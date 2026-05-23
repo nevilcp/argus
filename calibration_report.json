@@ -1,0 +1,37 @@
+{
+  "phase": 1,
+  "period": "2021-01-04 to 2022-12-30",
+  "baseline_sharpe": 0.6643602330739506,
+  "optimized_sharpe": 0.6643602330739506,
+  "locked_indicator_weights": {
+    "rsi": 2.0,
+    "macd": 2.0,
+    "bb": 1.5,
+    "adx": 1.0,
+    "vwap": 1.0,
+    "momentum": 1.5
+  },
+  "hmm_regime_mapping": {
+    "0": "EXPANSION",
+    "1": "CONTRACTION",
+    "2": "TRANSITIONAL"
+  },
+  "bias_audit": {
+    "survivorship_bias": {
+      "status": "PASS",
+      "total_tickers": 20,
+      "always_valid": 20,
+      "potentially_biased": [],
+      "survivorship_bias_pct": 0.0,
+      "recommendation": "OK"
+    },
+    "lookahead_bias": {
+      "status": "PASS",
+      "lag1_autocorr": 0.0,
+      "pct_positive_days": 0.0,
+      "suspicious": false
+    }
+  },
+  "locked_at": "2026-05-19T21:28:22.009444",
+  "WARNING": "These parameters must NOT be changed before Phase 3."
+}

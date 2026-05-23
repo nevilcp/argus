@@ -1,0 +1,43 @@
+name: ARGUS v2 CI
+
+on:
+  push:
+    branches: ["main", "develop"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  test:
+    name: Integration Test Suite
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install package with test extras
+        run: |
+          cd argus
+          pip install -e ".[test]"
+
+      - name: Run unit + integration tests (mocked LLMs)
+        run: |
+          cd argus
+          python -m pytest \
+            tests/test_technical.py \
+            tests/test_macro.py \
+            tests/test_risk.py \
+            tests/test_integration.py \
+            -v --tb=short
+        env:
+          # FRED key provided for macro data fetching in tests
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          # Groq/Gemini keys intentionally omitted — LLM agents are mocked in CI
+          GROQ_API_KEY: ""
+          GOOGLE_AI_API_KEY: ""
