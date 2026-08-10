@@ -24,6 +24,10 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger("argus.governor")
 
+
+class RateLimitExceeded(Exception):
+    """Raised when a model's daily request or token quota is exhausted."""
+
 # Per-model token and request limits; tuned against each provider's free-tier daily caps
 MODEL_LIMITS: dict[str, dict[str, int]] = {
     "llama-3.3-70b-versatile": {
@@ -133,12 +137,14 @@ class RateLimitGovernor:
 
         Checks both daily and per-minute quotas. If a per-minute limit would be
         exceeded, sleeps until the next UTC minute begins. If the daily limit is
-        exhausted, logs a critical warning and blocks for 60 seconds to prevent
-        runaway execution.
+        exhausted, raises ``RateLimitExceeded`` rather than proceeding.
 
         Args:
             model: Provider model identifier string.
             estimated_tokens: Estimated token consumption of the upcoming request.
+
+        Raises:
+            RateLimitExceeded: If the model's daily request or token quota is exhausted.
         """
         if model not in MODEL_LIMITS:
             return
@@ -165,8 +171,11 @@ class RateLimitGovernor:
                     usage.tokens_today,
                     limits["tokens_per_day"],
                 )
-                time.sleep(60)
-                return
+                raise RateLimitExceeded(
+                    f"Daily quota exhausted for {model}: "
+                    f"req={usage.requests_today}/{limits['requests_per_day']} "
+                    f"tok={usage.tokens_today}/{limits['tokens_per_day']}"
+                )
 
             if not (minute_req_ok and minute_tok_ok):
                 seconds_left = 60 - datetime.now(timezone.utc).second
