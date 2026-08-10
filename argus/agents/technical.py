@@ -27,6 +27,7 @@ from typing import Optional
 import numpy as np
 
 from argus.config import settings
+from argus.params import TECHNICAL
 from argus.schemas.signals import Signal, TechnicalSignal
 
 logger = logging.getLogger("argus.technical")
@@ -60,26 +61,35 @@ def _score_rsi(s: dict) -> float:
     """
     rsi = float(s.get("rsi_14", 50.0))
 
-    if rsi < 25:
+    oversold = TECHNICAL.rsi_oversold
+    bullish_transition = TECHNICAL.rsi_bullish_transition
+    bullish_transition_score = TECHNICAL.rsi_bullish_transition_score
+    overbought = TECHNICAL.rsi_overbought
+    bearish_transition = TECHNICAL.rsi_bearish_transition
+    neutral_low = TECHNICAL.rsi_neutral_low
+    neutral_high = TECHNICAL.rsi_neutral_high
+    neutral_span = TECHNICAL.rsi_neutral_span
+
+    if rsi < oversold:
         return 1.0
-    if rsi < 30:
-        return 1.0 - (rsi - 25) / (30 - 25) * (1.0 - 0.85)
+    if rsi < bullish_transition:
+        return 1.0 - (rsi - oversold) / (bullish_transition - oversold) * (1.0 - bullish_transition_score)
 
-    if rsi > 75:
+    if rsi > overbought:
         return -1.0
-    if rsi > 70:
-        return -0.85 - (rsi - 70) / (75 - 70) * (1.0 - 0.85)
+    if rsi > bearish_transition:
+        return -bullish_transition_score - (rsi - bearish_transition) / (overbought - bearish_transition) * (1.0 - bullish_transition_score)
 
-    if 45.0 <= rsi <= 55.0:
-        return (rsi - 50.0) / 25.0
+    if neutral_low <= rsi <= neutral_high:
+        return (rsi - 50.0) / neutral_span
 
-    if 30.0 <= rsi < 45.0:
-        lo, hi = 0.85, (45.0 - 50.0) / 25.0
-        return lo + (rsi - 30.0) / (45.0 - 30.0) * (hi - lo)
+    if bullish_transition <= rsi < neutral_low:
+        lo, hi = bullish_transition_score, (neutral_low - 50.0) / neutral_span
+        return lo + (rsi - bullish_transition) / (neutral_low - bullish_transition) * (hi - lo)
 
     # Bearish transition band: RSI in [55, 70] (implicit else-branch after all earlier guards)
-    lo, hi = (55.0 - 50.0) / 25.0, -0.85
-    return lo + (rsi - 55.0) / (70.0 - 55.0) * (hi - lo)
+    lo, hi = (neutral_high - 50.0) / neutral_span, -bullish_transition_score
+    return lo + (rsi - neutral_high) / (bearish_transition - neutral_high) * (hi - lo)
 
 
 def _score_macd(s: dict) -> float:
@@ -92,7 +102,7 @@ def _score_macd(s: dict) -> float:
         Clipped score in [-1.0, 1.0].
     """
     hist = float(s.get("macd_histogram", 0.0))
-    return float(np.clip(hist / 0.5, -1.0, 1.0))
+    return float(np.clip(hist / TECHNICAL.macd_normalization_scale, -1.0, 1.0))
 
 
 def _score_bollinger(s: dict) -> float:
@@ -111,10 +121,10 @@ def _score_bollinger(s: dict) -> float:
     bb = float(s.get("bb_percent_b", 0.5))
 
     if bb < 0.0:
-        return min(1.0, abs(bb) * 2.0 + 0.5)
+        return min(1.0, abs(bb) * TECHNICAL.bollinger_breach_multiplier + TECHNICAL.bollinger_breach_boost)
 
     if bb > 1.0:
-        return max(-1.0, -(bb - 1.0) * 2.0 - 0.5)
+        return max(-1.0, -(bb - 1.0) * TECHNICAL.bollinger_breach_multiplier - TECHNICAL.bollinger_breach_boost)
 
     return 0.5 - bb
 
@@ -134,13 +144,17 @@ def _score_adx_amplified(s: dict, base_direction: float) -> float:
         Trend-strength-adjusted score clipped to [-1.0, 1.0].
     """
     adx = float(s.get("adx_14", 25.0))
+    dampen_threshold = TECHNICAL.adx_dampen_threshold
+    dampen_multiplier = TECHNICAL.adx_dampen_multiplier
+    amplify_threshold = TECHNICAL.adx_amplify_threshold
+    amplify_multiplier = TECHNICAL.adx_amplify_multiplier
 
-    if adx < 20.0:
-        multiplier = 0.6
-    elif adx > 40.0:
-        multiplier = 1.2
+    if adx < dampen_threshold:
+        multiplier = dampen_multiplier
+    elif adx > amplify_threshold:
+        multiplier = amplify_multiplier
     else:
-        multiplier = 0.6 + (adx - 20.0) / 20.0 * 0.6
+        multiplier = dampen_multiplier + (adx - dampen_threshold) / (amplify_threshold - dampen_threshold) * (amplify_multiplier - dampen_multiplier)
 
     return float(np.clip(base_direction * multiplier, -1.0, 1.0))
 
@@ -155,7 +169,7 @@ def _score_vwap(s: dict) -> float:
         Clipped score in [-1.0, 1.0].
     """
     d = float(s.get("vwap_distance", 0.0))
-    return float(np.clip(d / 0.015, -1.0, 1.0))
+    return float(np.clip(d / TECHNICAL.vwap_spread_normalization, -1.0, 1.0))
 
 
 def _score_momentum(s: dict) -> float:
@@ -176,8 +190,8 @@ def _score_momentum(s: dict) -> float:
 
     # Positive product means both values share the same sign (directional confluence)
     if m30 * m1d > 0.0:
-        combined = m30 * 0.4 + m1d * 0.6
-        return float(np.clip(combined / 0.02, -1.0, 1.0))
+        combined = m30 * TECHNICAL.momentum_30m_weight + m1d * TECHNICAL.momentum_1d_weight
+        return float(np.clip(combined / TECHNICAL.momentum_saturation_bound, -1.0, 1.0))
 
     return 0.0
 
@@ -253,7 +267,10 @@ class TechnicalStatisticalAgent:
         net_score = sum(scores[k] * w[k] for k in scores) / total_weight
 
         vol_ratio = float(s.get("volume_ratio", 1.0))
-        volume_modifier = min(max(vol_ratio / 1.5, 0.7), 1.3)
+        volume_modifier = min(
+            max(vol_ratio / TECHNICAL.volume_ratio_divisor, TECHNICAL.volume_modifier_floor),
+            TECHNICAL.volume_modifier_ceiling,
+        )
         net_score = float(np.clip(net_score * volume_modifier, -1.0, 1.0))
 
         logger.debug(
@@ -263,7 +280,7 @@ class TechnicalStatisticalAgent:
         # RSI extremes override net_score direction to prevent contradictory signals
         # (e.g., a bullish net score while RSI is deeply overbought)
         rsi_raw = float(s.get("rsi_14", 50.0))
-        if rsi_raw > 75.0 and net_score > 0.0:
+        if rsi_raw > TECHNICAL.rsi_overbought and net_score > 0.0:
             logger.debug(
                 "analyze[%s] RSI=%.2f >75 overbought — clamping net_score %.4f → 0.0",
                 ticker,
@@ -271,7 +288,7 @@ class TechnicalStatisticalAgent:
                 net_score,
             )
             net_score = 0.0
-        elif rsi_raw < 25.0 and net_score < 0.0:
+        elif rsi_raw < TECHNICAL.rsi_oversold and net_score < 0.0:
             logger.debug(
                 "analyze[%s] RSI=%.2f <25 oversold — clamping net_score %.4f → 0.0",
                 ticker,
@@ -282,15 +299,21 @@ class TechnicalStatisticalAgent:
 
         abs_score = abs(net_score)
 
-        if abs_score < 0.12:
+        if abs_score < TECHNICAL.net_score_neutral_threshold:
             signal = Signal.NEUTRAL
-            conviction = 0.30 + abs_score
+            conviction = TECHNICAL.neutral_conviction_floor + abs_score
         elif net_score > 0:
             signal = Signal.BULLISH
-            conviction = min(0.40 + abs_score * 0.55, 0.92)
+            conviction = min(
+                TECHNICAL.conviction_base + abs_score * TECHNICAL.conviction_score_multiplier,
+                TECHNICAL.conviction_ceiling,
+            )
         else:
             signal = Signal.BEARISH
-            conviction = min(0.40 + abs_score * 0.55, 0.92)
+            conviction = min(
+                TECHNICAL.conviction_base + abs_score * TECHNICAL.conviction_score_multiplier,
+                TECHNICAL.conviction_ceiling,
+            )
 
         logger.debug(
             "analyze[%s]: signal=%s conviction=%.3f net_score=%.4f",

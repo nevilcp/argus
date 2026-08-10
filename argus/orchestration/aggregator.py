@@ -23,6 +23,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 
+from argus.params import AGGREGATOR
 from argus.schemas.signals import (
     AggregatedSignal,
     FundamentalSignal,
@@ -45,9 +46,9 @@ class HybridSignalAggregator:
     """
 
     DEFAULT_WEIGHTS = {
-        "fundamental": 0.35,
-        "technical": 0.35,
-        "sentiment": 0.30,
+        "fundamental": AGGREGATOR.weight_fundamental,
+        "technical": AGGREGATOR.weight_technical,
+        "sentiment": AGGREGATOR.weight_sentiment,
     }
 
     def aggregate(
@@ -135,7 +136,7 @@ class HybridSignalAggregator:
 
         # Debate threshold: no single direction dominates by > 10 pp over the runner-up
         runner_up = sorted([bull_pct, bear_pct, neutral_pct])[-2]
-        if max_pct - runner_up < 0.10:
+        if max_pct - runner_up < AGGREGATOR.debate_trigger_margin:
             debate_triggered = True
 
         if bull_pct >= bear_pct and bull_pct >= neutral_pct:
@@ -151,16 +152,16 @@ class HybridSignalAggregator:
         # Contract-based regime override: CONTRACTION suppresses BULLISH signals below a conviction
         # threshold of 0.70 to prevent the system from misallocating during elevated-stress regimes
         if macro and macro.macro_regime == Regime.CONTRACTION:
-            if consensus == Signal.BULLISH and conviction < 0.70:
+            if consensus == Signal.BULLISH and conviction < AGGREGATOR.contraction_conviction_threshold:
                 logger.info(
                     "[Aggregator] %s: Contraction regime override — suppressing BULLISH (conv=%.2f)",
                     ticker,
                     conviction,
                 )
                 consensus = Signal.NEUTRAL
-                conviction = conviction * 0.6
+                conviction = conviction * AGGREGATOR.contraction_conviction_reduction
 
-        conviction = min(conviction, 0.95)
+        conviction = min(conviction, AGGREGATOR.max_conviction)
 
         logger.info(
             "[Aggregator] %s: %s (conv=%.2f) bull=%.2f bear=%.2f neutral=%.2f debate=%s",
