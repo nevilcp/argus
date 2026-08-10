@@ -20,7 +20,7 @@ ARGUS is a multi-agent artificial intelligence system for quantitative equity re
 
 ## Architecture
 
-ARGUS operates as a stateful LangGraph workflow. Data ingestion is handled by an asynchronous pipeline, while decision logic is distributed across parallel analyst nodes before being aggregated and subjected to a quantitative risk audit.
+ARGUS operates as a stateful LangGraph workflow. Data ingestion is handled by an asynchronous pipeline, while decision logic is distributed across parallel analyst nodes before being aggregated and subjected to a quantitative risk audit. See [`docs/adr/`](docs/adr/) for the reasoning behind specific design decisions.
 
 ```mermaid
 flowchart TD
@@ -232,6 +232,7 @@ curl -X POST http://localhost:8000/backtest \
 │   └── schemas/          # Pydantic data contracts defining all inter-agent signaling
 ├── chroma_db/            # (Auto-generated) Local persistent vector database
 ├── docs/                 # Architecture walkthrough, run guides, project notes
+│   └── adr/              # Architecture decision records
 ├── tests/                # Deterministic unit tests covering agents and pipelines
 ├── argus_graph.db        # (Auto-generated) SQLite state checkpointer for LangGraph
 ├── pyproject.toml        # Project dependencies and build configuration
