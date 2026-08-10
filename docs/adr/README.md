@@ -12,6 +12,7 @@ written before their corresponding code lands are **predictive** and say so.
 | [0003](0003-503-not-daily-fallback.md) | 503 rather than fall back to daily-resolution data | Accepted (retrospective) |
 | [0004](0004-server-side-cash-reserve-recompute.md) | Recompute cash_reserve_pct server-side rather than trust the LLM | Accepted (retrospective) |
 | [0005](0005-monotonic-risk-verdict-downgrade.md) | Monotonic risk-verdict downgrade | Accepted (retrospective) |
+| [0006](0006-parameter-provenance.md) | Parameter provenance | Accepted |
 
 See [issue #1](https://github.com/nevilcp/argus/issues/1) for the rebuild
 plan these were written as part of.

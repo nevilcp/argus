@@ -24,6 +24,9 @@ from typing import Dict, List
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from argus.params import SYSTEM
+from argus.params import TECHNICAL_INDICATOR_WEIGHTS as _TECHNICAL_WEIGHTS
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
@@ -63,33 +66,34 @@ class Settings(BaseSettings):
         "MRK", "ABBV", "LLY", "AVGO", "CVX",
     ]
 
-    # MFT pipeline timing parameters
+    # MFT pipeline timing parameters. Numeric defaults live in argus/params.py,
+    # tagged with provenance (literature/convention/calibrated/arbitrary); this
+    # class only adds env-var override capability on top of them.
     MFT_CANDLE_INTERVAL: str = "5m"
-    MFT_DECISION_INTERVAL_SECONDS: int = 1800
-    CANDLE_BUFFER_SIZE: int = 78
+    MFT_DECISION_INTERVAL_SECONDS: int = SYSTEM.mft_decision_interval_seconds
+    CANDLE_BUFFER_SIZE: int = SYSTEM.candle_buffer_size
 
-    # Technical indicator scoring weights — mutated during Phase 1 grid search;
-    # locked values are persisted to calibration_report.json after Phase 1 completes
+    # Technical indicator scoring weights
     TECHNICAL_INDICATOR_WEIGHTS: Dict[str, float] = {
-        "rsi": 2.0,
-        "macd": 2.0,
-        "bb": 1.5,
-        "adx": 1.0,
-        "vwap": 1.0,
-        "momentum": 1.5,
+        "rsi": _TECHNICAL_WEIGHTS.rsi,
+        "macd": _TECHNICAL_WEIGHTS.macd,
+        "bb": _TECHNICAL_WEIGHTS.bb,
+        "adx": _TECHNICAL_WEIGHTS.adx,
+        "vwap": _TECHNICAL_WEIGHTS.vwap,
+        "momentum": _TECHNICAL_WEIGHTS.momentum,
     }
 
     # Portfolio hard limits enforced by RiskStatisticalEngine
-    MAX_SINGLE_POSITION_PCT: float = 0.15
-    MAX_SECTOR_CONCENTRATION: float = 0.40
-    MAX_PORTFOLIO_BETA: float = 1.50
+    MAX_SINGLE_POSITION_PCT: float = SYSTEM.max_single_position_pct
+    MAX_SECTOR_CONCENTRATION: float = SYSTEM.max_sector_concentration
+    MAX_PORTFOLIO_BETA: float = SYSTEM.max_portfolio_beta
 
     # Kill-switch circuit breaker thresholds
-    VIX_BLACKOUT_THRESHOLD: float = 35.0
-    MAX_DRAWDOWN_HALT: float = 0.15
+    VIX_BLACKOUT_THRESHOLD: float = SYSTEM.vix_blackout_threshold
+    MAX_DRAWDOWN_HALT: float = SYSTEM.max_drawdown_halt
 
     # Historical lookback window used in rolling indicator calculations
-    LOOKBACK_DAYS: int = 252
+    LOOKBACK_DAYS: int = SYSTEM.lookback_days
 
 
 # Module-level singleton — import this everywhere rather than instantiating locally
