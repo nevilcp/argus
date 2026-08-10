@@ -31,6 +31,7 @@ from scipy.optimize import minimize
 from argus.config import settings
 from argus.params import RISK
 from argus.schemas.signals import RiskAssessment, RiskVerdict
+from argus.seams import LiveMarketDataProvider, MarketDataProvider
 
 logger = logging.getLogger("argus.risk")
 
@@ -131,7 +132,10 @@ def conditional_var(portfolio_returns: pd.Series, confidence: float = RISK.cvar_
 
 
 def ols_portfolio_beta(
-    positions: list[dict], price_history: dict[str, pd.Series], benchmark_ticker: str = "SPY"
+    positions: list[dict],
+    price_history: dict[str, pd.Series],
+    benchmark_ticker: str = "SPY",
+    market_data: Optional[MarketDataProvider] = None,
 ) -> float:
     """Computes weighted Ordinary Least Squares (OLS) portfolio beta against a benchmark index.
 
@@ -139,6 +143,8 @@ def ols_portfolio_beta(
         positions: List of dicts with keys ``ticker`` and ``weight``.
         price_history: Mapping of ticker → daily close price Series.
         benchmark_ticker: Index to use as market proxy (default 'SPY').
+        market_data: Source for the benchmark series when it isn't already in
+            ``price_history``. Defaults to a live fetch.
 
     Returns:
         Dollar-weighted portfolio beta. Returns 1.0 if the benchmark cannot be fetched or
@@ -149,9 +155,9 @@ def ols_portfolio_beta(
 
     if benchmark_ticker not in price_history:
         try:
-            from argus.data.fetchers import fetch_ohlcv_daily
-
-            spy_df = fetch_ohlcv_daily(benchmark_ticker, period="1y")
+            spy_df = (market_data or LiveMarketDataProvider()).ohlcv_daily(
+                benchmark_ticker, period="1y"
+            )
             spy_returns = spy_df["close"].pct_change().dropna()
         except Exception:
             logger.warning("ols_portfolio_beta: benchmark fetch failed, returning 1.0")
@@ -264,11 +270,12 @@ class RiskStatisticalEngine:
     Returns a RiskAssessment with APPROVE, REDUCE, or VETO verdict.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, market_data: Optional[MarketDataProvider] = None) -> None:
         self.max_position_pct = settings.MAX_SINGLE_POSITION_PCT
         self.max_sector_pct = settings.MAX_SECTOR_CONCENTRATION
         self.vix_blackout = settings.VIX_BLACKOUT_THRESHOLD
         self.max_port_beta = settings.MAX_PORTFOLIO_BETA
+        self.market_data = market_data or LiveMarketDataProvider()
 
     def evaluate(
         self,
@@ -412,7 +419,7 @@ class RiskStatisticalEngine:
 
         var99 = historical_var(port_returns)
         cvar = conditional_var(port_returns)
-        beta = ols_portfolio_beta(proposed_positions, price_history)
+        beta = ols_portfolio_beta(proposed_positions, price_history, market_data=self.market_data)
         corr = avg_pairwise_correlation(returns)
 
         stat_violations: list[str] = []
