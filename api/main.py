@@ -39,7 +39,7 @@ from argus.agents.macro import MacroStatisticalAgent
 from argus.backtesting.engine import run_backtest
 from argus.config import settings
 from argus.data.pipeline import MFTDataPipeline
-from argus.memory.cultural import cultural_memory
+from argus.memory.cultural import get_cultural_memory
 from argus.orchestration.governor import governor
 from argus.orchestration.graph import graph
 from argus.orchestration.state import ARGUSState
@@ -317,7 +317,7 @@ async def get_backtest_result(job_id: str):
 @app.get("/memory/stats")
 async def get_memory_stats():
     """Retrieves high-level metadata and diagnostic stats from the vector DB memory vault."""
-    return cultural_memory.summary_stats()
+    return get_cultural_memory().summary_stats()
 
 
 @app.get("/governor/report")

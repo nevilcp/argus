@@ -1,0 +1,8 @@
+{
+  "AAPL": "{\"signal\": \"NEUTRAL\", \"conviction\": 0.4, \"sentiment_decay_risk\": \"LOW\", \"reasoning\": \"FinBERT score is slightly negative (-0.0456), but confidence is high (1.0). News volume is moderate (38 articles), and social mentions are low. No upcoming catalysts.\"}",
+  "MSFT": "{\"signal\": \"BULLISH\", \"conviction\": 0.7, \"sentiment_decay_risk\": \"LOW\", \"reasoning\": \"FinBERT score of 0.1225 and 36% positive headlines indicate a mild positive bias. High news volume and confidence proxy support this signal.\"}",
+  "NVDA": "{\"signal\": \"NEUTRAL\", \"conviction\": 0.4, \"sentiment_decay_risk\": \"LOW\", \"reasoning\": \"FinBERT score of 0.14 indicates a slightly positive bias, but low positive sentiment (28%) and low negative sentiment (4%) suggest a cautious tone. High news volume and confidence proxy support the signal.\"}",
+  "JPM": "{\"signal\": \"NEUTRAL\", \"conviction\": 0.5, \"sentiment_decay_risk\": \"LOW\", \"reasoning\": \"Neutral sentiment with balanced positive and negative headlines, high FinBERT confidence, and low social mention volume.\"}",
+  "XOM": "{\"signal\": \"NEUTRAL\", \"conviction\": 0.5, \"sentiment_decay_risk\": \"LOW\", \"reasoning\": \"Neutral sentiment with moderate FinBERT confidence and low social mention volume. No recent earnings catalysts.\"}",
+  "GOOGL": "{\"signal\": \"NEUTRAL\", \"conviction\": 0.5, \"sentiment_decay_risk\": \"LOW\", \"reasoning\": \"Neutral sentiment with low conviction due to mixed FinBERT score and low social mention volume. No upcoming catalysts.\"}"
+}

@@ -323,5 +323,19 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
             logger.warning("[Memory] Failed to snapshot decision for %s: %s", decision.ticker, e)
 
 
-# Module-level singleton; initialization triggers ChromaDB and model download on first import
-cultural_memory = CulturalMemoryManager()
+_cultural_memory: Optional[CulturalMemoryManager] = None
+
+
+def get_cultural_memory(persist_dir: str = "./chroma_db") -> CulturalMemoryManager:
+    """Returns the process-wide CulturalMemoryManager, constructing it on first call.
+
+    Lazy on purpose: construction pulls in sentence-transformers (and its
+    torch dependency) to build the embedding function, and both are an
+    optional `[models]` extra (see pyproject.toml, ADR 0007) — importing
+    this module must not require them, only actually using cultural memory
+    does.
+    """
+    global _cultural_memory
+    if _cultural_memory is None:
+        _cultural_memory = CulturalMemoryManager(persist_dir)
+    return _cultural_memory

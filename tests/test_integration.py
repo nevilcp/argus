@@ -88,10 +88,22 @@ class TestEndToEnd:
         assert r_sig.api_calls_used == 0
 
     @pytest.mark.asyncio
+    @mock.patch("argus.orchestration.graph.get_cultural_memory")
     @mock.patch("argus.agents.fundamental.FundamentalAgent.analyze")
     @mock.patch("argus.agents.sentiment.SentimentAgent.analyze")
-    async def test_full_graph_smoke(self, mock_sent, mock_fund):
-        """Runs the complete LangGraph graph for AAPL, MSFT using mocked LLMs."""
+    async def test_full_graph_smoke(self, mock_sent, mock_fund, mock_cultural_memory):
+        """Runs the complete LangGraph graph for AAPL, MSFT using mocked LLMs.
+
+        Cultural memory is mocked out (not just left real) because its embedding
+        function needs the optional `[models]` extra (sentence-transformers) that
+        default installs/CI don't have — see ADR 0007 — and because this smoke
+        test is about graph wiring, not vector-DB behavior.
+        """
+        mock_cultural_memory.return_value = mock.Mock(
+            retrieve_wisdom=mock.Mock(return_value=[]),
+            retrieve_warnings=mock.Mock(return_value=[]),
+            store_decision_snapshot=mock.Mock(),
+        )
 
         # analyze(self, ticker, backtest_mode=False, session_seed=None)
         def fund_side_effect(ticker, backtest_mode=False, session_seed=None):

@@ -4,10 +4,24 @@ Tests for the Macro-Economic Agent (argus/agents/macro.py).
 
 from datetime import datetime
 
+import pandas as pd
 import pytest
 
 from argus.agents.macro import MacroStatisticalAgent, RegimeClassifier
 from argus.schemas.signals import Regime
+
+
+class _StubMarketData:
+    """Minimal MarketDataProvider stub for macro.analyze()'s data needs."""
+
+    def macro_bundle(self) -> dict:
+        return {"vix": 15.0, "fed_funds": 2.0, "t10y2y": 1.5, "cpi_yoy": 2.0, "unemployment": 3.5}
+
+    def ohlcv_daily(self, ticker: str, period: str = "2y") -> pd.DataFrame:
+        return pd.DataFrame({"close": [20.0, 20.0, 20.0, 20.0, 10.0]})
+
+    def fred_series(self, series_id: str, start: str = "2018-01-01") -> pd.Series:
+        return pd.Series([1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0])
 
 
 def test_rule_based_fallback() -> None:
@@ -22,29 +36,12 @@ def test_rule_based_fallback() -> None:
 
 
 def test_agent_multipliers_expansion(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Mock the fetch bundle and prediction to force an EXPANSION regime."""
-    agent = MacroStatisticalAgent()
+    """Inject a stub MarketDataProvider and mock prediction to force an EXPANSION regime."""
+    agent = MacroStatisticalAgent(market_data=_StubMarketData())
 
-    # Mock data fetch to return benign values
-    monkeypatch.setattr(
-        "argus.agents.macro.fetch_macro_bundle",
-        lambda: {"vix": 15.0, "fed_funds": 2.0, "t10y2y": 1.5, "cpi_yoy": 2.0, "unemployment": 3.5},
-    )
     # Mock the classifier to always return EXPANSION
     monkeypatch.setattr(
         agent.classifier, "predict", lambda current_values: (Regime.EXPANSION.value, 0.9)
-    )
-    import pandas as pd
-
-    # Mock VIX history to return a low percentile
-    monkeypatch.setattr(
-        "argus.agents.macro.fetch_ohlcv_daily",
-        lambda ticker, period: pd.DataFrame({"close": [20.0, 20.0, 20.0, 20.0, 10.0]}),
-    )
-    # Mock FRED series for trend logic
-    monkeypatch.setattr(
-        "argus.agents.macro.fetch_fred_series",
-        lambda series_id, start=None: pd.Series([1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]),
     )
 
     ctx = agent.analyze()
