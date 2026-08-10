@@ -1,10 +1,17 @@
 """
 argus/orchestration/governor.py
-===============================
-Governor — Centralised rate limiter and quota tracker for LLM API calls.
 
-Ensures that we do not breach Groq or Google free-tier rate limits.
-Must be invoked before every single LLM call.
+Centralized API rate-limit governance module across all LLM and data providers.
+
+Responsibilities:
+  - Enforce per-model daily request and token quotas
+  - Provide cooperative back-pressure via timed waits before each API call
+  - Expose usage telemetry for health checks and governor reports
+
+Not responsible for:
+  - Retry logic (handled per-agent with exponential back-off)
+  - Authentication or credential management (see config.py)
+  - Kill-switch circuit breakers (see risk/kill_switch.py)
 """
 
 from __future__ import annotations
@@ -12,172 +19,215 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections import defaultdict, deque
-from dataclasses import dataclass
-from datetime import date
-from typing import Any, Dict
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 logger = logging.getLogger("argus.governor")
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Rate Limit Configuration
-# ──────────────────────────────────────────────────────────────────────────────
-
-@dataclass
-class ModelLimits:
-    rpm: int    # Requests per minute
-    rpd: int    # Requests per day
-    tpm: int    # Tokens per minute
-    tpd: int    # Tokens per day (0 = unlimited)
-
-MODEL_LIMITS: dict[str, ModelLimits] = {
-    "gemini-3.1-flash-lite":   ModelLimits(rpm=15, rpd=500,   tpm=250_000, tpd=0),
-    "llama-3.1-8b-instant":    ModelLimits(rpm=30, rpd=14_400, tpm=6_000,  tpd=500_000),
-    "llama-3.3-70b-versatile": ModelLimits(rpm=30, rpd=1_000,  tpm=12_000, tpd=100_000),
-    "llama-4-scout-17b":       ModelLimits(rpm=30, rpd=1_000,  tpm=30_000, tpd=500_000),
+# Per-model token and request limits; tuned against each provider's free-tier daily caps
+MODEL_LIMITS: dict[str, dict[str, int]] = {
+    "llama-3.3-70b-versatile": {
+        "requests_per_day": 1_000,
+        "tokens_per_day": 100_000,
+        "tokens_per_minute": 6_000,
+        "requests_per_minute": 30,
+    },
+    "llama-3.1-8b-instant": {
+        "requests_per_day": 14_400,
+        "tokens_per_day": 500_000,
+        "tokens_per_minute": 20_000,
+        "requests_per_minute": 30,
+    },
+    "gemini-3.5-flash": {
+        "requests_per_day": 1_500,
+        "tokens_per_day": 1_000_000,
+        "tokens_per_minute": 30_000,
+        "requests_per_minute": 30,
+    },
+    "gemini-2.0-flash": {
+        "requests_per_day": 1_500,
+        "tokens_per_day": 1_000_000,
+        "tokens_per_minute": 30_000,
+        "requests_per_minute": 30,
+    },
+    "ProsusAI/finbert": {
+        "requests_per_day": 10_000,
+        "tokens_per_day": 1_000_000,
+        "tokens_per_minute": 100_000,
+        "requests_per_minute": 1_000,
+    },
 }
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Exception
-# ──────────────────────────────────────────────────────────────────────────────
+@dataclass
+class ModelUsage:
+    """Per-model rolling usage counters scoped to the current UTC day.
 
-class RateLimitExceeded(Exception):
-    """Raised when the daily quota (RPD) for a model is exhausted."""
-    def __init__(self, model: str, limit_type: str, current: int, limit: int) -> None:
-        self.model = model
-        self.limit_type = limit_type
-        super().__init__(f"{model} {limit_type} limit: {current}/{limit}")
+    Counters reset when ``current_date`` does not match the current UTC date,
+    ensuring daily quotas refresh automatically at midnight UTC.
+    """
 
+    requests_today: int = 0
+    tokens_today: int = 0
+    requests_this_minute: int = 0
+    tokens_this_minute: int = 0
+    current_date: str = field(default_factory=lambda: datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+    current_minute: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
+    )
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Governor Singleton
-# ──────────────────────────────────────────────────────────────────────────────
 
 class RateLimitGovernor:
-    """
-    Module-level singleton tracking LLM usage across all agents.
-    Enforces RPM (via sleep) and RPD (via exceptions).
+    """Thread-safe governor enforcing daily and per-minute API quotas across all LLM providers.
+
+    Designed for cooperative multi-threaded use: agents call ``wait_if_needed`` before
+    each API invocation, causing a blocking sleep if adding the request would violate
+    quotas. Counters reset automatically at their respective time boundaries.
     """
 
     def __init__(self) -> None:
-        self._call_log: dict[str, deque[float]] = defaultdict(deque)
-        self._daily_counts: dict[str, int] = defaultdict(int)
-        self._daily_token_counts: dict[str, int] = defaultdict(int)
-        self._last_reset_date: date = date.today()
+        self._usage: dict[str, ModelUsage] = {}
         self._lock = threading.Lock()
+        logger.info("RateLimitGovernor initialized with %d model profiles", len(MODEL_LIMITS))
 
-    def _reset_daily_if_needed(self) -> None:
-        """Reset daily counters if the calendar day has changed."""
-        if date.today() != self._last_reset_date:
-            self._daily_counts.clear()
-            self._daily_token_counts.clear()
-            self._last_reset_date = date.today()
+    def _get_usage(self, model: str) -> ModelUsage:
+        """Retrieves or initialises the ModelUsage tracker for a given model.
+
+        Args:
+            model: Provider model identifier string.
+
+        Returns:
+            Live ModelUsage instance for the model.
+        """
+        if model not in self._usage:
+            self._usage[model] = ModelUsage()
+        return self._usage[model]
+
+    def _reset_if_new_day(self, usage: ModelUsage) -> None:
+        """Resets daily counters when the tracker's date diverges from the current UTC date.
+
+        Args:
+            usage: Mutable ModelUsage instance to check and reset.
+        """
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if usage.current_date != today:
+            usage.requests_today = 0
+            usage.tokens_today = 0
+            usage.current_date = today
+            logger.debug("RateLimitGovernor: daily counters reset for new UTC day")
+
+    def _reset_if_new_minute(self, usage: ModelUsage) -> None:
+        """Resets per-minute counters when the tracker's minute diverges from the current UTC minute.
+
+        Args:
+            usage: Mutable ModelUsage instance to check and reset.
+        """
+        now_minute = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
+        if usage.current_minute != now_minute:
+            usage.requests_this_minute = 0
+            usage.tokens_this_minute = 0
+            usage.current_minute = now_minute
 
     def wait_if_needed(self, model: str, estimated_tokens: int = 500) -> None:
-        """
-        Block if the RPM limit is reached, or raise RateLimitExceeded
-        if the daily limit is exhausted.
+        """Blocks the calling thread until rate limits allow the next API request.
 
-        Parameters
-        ----------
-        model:
-            Model identifier matching a key in MODEL_LIMITS.
-        estimated_tokens:
-            Expected token usage for TPM warnings and daily accounting.
+        Checks both daily and per-minute quotas. If a per-minute limit would be
+        exceeded, sleeps until the next UTC minute begins. If the daily limit is
+        exhausted, logs a critical warning and blocks for 60 seconds to prevent
+        runaway execution.
+
+        Args:
+            model: Provider model identifier string.
+            estimated_tokens: Estimated token consumption of the upcoming request.
         """
+        if model not in MODEL_LIMITS:
+            return
+
+        limits = MODEL_LIMITS[model]
         with self._lock:
-            self._reset_daily_if_needed()
+            usage = self._get_usage(model)
+            self._reset_if_new_day(usage)
+            self._reset_if_new_minute(usage)
 
-            if model not in MODEL_LIMITS:
-                # Unrestricted model
+            daily_req_ok = usage.requests_today < limits["requests_per_day"]
+            daily_tok_ok = usage.tokens_today + estimated_tokens <= limits["tokens_per_day"]
+            minute_req_ok = usage.requests_this_minute < limits["requests_per_minute"]
+            minute_tok_ok = (
+                usage.tokens_this_minute + estimated_tokens <= limits["tokens_per_minute"]
+            )
+
+            if not (daily_req_ok and daily_tok_ok):
+                logger.critical(
+                    "[Governor] Daily limit reached for %s. req=%d/%d tok=%d/%d",
+                    model,
+                    usage.requests_today,
+                    limits["requests_per_day"],
+                    usage.tokens_today,
+                    limits["tokens_per_day"],
+                )
+                time.sleep(60)
                 return
 
-            limits = MODEL_LIMITS[model]
-
-            # ── 1. Daily limit check ──
-            if self._daily_counts[model] >= limits.rpd:
-                raise RateLimitExceeded(model, "RPD", self._daily_counts[model], limits.rpd)
-
-            # ── 2. RPM check (rolling 60s window) ──
-            now = time.monotonic()
-            log = self._call_log[model]
-            
-            # Prune calls older than 60 seconds
-            while log and log[0] < now - 60.0:
-                log.popleft()
-
-            if len(log) >= limits.rpm:
-                sleep_secs = 60.0 - (now - log[0]) + 0.2  # 200ms buffer
-                logger.info("[Governor] %s RPM limit. Sleeping %.1fs...", model, sleep_secs)
-                time.sleep(max(sleep_secs, 0.0))
-                
-                # Cleanup again after sleep
-                now = time.monotonic()
-                while log and log[0] < now - 60.0:
-                    log.popleft()
-
-            # ── 3. TPM check ──
-            if limits.tpm > 0 and estimated_tokens > limits.tpm * 0.9:
+            if not (minute_req_ok and minute_tok_ok):
+                seconds_left = 60 - datetime.now(timezone.utc).second
                 logger.warning(
-                    "[Governor] %s single call uses %d tokens (%.0f%% of TPM limit)",
-                    model, estimated_tokens, (estimated_tokens / limits.tpm) * 100
+                    "[Governor] Minute limit approached for %s. Sleeping %ds.",
+                    model,
+                    seconds_left + 1,
                 )
+                time.sleep(seconds_left + 1)
+                self._reset_if_new_minute(usage)
 
-            # ── 4. Log this call ──
-            self._call_log[model].append(time.monotonic())
-            self._daily_counts[model] += 1
-            self._daily_token_counts[model] += estimated_tokens
+            usage.requests_today += 1
+            usage.tokens_today += estimated_tokens
+            usage.requests_this_minute += 1
+            usage.tokens_this_minute += estimated_tokens
 
-    def record_actual_tokens(self, model: str, actual_tokens: int, estimated_tokens: int = 500) -> None:
-        """
-        Replaces the estimated token count with the actual from the API response.
-        """
-        with self._lock:
-            self._reset_daily_if_needed()
-            # Adjust the daily total by the difference
-            self._daily_token_counts[model] += (actual_tokens - estimated_tokens)
-
-    def get_usage_report(self) -> dict[str, Any]:
-        """
-        Generate a snapshot of today's LLM consumption across all models.
-        """
-        with self._lock:
-            self._reset_daily_if_needed()
-            report: dict[str, Any] = {}
-            total_calls = 0
-            
-            for model, limits in MODEL_LIMITS.items():
-                calls = self._daily_counts[model]
-                tokens = self._daily_token_counts[model]
-                total_calls += calls
-                
-                pct = (calls / limits.rpd) if limits.rpd > 0 else 0.0
-                report[model] = {
-                    "calls_today": calls,
-                    "rpd_limit": limits.rpd,
-                    "pct_used": f"{pct:.1%}",
-                    "tokens_today": tokens,
-                    "tpd_limit": limits.tpd,
-                }
-            
-            report["total_api_calls_today"] = total_calls
-            report["projected_daily_cost"] = 0.0  # We only use free tiers in V2
-            return report
+            logger.debug(
+                "[Governor] %s — today: %d req, %d tok | this min: %d req, %d tok",
+                model,
+                usage.requests_today,
+                usage.tokens_today,
+                usage.requests_this_minute,
+                usage.tokens_this_minute,
+            )
 
     def get_remaining_capacity(self, model: str) -> int:
+        """Returns the remaining daily request capacity for a given model.
+
+        Args:
+            model: Provider model identifier string.
+
+        Returns:
+            Remaining requests allowed today, or 0 if the model is unregistered.
         """
-        Return the number of remaining daily calls for a model.
-        Useful for deciding whether to fetch fresh or use cache.
-        """
+        if model not in MODEL_LIMITS:
+            return 0
         with self._lock:
-            self._reset_daily_if_needed()
-            if model not in MODEL_LIMITS:
-                return 999_999
-            limits = MODEL_LIMITS[model]
-            return max(0, limits.rpd - self._daily_counts[model])
+            usage = self._get_usage(model)
+            self._reset_if_new_day(usage)
+            return max(0, MODEL_LIMITS[model]["requests_per_day"] - usage.requests_today)
+
+    def get_usage_report(self) -> dict:
+        """Compiles a per-model usage snapshot for health check endpoints.
+
+        Returns:
+            Dict mapping model name → dict of today's request and token usage with limits.
+        """
+        report: dict[str, dict] = {}
+        with self._lock:
+            for model in MODEL_LIMITS:
+                usage = self._get_usage(model)
+                self._reset_if_new_day(usage)
+                lim = MODEL_LIMITS[model]
+                report[model] = {
+                    "requests_today": usage.requests_today,
+                    "requests_limit": lim["requests_per_day"],
+                    "tokens_today": usage.tokens_today,
+                    "tokens_limit": lim["tokens_per_day"],
+                }
+        return report
 
 
-# Global singleton instance
+# Module-level singleton shared by all agents within a process
 governor = RateLimitGovernor()

@@ -1,1 +1,1 @@
-"""Schemas sub-package for ARGUS v2. Pydantic models for all inter-agent signal contracts."""
+"""Schemas sub-package for ARGUS. Pydantic models for all inter-agent signal contracts."""

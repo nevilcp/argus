@@ -31,14 +31,14 @@ def test_bullish_signal(agent: TechnicalStatisticalAgent) -> None:
 
 def test_bearish_signal(agent: TechnicalStatisticalAgent) -> None:
     session_state = {
-        "rsi_14": 72.0,           # Opposite of 28
+        "rsi_14": 72.0,  # Opposite of 28
         "macd_histogram": -0.15,  # Opposite of 0.15
-        "bb_percent_b": 1.2,      # Opposite of -0.2 (midline is 0.5, so 0.5 + 0.7 = 1.2)
-        "adx_14": 35.0,           # Trend strength
+        "bb_percent_b": 1.2,  # Opposite of -0.2 (midline is 0.5, so 0.5 + 0.7 = 1.2)
+        "adx_14": 35.0,  # Trend strength
         "vwap_distance": -0.008,  # Opposite
-        "volume_ratio": 1.8,      # High volume confirming the move
-        "momentum_30m": -0.012,   # Opposite
-        "momentum_1d": -0.025,    # Opposite
+        "volume_ratio": 1.8,  # High volume confirming the move
+        "momentum_30m": -0.012,  # Opposite
+        "momentum_1d": -0.025,  # Opposite
     }
     result = agent.analyze("TEST", session_state)
     assert result.signal == Signal.BEARISH
@@ -51,7 +51,7 @@ def test_neutral_signal(agent: TechnicalStatisticalAgent) -> None:
         "rsi_14": 50.0,
         "macd_histogram": 0.0,
         "bb_percent_b": 0.5,
-        "adx_14": 15.0,           # Weak trend
+        "adx_14": 15.0,  # Weak trend
         "vwap_distance": 0.0,
         "volume_ratio": 1.0,
         "momentum_30m": 0.0,

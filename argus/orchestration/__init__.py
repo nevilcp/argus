@@ -1,1 +1,1 @@
-"""Orchestration sub-package for ARGUS v2. Exports state, graph, aggregator, and governor."""
+"""Orchestration sub-package for ARGUS. Exports state, graph, aggregator, and governor."""

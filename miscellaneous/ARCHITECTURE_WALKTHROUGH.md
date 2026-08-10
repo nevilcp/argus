@@ -1,4 +1,4 @@
-# ARGUS v2 — Architecture Deep Dive
+# ARGUS — Architecture Deep Dive
 
 This document walks through the Mermaid diagram in `README.md` layer by layer, mapping every box and arrow to the actual source code so you can understand precisely what runs, when, why, and how it connects to everything else.
 
@@ -6,7 +6,7 @@ This document walks through the Mermaid diagram in `README.md` layer by layer, m
 
 ## The Big Picture
 
-ARGUS v2 is structured as **four concentric rings** of responsibility:
+ARGUS is structured as **four concentric rings** of responsibility:
 
 ```
 ┌──────────────────────────────────────────────────────┐

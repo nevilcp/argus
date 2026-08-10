@@ -1,9 +1,9 @@
-# ARGUS v2 - Setup and Run Guide
+# ARGUS - Setup and Run Guide
 
 ## Prerequisites
 - **Python 3.11+**
 - **Docker & Docker Compose** (optional, for containerized deployments)
-- **API Keys**: Groq, Google AI (Gemini), FRED, NewsAPI, and Langfuse (optional for observability)
+- **API Keys**: Groq, Google AI (Gemini), FRED, and NewsAPI
 
 ---
 
@@ -33,7 +33,7 @@ Open the `.env` file and fill in the required API keys:
 - `GOOGLE_AI_API_KEY`: Drives Gemini 3.1 Flash Lite (fundamental analysis).
 - `FRED_API_KEY`: Drives Macroeconomic data (CPI, Yield Curve, etc).
 - `NEWSAPI_KEY`: Drives News Sentiment analysis.
-- `LANGFUSE_*`: (Optional) Your newly added observability tracing keys.
+
 
 ### 4. Start the Backend API (FastAPI)
 In your terminal, start the FastAPI orchestrator:
