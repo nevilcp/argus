@@ -1,8 +1,8 @@
-# ARGUS v2: Core Concepts and Dataset Alignment
+# ARGUS: Core Concepts and Dataset Alignment
 
-This document outlines all the major concepts used in the **ARGUS v2 Multi-Agent Financial Intelligence System** and explains how each concept directly aligns with the underlying datasets utilized by the project.
+This document outlines all the major concepts used in the **ARGUS Multi-Agent Financial Intelligence System** and explains how each concept directly aligns with the underlying datasets utilized by the project.
 
-ARGUS v2 runs as an institutional-grade, multi-agent LangGraph Directed Acyclic Graph (DAG) that performs quantitative analysis in parallel across six specialist domains. 
+ARGUS runs as an institutional-grade, multi-agent LangGraph Directed Acyclic Graph (DAG) that performs quantitative analysis in parallel across six specialist domains. 
 
 ---
 

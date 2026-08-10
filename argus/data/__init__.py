@@ -1,1 +1,1 @@
-"""Data sub-package for ARGUS v2. Exports fetchers, pipeline, and cache utilities."""
+"""Data sub-package for ARGUS. Exports fetchers, pipeline, and cache utilities."""

@@ -1,1 +1,1 @@
-"""API sub-package for ARGUS v2. FastAPI application entry point."""
+"""API sub-package for ARGUS. FastAPI application entry point."""

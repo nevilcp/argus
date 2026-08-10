@@ -1,99 +1,182 @@
 """
 argus/orchestration/aggregator.py
-=================================
-Aggregates Technical, Fundamental, and Sentiment signals.
+
+Multi-agent signal aggregation module implementing conflict arbitration.
+
+Responsibilities:
+  - Weight individual specialist signals by macro multipliers
+  - Apply majority voting and override rules to produce a single AggregatedSignal
+  - Flag split or contested votes for downstream portfolio handling
+
+Not responsible for:
+  - LLM inference or data fetching
+  - Portfolio allocation (see agents/portfolio.py)
+  - Risk enforcement (see agents/risk.py)
+
+Dependencies:
+  - argus.schemas.signals (Signal, AggregatedSignal, MacroContext, etc.)
 """
 
+from __future__ import annotations
+
 import logging
-from collections import defaultdict
+from datetime import datetime
 from typing import Optional
 
-from langchain_core.messages import HumanMessage
-from langchain_groq import ChatGroq
-
-from argus.config import settings
-from argus.orchestration.governor import governor
 from argus.schemas.signals import (
-    AggregatedSignal, FundamentalSignal, MacroContext, SentimentSignal, Signal, TechnicalSignal
+    AggregatedSignal,
+    FundamentalSignal,
+    MacroContext,
+    Regime,
+    RiskVerdict,
+    SentimentSignal,
+    Signal,
+    TechnicalSignal,
 )
 
 logger = logging.getLogger("argus.aggregator")
 
-def _resolve_conflict(fundamental: FundamentalSignal, sentiment: SentimentSignal) -> str:
-    """Uses Groq 8B for lightweight conflict resolution between agents."""
-    governor.wait_if_needed("llama-3.1-8b-instant", 300)
-    
-    prompt = f"""
-Fundamental says {fundamental.signal.value}, Sentiment says {sentiment.signal.value}. Which is more reliable 
-given that moat_score={fundamental.moat_score} and finbert_score={sentiment.finbert_net_score:.2f}?
-Respond with one word: BULLISH, BEARISH, or NEUTRAL.
-"""
-    api_key = settings.groq_api_key or "DUMMY_KEY_FOR_TESTING"
-    llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0.0, max_tokens=10, groq_api_key=api_key)
-    
-    try:
-        response = llm.invoke([HumanMessage(content=prompt.strip())])
-        raw = response.content.strip().upper()
-        if "BULLISH" in raw: return "BULLISH"
-        if "BEARISH" in raw: return "BEARISH"
-        return "NEUTRAL"
-    except Exception as e:
-        logger.warning(f"[Aggregator] Conflict resolution failed: {e}")
-        return "NEUTRAL"
-
 
 class HybridSignalAggregator:
+    """Arbitrates and fuses independent specialist signals into a consensus AggregatedSignal.
+
+    Arbitration uses a weighted Borda-count style voting scheme. Macro multipliers
+    scale each agent's base weight at runtime; the highest-weighted signal pool wins.
+    """
+
+    DEFAULT_WEIGHTS = {
+        "fundamental": 0.35,
+        "technical": 0.35,
+        "sentiment": 0.30,
+    }
+
     def aggregate(
         self,
-        technical: TechnicalSignal,
-        macro: MacroContext,
+        technical: Optional[TechnicalSignal],
+        macro: Optional[MacroContext],
         fundamental: Optional[FundamentalSignal],
         sentiment: Optional[SentimentSignal],
     ) -> AggregatedSignal:
-        
-        multipliers = macro.agent_multipliers
-        weighted_votes = defaultdict(float)
-        
-        signal_inputs = [
-            ("technical", technical.signal, technical.conviction * multipliers.get("technical", 1.0))
-        ]
-        
-        if fundamental:
-            signal_inputs.append(
-                ("fundamental", fundamental.signal, fundamental.conviction * multipliers.get("fundamental", 1.0))
+        """Aggregates specialist signals via conviction-weighted voting with macro multipliers.
+
+        When agents disagree (no majority wins), the `debate_triggered` flag is set.
+        At least one of fundamental, technical, or sentiment must be non-None for
+        a meaningful signal to be generated.
+
+        Args:
+            technical: Optional TechnicalSignal from TechnicalStatisticalAgent.
+            macro: Optional MacroContext from MacroStatisticalAgent; used for multipliers.
+            fundamental: Optional FundamentalSignal from FundamentalAgent.
+            sentiment: Optional SentimentSignal from SentimentAgent.
+
+        Returns:
+            AggregatedSignal with a consensus direction, conviction, and weighted vote breakdown.
+        """
+        ticker = (
+            (technical.ticker if technical else None)
+            or (fundamental.ticker if fundamental else None)
+            or (sentiment.ticker if sentiment else None)
+            or "UNKNOWN"
+        )
+
+        macro_mults = {}
+        if macro:
+            macro_mults = macro.agent_multipliers
+
+        sources = {
+            "fundamental": fundamental,
+            "technical": technical,
+            "sentiment": sentiment,
+        }
+
+        bull_pool: float = 0.0
+        bear_pool: float = 0.0
+        neutral_pool: float = 0.0
+        weighted_votes: dict[str, float] = {}
+
+        for name, signal in sources.items():
+            if signal is None:
+                weighted_votes[name] = 0.0
+                continue
+
+            base_w = self.DEFAULT_WEIGHTS[name]
+            mult = macro_mults.get(name, 1.0)
+            effective_w = base_w * mult
+            vote = signal.conviction * effective_w
+
+            if signal.signal == Signal.BULLISH:
+                bull_pool += vote
+            elif signal.signal == Signal.BEARISH:
+                bear_pool += vote
+            else:
+                neutral_pool += vote
+
+            weighted_votes[name] = vote
+
+        total = bull_pool + bear_pool + neutral_pool
+
+        if total == 0.0:
+            logger.warning("[Aggregator] No signal contributions for %s", ticker)
+            return AggregatedSignal(
+                ticker=ticker,
+                signal=Signal.NEUTRAL,
+                conviction=0.0,
+                weighted_votes=weighted_votes,
+                debate_triggered=False,
+                skip_reason="No agent signals available",
             )
-        if sentiment:
-            signal_inputs.append(
-                ("sentiment", sentiment.signal, sentiment.conviction * multipliers.get("sentiment", 1.0))
-            )
-            
-        for name, sig, wt in signal_inputs:
-            weighted_votes[sig.value] += wt
-            
-        total = sum(weighted_votes.values())
-        best_sig = max(weighted_votes, key=weighted_votes.get) if total > 0 else Signal.NEUTRAL.value
-        best_score = weighted_votes[best_sig] / total if total > 0 else 0.0
-        
+
+        bull_pct = bull_pool / total
+        bear_pct = bear_pool / total
+        neutral_pct = neutral_pool / total
+
         debate_triggered = False
-        
-        if (fundamental and sentiment and 
-            fundamental.signal != Signal.NEUTRAL and 
-            sentiment.signal != Signal.NEUTRAL and 
-            fundamental.signal != sentiment.signal and 
-            best_score < 0.52):
-            
+        max_pct = max(bull_pct, bear_pct, neutral_pct)
+
+        # Debate threshold: no single direction dominates by > 10 pp over the runner-up
+        runner_up = sorted([bull_pct, bear_pct, neutral_pct])[-2]
+        if max_pct - runner_up < 0.10:
             debate_triggered = True
-            resolution = _resolve_conflict(fundamental, sentiment)
-            weighted_votes[resolution] += 0.25
-            
-            total = sum(weighted_votes.values())
-            best_sig = max(weighted_votes, key=weighted_votes.get)
-            best_score = weighted_votes[best_sig] / total
-            
+
+        if bull_pct >= bear_pct and bull_pct >= neutral_pct:
+            consensus = Signal.BULLISH
+            conviction = bull_pct
+        elif bear_pct > bull_pct and bear_pct >= neutral_pct:
+            consensus = Signal.BEARISH
+            conviction = bear_pct
+        else:
+            consensus = Signal.NEUTRAL
+            conviction = neutral_pct
+
+        # Contract-based regime override: CONTRACTION suppresses BULLISH signals below a conviction
+        # threshold of 0.70 to prevent the system from misallocating during elevated-stress regimes
+        if macro and macro.macro_regime == Regime.CONTRACTION:
+            if consensus == Signal.BULLISH and conviction < 0.70:
+                logger.info(
+                    "[Aggregator] %s: Contraction regime override — suppressing BULLISH (conv=%.2f)",
+                    ticker,
+                    conviction,
+                )
+                consensus = Signal.NEUTRAL
+                conviction = conviction * 0.6
+
+        conviction = min(conviction, 0.95)
+
+        logger.info(
+            "[Aggregator] %s: %s (conv=%.2f) bull=%.2f bear=%.2f neutral=%.2f debate=%s",
+            ticker,
+            consensus.value,
+            conviction,
+            bull_pct,
+            bear_pct,
+            neutral_pct,
+            debate_triggered,
+        )
+
         return AggregatedSignal(
-            ticker=technical.ticker,
-            signal=Signal(best_sig),
-            conviction=round(min(best_score, 0.92), 3),
-            weighted_votes=dict(weighted_votes),
+            ticker=ticker,
+            signal=consensus,
+            conviction=conviction,
+            weighted_votes=weighted_votes,
             debate_triggered=debate_triggered,
         )
