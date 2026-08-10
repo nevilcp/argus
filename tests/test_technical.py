@@ -22,6 +22,7 @@ def test_bullish_signal(agent: TechnicalStatisticalAgent) -> None:
         "volume_ratio": 1.8,
         "momentum_30m": 0.012,
         "momentum_1d": 0.025,
+        "close": 100.0,
     }
     result = agent.analyze("TEST", session_state)
     assert result.signal == Signal.BULLISH
@@ -39,6 +40,7 @@ def test_bearish_signal(agent: TechnicalStatisticalAgent) -> None:
         "volume_ratio": 1.8,  # High volume confirming the move
         "momentum_30m": -0.012,  # Opposite
         "momentum_1d": -0.025,  # Opposite
+        "close": 100.0,
     }
     result = agent.analyze("TEST", session_state)
     assert result.signal == Signal.BEARISH
@@ -56,6 +58,7 @@ def test_neutral_signal(agent: TechnicalStatisticalAgent) -> None:
         "volume_ratio": 1.0,
         "momentum_30m": 0.0,
         "momentum_1d": 0.0,
+        "close": 100.0,
     }
     result = agent.analyze("TEST", session_state)
     assert result.signal == Signal.NEUTRAL
@@ -72,6 +75,7 @@ def test_zero_api_calls(agent: TechnicalStatisticalAgent) -> None:
         "volume_ratio": 1.0,
         "momentum_30m": 0.0,
         "momentum_1d": 0.0,
+        "close": 100.0,
     }
     result = agent.analyze("TEST", session_state)
     assert result.api_calls_used == 0

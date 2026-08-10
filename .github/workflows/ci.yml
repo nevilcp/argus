@@ -23,12 +23,10 @@ jobs:
 
       - name: Install package with test extras
         run: |
-          cd argus
           pip install -e ".[test]"
 
       - name: Run unit + integration tests (mocked LLMs)
         run: |
-          cd argus
           python -m pytest \
             tests/test_technical.py \
             tests/test_macro.py \
