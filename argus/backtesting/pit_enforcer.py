@@ -1,221 +1,184 @@
 """
 argus/backtesting/pit_enforcer.py
-=================================
-Point-in-Time (PiT) Enforcer.
-Ensures absolutely zero future data leakage during backtests by restricting
-all historical fetches to strictly before or on the simulation date, enforcing
-reporting lags, and cryptographically anonymizing tickers to prevent LLM memory bias.
+
+Point-in-time (PiT) data constraint enforcer for backtest validity.
+
+Responsibilities:
+  - Prevent lookahead bias by restricting all data access to dates ≤ the simulation date
+  - Provide pre-truncated price Series for use within the Backtrader strategy loop
+  - Validate that indicator computations reference only historically available data
+
+Not responsible for:
+  - Fetching data from yfinance (see data/fetchers.py)
+  - Running the simulation (see backtesting/engine.py)
+  - Detecting post-hoc bias (see backtesting/bias_auditor.py)
 """
 
-import hashlib
+from __future__ import annotations
+
 import logging
-from datetime import date, datetime, timedelta
-from typing import Optional
+from datetime import date
 
 import pandas as pd
 import yfinance as yf
 
-from argus.data.fetchers import fetch_news
-
 logger = logging.getLogger("argus.pit_enforcer")
 
-class PiTDataError(Exception):
-    pass
+_PRICE_CACHE: dict[str, pd.Series] = {}
 
-_GLOBAL_PRICE_CACHE = {}
+
+def _get_cached_series(ticker: str, lookback_years: int = 3) -> pd.Series:
+    """Fetches and caches a full daily close price Series for a given ticker.
+
+    Results are cached in a module-level dict to avoid redundant yfinance calls
+    across bars within the same simulation run. Cache persists across Backtrader
+    strategy instances within the same Python process.
+
+    Args:
+        ticker: Equity ticker symbol.
+        lookback_years: Number of years of history to load (default 3).
+
+    Returns:
+        Daily close price Series with a DatetimeIndex.
+
+    Raises:
+        ValueError: If yfinance returns an empty DataFrame.
+    """
+    if ticker not in _PRICE_CACHE:
+        df = yf.download(ticker, period=f"{lookback_years}y", progress=False, threads=False)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.droplevel(1)
+
+        close_col = "Close" if "Close" in df.columns else "Adj Close"
+        if df.empty or close_col not in df.columns:
+            raise ValueError(f"No price data for {ticker!r}")
+
+        series = df[close_col].dropna()
+        series.index = pd.to_datetime(series.index)
+        _PRICE_CACHE[ticker] = series
+        logger.debug("_get_cached_series: cached %d rows for %s", len(series), ticker)
+
+    return _PRICE_CACHE[ticker]
+
 
 class PointInTimeEnforcer:
-    # Small lookup table for prompt anonymization (expand as needed)
-    _COMPANY_NAMES = {
-        "AAPL": "Apple",
-        "MSFT": "Microsoft",
-        "GOOGL": "Alphabet",
-        "AMZN": "Amazon",
-        "NVDA": "NVIDIA",
-        "META": "Meta Platforms",
-        "TSLA": "Tesla",
-        "JPM": "JPMorgan Chase",
-        "JNJ": "Johnson & Johnson",
-        "V": "Visa",
-        "PG": "Procter & Gamble",
-        "UNH": "UnitedHealth",
-        "HD": "Home Depot",
-        "MA": "Mastercard",
-        "BAC": "Bank of America",
-        "DIS": "Disney",
-        "CVX": "Chevron",
-        "XOM": "Exxon Mobil",
-        "PEP": "PepsiCo",
-        "KO": "Coca-Cola"
-    }
+    """Ensures data access within Backtrader strategies is always bounded to the simulation date.
 
-    def __init__(self, simulation_date: date):
-        self.sim_date = simulation_date
-        self._ticker_anon_map: dict[str, str] = {}
-        self._session_seed = int(simulation_date.strftime("%Y%m%d"))
-        logger.info(f"[PiT Enforcer] Initialized for simulation date: {self.sim_date}")
+    Each enforcer instance is scoped to a single simulation bar date. All data
+    lookups return only data available up to and including that date, preventing
+    any forward-looking information from contaminating signal computation.
+    """
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # Price Data
-    # ──────────────────────────────────────────────────────────────────────────
-
-    def get_ohlcv(self, ticker: str, lookback_days: int = 365) -> pd.DataFrame:
-        start_date = self.sim_date - timedelta(days=lookback_days)
-        
-        if ticker not in _GLOBAL_PRICE_CACHE:
-            logger.info(f"[PiT] Caching full history for {ticker}...")
-            df = yf.download(ticker, start="2010-01-01", progress=False)
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.droplevel(1)
-            _GLOBAL_PRICE_CACHE[ticker] = df
-            
-        data = _GLOBAL_PRICE_CACHE[ticker]
-        
-        # Filter strictly <= sim_date just to be absolutely certain
-        if not data.empty:
-            data = data[(data.index.date >= start_date) & (data.index.date <= self.sim_date)]
-            
-        if data.empty:
-            raise PiTDataError(f"No price data for {ticker} as of {self.sim_date}")
-            
-        return data.copy()
+    def __init__(self, simulation_date: date) -> None:
+        self.simulation_date = simulation_date
+        self._cutoff = pd.Timestamp(simulation_date)
+        logger.debug("PointInTimeEnforcer: cutoff = %s", self.simulation_date)
 
     def get_close_series(self, ticker: str, lookback_days: int = 252) -> pd.Series:
-        df = self.get_ohlcv(ticker, lookback_days)
-        # Squeeze to handle MultiIndex columns from yfinance 0.2.40+ if necessary
-        close = df["Close"].squeeze()
-        return close
+        """Returns a PiT-safe daily close price Series truncated to the simulation date.
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # Fundamental Data (with reporting lag)
-    # ──────────────────────────────────────────────────────────────────────────
+        Args:
+            ticker: Equity ticker symbol.
+            lookback_days: Maximum history to return (default 252 = 1 trading year).
 
-    def get_fundamentals_pit(self, ticker: str) -> dict:
+        Returns:
+            Daily close price Series with values only up to and including simulation_date.
+            Returns an empty Series if the ticker has no history up to the cutoff.
         """
-        Gets the most recent quarterly fundamentals that were PUBLICLY AVAILABLE 
-        on self.sim_date. Accounts for earnings reporting lag.
+        series = _get_cached_series(ticker)
+        available = series[series.index <= self._cutoff]
+        result = available.tail(lookback_days)
+        logger.debug(
+            "get_close_series: %s → %d rows (cutoff=%s)", ticker, len(result), self.simulation_date
+        )
+        return result
+
+    def get_returns(self, ticker: str, lookback_days: int = 252) -> pd.Series:
+        """Returns PiT-safe daily percentage returns from the close price Series.
+
+        Args:
+            ticker: Equity ticker symbol.
+            lookback_days: Number of returns to return after pct_change.
+
+        Returns:
+            Daily return Series, NaN-dropped, bounded to simulation_date.
         """
-        # SEC Rule: 10-Q must be filed within 40 days of quarter end for large accelerated filers.
-        # Approximate: subtract 45 days from sim_date to find the "safe" as-of date.
-        safe_date = self.sim_date - timedelta(days=45)
-        
-        ticker_obj = yf.Ticker(ticker)
-        financials = ticker_obj.quarterly_financials
-        balance_sheet = ticker_obj.quarterly_balance_sheet
-        
-        if financials.empty or balance_sheet.empty:
-            return {"error": f"No filed data available for {ticker} as of {safe_date}"}
+        closes = self.get_close_series(ticker, lookback_days + 1)
+        returns = closes.pct_change().dropna()
+        logger.debug(
+            "get_returns: %s → %d daily returns (cutoff=%s)",
+            ticker,
+            len(returns),
+            self.simulation_date,
+        )
+        return returns
 
-        # Filter columns to only those with dates <= safe_date
-        valid_cols = [col for col in financials.columns if pd.to_datetime(col).date() <= safe_date]
-        if not valid_cols:
-            return {"error": f"No filed data available for {ticker} as of {safe_date}"}
-            
-        recent_col = valid_cols[0]  # They are sorted descending by default
-        
-        # Basic extraction
-        try:
-            pe_ratio = 15.0  # Placeholder since P/E requires real-time price matching
-            
-            # Debt to Equity
-            total_debt = balance_sheet.loc["Total Debt", recent_col] if "Total Debt" in balance_sheet.index else 0
-            stockholders_equity = balance_sheet.loc["Stockholders Equity", recent_col] if "Stockholders Equity" in balance_sheet.index else 1
-            debt_to_equity = float(total_debt / stockholders_equity) if stockholders_equity else 0.0
+    def validate_no_lookahead(self, data_df: pd.DataFrame) -> bool:
+        """Verifies that no row in the DataFrame references a future date.
 
-            # Profit Margin
-            net_income = financials.loc["Net Income", recent_col] if "Net Income" in financials.index else 0
-            total_revenue = financials.loc["Total Revenue", recent_col] if "Total Revenue" in financials.index else 1
-            profit_margin = float(net_income / total_revenue) if total_revenue else 0.0
+        Args:
+            data_df: DataFrame with a DatetimeIndex to validate.
 
-            return {
-                "pe_ratio": round(pe_ratio, 2),
-                "debt_to_equity": round(debt_to_equity, 2),
-                "profit_margin": round(profit_margin, 3),
-                "revenue_growth": 0.05,  # Placeholder approximation for test
-                "data_as_of_date": safe_date.isoformat(),
-                "pit_enforced": True
-            }
-            
-        except Exception as e:
-            logger.debug(f"[PiT] Fundamental extraction failed for {ticker}: {e}")
-            return {"error": f"Failed parsing financials as of {safe_date}"}
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # News Data (time-gated)
-    # ──────────────────────────────────────────────────────────────────────────
-
-    def get_news_pit(self, ticker: str, company_name: str, lookback_days: int = 7) -> list[dict]:
+        Returns:
+            True if all index values fall on or before the simulation date.
+            False and a warning log if any future dates are found.
         """
-        NewsAPI free tier only goes back 1 month — warn if sim_date is too old.
-        """
-        days_ago = (date.today() - self.sim_date).days
-        if days_ago > 28:
+        future_dates = data_df.index[data_df.index > self._cutoff]
+        if not future_dates.empty:
             logger.warning(
-                f"[PiT] Backtest date {self.sim_date} is > 1 month old. "
-                f"NewsAPI free tier cannot provide historical data for {ticker}. "
-                "Returning empty news array."
+                "validate_no_lookahead: %d future dates detected (simulation_date=%s): %s",
+                len(future_dates),
+                self.simulation_date,
+                future_dates.tolist()[:5],
             )
-            return []
-            
-        news = fetch_news(ticker, company_name, days_back=lookback_days)
-        # Filter news strictly <= sim_date
-        # Note: NewsAPI dates are ISO strings
-        valid_news = []
-        for n in news:
-            if n.get("published_at"):
-                try:
-                    pub_date = datetime.fromisoformat(n["published_at"].replace("Z", "+00:00")).date()
-                    if pub_date <= self.sim_date:
-                        valid_news.append(n)
-                except Exception:
-                    pass
-        return valid_news
+            return False
+        return True
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # Entity Anonymization
-    # ──────────────────────────────────────────────────────────────────────────
+    def get_fundamental_snapshot(self, ticker: str, fundamentals_df: pd.DataFrame) -> pd.Series:
+        """Returns the most recent fundamental row available before the simulation date.
 
-    def anonymize_ticker(self, ticker: str) -> str:
-        if ticker not in self._ticker_anon_map:
-            code = hashlib.md5(f"{ticker}{self._session_seed}".encode()).hexdigest()[:6].upper()
-            self._ticker_anon_map[ticker] = f"COMP_{code}"
-        return self._ticker_anon_map[ticker]
+        Uses the last available row rather than the row matching the exact date, because
+        fundamental data is typically reported with a 30–90 day lag from the period end.
 
-    def deanonymize(self, anon_id: str) -> Optional[str]:
-        for real, anon in self._ticker_anon_map.items():
-            if anon == anon_id:
-                return real
-        return None
+        Args:
+            ticker: Equity ticker symbol used to filter fundamentals_df.
+            fundamentals_df: DataFrame with a DatetimeIndex and a 'ticker' column.
 
-    def anonymize_prompt(self, prompt: str) -> str:
+        Returns:
+            Pandas Series of the most recent valid fundamental snapshot, or an empty Series.
         """
-        Replaces all occurrences of real tickers AND company names with anon codes.
+        ticker_data = fundamentals_df[
+            (fundamentals_df["ticker"] == ticker)
+            & (fundamentals_df.index <= self._cutoff)
+        ]
+        if ticker_data.empty:
+            logger.warning(
+                "get_fundamental_snapshot: no data for %s up to %s",
+                ticker,
+                self.simulation_date,
+            )
+            return pd.Series()
+        return ticker_data.iloc[-1]
+
+    def get_sentiment_snapshot(self, ticker: str, sentiment_df: pd.DataFrame) -> pd.Series:
+        """Returns the most recent sentiment row available before the simulation date.
+
+        Args:
+            ticker: Equity ticker symbol used to filter sentiment_df.
+            sentiment_df: DataFrame with a DatetimeIndex and a 'ticker' column.
+
+        Returns:
+            Pandas Series of the most recent valid sentiment snapshot, or an empty Series.
         """
-        res = prompt
-        # Replace mapping keys
-        for ticker, anon in self._ticker_anon_map.items():
-            res = res.replace(ticker, anon)
-            # Also replace company name if known
-            if ticker in self._COMPANY_NAMES:
-                res = res.replace(self._COMPANY_NAMES[ticker], f"{anon} Corp")
-        return res
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # Survivorship Bias Prevention
-    # ──────────────────────────────────────────────────────────────────────────
-
-    def get_valid_universe_for_date(self, full_universe: list[str]) -> list[str]:
-        """Checks each ticker: was it publicly traded on self.sim_date?"""
-        valid = []
-        for ticker in full_universe:
-            try:
-                df = self.get_ohlcv(ticker, lookback_days=5)
-                if not df.empty:
-                    valid.append(ticker)
-                else:
-                    logger.info(f"[PiT] Excluding {ticker}: no trading data near {self.sim_date}")
-            except PiTDataError:
-                logger.info(f"[PiT] Excluding {ticker}: no trading data near {self.sim_date}")
-            except Exception as e:
-                logger.info(f"[PiT] Excluding {ticker} due to fetch error: {e}")
-        return valid
+        ticker_data = sentiment_df[
+            (sentiment_df["ticker"] == ticker)
+            & (sentiment_df.index <= self._cutoff)
+        ]
+        if ticker_data.empty:
+            logger.warning(
+                "get_sentiment_snapshot: no data for %s up to %s",
+                ticker,
+                self.simulation_date,
+            )
+            return pd.Series()
+        return ticker_data.iloc[-1]

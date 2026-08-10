@@ -1,4 +1,4 @@
-# ARGUS v2 — Running & Testing Guide
+# ARGUS — Running & Testing Guide
 
 > Complete instructions for local development, testing, backtesting, and deployment.
 
@@ -41,7 +41,7 @@ Obtain all keys before installation. All are free, no credit card required.
 1. Go to **https://console.groq.com**
 2. Sign up with Google or email
 3. Click **API Keys** in the left sidebar → **Create API Key**
-4. Name it `argus-v2`. Copy the key (shown once).
+4. Name it `argus`. Copy the key (shown once).
 5. Free limits: `llama-3.1-8b-instant` = 14,400 req/day; `llama-3.3-70b-versatile` = 1,000 req/day
 
 ### Google AI Studio (for Fundamental Agent)
@@ -79,8 +79,8 @@ Obtain all keys before installation. All are free, no credit card required.
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/YOUR_USERNAME/argus-v2.git
-cd argus-v2
+git clone https://github.com/YOUR_USERNAME/argus.git
+cd argus
 
 # 2. Create a virtual environment
 python -m venv .venv
@@ -549,7 +549,7 @@ docker compose down -v        # WARNING: deletes all stored trade history
 **Step 1: Push to GitHub**
 ```bash
 git add .
-git commit -m "ARGUS v2 production build"
+git commit -m "ARGUS production build"
 git push origin main
 ```
 

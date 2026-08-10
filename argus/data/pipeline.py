@@ -1,27 +1,21 @@
 """
 argus/data/pipeline.py
-======================
-Mid-Frequency Trading (MFT) data pipeline for ARGUS v2.
 
-``MFTDataPipeline`` drives the real-time data flow:
+Mid-Frequency Trading (MFT) data pipeline for real-time asset ingestion.
 
-1. Every 300 seconds (5 minutes) the ``_fetch_loop`` pulls the latest 5-minute
-   candle for each ticker and stores it in the in-memory ``OHLCVBuffer``.
+Responsibilities:
+  - Asynchronously fetch 5-minute intraday candles across the target ticker universe
+  - Buffer candles in OHLCVBuffer and compress them into technical feature dicts
+  - Trigger downstream agent decision cycles at configurable intervals
 
-2. Every 1800 seconds (30 minutes) the ``_session_loop`` compresses the
-   buffered candles into a feature dict (RSI, MACD, BB, ATR, ADX, VWAP, …)
-   and fires the ``on_session_ready`` callback — which triggers the LangGraph
-   agent graph for a new decision cycle.
+Not responsible for:
+  - Market data source selection (see data/fetchers.py)
+  - Persistent agent state (see orchestration/state.py)
+  - Execution order routing
 
-Rate limiting
--------------
-Polygon free tier allows 5 requests/minute.  The fetch loop issues one request
-per ticker with a 13-second inter-request sleep, batched in groups of 4.
-
-Market hours guard
-------------------
-``_is_market_hours()`` checks US/Eastern time (09:30 – 16:00, weekdays only)
-so the pipeline idles silently outside trading hours without error.
+Dependencies:
+  - asyncio
+  - pandas_ta (lazy import; loaded only at indicator compute time)
 """
 
 from __future__ import annotations
@@ -41,59 +35,39 @@ from argus.data.fetchers import DataFetchError, fetch_ohlcv_intraday
 logger = logging.getLogger("argus.pipeline")
 
 _ET = ZoneInfo("America/New_York")
-_MARKET_OPEN  = dtime(9, 30)
+_MARKET_OPEN = dtime(9, 30)
 _MARKET_CLOSE = dtime(16, 0)
 
-# Batch size chosen so that 4 tickers × 13 s ≈ 52 s < 60 s → < 5 req/min
-_BATCH_SIZE        = 4
-_INTER_REQUEST_SLEEP = 13   # seconds between individual ticker fetches
-_FETCH_INTERVAL      = 300  # seconds between full-universe fetch sweeps
-_SESSION_INTERVAL    = 1800 # seconds between decision-cycle callbacks
+# Tuned to stay under yfinance's 5 req/min informal rate ceiling for intraday data
+_BATCH_SIZE = 4
+_INTER_REQUEST_SLEEP = 13
+_FETCH_INTERVAL = 300
+_SESSION_INTERVAL = 1800
 
 
 class MFTDataPipeline:
-    """
-    Asynchronous mid-frequency data pipeline.
+    """Asynchronous mid-frequency data pipeline coordinating candlestick updates and feature extraction.
 
-    Parameters
-    ----------
-    tickers:
-        List of equity symbols to track.
-    polygon_key:
-        Optional Polygon.io API key (reserved for future use when the
-        Polygon websocket replaces the yfinance polling approach).
+    Runs two concurrent asyncio loops: one that periodically fetches intraday
+    candles for all tracked tickers, and one that fires a decision-cycle callback
+    at a longer interval. Both loops only execute during US equity market hours.
     """
 
     def __init__(
         self,
         tickers: list[str],
-        polygon_key: Optional[str] = None,
     ) -> None:
-        self.tickers     = tickers
-        self.polygon_key = polygon_key
-        self.buffer      = OHLCVBuffer(db_path=":memory:", buffer_size=78)
-        self.running     = False
-        logger.info(
-            "MFTDataPipeline initialised: %d tickers", len(tickers)
-        )
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # Public lifecycle
-    # ──────────────────────────────────────────────────────────────────────────
+        self.tickers = tickers
+        self.buffer = OHLCVBuffer(db_path=":memory:", buffer_size=78)
+        self.running = False
+        logger.info("MFTDataPipeline initialised: %d tickers", len(tickers))
 
     async def start(self, on_session_ready: Callable) -> None:
-        """
-        Start the pipeline by launching both the fetch and session loops.
+        """Starts concurrent fetch and session cycles, blocking until stopped.
 
-        Both coroutines run concurrently via ``asyncio.gather``.  This method
-        blocks until :meth:`stop` is called.
-
-        Parameters
-        ----------
-        on_session_ready:
-            Async callable invoked every ``SESSION_INTERVAL`` seconds when
-            the market is open.  Signature: ``async def cb(states: dict) -> None``
-            where *states* is the output of :meth:`compress_all`.
+        Args:
+            on_session_ready: Async callback invoked with compressed session states
+                after each session interval elapses during market hours.
         """
         self.running = True
         logger.info("MFTDataPipeline.start: launching fetch and session loops")
@@ -102,49 +76,58 @@ class MFTDataPipeline:
             self._session_loop(on_session_ready),
         )
 
+    def register_tickers(self, tickers: list[str]) -> None:
+        """Adds new tickers to the live tracking universe without restarting the pipeline.
+
+        Safe to call while the pipeline is running. The ``_fetch_loop`` reads
+        ``self.tickers`` on every iteration, so new entries are picked up within
+        ``_FETCH_INTERVAL`` seconds.
+
+        Args:
+            tickers: Ticker symbols to add. Duplicates are silently ignored.
+        """
+        new = [t for t in tickers if t not in self.tickers]
+        if new:
+            self.tickers.extend(new)
+            logger.info(
+                "MFTDataPipeline.register_tickers: added %d ticker(s): %s",
+                len(new),
+                new,
+            )
+
     async def stop(self) -> None:
-        """Signal both loops to exit on their next iteration."""
+        """Signals active loops to stop execution."""
         self.running = False
         logger.info("MFTDataPipeline.stop: shutdown requested")
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # Internal loops
-    # ──────────────────────────────────────────────────────────────────────────
-
     async def _fetch_loop(self) -> None:
-        """
-        Periodically fetch the latest 5-minute candle for every tracked ticker.
+        """Periodically downloads the latest intraday candlesticks for the tracking universe.
 
-        Runs in batches of ``_BATCH_SIZE`` with ``_INTER_REQUEST_SLEEP`` seconds
-        between individual fetches to stay under the Polygon free-tier limit of
-        5 requests/minute.  The full sweep repeats every ``_FETCH_INTERVAL``
-        seconds (300 s = 5 min).
-
-        Only operates during US market hours; sleeps through off-hours without
-        error.
+        Batches requests by ``_BATCH_SIZE`` with ``_INTER_REQUEST_SLEEP`` seconds between
+        each fetch to avoid triggering yfinance throttling. Iterates over a snapshot of
+        ``self.tickers`` so that concurrent ``register_tickers`` calls cannot corrupt iteration.
         """
         while self.running:
             if self._is_market_hours():
-                logger.debug("_fetch_loop: starting universe sweep (%d tickers)", len(self.tickers))
-                for i in range(0, len(self.tickers), _BATCH_SIZE):
-                    batch = self.tickers[i : i + _BATCH_SIZE]
-                    for ticker in batch:
+                tickers_snapshot = list(self.tickers)
+                logger.debug("_fetch_loop: starting universe sweep (%d tickers)", len(tickers_snapshot))
+                for i in range(0, len(tickers_snapshot), _BATCH_SIZE):
+                    batch = tickers_snapshot[i : i + _BATCH_SIZE]
+                    for j, ticker in enumerate(batch):
                         await self._fetch_one_ticker(ticker)
-                        await asyncio.sleep(_INTER_REQUEST_SLEEP)
+                        # Sleep between tickers but not after the last one in the final batch
+                        if not (i + j + 1 >= len(tickers_snapshot)):
+                            await asyncio.sleep(_INTER_REQUEST_SLEEP)
             else:
                 logger.debug("_fetch_loop: outside market hours — idle")
 
             await asyncio.sleep(_FETCH_INTERVAL)
 
     async def _session_loop(self, callback: Callable) -> None:
-        """
-        Every ``SESSION_INTERVAL`` seconds, compress buffered candles and fire
-        *callback* if the market is open.
+        """Periodically compiles buffered candlesticks and triggers downstream agent actions.
 
-        Parameters
-        ----------
-        callback:
-            Async callable receiving the compressed session states dict.
+        Args:
+            callback: Async callable receiving the ``session_states`` dict.
         """
         while self.running:
             await asyncio.sleep(_SESSION_INTERVAL)
@@ -156,67 +139,60 @@ class MFTDataPipeline:
                 except Exception as exc:
                     logger.error(
                         "_session_loop: callback raised %s: %s",
-                        type(exc).__name__, exc,
+                        type(exc).__name__,
+                        exc,
                     )
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # Fetch helper
-    # ──────────────────────────────────────────────────────────────────────────
-
     async def _fetch_one_ticker(self, ticker: str) -> None:
-        """
-        Fetch the latest 5-minute candle for *ticker* and store it in the buffer.
+        """Downloads and bulk-inserts all available 5-minute candles for a specific symbol.
 
-        Uses ``asyncio.to_thread`` to run the blocking yfinance call off the
-        event loop.  If the fetch fails for any reason, a warning is logged
-        and the loop continues — individual ticker failures must never crash the
-        pipeline.
+        Fetches up to 2 trading days of 5-minute candles and inserts every row into the
+        buffer. This warms the buffer to a full indicator-ready depth on the very first
+        fetch cycle, eliminating the 70-minute cold start that would result from
+        inserting only the latest candle. Duplicate timestamps are safely overwritten
+        via the buffer's INSERT OR REPLACE contract.
 
-        Parameters
-        ----------
-        ticker:
-            Equity symbol.
+        Args:
+            ticker: Equity ticker symbol to fetch.
         """
         try:
-            df: pd.DataFrame = await asyncio.to_thread(
-                fetch_ohlcv_intraday, ticker, "5m", "2d"
-            )
+            df: pd.DataFrame = await asyncio.to_thread(fetch_ohlcv_intraday, ticker, "5m", "2d")
             if df is None or df.empty:
                 logger.warning("_fetch_one_ticker: empty result for %s", ticker)
                 return
 
-            # Take the most recent complete candle (iloc[-1])
-            latest = df.iloc[-1]
-            candle = {
-                "timestamp": df.index[-1].isoformat(),
-                "open":      float(latest["open"])   if "open"   in latest.index else None,
-                "high":      float(latest["high"])   if "high"   in latest.index else None,
-                "low":       float(latest["low"])    if "low"    in latest.index else None,
-                "close":     float(latest["close"])  if "close"  in latest.index else None,
-                "volume":    float(latest["volume"]) if "volume" in latest.index else None,
-            }
-            self.buffer.insert_candle(ticker, candle)
-            logger.debug("_fetch_one_ticker: %s → close=%.2f", ticker, candle["close"] or 0.0)
+            for idx, row in df.iterrows():
+                candle = {
+                    "timestamp": idx.isoformat(),
+                    "open": float(row["open"]) if "open" in row.index else None,
+                    "high": float(row["high"]) if "high" in row.index else None,
+                    "low": float(row["low"]) if "low" in row.index else None,
+                    "close": float(row["close"]) if "close" in row.index else None,
+                    "volume": float(row["volume"]) if "volume" in row.index else None,
+                }
+                self.buffer.insert_candle(ticker, candle)
 
-        except (DataFetchError, Exception) as exc:
-            logger.warning(
-                "_fetch_one_ticker: %s failed — %s: %s",
-                ticker, type(exc).__name__, exc,
+            logger.debug(
+                "_fetch_one_ticker: %s → %d candles inserted, latest close=%.2f",
+                ticker,
+                len(df),
+                float(df["close"].iloc[-1]) if "close" in df.columns else 0.0,
             )
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # Compression
-    # ──────────────────────────────────────────────────────────────────────────
+        except Exception as exc:
+            logger.warning(
+                "_fetch_one_ticker: %s failed — %s: %s",
+                ticker,
+                type(exc).__name__,
+                exc,
+            )
 
     def compress_all(self) -> dict[str, dict]:
-        """
-        Compress buffered candles for every ticker into a feature dict.
+        """Compresses cached candle metrics across all universe symbols into a feature dictionary.
 
-        Returns
-        -------
-        dict[str, dict]
-            ``{ticker: feature_dict}`` for every ticker that has enough
-            candles (≥ 14).  Tickers with insufficient data are skipped.
+        Returns:
+            Mapping of ticker → technical feature dict (rsi_14, macd_histogram, etc.).
+            Failed tickers are omitted and logged as warnings.
         """
         states: dict[str, dict] = {}
         for ticker in self.buffer.get_all_tickers():
@@ -227,77 +203,68 @@ class MFTDataPipeline:
                 except Exception as exc:
                     logger.warning(
                         "compress_all: %s compression failed — %s: %s",
-                        ticker, type(exc).__name__, exc,
+                        ticker,
+                        type(exc).__name__,
+                        exc,
                     )
         logger.info("compress_all: %d tickers compressed", len(states))
         return states
 
     def _compress_candles(self, df: pd.DataFrame) -> dict:
+        """Calculates technical indicators on a DataFrame using pandas-ta.
+
+        Delayed import of pandas_ta avoids loading the heavy C extension on startup,
+        which is particularly important in serverless and cold-start environments.
+
+        Args:
+            df: OHLCV DataFrame with float columns and a datetime index.
+
+        Returns:
+            Dict with keys: rsi_14, macd_histogram, bb_percent_b, atr_pct, adx_14,
+            vwap_distance, volume_ratio, momentum_30m, momentum_1d, close, timestamp.
         """
-        Run pandas-ta technical indicators on *df* and return the latest values.
+        import pandas_ta as ta  # Lazy import to avoid heavy C extension load on startup
 
-        Indicators computed
-        -------------------
-        ``rsi_14``       14-period RSI
-        ``macd_histogram`` MACD signal line histogram (12/26/9)
-        ``bb_percent_b``  Bollinger %B (20-period, 2 σ)
-        ``atr_pct``       14-period ATR as % of close price
-        ``adx_14``        14-period ADX trend strength
-        ``vwap_distance`` (close − VWAP) / VWAP
-        ``volume_ratio``  current volume / 20-period rolling mean
-        ``momentum_30m``  6-bar log return  (≈ 30 minutes)
-        ``momentum_1d``   78-bar log return (≈ 1 trading day)
-        ``close``         last close price
-        ``timestamp``     ISO-8601 string of the latest bar
+        rsi_series = ta.rsi(df["close"], length=14)
+        rsi_14 = (
+            float(rsi_series.iloc[-1]) if rsi_series is not None and not rsi_series.empty else 50.0
+        )
 
-        Parameters
-        ----------
-        df:
-            OHLCV DataFrame with DatetimeIndex, at least 14 rows.
-
-        Returns
-        -------
-        dict
-            Feature dict ready for injection into ``TechnicalSignal``.
-        """
-        import pandas_ta as ta  # lazy import — heavy dep, avoid at module load
-
-        # ── RSI ──────────────────────────────────────────────────────────────
-        rsi_series  = ta.rsi(df["close"], length=14)
-        rsi_14      = float(rsi_series.iloc[-1]) if rsi_series is not None and not rsi_series.empty else 50.0
-
-        # ── MACD ─────────────────────────────────────────────────────────────
-        macd_df     = ta.macd(df["close"], fast=12, slow=26, signal=9)
-        macd_hist   = 0.0
+        macd_df = ta.macd(df["close"], fast=12, slow=26, signal=9)
+        macd_hist = 0.0
         if macd_df is not None and not macd_df.empty:
-            hist_col = [c for c in macd_df.columns if "h" in c.lower()]
+            # pandas_ta names the histogram column with an 'h' suffix, e.g. MACDh_12_26_9
+            hist_col = [c for c in macd_df.columns if c.upper().startswith("MACDH_")]
             if hist_col:
                 macd_hist = float(macd_df[hist_col[0]].iloc[-1])
+            else:
+                logger.warning("_compress_candles: MACD histogram column not found in %s", list(macd_df.columns))
 
-        # ── Bollinger Bands ──────────────────────────────────────────────────
-        bb_df       = ta.bbands(df["close"], length=20, std=2)
-        bb_pct_b    = 0.5
+        bb_df = ta.bbands(df["close"], length=20, std=2)
+        bb_pct_b = 0.5
         if bb_df is not None and not bb_df.empty:
-            pct_col = [c for c in bb_df.columns if "p" in c.lower()]
+            # pandas_ta names the %B column with a 'BBP_' prefix, e.g. BBP_20_2.0
+            pct_col = [c for c in bb_df.columns if c.upper().startswith("BBP_")]
             if pct_col:
                 bb_pct_b = float(bb_df[pct_col[0]].iloc[-1])
+            else:
+                logger.warning("_compress_candles: BB %%B column not found in %s", list(bb_df.columns))
 
-        # ── ATR ──────────────────────────────────────────────────────────────
-        atr_series  = ta.atr(df["high"], df["low"], df["close"], length=14)
-        close_last  = float(df["close"].iloc[-1])
-        atr_pct     = (float(atr_series.iloc[-1]) / close_last) if (
-            atr_series is not None and not atr_series.empty and close_last
-        ) else 0.0
+        atr_series = ta.atr(df["high"], df["low"], df["close"], length=14)
+        close_last = float(df["close"].iloc[-1])
+        atr_pct = (
+            (float(atr_series.iloc[-1]) / close_last)
+            if (atr_series is not None and not atr_series.empty and close_last)
+            else 0.0
+        )
 
-        # ── ADX ──────────────────────────────────────────────────────────────
-        adx_df      = ta.adx(df["high"], df["low"], df["close"], length=14)
-        adx_14      = 20.0
+        adx_df = ta.adx(df["high"], df["low"], df["close"], length=14)
+        adx_14 = 20.0
         if adx_df is not None and not adx_df.empty:
             adx_col = [c for c in adx_df.columns if c.upper().startswith("ADX_")]
             if adx_col:
                 adx_14 = float(adx_df[adx_col[0]].iloc[-1])
 
-        # ── VWAP ─────────────────────────────────────────────────────────────
         vwap_distance = 0.0
         try:
             vwap_series = ta.vwap(df["high"], df["low"], df["close"], df["volume"])
@@ -306,47 +273,45 @@ class MFTDataPipeline:
                 if vwap_val and close_last:
                     vwap_distance = (close_last - vwap_val) / vwap_val
         except Exception:
-            pass  # VWAP may fail if volume is zero — keep default 0.0
+            # pandas_ta raises on zero-volume days; default to 0.0 (no VWAP deviation)
+            pass
 
-        # ── Volume ratio ─────────────────────────────────────────────────────
-        vol_series   = df["volume"]
-        vol_mean     = float(vol_series.rolling(20).mean().iloc[-1]) if len(vol_series) >= 20 else float(vol_series.mean())
+        vol_series = df["volume"]
+        vol_mean = (
+            float(vol_series.rolling(20).mean().iloc[-1])
+            if len(vol_series) >= 20
+            else float(vol_series.mean())
+        )
         volume_ratio = (float(vol_series.iloc[-1]) / vol_mean) if vol_mean else 1.0
 
-        # ── Momentum ─────────────────────────────────────────────────────────
-        close_s      = df["close"]
-        n            = len(close_s)
-        momentum_30m = (float(close_s.iloc[-1]) / float(close_s.iloc[max(-7,  -n)])) - 1.0
-        momentum_1d  = (float(close_s.iloc[-1]) / float(close_s.iloc[max(-79, -n)])) - 1.0
+        close_s = df["close"]
+        n = len(close_s)
+        # 7-bar lookback ≈ 35 minutes at 5m resolution; 79-bar lookback ≈ 1 trading day
+        momentum_30m = (float(close_s.iloc[-1]) / float(close_s.iloc[max(-7, -n)])) - 1.0
+        momentum_1d = (float(close_s.iloc[-1]) / float(close_s.iloc[max(-79, -n)])) - 1.0
 
         return {
-            "rsi_14":          round(rsi_14, 4),
-            "macd_histogram":  round(macd_hist, 6),
-            "bb_percent_b":    round(bb_pct_b, 4),
-            "atr_pct":         round(atr_pct, 6),
-            "adx_14":          round(adx_14, 4),
-            "vwap_distance":   round(vwap_distance, 6),
-            "volume_ratio":    round(volume_ratio, 4),
-            "momentum_30m":    round(momentum_30m, 6),
-            "momentum_1d":     round(momentum_1d, 6),
-            "close":           round(close_last, 4),
-            "timestamp":       df.index[-1].isoformat(),
+            "rsi_14": round(rsi_14, 4),
+            "macd_histogram": round(macd_hist, 6),
+            "bb_percent_b": round(bb_pct_b, 4),
+            "atr_pct": round(atr_pct, 6),
+            "adx_14": round(adx_14, 4),
+            "vwap_distance": round(vwap_distance, 6),
+            "volume_ratio": round(volume_ratio, 4),
+            "momentum_30m": round(momentum_30m, 6),
+            "momentum_1d": round(momentum_1d, 6),
+            "close": round(close_last, 4),
+            "timestamp": df.index[-1].isoformat(),
         }
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # Market hours guard
-    # ──────────────────────────────────────────────────────────────────────────
-
     def _is_market_hours(self) -> bool:
-        """
-        Return ``True`` if the current US/Eastern time is within regular
-        trading hours (09:30 – 16:00, Monday – Friday).
+        """Checks if current Eastern Time falls within regular US stock market hours (09:30 - 16:00 ET).
 
-        Uses ``zoneinfo.ZoneInfo("America/New_York")`` for DST-aware
-        conversion.  Pre-market and after-hours sessions are excluded.
+        Returns:
+            True during weekday trading hours in America/New_York timezone.
         """
         now_et = datetime.now(_ET)
-        if now_et.weekday() >= 5:   # Saturday=5, Sunday=6
+        if now_et.weekday() >= 5:
             return False
         current = now_et.time().replace(second=0, microsecond=0)
         return _MARKET_OPEN <= current < _MARKET_CLOSE

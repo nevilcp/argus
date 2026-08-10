@@ -1,25 +1,23 @@
 """
 argus/data/cache.py
-===================
-SQLite-backed persistence layer for ARGUS v2.
 
-Two classes are provided:
+SQLite-backed persistence layer for caching price candles and trading decisions.
 
-OHLCVBuffer
-    In-memory (or file-backed) SQLite store for the rolling 78-candle MFT
-    window.  Designed for high-frequency writes from the data pipeline; uses
-    an in-memory DB by default for maximum throughput.
+Responsibilities:
+  - Buffer rolling intraday OHLCV candles with a configurable max-rows limit
+  - Archive completed ARGUSDecision records for post-session auditing
 
-DecisionLogger
-    Persistent SQLite store (``argus_decisions.db``) that archives every
-    completed ``ARGUSDecision`` as both a flattened summary row and a full
-    JSON blob.  Provides the audit trail required by the Governor and the
-    Streamlit memory browser.
+Not responsible for:
+  - Fetching raw data (see data/fetchers.py)
+  - Semantic vector storage (see memory/cultural.py)
+
+Dependencies:
+  - sqlite3 (stdlib)
+  - pandas
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import sqlite3
 import threading
@@ -31,10 +29,6 @@ import pandas as pd
 from argus.schemas.signals import ARGUSDecision
 
 logger = logging.getLogger("argus.cache")
-
-# ──────────────────────────────────────────────────────────────────────────────
-# OHLCVBuffer
-# ──────────────────────────────────────────────────────────────────────────────
 
 _CREATE_OHLCV = """
 CREATE TABLE IF NOT EXISTS ohlcv (
@@ -78,53 +72,28 @@ SELECT DISTINCT ticker FROM ohlcv
 
 
 class OHLCVBuffer:
-    """
-    Rolling OHLCV buffer backed by SQLite.
+    """Rolling in-memory candle cache backed by SQLite to support real-time indicators.
 
-    Keeps the last ``buffer_size`` candles per ticker.  When the buffer is
-    full, the oldest rows are pruned after each insert.  An in-memory SQLite
-    database (``:memory:``) is used by default; pass a file path for
-    persistence across process restarts.
-
-    Thread-safety
-    -------------
-    A ``threading.Lock`` serialises all writes.  Multiple threads in the
-    pipeline fetch loop may call :meth:`insert_candle` concurrently without
-    data corruption.
-
-    Parameters
-    ----------
-    db_path:
-        SQLite connection string.  Use ``":memory:"`` (default) for speed or
-        a file path for warm-start persistence.
-    buffer_size:
-        Maximum number of candles to retain per ticker (default 78 ≈ one
-        full 6.5-hour trading session at 5-minute resolution).
+    WAL mode is enabled to allow concurrent readers while the buffer is being written
+    by the async fetch loop. Thread safety is enforced by a single module-level lock.
     """
 
     def __init__(self, db_path: str = ":memory:", buffer_size: int = 78) -> None:
-        self._db_path    = db_path
+        self._db_path = db_path
         self._buffer_size = buffer_size
-        self._lock       = threading.Lock()
-        self._conn       = sqlite3.connect(db_path, check_same_thread=False)
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute(_CREATE_OHLCV)
         self._conn.commit()
         logger.info("OHLCVBuffer initialised (db=%s, buffer_size=%d)", db_path, buffer_size)
 
-    # ── Writes ────────────────────────────────────────────────────────────────
-
     def insert_candle(self, ticker: str, candle: dict) -> None:
-        """
-        Insert a single 5-minute candle for *ticker* and prune old rows.
+        """Inserts a single candlestick entry and prunes historical values exceeding the buffer limit.
 
-        Parameters
-        ----------
-        ticker:
-            Equity symbol.
-        candle:
-            Dict with keys ``timestamp`` (ISO-8601 str or datetime),
-            ``open``, ``high``, ``low``, ``close``, ``volume``.
+        Args:
+            ticker: Equity ticker symbol.
+            candle: Dict with keys timestamp, open, high, low, close, volume.
         """
         ts = candle.get("timestamp")
         if isinstance(ts, datetime):
@@ -133,7 +102,8 @@ class OHLCVBuffer:
             ts = datetime.now(timezone.utc).isoformat()
 
         row = (
-            ticker, str(ts),
+            ticker,
+            str(ts),
             candle.get("open"),
             candle.get("high"),
             candle.get("low"),
@@ -148,20 +118,17 @@ class OHLCVBuffer:
 
         logger.debug("OHLCVBuffer.insert_candle: %s @ %s", ticker, ts)
 
-    # ── Reads ─────────────────────────────────────────────────────────────────
-
     def get_candles(self, ticker: str) -> Optional[pd.DataFrame]:
-        """
-        Return buffered candles for *ticker* as a DataFrame.
+        """Retrieves buffered candles as a pandas DataFrame indexed by timestamp.
 
-        Returns ``None`` when fewer than 14 rows are available (insufficient
-        for the shortest indicator window — RSI-14).
+        Returns None when fewer than 14 rows exist, as most indicators require at
+        least that many periods to produce meaningful values.
 
-        Returns
-        -------
-        pd.DataFrame or None
-            Columns: ``open, high, low, close, volume``.
-            Index: ``DatetimeIndex`` sorted ascending.
+        Args:
+            ticker: Equity ticker symbol.
+
+        Returns:
+            DataFrame with float OHLCV columns and a datetime index, or None.
         """
         with self._lock:
             rows = self._conn.execute(_SELECT_CANDLES, (ticker,)).fetchall()
@@ -172,9 +139,7 @@ class OHLCVBuffer:
             )
             return None
 
-        df = pd.DataFrame(
-            rows, columns=["timestamp", "open", "high", "low", "close", "volume"]
-        )
+        df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
         df["timestamp"] = pd.to_datetime(df["timestamp"])
         df.set_index("timestamp", inplace=True)
         df = df.astype(float)
@@ -182,20 +147,20 @@ class OHLCVBuffer:
         return df
 
     def get_all_tickers(self) -> list[str]:
-        """Return a list of distinct tickers that have data in the buffer."""
+        """Returns a list of distinct tickers currently cached in the buffer.
+
+        Returns:
+            List of ticker strings.
+        """
         with self._lock:
             rows = self._conn.execute(_SELECT_TICKERS).fetchall()
         return [r[0] for r in rows]
 
     def close(self) -> None:
-        """Close the underlying SQLite connection."""
+        """Closes the underlying database connection."""
         self._conn.close()
         logger.info("OHLCVBuffer closed (db=%s)", self._db_path)
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# DecisionLogger
-# ──────────────────────────────────────────────────────────────────────────────
 
 _CREATE_DECISIONS = """
 CREATE TABLE IF NOT EXISTS decisions (
@@ -231,55 +196,37 @@ LIMIT ?
 
 
 class DecisionLogger:
-    """
-    Persistent decision archive backed by a SQLite file database.
+    """Archives completed ARGUSDecision models to an SQLite database file for auditability.
 
-    Each completed :class:`~argus.schemas.signals.ARGUSDecision` is stored
-    as a flattened summary row (for fast SQL queries) together with the full
-    Pydantic JSON blob (for complete audit trail / memory retrieval).
-
-    Parameters
-    ----------
-    db_path:
-        Path to the SQLite database file (default ``"argus_decisions.db"``).
-        The file is created if it does not exist.
+    Flattens scalar decision fields into indexed columns while also persisting
+    the complete JSON blob, enabling both tabular queries and full object reconstruction.
     """
 
     def __init__(self, db_path: str = "argus_decisions.db") -> None:
         self._db_path = db_path
-        self._lock    = threading.Lock()
-        self._conn    = sqlite3.connect(db_path, check_same_thread=False)
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute(_CREATE_DECISIONS)
         self._conn.commit()
         logger.info("DecisionLogger initialised (db=%s)", db_path)
 
-    # ── Writes ────────────────────────────────────────────────────────────────
-
     def log(self, decision: ARGUSDecision) -> None:
+        """Persists a flattened decision profile and its complete JSON representation.
+
+        Args:
+            decision: Validated ARGUSDecision to archive.
         """
-        Persist *decision* to the database.
+        signal = decision.aggregated.signal.value if decision.aggregated else None
+        conviction = decision.aggregated.conviction if decision.aggregated else None
 
-        Extracts commonly-queried scalar fields into dedicated columns and
-        serialises the full Pydantic model to JSON for the ``full_json``
-        column.
-
-        Parameters
-        ----------
-        decision:
-            A completed :class:`~argus.schemas.signals.ARGUSDecision` instance.
-        """
-        # ── Flatten scalar fields ──────────────────────────────────────────
-        signal     = decision.aggregated.signal.value if decision.aggregated else None
-        conviction = decision.aggregated.conviction   if decision.aggregated else None
-
-        alloc_pct  = decision.allocation.allocation_pct if decision.allocation else None
-        alloc_usd  = decision.allocation.allocation_usd if decision.allocation else None
-        stop_loss  = decision.allocation.stop_loss      if decision.allocation else None
+        alloc_pct = decision.allocation.allocation_pct if decision.allocation else None
+        alloc_usd = decision.allocation.allocation_usd if decision.allocation else None
+        stop_loss = decision.allocation.stop_loss if decision.allocation else None
 
         macro_regime = decision.macro.macro_regime.value if decision.macro else None
-        var_99       = decision.risk.var_99              if decision.risk   else None
+        var_99 = decision.risk.var_99 if decision.risk else None
 
         row = (
             decision.decision_id,
@@ -302,26 +249,21 @@ class DecisionLogger:
 
         logger.info(
             "DecisionLogger.log: %s [%s] signal=%s conviction=%.2f",
-            decision.ticker, decision.decision_id, signal, conviction or 0.0,
+            decision.ticker,
+            decision.decision_id,
+            signal,
+            conviction or 0.0,
         )
 
-    # ── Reads ─────────────────────────────────────────────────────────────────
-
     def get_recent(self, ticker: str, n: int = 20) -> list[dict]:
-        """
-        Return the *n* most recent decision records for *ticker*.
+        """Retrieves the n most recent decision records matching a symbol.
 
-        Parameters
-        ----------
-        ticker:
-            Equity symbol.
-        n:
-            Maximum number of records to return (default 20).
+        Args:
+            ticker: Equity ticker symbol.
+            n: Maximum number of records to return (default 20).
 
-        Returns
-        -------
-        list[dict]
-            Each element is a flat dict of all columns including ``full_json``.
+        Returns:
+            List of dicts matching the decisions table schema, ordered by session_timestamp desc.
         """
         with self._lock:
             rows = self._conn.execute(_SELECT_RECENT, (ticker, n)).fetchall()
@@ -330,6 +272,6 @@ class DecisionLogger:
         return result
 
     def close(self) -> None:
-        """Close the underlying SQLite connection."""
+        """Closes the database connection."""
         self._conn.close()
         logger.info("DecisionLogger closed (db=%s)", self._db_path)

@@ -1,1 +1,1 @@
-"""Tests sub-package for ARGUS v2."""
+"""Tests sub-package for ARGUS."""

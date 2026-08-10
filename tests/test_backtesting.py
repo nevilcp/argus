@@ -26,8 +26,6 @@ Test plan (to be implemented):
       WalkForwardReport contains exactly 3 out-of-sample PerformanceReport entries.
 """
 
-import pytest
-
 
 def test_placeholder_backtesting() -> None:
     """Placeholder test — always passes until real tests are implemented."""
