@@ -270,11 +270,7 @@ class SentimentSignal(BaseModel):
     news_volume_7d: int = Field(
         ..., ge=0, description="Total news articles ingested (7-day window)"
     )
-    mention_count_7d: int = Field(..., ge=0, description="Social mentions in last 7 days")
     social_volume_change_pct: float = Field(..., description="Change in social volume (%)")
-    social_avg_score: float = Field(
-        ..., ge=-1.0, le=1.0, description="Raw social bull/bear score [-1, +1]"
-    )
     social_mention_surge: bool = Field(
         ..., description="True if social mentions > 2× 30-day average"
     )
