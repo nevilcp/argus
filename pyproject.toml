@@ -20,9 +20,6 @@ dependencies = [
     "yfinance>=0.2.45",
     "fredapi>=0.5.2",
     "chromadb>=0.5.0",
-    "sentence-transformers>=2.7.0",
-    "transformers>=4.46.0",
-    "torch>=2.4.0",
     "newsapi-python>=0.2.7",
     "pytrends>=4.9.2",
     "backtrader>=1.9.78",
@@ -53,6 +50,14 @@ test = [
     "pytest>=8.0.0",
     "pytest-mock>=3.14.0",
     "pytest-asyncio>=0.24.0",
+]
+# FinBERT (sentiment.py) and the cultural-memory embedding function
+# (memory/cultural.py) both lazy-import from this extra on first actual use,
+# not on module import — see ADR 0007. Default install and CI never need it.
+models = [
+    "sentence-transformers>=2.7.0",
+    "transformers>=4.46.0",
+    "torch>=2.4.0",
 ]
 
 [tool.pytest.ini_options]

@@ -28,13 +28,12 @@ from typing import Optional
 from uuid import uuid4
 
 import numpy as np
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_groq import ChatGroq
 
 from argus.config import settings
 from argus.orchestration.governor import governor
 from argus.params import PORTFOLIO
 from argus.schemas.signals import MacroContext, PortfolioAllocation, RiskVerdict
+from argus.seams import GroqLLMClient, LLMClient
 
 logger = logging.getLogger("argus.portfolio")
 
@@ -167,18 +166,20 @@ class PortfolioManagerAgent:
     all-cash on API failures or when no tickers are risk-approved.
     """
 
-    def __init__(self) -> None:
-        api_key = settings.groq_api_key
-        if not api_key:
-            logger.warning(
-                "PortfolioManagerAgent: GROQ_API_KEY is not set — LLM calls will fail at invocation time."
+    def __init__(self, llm_client: Optional[LLMClient] = None) -> None:
+        if llm_client is None:
+            api_key = settings.groq_api_key
+            if not api_key:
+                logger.warning(
+                    "PortfolioManagerAgent: GROQ_API_KEY is not set — LLM calls will fail at invocation time."
+                )
+            llm_client = GroqLLMClient(
+                model="llama-3.3-70b-versatile",
+                temperature=PORTFOLIO.llm_temperature,
+                max_tokens=PORTFOLIO.llm_max_tokens,
+                api_key=api_key,
             )
-        self.llm = ChatGroq(
-            model="llama-3.3-70b-versatile",
-            temperature=PORTFOLIO.llm_temperature,
-            max_tokens=PORTFOLIO.llm_max_tokens,
-            groq_api_key=api_key,
-        )
+        self.llm_client = llm_client
         self._session_count = 0
         self.max_position_pct = settings.MAX_SINGLE_POSITION_PCT
 
@@ -281,20 +282,7 @@ class PortfolioManagerAgent:
 
         for attempt in range(3):
             try:
-                response = self.llm.invoke(
-                    [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
-                )
-                raw = response.content
-                if isinstance(raw, list):
-                    raw = "".join(
-                        item.get("text", "")
-                        for item in raw
-                        if isinstance(item, dict) and item.get("type") == "text"
-                    )
-                elif not isinstance(raw, str):
-                    raw = str(raw)
-
-                raw = raw.strip()
+                raw = self.llm_client.complete(SYSTEM_PROMPT, prompt).strip()
                 if raw.startswith("```"):
                     parts = raw.split("```")
                     if len(parts) >= 3:
