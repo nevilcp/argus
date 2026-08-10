@@ -28,7 +28,7 @@ from uuid import uuid4
 
 from dotenv import load_dotenv
 
-# .env must be loaded before any LangChain/Groq/Gemini imports that read env vars
+# .env must be loaded before any LangChain/Groq imports that read env vars
 load_dotenv()
 
 from fastapi import FastAPI, HTTPException
@@ -156,7 +156,7 @@ async def health():
         "model_versions": {
             "synthesis": "llama-3.3-70b-versatile",
             "sentiment": "llama-3.1-8b-instant",
-            "fundamental": "gemini-3.5-flash",
+            "fundamental": "llama-3.3-70b-versatile",
             "finbert": "ProsusAI/finbert",
         },
         "can_make_calls": can_make_calls,
