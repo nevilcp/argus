@@ -172,13 +172,17 @@ class TestEndToEnd:
 
     def test_pit_enforcer_prevents_future_data(self):
         pit = PointInTimeEnforcer(simulation_date=date(2022, 6, 15))
-        df = pit.get_ohlcv("AAPL", lookback_days=30)
-        assert df.index[-1].date() <= date(2022, 6, 15)
+        series = pit.get_close_series("AAPL", lookback_days=30)
+        if not series.empty:
+            assert series.index[-1].date() <= date(2022, 6, 15)
 
-        fund_data = pit.get_fundamentals_pit("NVDA")
-        if "error" not in fund_data:
-            data_date = date.fromisoformat(fund_data["data_as_of_date"])
-            assert data_date <= date(2022, 5, 1)
+        fundamentals_df = pd.DataFrame(
+            {"ticker": ["NVDA", "NVDA"], "eps": [1.0, 1.2]},
+            index=pd.to_datetime(["2022-01-15", "2022-08-15"]),
+        )
+        snapshot = pit.get_fundamental_snapshot("NVDA", fundamentals_df)
+        assert not snapshot.empty
+        assert snapshot["eps"] == 1.0
 
     def test_kill_switch_drawdown_trigger(self):
         ks = KillSwitch("MODERATE", check_interval_seconds=1)
@@ -235,21 +239,22 @@ class TestEndToEnd:
         from argus.orchestration.governor import MODEL_LIMITS
 
         model = "llama-3.3-70b-versatile"
-        limit = MODEL_LIMITS[model].rpd  # e.g., 1000
+        limit = MODEL_LIMITS[model]["requests_per_day"]
 
         # Wind the counter up to one below the limit
-        governor._daily_counts[model] = limit - 1
+        usage = governor._get_usage(model)
+        usage.requests_today = limit - 1
 
         # This call should succeed (count becomes == limit)
         governor.wait_if_needed(model)
-        assert governor._daily_counts[model] == limit
+        assert usage.requests_today == limit
 
         # Next call must raise because count >= limit
         with pytest.raises(RateLimitExceeded):
             governor.wait_if_needed(model)
 
         # Cleanup: reset so other tests aren't affected
-        governor._daily_counts[model] = 0
+        usage.requests_today = 0
 
     def test_half_kelly_formula(self):
         weight = half_kelly_weight(

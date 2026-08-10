@@ -429,8 +429,6 @@ with tab2:
                         col5.metric("Win Rate", "N/A")
                         col6.metric("Total Trades", f"{res.get('total_trades', 0)}")
 
-                        st.subheader("Bias Audit Results")
-                        st.info("PASS: Survivorship Bias | PASS: Lookahead Bias | PASS: Data Quality")
                         st.json(res)
                     else:
                         st.error(f"Backtest Failed: {job.get('error', 'Unknown Error')}")
@@ -449,7 +447,6 @@ with tab3:
 
         with c2:
             st.subheader("Safety Checks")
-            st.success("✅ KILL SWITCH ACTIVE")
             if health_data.get("can_make_calls"):
                 st.success("✅ API CAPACITY OK")
             else:

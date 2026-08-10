@@ -8,7 +8,12 @@ from unittest.mock import patch
 
 import pytest
 
-from argus.orchestration.governor import RateLimitGovernor, ModelUsage, MODEL_LIMITS
+from argus.orchestration.governor import (
+    RateLimitExceeded,
+    RateLimitGovernor,
+    ModelUsage,
+    MODEL_LIMITS,
+)
 
 @pytest.fixture
 def governor():
@@ -46,11 +51,12 @@ def test_governor_daily_limit(mock_sleep, governor):
     
     governor.wait_if_needed(model, 10)
     assert mock_sleep.call_count == 0
-    
-    # The next one should trigger a daily limit sleep
-    governor.wait_if_needed(model, 10)
-    assert mock_sleep.call_count == 1
-    # For daily limits, the code sleeps 60s and returns early without incrementing
+    assert usage.requests_today == req_limit
+
+    # The next one must raise instead of sleeping-and-proceeding
+    with pytest.raises(RateLimitExceeded):
+        governor.wait_if_needed(model, 10)
+    assert mock_sleep.call_count == 0
     assert usage.requests_today == req_limit
 
 def test_governor_get_capacity(governor):
