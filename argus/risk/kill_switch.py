@@ -22,6 +22,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from argus.config import settings
@@ -160,7 +161,9 @@ class KillSwitch:
             vix: VIX level at the time of halt.
         """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"argus_halt_{timestamp}.json"
+        runs_dir = Path("runs")
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        filename = runs_dir / f"argus_halt_{timestamp}.json"
 
         dump = {
             "halt_time": datetime.now().isoformat(),

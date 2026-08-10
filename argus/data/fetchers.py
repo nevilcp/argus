@@ -450,8 +450,8 @@ def fetch_social_sentiment(ticker: str) -> dict:
         ticker: Equity ticker symbol.
 
     Returns:
-        Dict with keys: mention_count_7d, mention_surge, volume_change_pct,
-        avg_score, top_posts, earnings_within_14d.
+        Dict with keys: mention_surge, volume_change_pct, top_posts,
+        earnings_within_14d.
     """
     trends = _fetch_google_trends(ticker)
     trend_score = trends.get("trend_score", 50)
@@ -461,10 +461,8 @@ def fetch_social_sentiment(ticker: str) -> dict:
     volume_change_pct = (trend_score - 50) / 50.0
 
     return {
-        "mention_count_7d": 0,
         "mention_surge": trend_surge,
         "volume_change_pct": round(volume_change_pct, 3),
-        "avg_score": 0.0,
         "top_posts": [],
         "earnings_within_14d": False,
     }

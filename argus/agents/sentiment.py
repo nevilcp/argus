@@ -233,7 +233,6 @@ _SENTIMENT_METRIC_LABELS: dict[str, str] = {
     "(caps at 1.0 when ≥10 articles)",
     "news_volume_7d": "[integer]        total news articles fetched in the last 7 days",
     "social_mention_surge": "[bool]           True if social mention volume is unusually high",
-    "social_mention_count": "[integer]        raw social mention count over 7 days",
     "upcoming_catalyst": "[bool]           True if earnings are expected within 14 days",
 }
 
@@ -298,7 +297,6 @@ SYSTEM_PROMPT = (
     "                         Values below 0.30 indicate thin evidence — reduce conviction accordingly.\n"
     "  news_volume_7d       : integer              Total articles fetched in the prior 7-day window.\n"
     "  social_mention_surge : boolean              True if 7-day social volume is statistically abnormal.\n"
-    "  social_mention_count : integer              Raw social mention count over 7 days.\n"
     "  upcoming_catalyst    : boolean              True if an earnings event falls within 14 calendar days.\n"
     "                         Presence elevates sentiment_decay_risk because event-driven sentiment\n"
     "                         typically reverts rapidly post-announcement.\n"
@@ -367,9 +365,7 @@ class SentimentAgent:
             "finbert_confidence": agg["confidence"],
             "news_volume_7d": len(news),
             "social_mention_surge": social.get("mention_surge", False),
-            "social_mention_count": social.get("mention_count_7d", 0),
             "social_volume_change_pct": social.get("volume_change_pct", 0.0),
-            "social_avg_score": social.get("avg_score", 0.0),
             "upcoming_catalyst": _check_earnings_calendar(ticker),
         }
 
@@ -412,9 +408,7 @@ class SentimentAgent:
                     pct_positive=metrics["pct_positive"],
                     pct_negative=metrics["pct_negative"],
                     news_volume_7d=metrics["news_volume_7d"],
-                    mention_count_7d=metrics["social_mention_count"],
                     social_volume_change_pct=metrics["social_volume_change_pct"],
-                    social_avg_score=metrics["social_avg_score"],
                     social_mention_surge=metrics["social_mention_surge"],
                     upcoming_catalyst=metrics["upcoming_catalyst"],
                     signal=data["signal"],

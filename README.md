@@ -9,7 +9,7 @@ Multi-agent financial intelligence system orchestrating specialist LLMs and stat
 
 ## Overview
 
-ARGUS is an institutional-grade, multi-agent artificial intelligence system designed to automate quantitative equity research. By orchestrating six specialized agents (Technical, Macro, Fundamental, Sentiment, Risk, and Portfolio) as a directed acyclic graph (DAG), ARGUS synthesizes structured investment theses and asset allocations. It is built for quantitative researchers and developers who require a deterministic, auditable, and bias-free pipeline for testing AI-driven trading strategies.
+ARGUS is a multi-agent artificial intelligence system for quantitative equity research. By orchestrating six specialized agents (Technical, Macro, Fundamental, Sentiment, Risk, and Portfolio) as a directed acyclic graph (DAG), ARGUS synthesizes structured investment theses and asset allocations. See [`limitations.md`](limitations.md) for the current, honestly-stated gaps in this system.
 
 - **Parallel Agent Orchestration** — delegates analysis to domain-specific statistical models and LLMs, improving decision accuracy over monolithic prompts.
 - **Strict Point-in-Time Gating** — masks future data during historical backtesting, completely preventing look-ahead and survivorship biases.
@@ -218,12 +218,6 @@ curl -X POST http://localhost:8000/backtest \
 }
 ```
 
-### Accessing the Dashboard
-ARGUS includes a Streamlit UI for reviewing live signals and system health.
-```bash
-streamlit run ui/app.py --server.port 8501
-```
-
 ## Project Structure
 
 ```text
@@ -237,8 +231,8 @@ streamlit run ui/app.py --server.port 8501
 │   ├── orchestration/    # LangGraph definition, safety governors, and kill-switches
 │   └── schemas/          # Pydantic data contracts defining all inter-agent signaling
 ├── chroma_db/            # (Auto-generated) Local persistent vector database
+├── docs/                 # Architecture walkthrough, run guides, project notes
 ├── tests/                # Deterministic unit tests covering agents and pipelines
-├── ui/                   # Streamlit frontend dashboard
 ├── argus_graph.db        # (Auto-generated) SQLite state checkpointer for LangGraph
 ├── pyproject.toml        # Project dependencies and build configuration
 └── docker-compose.yml    # Multi-container orchestration definition
@@ -246,7 +240,7 @@ streamlit run ui/app.py --server.port 8501
 
 ## Testing
 
-ARGUS includes a comprehensive suite of deterministic unit tests that execute without triggering external API calls (via `pytest-mock`), covering core agents, rate limit governors, and the intraday MFT pipeline.
+ARGUS includes a suite of deterministic unit tests that execute without triggering external API calls (via `pytest-mock`), covering core agents, rate limit governors, and the intraday MFT pipeline.
 
 **Run the full test suite:**
 ```bash
@@ -258,11 +252,11 @@ pytest tests/ -v
 
 ## Contributing
 
-N/A — ARGUS is currently maintained as a private research and portfolio project. External pull requests are closed, though forks for personal experimentation are welcome.
+N/A — ARGUS is currently maintained as a private research and portfolio project. External pull requests are closed, though forks for personal experimentation are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the standing agent rules used while developing this repo.
 
 ## Roadmap
 
-N/A — The core architecture is feature-complete for its current research scope.
+Under active rebuild — see [issue #1](https://github.com/nevilcp/argus/issues/1) for the current plan and its rationale.
 
 ## License & Acknowledgements
 
