@@ -43,7 +43,7 @@ from argus.memory.cultural import cultural_memory
 from argus.orchestration.governor import governor
 from argus.orchestration.graph import graph
 from argus.orchestration.state import ARGUSState
-from argus.risk.kill_switch import get_kill_switch
+from argus.risk.kill_switch import get_kill_switch, initialize_kill_switch
 
 logger = logging.getLogger("argus.api")
 
@@ -138,6 +138,11 @@ async def startup_event():
     _mft_pipeline = MFTDataPipeline(tickers=[])
     asyncio.create_task(_mft_pipeline.start(on_session_ready=_mft_session_callback))
     logger.info("[Startup] MFT pipeline background task launched.")
+
+    # Default risk tolerance and inception value; /kill-switch/reset re-bases
+    # this once the actual session's total_wealth and risk_tolerance are known.
+    initialize_kill_switch(risk_tolerance="MODERATE", portfolio_value=100_000.0)
+    logger.info("[Startup] Kill switch initialized.")
 
     logger.info("[Startup] Governor initialized: %s", governor.get_usage_report())
 
