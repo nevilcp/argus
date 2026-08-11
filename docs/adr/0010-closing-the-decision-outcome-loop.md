@@ -39,7 +39,7 @@ Three separate problems live under "close the loop":
 `build_graph()` already checkpoints full `ARGUSState` — including the
 `decisions: list[ARGUSDecision]` field `node_log_decisions` populates — to
 `argus_graph.db` via `SqliteSaver`, keyed by `thread_id` per session
-(`docs/ARCHITECTURE_WALKTHROUGH.md` already documents this as "the audit
+(`docs/historical/ARCHITECTURE_WALKTHROUGH.md` already documents this as "the audit
 trail"). That is a complete, durable, already-written record of every
 decision, including the nested signal objects ablation needs. Building a
 second archive (`DecisionLogger` or otherwise) to hold the same information

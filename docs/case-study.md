@@ -58,7 +58,7 @@ several cases logged or stored, and consumed by nothing:
 | 7 | Kill switch | `initialize_kill_switch` never called; `get_kill_switch()` always `None`; both `/analyze` safety guards short-circuited |
 | 8 | Bias audit output | `ui/app.py` printed "PASS: Survivorship \| Lookahead \| Data Quality" unconditionally; `BiasAuditor` was constructed once, against an empty returns series |
 | 9 | Rate limit enforcement | `governor.py` slept 60s on exhaustion and `return`ed without incrementing or raising — advisory, not enforced |
-| 10 | `AggregatedSignal.debate_triggered`/`skip_reason` | Written by `aggregator.aggregate()`, read by nothing; `ARCHITECTURE_WALKTHROUGH.md` described a `_resolve_conflict()` LLM call that was never in the repository |
+| 10 | `AggregatedSignal.debate_triggered`/`skip_reason` | Written by `aggregator.aggregate()`, read by nothing; `docs/historical/ARCHITECTURE_WALKTHROUGH.md` described a `_resolve_conflict()` LLM call that was never in the repository |
 | 11 | `DecisionLogger` | ~260 lines, fully implemented, never instantiated |
 
 Eleven items, one shape: a value gets computed, sometimes stored, sometimes
