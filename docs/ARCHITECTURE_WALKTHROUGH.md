@@ -264,40 +264,35 @@ Also ingests the current VIX level from `macro_context` — a high VIX inflates 
 
 This is the most intellectually interesting part of the DAG. The `HybridSignalAggregator` combines the outputs of the four parallel agents into a single `AggregatedSignal` per ticker.
 
-#### Step 1 — Weighted Conviction Voting
+#### Weighted Conviction Voting
 
 Each agent's signal (BULLISH / BEARISH / NEUTRAL) is cast as a weighted vote:
 
 ```
-vote weight = agent.conviction × macro.agent_multipliers[agent_name]
+vote weight = agent.conviction × macro.agent_multipliers[agent_name] × (agent_reliability / 0.5)
 ```
 
 The `agent_multipliers` come from `MacroContext` — the macro regime directly adjusts how much each agent's vote counts. Example:
 - In **EXPANSION**: fundamental multiplier is boosted (good earnings matter more), technical is slightly dampened
 - In **CONTRACTION**: technical multiplier rises (price action matters more), fundamental is dampened (earnings lag)
 
-The signal with the highest total weighted vote wins. `best_score` = that signal's fraction of total votes.
+`agent_reliability` is that agent's shrinkage-adjusted historical win rate for the
+current regime, from `cultural.get_agent_accuracy()` (see ADR 0011): an agent
+sitting at the neutral 0.5 prior — no history yet, or exactly break-even — votes
+at its unscaled base weight; a regime-specific track record above or below 0.5
+scales its vote up or down accordingly. This is the mechanism that closes the
+decision→outcome→reliability loop: agents that have been right in this regime
+count for more.
 
-#### Step 2 — The Debate Loop (Conflict Arbitration)
+The bull/bear/neutral vote pools are summed and normalized to a percentage of
+the total; the highest-percentage pool wins, capped at `AGGREGATOR.max_conviction`
+so no aggregate ever claims certainty. There is no separate conflict-resolution
+LLM call — the whole aggregation is a pure, deterministic function of the four
+signal inputs plus reliability, which is what makes it property-testable
+(`tests/test_aggregator_properties.py`) and reusable, unmodified, as the ablation
+step in `orchestration/reconciliation.py`'s credit assignment.
 
-The diamond in the diagram:
-
-```
-Fundamental ≠ Sentiment
-AND best_score < 52%?
-```
-
-This triggers if and only if **all three** conditions are met:
-1. Fundamental and Sentiment have *opposite non-neutral signals* (genuine disagreement)
-2. The winning signal has less than 52% of votes (the vote is too close to call)
-
-If triggered, `_resolve_conflict()` calls **Llama 3.1-8b** (Groq) with a short prompt: *"Fundamental says X, Sentiment says Y, moat_score=Z, finbert_score=W. Which is more reliable? Respond: BULLISH, BEARISH, or NEUTRAL."*
-
-The winning side gets **+0.25 added to its vote weight**, which breaks the tie deterministically.
-
-This is a clever architectural choice: the conflict arbitration LLM is only called when genuinely needed (avoiding unnecessary API calls), and it uses the lightweight 8b model (fast, cheap) rather than the expensive 70b model.
-
-**Output:** `AggregatedSignal` per ticker with `signal`, `conviction`, `weighted_votes`, `debate_triggered`.
+**Output:** `AggregatedSignal` per ticker with `signal`, `conviction`, `weighted_votes`.
 
 ---
 
@@ -319,7 +314,15 @@ This is a clever architectural choice: the conflict arbitration LLM is only call
 
 ### Nodes 8 & END — `log_decisions` → END
 
-Currently a lightweight decision logger that appends `ARGUSDecision` objects to the state's audit trail (using LangGraph's `operator.add` reducer). The `argus_graph.db` checkpoint file preserves the full decision history across runs.
+Appends `ARGUSDecision` objects to the state's audit trail (using LangGraph's `operator.add` reducer) and snapshots each one to ChromaDB as `PENDING` via `CulturalMemoryManager.store_decision_snapshot`. The `argus_graph.db` checkpoint file preserves the full decision history — including nested technical/fundamental/sentiment signals — across runs, keyed by `thread_id` per session.
+
+**Closing the loop (PR 8):** `argus/orchestration/reconciliation.py` is the second half of the story `log_decisions` starts. Run periodically (`scripts/reconcile_outcomes.py`), it reads every session's decisions back out of `argus_graph.db` (`load_decisions_from_checkpoints`), and for any decision whose `RECONCILIATION.horizon_days` has elapsed since `session_timestamp`:
+
+1. **Credit assignment** — `credit_primary_driver()` reruns `HybridSignalAggregator.aggregate()` once per specialist agent with that agent's signal removed (leave-one-out ablation), and credits whichever removal either flips the consensus direction or, failing that, contributed the largest raw vote.
+2. **Outcome** — `compute_realized_return()` pairs the decision's entry price (`technical.current_price`) with the close price at or after the target exit date, via the same `MarketDataProvider` seam every other node uses.
+3. **Persistence** — `cultural.store_trade_outcome()` (previously written, never called — the original defect this whole rebuild started from) writes the realized return, holding period, and ablation-derived `primary_driver` to ChromaDB, upserted as a separate `trade_{decision_id}` document alongside the original `snapshot_{decision_id}` one.
+
+See [`docs/adr/0010-closing-the-decision-outcome-loop.md`](adr/0010-closing-the-decision-outcome-loop.md) for why decisions are read back from the existing checkpoint rather than a dedicated archive (the now-deleted `DecisionLogger` used to fill that role and was never instantiated), and why the ablation metric compares direction-flip-then-magnitude rather than a raw conviction delta.
 
 ---
 
@@ -346,7 +349,7 @@ Runs as a **background daemon thread** (`threading.Thread(daemon=True)`) that wa
 **Why the halt file?** The halt condition requires a human to manually `rm argus_halt_*.json` and call `/kill-switch/reset`. This is an intentional circuit-breaker pattern — no automated restart is allowed after a drawdown event. A human must review what happened.
 
 > [!IMPORTANT]
-> The halt files you can see in the project root (`argus_halt_20260518_*.json`) are real prior halt events from live runs. The system genuinely triggered on a drawdown during testing.
+> Halt events are written to `runs/argus_halt_<timestamp>.json` (gitignored, not checked into the repo) — the kill switch has genuinely triggered on a drawdown during testing. `runs/` is empty in a fresh checkout; a halt file only appears after a real trigger.
 
 ### RateLimitGovernor 🔴
 

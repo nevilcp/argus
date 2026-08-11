@@ -145,7 +145,6 @@ class AggregatorParams:
     weight_fundamental: float = p(0.35, Provenance.ARBITRARY, "no basis for relative agent weighting")
     weight_technical: float = p(0.35, Provenance.ARBITRARY, "no basis for relative agent weighting")
     weight_sentiment: float = p(0.30, Provenance.ARBITRARY, "no basis for relative agent weighting")
-    debate_trigger_margin: float = p(0.10, Provenance.ARBITRARY, "no basis for this specific margin")
     contraction_conviction_threshold: float = p(0.70, Provenance.ARBITRARY, "no basis for this specific threshold")
     contraction_conviction_reduction: float = p(0.6, Provenance.ARBITRARY, "no basis for this specific multiplier")
     max_conviction: float = p(0.95, Provenance.ARBITRARY, "kept below 1.0 so no aggregate claims certainty")
@@ -191,12 +190,44 @@ class RiskParams:
     reduce_weight_multiplier: float = p(0.5, Provenance.ARBITRARY, "no basis for this specific haircut on statistical violation")
 
 
+@dataclass(frozen=True)
+class ReconciliationParams:
+    """Outcome-reconciliation horizon (orchestration/reconciliation.py)."""
+
+    horizon_days: int = p(
+        5,
+        Provenance.ARBITRARY,
+        "pre-registered by docs/adr/0012 before any evaluation result was "
+        "observed; still no empirical basis for this specific value",
+    )
+    min_abs_return_for_storage: float = p(
+        0.01,
+        Provenance.ARBITRARY,
+        "matches cultural.store_trade_outcome's existing |return| > 1% "
+        "storage filter; kept here so both live in one place",
+    )
+
+
+@dataclass(frozen=True)
+class MemoryParams:
+    """Reliability-weighting parameters (memory/cultural.py, orchestration/aggregator.py)."""
+
+    accuracy_shrinkage_k: float = p(
+        10.0,
+        Provenance.ARBITRARY,
+        "pseudo-observation count pulling small-sample agent accuracy toward "
+        "the 0.5 prior; no basis for this specific strength, see docs/adr/0011",
+    )
+
+
 SYSTEM = SystemParams()
 TECHNICAL_INDICATOR_WEIGHTS = TechnicalIndicatorWeights()
 TECHNICAL = TechnicalParams()
 AGGREGATOR = AggregatorParams()
 PORTFOLIO = PortfolioParams()
 RISK = RiskParams()
+RECONCILIATION = ReconciliationParams()
+MEMORY = MemoryParams()
 
 _ALL_GROUPS: dict[str, Any] = {
     "SYSTEM": SYSTEM,
@@ -205,6 +236,8 @@ _ALL_GROUPS: dict[str, Any] = {
     "AGGREGATOR": AGGREGATOR,
     "PORTFOLIO": PORTFOLIO,
     "RISK": RISK,
+    "RECONCILIATION": RECONCILIATION,
+    "MEMORY": MEMORY,
 }
 
 

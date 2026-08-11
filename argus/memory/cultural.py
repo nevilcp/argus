@@ -13,7 +13,8 @@ Responsibilities:
 
 Not responsible for:
   - Real-time signal generation (see agents/)
-  - SQLite decision archiving (see data/cache.py)
+  - Credit assignment / primary_driver computation (see
+    orchestration/reconciliation.py)
   - Portfolio allocation (see agents/portfolio.py)
 
 Dependencies:
@@ -27,6 +28,7 @@ import logging
 import os
 from typing import Any, Optional
 
+from argus.params import MEMORY, RECONCILIATION
 from argus.schemas.signals import ARGUSDecision, MacroContext
 
 logger = logging.getLogger("argus.cultural_memory")
@@ -60,7 +62,12 @@ class CulturalMemoryManager:
         logger.info("[Memory] Cultural Memory Manager initialized at %s", persist_dir)
 
     def store_trade_outcome(
-        self, decision: ARGUSDecision, actual_return_pct: float, holding_days: int, exit_reason: str
+        self,
+        decision: ARGUSDecision,
+        actual_return_pct: float,
+        holding_days: int,
+        exit_reason: str,
+        primary_driver: str,
     ) -> None:
         """Persists successful or failed trade outcomes to index trading history patterns.
 
@@ -72,10 +79,15 @@ class CulturalMemoryManager:
             actual_return_pct: Realized return as a decimal (e.g. 0.05 = +5%).
             holding_days: Number of calendar days the position was held.
             exit_reason: Free-text description of the exit trigger.
+            primary_driver: Agent name ('technical'/'fundamental'/'sentiment'/'unknown')
+                credited via leave-one-out ablation
+                (see argus/orchestration/reconciliation.py:credit_primary_driver).
+                Signal arbitration is this method's caller's job, not this
+                module's — see its docstring's "Not responsible for" list.
         """
-        if actual_return_pct > 0.01:
+        if actual_return_pct > RECONCILIATION.min_abs_return_for_storage:
             prefix = "SUCCESSFUL"
-        elif actual_return_pct < -0.01:
+        elif actual_return_pct < -RECONCILIATION.min_abs_return_for_storage:
             prefix = "FAILED"
         else:
             return
@@ -94,14 +106,6 @@ class CulturalMemoryManager:
             getattr(decision.sentiment, "finbert_net_score", 0.0) if decision.sentiment else "N/A"
         )
         agg_conv = decision.aggregated.conviction if decision.aggregated else "N/A"
-
-        primary_driver = "unknown"
-        if decision.technical and decision.technical.conviction > 0.8:
-            primary_driver = "technical"
-        elif decision.fundamental and decision.fundamental.conviction > 0.8:
-            primary_driver = "fundamental"
-        elif decision.sentiment and getattr(decision.sentiment, "conviction", 0.0) > 0.8:
-            primary_driver = "sentiment"
 
         document = f"""{prefix} PATTERN:
 Macro regime: {macro_regime}
@@ -190,14 +194,21 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
             return []
 
     def get_agent_accuracy(self, agent_name: str, regime: Optional[str] = None) -> float:
-        """Computes statistical win rates for trades driven primarily by a specific specialist agent.
+        """Computes shrunk statistical win rates for trades driven primarily by a specific specialist agent.
+
+        Win rate is shrunk toward the 0.5 neutral prior by
+        MEMORY.accuracy_shrinkage_k pseudo-observations (wins + k*0.5) / (n + k),
+        so an agent with 3 observations isn't trusted like one with 300 — it
+        converges to the raw win rate as n grows and collapses to 0.5 as
+        n -> 0. See docs/adr/0011 for why this feeds
+        orchestration/aggregator.py's reliability weighting.
 
         Args:
             agent_name: Agent identifier string (e.g. 'technical', 'fundamental', 'sentiment').
             regime: Optional regime filter (e.g. 'EXPANSION'); queries all regimes if None.
 
         Returns:
-            Win rate as a float in [0, 1]. Returns 0.5 (neutral prior) when no data exists.
+            Shrunk win rate as a float in [0, 1]. Returns 0.5 (neutral prior) when no data exists.
         """
         if self.collection.count() == 0:
             return 0.5
@@ -215,7 +226,9 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
                 return 0.5
 
             wins = sum(1 for m in metadatas if m.get("outcome") == "SUCCESSFUL")
-            return float(wins) / len(metadatas)
+            n = len(metadatas)
+            k = MEMORY.accuracy_shrinkage_k
+            return (float(wins) + k * 0.5) / (n + k)
         except Exception as e:
             logger.warning("[Memory] Failed to compute agent accuracy: %s", e)
             return 0.5

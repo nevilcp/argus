@@ -34,6 +34,7 @@ import sqlite3
 from datetime import datetime
 from typing import Optional
 
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, StateGraph
 from langgraph.types import Send
@@ -52,12 +53,41 @@ from argus.seams import LiveMarketDataProvider, LLMClient, MarketDataProvider
 
 logger = logging.getLogger("argus.graph")
 
+# Every argus.schemas.signals BaseModel subclass that can end up nested inside
+# ARGUSState's channel values (directly or via ARGUSDecision) needs to be
+# named here, or the checkpointer's msgpack deserializer either logs a
+# deprecation warning today or silently degrades reconstructed objects to
+# plain dicts in a future langgraph version. Shared by build_graph()'s real
+# checkpointer and argus/orchestration/reconciliation.py's checkpoint loader
+# so the two allowlists can't drift apart. See docs/adr/0010.
+_CHECKPOINT_MODEL_CLASSES = (
+    "MacroContext",
+    "TechnicalSignal",
+    "FundamentalSignal",
+    "SentimentSignal",
+    "RiskAssessment",
+    "AggregatedSignal",
+    "PositionAllocation",
+    "PortfolioAllocation",
+    "ARGUSDecision",
+)
+
+
+def build_checkpoint_serde() -> JsonPlusSerializer:
+    """Returns the JsonPlusSerializer used to read/write ARGUSState checkpoints."""
+    return JsonPlusSerializer(
+        allowed_msgpack_modules=[
+            ("argus.schemas.signals", cls) for cls in _CHECKPOINT_MODEL_CLASSES
+        ]
+    )
+
 
 def build_graph(
     market_data: Optional[MarketDataProvider] = None,
     fundamental_llm: Optional[LLMClient] = None,
     sentiment_llm: Optional[LLMClient] = None,
     portfolio_llm: Optional[LLMClient] = None,
+    checkpoint_db_path: str = "argus_graph.db",
 ):
     """Constructs and compiles the ARGUS decision graph.
 
@@ -71,6 +101,11 @@ def build_graph(
             client.
         portfolio_llm: LLMClient for PortfolioManagerAgent. Defaults to a real
             Groq client.
+        checkpoint_db_path: SQLite file the compiled graph checkpoints
+            ARGUSState to after each run. Exposed (rather than hardcoded) so
+            tests — and argus/orchestration/reconciliation.py's own tests —
+            can point it at a temp file instead of the real
+            argus_graph.db production callers use.
 
     Returns:
         A compiled LangGraph graph, ready for .invoke()/.ainvoke().
@@ -215,13 +250,21 @@ def build_graph(
         if not macro:
             return {"aggregated_signals": aggs}
 
+        # Per-regime reliability doesn't depend on ticker, so compute it once per
+        # session rather than once per ticker.
+        regime = macro.macro_regime.value
+        reliability = {
+            name: get_cultural_memory().get_agent_accuracy(name, regime=regime)
+            for name in ("technical", "fundamental", "sentiment")
+        }
+
         for ticker in state["universe"]:
             tech = state.get("technical_signals", {}).get(ticker)
             if not tech:
                 continue
             fund = state.get("fundamental_signals", {}).get(ticker)
             sent = state.get("sentiment_signals", {}).get(ticker)
-            aggs[ticker] = aggregator.aggregate(tech, macro, fund, sent)
+            aggs[ticker] = aggregator.aggregate(tech, macro, fund, sent, reliability=reliability)
         return {"aggregated_signals": aggs}
 
     def node_risk_evaluation(state: ARGUSState) -> dict:
@@ -339,8 +382,9 @@ def build_graph(
 
         mem = state.get("cultural_memory", {})
         wisdom = mem.get("wisdom", [])
+        warnings = mem.get("warnings", [])
 
-        alloc = portfolio_agent.allocate(profile, signals_dict, macro, wisdom)
+        alloc = portfolio_agent.allocate(profile, signals_dict, macro, wisdom, warnings)
         if alloc is None:
             logger.error(
                 "node_portfolio_allocation: PortfolioManagerAgent returned None (LLM API failure). "
@@ -437,8 +481,8 @@ def build_graph(
     builder.add_edge("log_decisions", END)
 
     try:
-        conn = sqlite3.connect("argus_graph.db", check_same_thread=False)
-        checkpointer = SqliteSaver(conn)
+        conn = sqlite3.connect(checkpoint_db_path, check_same_thread=False)
+        checkpointer = SqliteSaver(conn, serde=build_checkpoint_serde())
     except Exception:
         checkpointer = None
 

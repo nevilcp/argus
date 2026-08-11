@@ -1,15 +1,18 @@
 """
 argus/data/cache.py
 
-SQLite-backed persistence layer for caching price candles and trading decisions.
+SQLite-backed rolling cache for intraday price candles.
 
 Responsibilities:
   - Buffer rolling intraday OHLCV candles with a configurable max-rows limit
-  - Archive completed ARGUSDecision records for post-session auditing
 
 Not responsible for:
   - Fetching raw data (see data/fetchers.py)
-  - Semantic vector storage (see memory/cultural.py)
+  - Semantic vector storage or decision archiving — the LangGraph checkpoint
+    (argus_graph.db, see orchestration/graph.py) and ChromaDB
+    (memory/cultural.py) cover this; see docs/adr/0010 for why a third,
+    unused archive (formerly DecisionLogger, here) was deleted rather than
+    wired up.
 
 Dependencies:
   - sqlite3 (stdlib)
@@ -25,8 +28,6 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import pandas as pd
-
-from argus.schemas.signals import ARGUSDecision
 
 logger = logging.getLogger("argus.cache")
 
@@ -160,118 +161,3 @@ class OHLCVBuffer:
         """Closes the underlying database connection."""
         self._conn.close()
         logger.info("OHLCVBuffer closed (db=%s)", self._db_path)
-
-
-_CREATE_DECISIONS = """
-CREATE TABLE IF NOT EXISTS decisions (
-    decision_id       TEXT PRIMARY KEY,
-    ticker            TEXT,
-    session_timestamp TEXT,
-    signal            TEXT,
-    conviction        REAL,
-    allocation_pct    REAL,
-    allocation_usd    REAL,
-    stop_loss         REAL,
-    macro_regime      TEXT,
-    var_99            REAL,
-    total_api_calls   INTEGER,
-    full_json         TEXT
-)
-"""
-
-_INSERT_DECISION = """
-INSERT OR REPLACE INTO decisions (
-    decision_id, ticker, session_timestamp, signal, conviction,
-    allocation_pct, allocation_usd, stop_loss, macro_regime,
-    var_99, total_api_calls, full_json
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-"""
-
-_SELECT_RECENT = """
-SELECT * FROM decisions
-WHERE ticker = ?
-ORDER BY session_timestamp DESC
-LIMIT ?
-"""
-
-
-class DecisionLogger:
-    """Archives completed ARGUSDecision models to an SQLite database file for auditability.
-
-    Flattens scalar decision fields into indexed columns while also persisting
-    the complete JSON blob, enabling both tabular queries and full object reconstruction.
-    """
-
-    def __init__(self, db_path: str = "argus_decisions.db") -> None:
-        self._db_path = db_path
-        self._lock = threading.Lock()
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute(_CREATE_DECISIONS)
-        self._conn.commit()
-        logger.info("DecisionLogger initialised (db=%s)", db_path)
-
-    def log(self, decision: ARGUSDecision) -> None:
-        """Persists a flattened decision profile and its complete JSON representation.
-
-        Args:
-            decision: Validated ARGUSDecision to archive.
-        """
-        signal = decision.aggregated.signal.value if decision.aggregated else None
-        conviction = decision.aggregated.conviction if decision.aggregated else None
-
-        alloc_pct = decision.allocation.allocation_pct if decision.allocation else None
-        alloc_usd = decision.allocation.allocation_usd if decision.allocation else None
-        stop_loss = decision.allocation.stop_loss if decision.allocation else None
-
-        macro_regime = decision.macro.macro_regime.value if decision.macro else None
-        var_99 = decision.risk.var_99 if decision.risk else None
-
-        row = (
-            decision.decision_id,
-            decision.ticker,
-            decision.session_timestamp.isoformat(),
-            signal,
-            conviction,
-            alloc_pct,
-            alloc_usd,
-            stop_loss,
-            macro_regime,
-            var_99,
-            decision.total_api_calls,
-            decision.model_dump_json(),
-        )
-
-        with self._lock:
-            self._conn.execute(_INSERT_DECISION, row)
-            self._conn.commit()
-
-        logger.info(
-            "DecisionLogger.log: %s [%s] signal=%s conviction=%.2f",
-            decision.ticker,
-            decision.decision_id,
-            signal,
-            conviction or 0.0,
-        )
-
-    def get_recent(self, ticker: str, n: int = 20) -> list[dict]:
-        """Retrieves the n most recent decision records matching a symbol.
-
-        Args:
-            ticker: Equity ticker symbol.
-            n: Maximum number of records to return (default 20).
-
-        Returns:
-            List of dicts matching the decisions table schema, ordered by session_timestamp desc.
-        """
-        with self._lock:
-            rows = self._conn.execute(_SELECT_RECENT, (ticker, n)).fetchall()
-        result = [dict(r) for r in rows]
-        logger.debug("DecisionLogger.get_recent: %s → %d records", ticker, len(result))
-        return result
-
-    def close(self) -> None:
-        """Closes the database connection."""
-        self._conn.close()
-        logger.info("DecisionLogger closed (db=%s)", self._db_path)
