@@ -197,8 +197,8 @@ class ReconciliationParams:
     horizon_days: int = p(
         5,
         Provenance.ARBITRARY,
-        "provisional; PR 10 pre-registers the real evaluation horizon H "
-        "before observing any result, per docs/adr/0010",
+        "pre-registered by docs/adr/0012 before any evaluation result was "
+        "observed; still no empirical basis for this specific value",
     )
     min_abs_return_for_storage: float = p(
         0.01,

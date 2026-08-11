@@ -18,6 +18,7 @@ written before their corresponding code lands are **predictive** and say so.
 | [0009](0009-no-multiyear-backtest.md) | Why ARGUS cannot be backtested over multi-year windows | Accepted |
 | [0010](0010-closing-the-decision-outcome-loop.md) | Closing the decision→outcome loop | Accepted (predictive) |
 | [0011](0011-reliability-weighting.md) | Reliability weighting consumes the outcome loop | Accepted |
+| [0012](0012-pre-registered-evaluation.md) | Pre-registered evaluation | Accepted (predictive) |
 
 See [issue #1](https://github.com/nevilcp/argus/issues/1) for the rebuild
 plan these were written as part of.

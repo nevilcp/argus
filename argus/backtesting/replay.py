@@ -36,9 +36,11 @@ never recorded.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -98,11 +100,11 @@ def replay_session(
     total_wealth: float = 100_000.0,
     invest_pct: float = 0.8,
     risk_tolerance: str = "MODERATE",
+    closed_loop: bool = False,
 ) -> SessionResult:
     """Runs the real graph once against a single captured fixture session.
 
-    Cultural memory is mocked (per ADR 0007, it isn't a fixture-replay
-    candidate) and the rate-limit governor is patched to a no-op (its real
+    The rate-limit governor is always patched to a no-op (its real
     per-minute throttling is orthogonal to whether fixture replay is
     correct — see ADR 0008's test_golden_dag.py precedent). Returns the raw
     final ARGUSState dict; this function makes no judgment about what a
@@ -114,6 +116,13 @@ def replay_session(
         total_wealth: Simulated investable capital for this session.
         invest_pct: Fraction of total_wealth eligible for allocation.
         risk_tolerance: 'CONSERVATIVE', 'MODERATE', or 'AGGRESSIVE'.
+        closed_loop: When False (default), cultural memory is mocked to
+            return neutral wisdom/warnings/accuracy (per ADR 0007, it isn't
+            a fixture-replay candidate) — reliability weighting is fixed at
+            the 0.5 prior. When True, the real `get_cultural_memory()` is
+            used, so `wisdom`/`warnings`/reliability weighting read
+            whatever outcome history actually exists in `chroma_db`. See
+            ADR 0012 for why PR 10's evaluation runs both.
 
     Returns:
         SessionResult with the session's universe and the graph's final state.
@@ -150,19 +159,41 @@ def replay_session(
     )
     config = {"configurable": {"thread_id": str(uuid4())}}
 
-    with (
-        mock.patch("argus.orchestration.graph.get_cultural_memory") as mock_get_cultural_memory,
-        mock.patch.object(governor, "wait_if_needed"),
-    ):
-        mock_get_cultural_memory.return_value = mock.Mock(
-            retrieve_wisdom=mock.Mock(return_value=[]),
-            retrieve_warnings=mock.Mock(return_value=[]),
-            get_agent_accuracy=mock.Mock(return_value=0.5),
-            store_decision_snapshot=mock.Mock(),
-        )
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(mock.patch.object(governor, "wait_if_needed"))
+        if not closed_loop:
+            mock_get_cultural_memory = stack.enter_context(
+                mock.patch("argus.orchestration.graph.get_cultural_memory")
+            )
+            mock_get_cultural_memory.return_value = mock.Mock(
+                retrieve_wisdom=mock.Mock(return_value=[]),
+                retrieve_warnings=mock.Mock(return_value=[]),
+                get_agent_accuracy=mock.Mock(return_value=0.5),
+                store_decision_snapshot=mock.Mock(),
+            )
         final_state = graph.invoke(state, config)
 
+    _rebase_decision_timestamps(final_state, session_states)
     return SessionResult(session_dir=session_dir, universe=universe, final_state=final_state)
+
+
+def _rebase_decision_timestamps(final_state: dict[str, Any], session_states: dict[str, dict]) -> None:
+    """Overwrites each decision's session_timestamp with the fixture's captured point-in-time date.
+
+    node_log_decisions stamps session_timestamp with datetime.now() — correct
+    for a live session (the decision genuinely happens now), wrong for a
+    replayed one: the fixture's session_states were captured on a real past
+    date (its "timestamp" field), and PR 10's evaluation needs that date, not
+    replay wall-clock time, to look up a forward return. Every ticker in a
+    session shares one capture date, so any one of them is representative.
+    """
+    decisions = final_state.get("decisions") or []
+    if not decisions or not session_states:
+        return
+    session_date = datetime.fromisoformat(next(iter(session_states.values()))["timestamp"])
+    final_state["decisions"] = [
+        d.model_copy(update={"session_timestamp": session_date}) for d in decisions
+    ]
 
 
 def replay_sessions(session_dirs: list[Path], **kwargs: Any) -> list[SessionResult]:
