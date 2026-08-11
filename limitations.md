@@ -15,8 +15,9 @@ This document tracks identified architectural, technical, data, and modeling lim
 - **Context Window Limits in Allocation**: The `PortfolioManagerAgent` receives the entire signal table for the universe. For very large universes (e.g., the entire S&P 500), the token count of the XML-delimited state may exceed the context limits of the LLM or degrade reasoning quality.
 
 ## 3. Backtesting Limitations
+- **No multi-year backtest**: There is no walk-forward engine or `/backtest` API endpoint. Yahoo Finance's 5-minute intraday data is only available for the trailing ~60 days, and the technical-indicator snapshot ARGUS's live pipeline computes cannot be reconstructed for older dates — see [`docs/adr/0009-no-multiyear-backtest.md`](docs/adr/0009-no-multiyear-backtest.md). `scripts/replay_backtest.py` replays recorded fixture sessions through the real graph instead, over whatever window has genuinely been captured.
 - **Parametric Memory Contamination**: While the system uses deterministic ticker anonymization to combat look-ahead bias, LLMs might still implicitly recognize high-profile companies (e.g., AAPL, NVDA) from unique combinations of their exact market cap, margins, and sector, leading to implicit bias.
-- **Shortened Hash Collision Risk**: The deterministic anonymization logic slices the MD5 hash hex digest to 4 characters (`[:4]`) in `fundamental.py` and 6 characters (`[:6]`) in `pit_enforcer.py`. While sufficient for small asset universes, a 4-character hex slice has only $16^4 = 65,536$ unique identifiers, raising collision risks in larger stock databases.
+- **Shortened Hash Collision Risk**: The deterministic anonymization logic in `fundamental.py` slices the MD5 hash hex digest to 4 characters (`[:4]`). A 4-character hex slice has only $16^4 = 65,536$ unique identifiers, raising collision risks in larger stock databases.
 
 ## 4. Financial Modeling & Execution Simulation
 - **No Slippage or Market Impact Modeling**: The system calculates theoretical allocations based on end-of-day or intraday prices but does not account for execution slippage, bid-ask spreads, liquidity constraints, or the market impact of trading large sizes.

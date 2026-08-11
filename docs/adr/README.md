@@ -15,6 +15,7 @@ written before their corresponding code lands are **predictive** and say so.
 | [0006](0006-parameter-provenance.md) | Parameter provenance | Accepted |
 | [0007](0007-injection-seam.md) | Injection seam for market data and LLM calls | Accepted (predictive) |
 | [0008](0008-deterministic-test-suite.md) | Deterministic test suite | Accepted |
+| [0009](0009-no-multiyear-backtest.md) | Why ARGUS cannot be backtested over multi-year windows | Accepted |
 
 See [issue #1](https://github.com/nevilcp/argus/issues/1) for the rebuild
 plan these were written as part of.
