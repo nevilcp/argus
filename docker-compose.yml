@@ -12,7 +12,7 @@ services:
       - NEWSAPI_KEY=${NEWSAPI_KEY}
     volumes:
       - ./chroma_db:/app/chroma_db
-      - ./argus_decisions.db:/app/argus_decisions.db
+      - ./argus_graph.db:/app/argus_graph.db
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
