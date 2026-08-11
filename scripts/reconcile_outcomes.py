@@ -9,9 +9,7 @@ data, and reports how many outcomes were stored to cultural memory.
     .venv/bin/python scripts/reconcile_outcomes.py [--db PATH] [--horizon-days N]
 
 Meant to run periodically (e.g. a daily cron) against the live checkpoint
-database. See docs/adr/0010-closing-the-decision-outcome-loop.md for why
-decisions live in the checkpoint rather than a dedicated archive, and why
-horizon_days is provisional pending PR 10's pre-registered evaluation.
+database.
 """
 
 from __future__ import annotations
@@ -31,6 +29,7 @@ logger = logging.getLogger("argus.reconcile_outcomes")
 
 
 def main() -> None:
+    """Parses CLI args, reconciles cleared decisions, and prints the outcome count."""
     logging.basicConfig(level=logging.INFO)
 
     parser = argparse.ArgumentParser(description=__doc__)

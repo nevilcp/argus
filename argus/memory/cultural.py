@@ -43,6 +43,11 @@ class CulturalMemoryManager:
     """
 
     def __init__(self, persist_dir: str = "./chroma_db"):
+        """Opens (or creates) the persistent ChromaDB collection and embedding function.
+
+        Args:
+            persist_dir: Filesystem directory backing the ChromaDB PersistentClient.
+        """
         import chromadb
         from chromadb.utils import embedding_functions
 
@@ -200,8 +205,7 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
         MEMORY.accuracy_shrinkage_k pseudo-observations (wins + k*0.5) / (n + k),
         so an agent with 3 observations isn't trusted like one with 300 — it
         converges to the raw win rate as n grows and collapses to 0.5 as
-        n -> 0. See docs/adr/0011 for why this feeds
-        orchestration/aggregator.py's reliability weighting.
+        n -> 0. Feeds orchestration/aggregator.py's reliability weighting.
 
         Args:
             agent_name: Agent identifier string (e.g. 'technical', 'fundamental', 'sentiment').
@@ -346,9 +350,15 @@ def get_cultural_memory(persist_dir: str = "./chroma_db") -> CulturalMemoryManag
 
     Lazy on purpose: construction pulls in sentence-transformers (and its
     torch dependency) to build the embedding function, and both are an
-    optional `[models]` extra (see pyproject.toml, ADR 0007) — importing
-    this module must not require them, only actually using cultural memory
-    does.
+    optional `[models]` extra (see pyproject.toml) — importing this module
+    must not require them, only actually using cultural memory does.
+
+    Args:
+        persist_dir: Filesystem directory backing the ChromaDB PersistentClient,
+            used only on the first call that constructs the manager.
+
+    Returns:
+        The process-wide CulturalMemoryManager singleton.
     """
     global _cultural_memory
     if _cultural_memory is None:

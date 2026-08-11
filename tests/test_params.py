@@ -4,6 +4,7 @@ from argus.params import Provenance, all_params
 
 
 def test_every_param_has_provenance_metadata():
+    """Every declared parameter row carries a non-null provenance tag."""
     rows = all_params()
     assert rows, "expected at least one declared parameter"
     missing = [f"{r['group']}.{r['field']}" for r in rows if r["provenance"] is None]
@@ -11,6 +12,7 @@ def test_every_param_has_provenance_metadata():
 
 
 def test_every_provenance_value_is_valid():
+    """Every provenance tag is a member of the Provenance enum, not an arbitrary value."""
     rows = all_params()
     invalid = [
         f"{r['group']}.{r['field']}"
