@@ -203,6 +203,20 @@ real graph instead:
 .venv/bin/python -m scripts.replay_backtest
 ```
 
+### Pre-registered evaluation
+
+`scripts/run_evaluation.py` scores replayed decisions against real forward
+returns (rank IC, hit-rate-with-dead-band, open-loop vs. closed-loop
+reliability weighting), per
+[`docs/adr/0012-pre-registered-evaluation.md`](docs/adr/0012-pre-registered-evaluation.md).
+Results are committed at
+[`docs/evaluation-results.md`](docs/evaluation-results.md) — including
+where reliability weighting did not measurably help.
+
+```bash
+.venv/bin/python -m scripts.run_evaluation
+```
+
 ## Project Structure
 
 ```text
