@@ -37,7 +37,6 @@ from pydantic import BaseModel, Field
 
 from argus.agents.macro import MacroStatisticalAgent
 from argus.backtesting.engine import run_backtest
-from argus.config import settings
 from argus.data.pipeline import MFTDataPipeline
 from argus.memory.cultural import get_cultural_memory
 from argus.orchestration.governor import governor

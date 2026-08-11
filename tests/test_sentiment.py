@@ -4,7 +4,6 @@ Tests for the Sentiment Agent and its pure-Python helpers.
 
 from datetime import datetime, timedelta
 
-import pytest
 
 from argus.agents.sentiment import aggregate_finbert_scores, SentimentDailyCache
 from argus.schemas.signals import SentimentSignal, Signal
