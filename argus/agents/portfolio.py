@@ -189,6 +189,7 @@ class PortfolioManagerAgent:
         all_signals: dict[str, dict],
         macro: MacroContext,
         cultural_wisdom: Optional[list[str]] = None,
+        cultural_warnings: Optional[list[str]] = None,
     ) -> Optional[PortfolioAllocation]:
         """Aggregates all specialist agent verdicts to construct a consolidated PortfolioAllocation.
 
@@ -203,6 +204,8 @@ class PortfolioManagerAgent:
             all_signals: Mapping of ticker → dict of signal objects keyed by agent name.
             macro: Current macroeconomic context.
             cultural_wisdom: Optional list of historical wisdom strings from cultural memory.
+            cultural_warnings: Optional list of failed-trade pattern strings from
+                cultural memory, scoped to the current macro regime.
 
         Returns:
             A validated PortfolioAllocation, all-cash if no tickers are approved, or None
@@ -235,6 +238,7 @@ class PortfolioManagerAgent:
 
         signal_table = build_signal_table(all_signals, macro)
         wisdom_text = "\n".join(f"- {w}" for w in (cultural_wisdom or [])[:3])
+        warnings_text = "\n".join(f"- {w}" for w in (cultural_warnings or [])[:3])
         kelly_text = "\n".join(
             f"{t}: half-Kelly suggests {w:.1%}" for t, w in kelly_suggestions.items()
         )
@@ -262,6 +266,9 @@ class PortfolioManagerAgent:
             "\n"
             "CULTURAL WISDOM (from prior sessions with similar macro regime):\n"
             f"{wisdom_text if wisdom_text else 'None available.'}\n"
+            "\n"
+            "CULTURAL WARNINGS (failed trades in this macro regime — avoid repeating these patterns):\n"
+            f"{warnings_text if warnings_text else 'None available.'}\n"
             "\n"
             "Step 1 — For each approved ticker: compare AGG signal against Half-Kelly anchor and Cap.\n"
             "Step 2 — Assign allocation_pct respecting all 10 ALLOCATION RULES from the system prompt.\n"

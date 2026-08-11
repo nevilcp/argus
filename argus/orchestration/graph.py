@@ -250,13 +250,21 @@ def build_graph(
         if not macro:
             return {"aggregated_signals": aggs}
 
+        # Per-regime reliability doesn't depend on ticker, so compute it once per
+        # session rather than once per ticker.
+        regime = macro.macro_regime.value
+        reliability = {
+            name: get_cultural_memory().get_agent_accuracy(name, regime=regime)
+            for name in ("technical", "fundamental", "sentiment")
+        }
+
         for ticker in state["universe"]:
             tech = state.get("technical_signals", {}).get(ticker)
             if not tech:
                 continue
             fund = state.get("fundamental_signals", {}).get(ticker)
             sent = state.get("sentiment_signals", {}).get(ticker)
-            aggs[ticker] = aggregator.aggregate(tech, macro, fund, sent)
+            aggs[ticker] = aggregator.aggregate(tech, macro, fund, sent, reliability=reliability)
         return {"aggregated_signals": aggs}
 
     def node_risk_evaluation(state: ARGUSState) -> dict:
@@ -374,8 +382,9 @@ def build_graph(
 
         mem = state.get("cultural_memory", {})
         wisdom = mem.get("wisdom", [])
+        warnings = mem.get("warnings", [])
 
-        alloc = portfolio_agent.allocate(profile, signals_dict, macro, wisdom)
+        alloc = portfolio_agent.allocate(profile, signals_dict, macro, wisdom, warnings)
         if alloc is None:
             logger.error(
                 "node_portfolio_allocation: PortfolioManagerAgent returned None (LLM API failure). "

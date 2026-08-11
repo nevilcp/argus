@@ -119,6 +119,7 @@ def _run_fixture_graph() -> dict:
         mock_get_cultural_memory.return_value = mock.Mock(
             retrieve_wisdom=mock.Mock(return_value=[]),
             retrieve_warnings=mock.Mock(return_value=[]),
+            get_agent_accuracy=mock.Mock(return_value=0.5),
             store_decision_snapshot=mock.Mock(),
         )
         final_state = graph.invoke(_initial_state(), config)
