@@ -105,7 +105,7 @@ def run_phase1_calibration() -> dict:
         """
         from uuid import uuid4
 
-        from argus.schemas.signals import PortfolioAllocation, PositionAllocation, RiskVerdict
+        from argus.schemas.signals import PositionAllocation, RiskVerdict
 
         investable = user_profile.get("total_wealth", 100_000.0) * user_profile.get(
             "invest_pct", 0.8

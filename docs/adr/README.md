@@ -14,6 +14,7 @@ written before their corresponding code lands are **predictive** and say so.
 | [0005](0005-monotonic-risk-verdict-downgrade.md) | Monotonic risk-verdict downgrade | Accepted (retrospective) |
 | [0006](0006-parameter-provenance.md) | Parameter provenance | Accepted |
 | [0007](0007-injection-seam.md) | Injection seam for market data and LLM calls | Accepted (predictive) |
+| [0008](0008-deterministic-test-suite.md) | Deterministic test suite | Accepted |
 
 See [issue #1](https://github.com/nevilcp/argus/issues/1) for the rebuild
 plan these were written as part of.

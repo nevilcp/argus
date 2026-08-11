@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional
+from typing import Any, Optional
 
 from argus.schemas.signals import ARGUSDecision, MacroContext
 
@@ -53,7 +53,9 @@ class CulturalMemoryManager:
         )
 
         self.collection = self.client.get_or_create_collection(
-            name="argus_wisdom", embedding_function=self.ef, metadata={"hnsw:space": "cosine"}
+            name="argus_wisdom",
+            embedding_function=self.ef,  # type: ignore[arg-type]  # chromadb/sentence-transformers stub mismatch
+            metadata={"hnsw:space": "cosine"},
         )
         logger.info("[Memory] Cultural Memory Manager initialized at %s", persist_dir)
 
@@ -201,13 +203,13 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
             return 0.5
 
         try:
-            where_clause = {"primary_driver": agent_name.lower()}
+            where_clause: dict[str, Any] = {"primary_driver": agent_name.lower()}
             if regime:
                 where_clause = {
                     "$and": [{"primary_driver": agent_name.lower()}, {"regime": regime}]
                 }
 
-            results = self.collection.get(where=where_clause)
+            results = self.collection.get(where=where_clause)  # type: ignore[arg-type]
             metadatas = results.get("metadatas", [])
             if not metadatas:
                 return 0.5
@@ -237,7 +239,7 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
 
         try:
             results = self.collection.get()
-            metadatas = results.get("metadatas", [])
+            metadatas = results.get("metadatas") or []
             wins = 0
             fails = 0
             total_ret = 0.0
@@ -245,8 +247,8 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
 
             for m in metadatas:
                 outcome = m.get("outcome")
-                ret = m.get("return_pct", 0.0)
-                regime = m.get("regime", "unknown")
+                ret = float(m.get("return_pct", 0.0) or 0.0)  # type: ignore[arg-type]  # chromadb metadata values are typed as a broad scalar union
+                regime = str(m.get("regime", "unknown"))
 
                 total_ret += ret
                 if outcome == "SUCCESSFUL":

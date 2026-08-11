@@ -26,7 +26,7 @@ import json
 import logging
 import time
 from datetime import date, datetime
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import ValidationError
 
@@ -93,10 +93,6 @@ def build_compact_prompt(ticker: str, pit_data: dict, anon_id: Optional[str] = N
     as_of = pit_data.get("as_of_date", "")
 
     sector = fundamentals.get("sector", "Unknown")
-    sector_str = (
-        f"[{sector} sector company]" if anon_id else f"{ticker} operates in the {sector} sector."
-    )
-
     industry_median_pe = _SECTOR_PE_MEDIANS.get(sector, _DEFAULT_PE_MEDIAN)
 
     METRIC_LABELS = {
@@ -303,7 +299,7 @@ class FundamentalAgent:
             logger.warning("[Fundamental] Failed to fetch fundamentals for %s: %s", ticker, e)
             return None
 
-        pit_data = {
+        pit_data: dict[str, Any] = {
             "fundamentals": fundamentals,
             "as_of_date": date.today().isoformat(),
         }

@@ -1,0 +1,49 @@
+{
+  "portfolio": [
+    {
+      "ticker": "AAPL",
+      "allocation_pct": 0,
+      "composite_conviction": 0.51,
+      "thesis": "Skipped: bearish signal",
+      "time_horizon": "3-6 months"
+    },
+    {
+      "ticker": "MSFT",
+      "allocation_pct": 0.123,
+      "composite_conviction": 0.61,
+      "thesis": "Sentiment is bullish",
+      "time_horizon": "3-6 months"
+    },
+    {
+      "ticker": "NVDA",
+      "allocation_pct": 0.075,
+      "composite_conviction": 0.54,
+      "thesis": "Fundamental is bullish",
+      "time_horizon": "3-6 months"
+    },
+    {
+      "ticker": "JPM",
+      "allocation_pct": 0.15,
+      "composite_conviction": 0.92,
+      "thesis": "Neutral with high conviction",
+      "time_horizon": "3-6 months"
+    },
+    {
+      "ticker": "XOM",
+      "allocation_pct": 0,
+      "composite_conviction": 0.5,
+      "thesis": "Skipped: bearish signal",
+      "time_horizon": "3-6 months"
+    },
+    {
+      "ticker": "GOOGL",
+      "allocation_pct": 0.077,
+      "composite_conviction": 0.67,
+      "thesis": "Neutral with moderate conviction",
+      "time_horizon": "3-6 months"
+    }
+  ],
+  "cash_reserve_pct": 0.575,
+  "expected_sharpe": null,
+  "rebalance_trigger": "MONTHLY"
+}
