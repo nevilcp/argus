@@ -2,8 +2,8 @@
 tests/test_aggregator.py
 
 Unit tests for HybridSignalAggregator.aggregate()'s reliability-weighting
-parameter (see docs/adr/0011). Reuses the signal/macro builders from
-test_aggregator_properties.py rather than duplicating them.
+parameter. Reuses the signal/macro builders from test_aggregator_properties.py
+rather than duplicating them.
 
 Covers the two claims the rebuild plan's verification section makes about
 this mechanism: an agent with a strong regime-specific track record
@@ -26,6 +26,7 @@ def _split_signals():
 
 
 def test_no_history_reliability_matches_unweighted_aggregation():
+    """With no reliability history, aggregation is identical to the unweighted path."""
     technical, macro, fundamental, sentiment = _split_signals()
     aggregator = HybridSignalAggregator()
 
@@ -53,12 +54,12 @@ def test_no_history_reliability_matches_unweighted_aggregation():
 
 
 def test_strong_track_record_measurably_outweighs_a_poor_one():
+    """A high-reliability agent's vote gains weight while a low-reliability one's shrinks."""
     technical, macro, fundamental, sentiment = _split_signals()
     aggregator = HybridSignalAggregator()
 
     baseline = aggregator.aggregate(technical, macro, fundamental, sentiment)
-    # technical (BULLISH) has been reliably right in this regime;
-    # fundamental (BEARISH) has been reliably wrong.
+    # technical (BULLISH) reliably right in this regime, fundamental (BEARISH) reliably wrong
     reweighted = aggregator.aggregate(
         technical,
         macro,

@@ -6,9 +6,6 @@ network market-data fetches (argus/data/fetchers.py) and Groq LLM calls
 (inline `ChatGroq` construction previously duplicated in fundamental.py,
 sentiment.py, and portfolio.py).
 
-See docs/adr/0007-injection-seam.md for why this exists and what it
-deliberately does not cover.
-
 Each boundary gets one Protocol and two implementations:
   - `MarketDataProvider` / `LiveMarketDataProvider` (delegates to
     argus/data/fetchers.py, unchanged behavior) / `FixtureMarketDataProvider`
@@ -52,48 +49,72 @@ class MarketDataProvider(Protocol):
     they wrap; see that module's docstrings for the semantics of each field.
     """
 
-    def ohlcv_daily(self, ticker: str, period: str = "2y") -> pd.DataFrame: ...
+    def ohlcv_daily(self, ticker: str, period: str = "2y") -> pd.DataFrame:
+        """Returns daily OHLCV history for a ticker."""
+        ...
 
-    def multiple_daily(self, tickers: list[str], period: str = "1y") -> dict[str, pd.DataFrame]: ...
+    def multiple_daily(self, tickers: list[str], period: str = "1y") -> dict[str, pd.DataFrame]:
+        """Returns daily OHLCV history for multiple tickers, keyed by ticker."""
+        ...
 
-    def fundamentals(self, ticker: str) -> dict: ...
+    def fundamentals(self, ticker: str) -> dict:
+        """Returns the fundamentals ratio payload for a ticker."""
+        ...
 
-    def fred_series(self, series_id: str, start: str = "2018-01-01") -> pd.Series: ...
+    def fred_series(self, series_id: str, start: str = "2018-01-01") -> pd.Series:
+        """Returns a FRED economic time series."""
+        ...
 
-    def macro_bundle(self) -> dict: ...
+    def macro_bundle(self) -> dict:
+        """Returns the current macro indicator bundle."""
+        ...
 
-    def news(self, ticker: str, company_name: str, days_back: int = 7) -> list[dict]: ...
+    def news(self, ticker: str, company_name: str, days_back: int = 7) -> list[dict]:
+        """Returns recent news articles for a ticker."""
+        ...
 
-    def social_sentiment(self, ticker: str) -> dict: ...
+    def social_sentiment(self, ticker: str) -> dict:
+        """Returns social media sentiment metrics for a ticker."""
+        ...
 
-    def vix(self) -> float: ...
+    def vix(self) -> float:
+        """Returns the current CBOE VIX level."""
+        ...
 
 
 class LiveMarketDataProvider:
     """Thin delegating wrapper around argus/data/fetchers.py. No behavior change."""
 
     def ohlcv_daily(self, ticker: str, period: str = "2y") -> pd.DataFrame:
+        """Delegates to fetchers.fetch_ohlcv_daily."""
         return fetchers.fetch_ohlcv_daily(ticker, period=period)
 
     def multiple_daily(self, tickers: list[str], period: str = "1y") -> dict[str, pd.DataFrame]:
+        """Delegates to fetchers.fetch_multiple_daily."""
         return fetchers.fetch_multiple_daily(tickers, period=period)
 
     def fundamentals(self, ticker: str) -> dict:
+        """Delegates to fetchers.fetch_fundamentals."""
         return fetchers.fetch_fundamentals(ticker)
 
     def fred_series(self, series_id: str, start: str = "2018-01-01") -> pd.Series:
+        """Delegates to fetchers.fetch_fred_series."""
         return fetchers.fetch_fred_series(series_id, start=start)
 
     def macro_bundle(self) -> dict:
+        """Delegates to fetchers.fetch_macro_bundle."""
         return fetchers.fetch_macro_bundle()
 
     def news(self, ticker: str, company_name: str, days_back: int = 7) -> list[dict]:
+        """Delegates to fetchers.fetch_news."""
         return fetchers.fetch_news(ticker, company_name, days_back=days_back)
 
     def social_sentiment(self, ticker: str) -> dict:
+        """Delegates to fetchers.fetch_social_sentiment."""
         return fetchers.fetch_social_sentiment(ticker)
 
     def vix(self) -> float:
+        """Delegates to fetchers.fetch_vix."""
         return fetchers.fetch_vix()
 
 
@@ -103,10 +124,15 @@ class FixtureMarketDataProvider:
     Fixtures are plain JSON keyed by ticker (see scripts/capture_fixtures.py).
     A ticker missing from a fixture file raises KeyError rather than silently
     returning empty/zero data — a test exercising a ticker with no fixture
-    should fail loudly, not pass on fabricated data (see ADR 0002).
+    should fail loudly, not pass on fabricated data.
     """
 
     def __init__(self, fixtures_dir: Path = FIXTURES_DIR / "market_data") -> None:
+        """Initializes the provider against a fixtures directory.
+
+        Args:
+            fixtures_dir: Directory containing the per-domain JSON fixture files.
+        """
         self._dir = fixtures_dir
         self._cache: dict[str, Any] = {}
 
@@ -118,6 +144,7 @@ class FixtureMarketDataProvider:
         return self._cache[name]
 
     def ohlcv_daily(self, ticker: str, period: str = "2y") -> pd.DataFrame:
+        """Returns cached OHLCV history from the price_history fixture."""
         record = self._load("price_history")[ticker]
         return pd.DataFrame(
             {"close": record["prices"]},
@@ -125,25 +152,32 @@ class FixtureMarketDataProvider:
         )
 
     def multiple_daily(self, tickers: list[str], period: str = "1y") -> dict[str, pd.DataFrame]:
+        """Returns cached OHLCV history for each ticker present in the price_history fixture."""
         return {t: self.ohlcv_daily(t, period=period) for t in tickers if t in self._load("price_history")}
 
     def fundamentals(self, ticker: str) -> dict:
+        """Returns the cached fundamentals payload from the fundamentals fixture."""
         return dict(self._load("fundamentals")[ticker])
 
     def fred_series(self, series_id: str, start: str = "2018-01-01") -> pd.Series:
+        """Returns a cached FRED series from the fred_series fixture."""
         record = self._load("fred_series")[series_id]
         return pd.Series(record["values"], index=pd.to_datetime(record["dates"]))
 
     def macro_bundle(self) -> dict:
+        """Returns the cached macro indicator bundle from the macro_bundle fixture."""
         return dict(self._load("macro_bundle"))
 
     def news(self, ticker: str, company_name: str, days_back: int = 7) -> list[dict]:
+        """Returns cached news articles from the news fixture, or an empty list if none."""
         return list(self._load("news").get(ticker, []))
 
     def social_sentiment(self, ticker: str) -> dict:
+        """Returns cached social sentiment metrics from the social_sentiment fixture."""
         return dict(self._load("social_sentiment").get(ticker, {}))
 
     def vix(self) -> float:
+        """Returns the cached VIX level from the macro_bundle fixture."""
         return float(self._load("macro_bundle")["vix"])
 
 
@@ -160,13 +194,23 @@ class LLMClient(Protocol):
     LLM to answer this prompt," not "what does the answer mean."
     """
 
-    def complete(self, system_prompt: str, user_prompt: str) -> str: ...
+    def complete(self, system_prompt: str, user_prompt: str) -> str:
+        """Sends a system + user prompt to the LLM and returns the raw response text."""
+        ...
 
 
 class GroqLLMClient:
     """Wraps a ChatGroq model+params combination. One instance per (model, temperature, max_tokens)."""
 
     def __init__(self, model: str, temperature: float, max_tokens: int, api_key: str) -> None:
+        """Constructs the underlying ChatGroq client for this model+params combination.
+
+        Args:
+            model: Groq model identifier.
+            temperature: Sampling temperature.
+            max_tokens: Maximum completion length in tokens.
+            api_key: Groq API key.
+        """
         self._llm = ChatGroq(
             model_name=model,
             temperature=temperature,
@@ -175,6 +219,11 @@ class GroqLLMClient:
         )
 
     def complete(self, system_prompt: str, user_prompt: str) -> str:
+        """Invokes the Groq model and returns its response as plain text.
+
+        Returns:
+            The response text, flattened from a content-block list if needed.
+        """
         response = self._llm.invoke(
             [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
         )
@@ -199,10 +248,22 @@ class FixtureLLMClient:
     """
 
     def __init__(self, responses: dict[str, str], key_fn: Optional[Any] = None) -> None:
+        """Stores the response map and the key function used to look up responses.
+
+        Args:
+            responses: Mapping of key → pre-captured raw response text.
+            key_fn: Function deriving a lookup key from the user prompt. Defaults
+                to using the user prompt itself as the key.
+        """
         self._responses = responses
         self._key_fn = key_fn or (lambda user_prompt: user_prompt)
 
     def complete(self, system_prompt: str, user_prompt: str) -> str:
+        """Returns the pre-captured response text keyed by ``key_fn(user_prompt)``.
+
+        Raises:
+            KeyError: If no response was recorded for the derived key.
+        """
         key = self._key_fn(user_prompt)
         if key not in self._responses:
             raise KeyError(f"FixtureLLMClient has no recorded response for key {key!r}")
@@ -210,6 +271,15 @@ class FixtureLLMClient:
 
     @classmethod
     def from_fixture_file(cls, path: Path, key_fn: Optional[Any] = None) -> "FixtureLLMClient":
+        """Builds a FixtureLLMClient from a JSON file of key → response text.
+
+        Args:
+            path: Path to the JSON fixture file.
+            key_fn: Function deriving a lookup key from the user prompt.
+
+        Returns:
+            A FixtureLLMClient backed by the loaded responses.
+        """
         with open(path) as f:
             responses = json.load(f)
         return cls(responses, key_fn=key_fn)

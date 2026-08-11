@@ -150,6 +150,7 @@ class SentimentDailyCache:
     """
 
     def __init__(self) -> None:
+        """Initializes an empty per-ticker cache."""
         self._cache: dict[str, tuple[SentimentSignal, datetime]] = {}
         self._ttl_days = 1
 
@@ -326,6 +327,12 @@ class SentimentAgent:
         llm_client: Optional[LLMClient] = None,
         market_data: Optional[MarketDataProvider] = None,
     ) -> None:
+        """Constructs Groq/live defaults for any provider not injected.
+
+        Args:
+            llm_client: LLM backend; defaults to a Groq-backed client.
+            market_data: Provider for price lookups; defaults to live fetches.
+        """
         if llm_client is None:
             api_key = settings.groq_api_key
             if not api_key:

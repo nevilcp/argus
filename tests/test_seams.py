@@ -1,6 +1,6 @@
 """
 Tests exercising argus/seams.py's fixture-backed implementations against the
-real agent classes — the point of the injection seam (ADR 0007) is that
+real agent classes — the point of the injection seam is that
 FundamentalAgent/SentimentAgent produce a real, schema-valid signal from
 fixture data with zero network or LLM calls. If these fixtures ever go
 stale or the seam breaks, these tests fail; nothing here is decorative.
@@ -18,14 +18,23 @@ FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 
 def _single_response_llm(fixture_file: str, ticker: str) -> FixtureLLMClient:
+    """Builds a FixtureLLMClient that replays one recorded response for every call.
+
+    Args:
+        fixture_file: JSON file under fixtures/llm_responses/ keyed by ticker.
+        ticker: Ticker whose recorded response to replay.
+
+    Returns:
+        A FixtureLLMClient returning that ticker's response for any prompt.
+    """
     with open(FIXTURES_DIR / "llm_responses" / fixture_file) as f:
         responses = json.load(f)
-    # Fixture only handles one ticker per instance — every call in a single
-    # analyze() invocation gets the same recorded response for that ticker.
+    # One ticker per instance, so every call in a single analyze() gets the same response
     return FixtureLLMClient({"only": responses[ticker]}, key_fn=lambda _prompt: "only")
 
 
 def test_fundamental_agent_with_fixtures_produces_valid_signal():
+    """FundamentalAgent produces a schema-valid signal from fixture data alone."""
     market_data = FixtureMarketDataProvider()
     llm_client = _single_response_llm("fundamental.json", "AAPL")
     agent = FundamentalAgent(llm_client=llm_client, market_data=market_data)
@@ -43,6 +52,7 @@ def test_fundamental_agent_with_fixtures_produces_valid_signal():
 
 
 def test_sentiment_agent_with_fixtures_produces_valid_signal():
+    """SentimentAgent produces a schema-valid signal from fixture data alone."""
     market_data = FixtureMarketDataProvider()
     llm_client = _single_response_llm("sentiment.json", "AAPL")
     agent = SentimentAgent(llm_client=llm_client, market_data=market_data)
@@ -57,6 +67,7 @@ def test_sentiment_agent_with_fixtures_produces_valid_signal():
 
 
 def test_fixture_market_data_provider_ohlcv_daily_matches_fixture():
+    """The fixture provider serves real OHLCV data, not an empty stand-in."""
     market_data = FixtureMarketDataProvider()
     df = market_data.ohlcv_daily("AAPL")
     assert not df.empty
@@ -64,6 +75,7 @@ def test_fixture_market_data_provider_ohlcv_daily_matches_fixture():
 
 
 def test_fixture_market_data_provider_missing_ticker_raises():
+    """A ticker with no fixture data raises KeyError rather than failing silently."""
     market_data = FixtureMarketDataProvider()
     try:
         market_data.fundamentals("NOT_A_REAL_TICKER")

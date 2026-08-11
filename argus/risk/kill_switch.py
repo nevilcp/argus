@@ -59,6 +59,13 @@ class KillSwitch:
     VIX_BLACKOUT = getattr(settings, "VIX_BLACKOUT_THRESHOLD", 35.0)
 
     def __init__(self, user_risk_tolerance: str, check_interval_seconds: int = 60):
+        """Initializes the kill switch, deferring monitoring until start() is called.
+
+        Args:
+            user_risk_tolerance: Risk tier string ('CONSERVATIVE', 'MODERATE',
+                'AGGRESSIVE'); unrecognized values fall back to 'MODERATE'.
+            check_interval_seconds: Seconds between monitor loop iterations.
+        """
         self.risk_tolerance = user_risk_tolerance.upper()
         if self.risk_tolerance not in self.DRAWDOWN_THRESHOLDS:
             logger.warning(f"Unknown risk tolerance {self.risk_tolerance}, defaulting to MODERATE.")

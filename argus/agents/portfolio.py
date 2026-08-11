@@ -167,6 +167,11 @@ class PortfolioManagerAgent:
     """
 
     def __init__(self, llm_client: Optional[LLMClient] = None) -> None:
+        """Constructs a Groq client if none is injected.
+
+        Args:
+            llm_client: LLM backend; defaults to a Groq-backed client.
+        """
         if llm_client is None:
             api_key = settings.groq_api_key
             if not api_key:
@@ -315,8 +320,7 @@ class PortfolioManagerAgent:
                         if engine_stop is not None:
                             pos["stop_loss"] = float(engine_stop)
 
-                # Force the residual to be mathematically exact; prevents Pydantic sum validation failure
-                # when the LLM sets cash_reserve_pct independently instead of as 1 - equity
+                # Force residual exact; LLM may set cash_reserve_pct independently, not as 1-equity
                 total_equity = sum(p["allocation_pct"] for p in data.get("portfolio", []))
                 data["cash_reserve_pct"] = round(max(0.0, 1.0 - total_equity), 6)
 

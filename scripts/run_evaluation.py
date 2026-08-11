@@ -1,11 +1,10 @@
 """
 scripts/run_evaluation.py
 
-CLI entry point for PR 10's pre-registered evaluation
-(docs/adr/0012-pre-registered-evaluation.md). Replays a fixture session
+CLI entry point for the pre-registered evaluation. Replays a fixture session
 open-loop and closed-loop, scores both against real forward returns, and
-prints the report the ADR's success threshold is judged against, plus
-system-behavior metrics reported separately.
+prints the report the pre-registered success threshold is judged against,
+plus system-behavior metrics reported separately.
 
     .venv/bin/python scripts/run_evaluation.py [--fixtures-dir PATH]
         [--horizon-days N] [--deadband X]
@@ -13,7 +12,7 @@ system-behavior metrics reported separately.
 Requires network access (LiveMarketDataProvider fetches real daily closes
 for the session's tickers) — this is the one place in the test/eval stack
 that's expected to, since the whole point is scoring against real forward
-returns rather than fixture data (see ADR 0012's "What is measured").
+returns rather than fixture data.
 """
 
 from __future__ import annotations
@@ -55,6 +54,7 @@ def _print_evaluation(label: str, result: EvaluationResult) -> None:
 
 
 def main() -> None:
+    """Replays open-loop and closed-loop sessions and prints the evaluation report."""
     logging.basicConfig(level=logging.INFO)
 
     parser = argparse.ArgumentParser(description=__doc__)
@@ -83,7 +83,7 @@ def main() -> None:
     if open_result.n < 6 or closed_result.n < 6:
         print(
             "\nNOTE: n < 6 (fewer than the full fixture universe) — statistical "
-            "power is very low at this sample size. See ADR 0012."
+            "power is very low at this sample size."
         )
 
     if closed_result.rank_ic is not None and open_result.rank_ic is not None:
@@ -94,7 +94,7 @@ def main() -> None:
             and closed_result.rank_ic > open_result.rank_ic
         )
         verdict = "closed-loop cleared the pre-registered bar" if helped else \
-            "closed-loop did NOT clear the pre-registered bar (see ADR 0012's success threshold)"
+            "closed-loop did NOT clear the pre-registered bar"
         print(f"\nVerdict: {verdict}")
 
     print("\n=== System-behavior metrics (open-loop session; reported separately) ===")
@@ -107,8 +107,8 @@ def main() -> None:
           f"{sys_report.reduce_verdicts} REDUCE verdicts exercised it)")
     print(f"  API calls/decision:    {sys_report.api_calls_per_decision:.2f} "
           f"(total {sys_report.total_api_calls})")
-    print("  retries/decision:      not instrumented (disclosed gap, see ADR 0012)")
-    print("  tokens/decision:       not instrumented (disclosed gap, see ADR 0012)")
+    print("  retries/decision:      not instrumented (disclosed gap)")
+    print("  tokens/decision:       not instrumented (disclosed gap)")
 
     print("\n=== Replay determinism ===")
     deterministic = check_replay_determinism(args.fixtures_dir)

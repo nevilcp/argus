@@ -10,9 +10,8 @@ Not responsible for:
   - Fetching raw data (see data/fetchers.py)
   - Semantic vector storage or decision archiving — the LangGraph checkpoint
     (argus_graph.db, see orchestration/graph.py) and ChromaDB
-    (memory/cultural.py) cover this; see docs/adr/0010 for why a third,
-    unused archive (formerly DecisionLogger, here) was deleted rather than
-    wired up.
+    (memory/cultural.py) cover this; a third, unused archive (formerly
+    DecisionLogger, here) was deleted rather than wired up.
 
 Dependencies:
   - sqlite3 (stdlib)
@@ -80,6 +79,12 @@ class OHLCVBuffer:
     """
 
     def __init__(self, db_path: str = ":memory:", buffer_size: int = 78) -> None:
+        """Opens (or creates) the SQLite-backed candle buffer.
+
+        Args:
+            db_path: SQLite connection path, or ':memory:' for an ephemeral buffer.
+            buffer_size: Max candles retained per ticker; older rows are pruned on insert.
+        """
         self._db_path = db_path
         self._buffer_size = buffer_size
         self._lock = threading.Lock()
