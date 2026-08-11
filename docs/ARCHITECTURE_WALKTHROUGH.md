@@ -354,7 +354,7 @@ Runs as a **background daemon thread** (`threading.Thread(daemon=True)`) that wa
 **Why the halt file?** The halt condition requires a human to manually `rm argus_halt_*.json` and call `/kill-switch/reset`. This is an intentional circuit-breaker pattern — no automated restart is allowed after a drawdown event. A human must review what happened.
 
 > [!IMPORTANT]
-> The halt files you can see in the project root (`argus_halt_20260518_*.json`) are real prior halt events from live runs. The system genuinely triggered on a drawdown during testing.
+> Halt events are written to `runs/argus_halt_<timestamp>.json` (gitignored, not checked into the repo) — the kill switch has genuinely triggered on a drawdown during testing. `runs/` is empty in a fresh checkout; a halt file only appears after a real trigger.
 
 ### RateLimitGovernor 🔴
 
