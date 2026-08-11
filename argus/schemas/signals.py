@@ -211,7 +211,11 @@ class TechnicalSignal(BaseModel):
     @field_validator("conviction", mode="before")
     @classmethod
     def cap_conviction(cls, v: float) -> float:
-        """Silently clamps conviction to the 0.95 maximum."""
+        """Silently clamps conviction to the 0.95 maximum.
+
+        Args:
+            v: Raw conviction value.
+        """
         return _clamp_conviction(v)
 
 
@@ -250,6 +254,7 @@ class FundamentalSignal(BaseModel):
     @field_validator("conviction", mode="before")
     @classmethod
     def cap_conviction(cls, v: float) -> float:
+        """Silently clamps conviction to the 0.95 maximum."""
         return _clamp_conviction(v)
 
 
@@ -290,6 +295,7 @@ class SentimentSignal(BaseModel):
     @field_validator("conviction", mode="before")
     @classmethod
     def cap_conviction(cls, v: float) -> float:
+        """Silently clamps conviction to the 0.95 maximum."""
         return _clamp_conviction(v)
 
     @model_validator(mode="after")

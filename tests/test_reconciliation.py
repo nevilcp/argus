@@ -1,10 +1,9 @@
 """
 tests/test_reconciliation.py
 
-Tests for argus/orchestration/reconciliation.py — see
-docs/adr/0010-closing-the-decision-outcome-loop.md for the design this
-exercises: leave-one-out credit assignment, entry/exit price outcome
-computation, and reading decisions back out of the LangGraph checkpoint.
+Tests for argus/orchestration/reconciliation.py: leave-one-out credit
+assignment, entry/exit price outcome computation, and reading decisions back
+out of the LangGraph checkpoint.
 """
 
 from datetime import datetime
@@ -43,6 +42,17 @@ FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 
 def _technical(signal: Signal, conviction: float, ticker: str = "TEST", price: float = 100.0) -> TechnicalSignal:
+    """Builds a TechnicalSignal with fixed indicator values, varying only the given fields.
+
+    Args:
+        signal: Signal direction to assign.
+        conviction: Confidence score to assign.
+        ticker: Ticker symbol.
+        price: Current price.
+
+    Returns:
+        A TechnicalSignal fixture.
+    """
     return TechnicalSignal(
         ticker=ticker,
         current_price=price,
@@ -63,6 +73,16 @@ def _technical(signal: Signal, conviction: float, ticker: str = "TEST", price: f
 
 
 def _fundamental(signal: Signal, conviction: float, ticker: str = "TEST") -> FundamentalSignal:
+    """Builds a FundamentalSignal with fixed field values, varying only the given fields.
+
+    Args:
+        signal: Signal direction to assign.
+        conviction: Confidence score to assign.
+        ticker: Ticker symbol.
+
+    Returns:
+        A FundamentalSignal fixture.
+    """
     return FundamentalSignal(
         ticker=ticker,
         sector="Technology",
@@ -77,6 +97,14 @@ def _fundamental(signal: Signal, conviction: float, ticker: str = "TEST") -> Fun
 
 
 def _macro(regime: Regime = Regime.EXPANSION) -> MacroContext:
+    """Builds a MacroContext with fixed field values, varying only the regime.
+
+    Args:
+        regime: Macro regime to assign.
+
+    Returns:
+        A MacroContext fixture.
+    """
     return MacroContext(
         fed_funds=4.0,
         cpi_yoy=3.0,
@@ -98,6 +126,14 @@ def _macro(regime: Regime = Regime.EXPANSION) -> MacroContext:
 
 
 def _allocation(ticker: str = "TEST") -> PositionAllocation:
+    """Builds a PositionAllocation with fixed field values, varying only the ticker.
+
+    Args:
+        ticker: Ticker symbol.
+
+    Returns:
+        A PositionAllocation fixture.
+    """
     return PositionAllocation(
         ticker=ticker,
         allocation_pct=0.10,
@@ -113,13 +149,37 @@ class _FakeMarketData:
     """Minimal MarketDataProvider double: only ohlcv_daily is used by reconciliation."""
 
     def __init__(self, closes: dict[str, pd.Series]) -> None:
+        """Stores the fixed per-ticker close series to serve from ohlcv_daily.
+
+        Args:
+            closes: Ticker to close-price series.
+        """
         self._closes = closes
 
     def ohlcv_daily(self, ticker: str, period: str = "2y") -> pd.DataFrame:
+        """Returns the fixed close series for the given ticker, ignoring period.
+
+        Args:
+            ticker: Ticker to look up.
+            period: Lookback period (ignored).
+
+        Returns:
+            A DataFrame with the fixed close series.
+        """
         return pd.DataFrame({"close": self._closes[ticker]})
 
 
 def _ten_day_series(start: datetime, start_price: float = 100.0, ticker: str = "TEST") -> _FakeMarketData:
+    """Builds a 10-day daily close series rising by 1.0 per day from start_price.
+
+    Args:
+        start: First date in the series.
+        start_price: Close price on the first day.
+        ticker: Ticker symbol the series is keyed under.
+
+    Returns:
+        A _FakeMarketData backed by the generated series.
+    """
     dates = pd.date_range(start=start, periods=10, freq="D")
     closes = pd.Series([start_price + i for i in range(10)], index=dates)
     return _FakeMarketData({ticker: closes})
@@ -131,11 +191,13 @@ def _ten_day_series(start: datetime, start_price: float = 100.0, ticker: str = "
 
 
 def test_credit_primary_driver_returns_unknown_with_no_signals():
+    """A decision with no agent signals credits no driver."""
     decision = ARGUSDecision(ticker="TEST", session_timestamp=datetime.now())
     assert credit_primary_driver(decision) == "unknown"
 
 
 def test_credit_primary_driver_returns_the_sole_signal_when_only_one_present():
+    """With only one agent signal present, that agent is credited by default."""
     technical = _technical(Signal.BULLISH, 0.8)
     macro = _macro()
     aggregator = HybridSignalAggregator()
@@ -152,11 +214,7 @@ def test_credit_primary_driver_returns_the_sole_signal_when_only_one_present():
 
 
 def test_credit_primary_driver_credits_the_dominant_agent():
-    """Technical votes strongly BULLISH; fundamental votes weakly (low conviction).
-
-    Removing technical should swing the aggregated conviction far more than
-    removing fundamental — leave-one-out ablation should credit technical.
-    """
+    """Leave-one-out ablation credits whichever agent's removal swings conviction most."""
     technical = _technical(Signal.BULLISH, 0.9)
     fundamental = _fundamental(Signal.BULLISH, 0.1)
     macro = _macro()
@@ -199,6 +257,7 @@ def test_credit_primary_driver_is_symmetric_under_relabeling():
 
 
 def test_compute_realized_return_pairs_entry_and_horizon_close():
+    """Realized return pairs the entry-day close with the close N horizon days later."""
     start = datetime(2026, 1, 1)
     technical = _technical(Signal.BULLISH, 0.8, price=100.0)
     decision = ARGUSDecision(
@@ -219,6 +278,7 @@ def test_compute_realized_return_pairs_entry_and_horizon_close():
 
 
 def test_compute_realized_return_none_without_allocation():
+    """A decision with no position allocation has no realized return to compute."""
     decision = ARGUSDecision(
         ticker="TEST",
         session_timestamp=datetime(2026, 1, 1),
@@ -229,6 +289,7 @@ def test_compute_realized_return_none_without_allocation():
 
 
 def test_compute_realized_return_none_without_technical_signal():
+    """A decision with no technical signal has no entry price to compute a return from."""
     decision = ARGUSDecision(
         ticker="TEST",
         session_timestamp=datetime(2026, 1, 1),
@@ -239,6 +300,7 @@ def test_compute_realized_return_none_without_technical_signal():
 
 
 def test_compute_realized_return_none_when_horizon_not_yet_reached():
+    """No return is computed until price data reaches the requested horizon."""
     start = datetime(2026, 1, 1)
     decision = ARGUSDecision(
         ticker="TEST",
@@ -246,7 +308,7 @@ def test_compute_realized_return_none_when_horizon_not_yet_reached():
         technical=_technical(Signal.BULLISH, 0.8),
         allocation=_allocation(),
     )
-    market_data = _ten_day_series(start)  # only 10 days of data
+    market_data = _ten_day_series(start)  # only 10 days, short of the 30-day horizon requested below
     assert compute_realized_return(decision, market_data, horizon_days=30) is None
 
 
@@ -256,6 +318,7 @@ def test_compute_realized_return_none_when_horizon_not_yet_reached():
 
 
 def test_reconcile_decision_stores_outcome_with_ablated_primary_driver():
+    """Reconciling a decision stores the realized outcome tagged with its credited driver."""
     start = datetime(2026, 1, 1)
     technical = _technical(Signal.BULLISH, 0.9, price=100.0)
     fundamental = _fundamental(Signal.BULLISH, 0.1)
@@ -286,6 +349,7 @@ def test_reconcile_decision_stores_outcome_with_ablated_primary_driver():
 
 
 def test_reconcile_decision_returns_false_and_stores_nothing_with_no_position():
+    """A decision with no position produces no stored outcome."""
     decision = ARGUSDecision(
         ticker="TEST",
         session_timestamp=datetime(2026, 1, 1),
@@ -299,6 +363,7 @@ def test_reconcile_decision_returns_false_and_stores_nothing_with_no_position():
 
 
 def test_reconcile_decisions_counts_only_the_ones_actually_reconciled():
+    """The batch count reflects only decisions that actually had an outcome to store."""
     start = datetime(2026, 1, 1)
     reconcilable = ARGUSDecision(
         ticker="TEST",
@@ -329,10 +394,7 @@ def test_reconcile_decisions_counts_only_the_ones_actually_reconciled():
 
 
 def test_load_decisions_from_checkpoints_round_trips_a_real_graph_run(tmp_path):
-    """Runs the real graph (fixture-backed) with a temp checkpoint db, then
-    confirms load_decisions_from_checkpoints() reads back real ARGUSDecision
-    objects (not degraded dicts) with the expected tickers.
-    """
+    """Checkpoints round-trip real ARGUSDecision objects, not degraded dicts, per ticker."""
     import json
 
     universe = ["AAPL", "MSFT", "NVDA", "GOOGL", "JPM", "XOM"]

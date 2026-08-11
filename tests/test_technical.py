@@ -9,10 +9,14 @@ from argus.schemas.signals import Signal
 
 @pytest.fixture
 def agent() -> TechnicalStatisticalAgent:
+    """Returns:
+        A fresh TechnicalStatisticalAgent instance.
+    """
     return TechnicalStatisticalAgent()
 
 
 def test_bullish_signal(agent: TechnicalStatisticalAgent) -> None:
+    """Oversold RSI, positive MACD, and strong momentum together yield a BULLISH signal."""
     session_state = {
         "rsi_14": 28.0,
         "macd_histogram": 0.15,
@@ -31,6 +35,7 @@ def test_bullish_signal(agent: TechnicalStatisticalAgent) -> None:
 
 
 def test_bearish_signal(agent: TechnicalStatisticalAgent) -> None:
+    """Inverting every bullish indicator flips the signal to BEARISH."""
     session_state = {
         "rsi_14": 72.0,  # Opposite of 28
         "macd_histogram": -0.15,  # Opposite of 0.15
@@ -49,6 +54,7 @@ def test_bearish_signal(agent: TechnicalStatisticalAgent) -> None:
 
 
 def test_neutral_signal(agent: TechnicalStatisticalAgent) -> None:
+    """All-flat indicators with a weak trend keep the net score within the neutral band."""
     session_state = {
         "rsi_14": 50.0,
         "macd_histogram": 0.0,
@@ -66,6 +72,7 @@ def test_neutral_signal(agent: TechnicalStatisticalAgent) -> None:
 
 
 def test_zero_api_calls(agent: TechnicalStatisticalAgent) -> None:
+    """The technical agent evaluates purely statistically, never calling an LLM."""
     session_state = {
         "rsi_14": 50.0,
         "macd_histogram": 0.0,

@@ -5,11 +5,10 @@ api/main.py
 FastAPI gateway service for the ARGUS multi-agent decision system.
 
 Exposes REST API endpoints to orchestrate execution graphs and audit system
-safety/governor statistics. There is no live /backtest endpoint — see
-docs/adr/0009-no-multiyear-backtest.md for why a multi-year walk-forward
-backtest isn't offered; scripts/replay_backtest.py replays recorded
-fixtures through this same graph over the ~60-day window that is
-genuinely available.
+safety/governor statistics. There is no live /backtest endpoint; a
+multi-year walk-forward backtest isn't offered, so scripts/replay_backtest.py
+replays recorded fixtures through this same graph over the ~60-day window
+that is genuinely available.
 
 Responsibilities:
   - Route analysis requests to the LangGraph execution pipeline
@@ -77,16 +76,12 @@ class AnalysisResponse(BaseModel):
     timestamp: str
 
 
-# Live 5-minute intraday session states keyed by ticker, populated by the MFT
-# background loop. Read by /analyze and injected into ARGUSState before graph
-# execution. Values are (state_dict, updated_at) tuples; entries older than
-# _SESSION_STATE_TTL_SECONDS are treated as missing to prevent stale intraday
-# data from a prior trading session from being injected silently.
+# Entries older than _SESSION_STATE_TTL_SECONDS are treated as missing so a prior
+# session's stale intraday data is never injected silently
 _SESSION_STATE_TTL_SECONDS = 2100  # 35 min = one _SESSION_INTERVAL + 5 min buffer
 _live_session_cache: dict[str, tuple[dict, datetime]] = {}
 
-# Singleton MFT pipeline shared across the server lifetime. Initialized empty;
-# tickers are registered dynamically per /analyze request.
+# Initialized empty; tickers are registered dynamically per /analyze request
 _mft_pipeline: MFTDataPipeline | None = None
 
 
@@ -121,15 +116,12 @@ async def startup_event():
             "[Startup] Macro Agent fit failed (possibly due to missing API keys): %s", e
         )
 
-    # Start the MFT pipeline as a non-blocking background task.
-    # The pipeline begins with an empty ticker list; tickers are registered
-    # on the first /analyze call so the fetch loop tracks only requested symbols.
+    # Empty ticker list at start; the fetch loop only tracks symbols requested later
     _mft_pipeline = MFTDataPipeline(tickers=[])
     asyncio.create_task(_mft_pipeline.start(on_session_ready=_mft_session_callback))
     logger.info("[Startup] MFT pipeline background task launched.")
 
-    # Default risk tolerance and inception value; /kill-switch/reset re-bases
-    # this once the actual session's total_wealth and risk_tolerance are known.
+    # Placeholder base; /kill-switch/reset re-bases once the real session is known
     initialize_kill_switch(risk_tolerance="MODERATE", portfolio_value=100_000.0)
     logger.info("[Startup] Kill switch initialized.")
 
@@ -181,14 +173,10 @@ async def analyze(req: AnalysisRequest):
     if ks and not ks.new_positions_allowed:
         raise HTTPException(503, "New positions blocked. VIX above threshold.")
 
-    # Register requested tickers with the running MFT pipeline so they are
-    # fetched on the next intraday cycle (within _FETCH_INTERVAL seconds).
     if _mft_pipeline is not None:
         _mft_pipeline.register_tickers(req.tickers)
 
-    # Reject if any ticker is missing from the cache or its entry has expired.
-    # Falling back to daily-compressed indicators would produce a mismatched signal
-    # resolution relative to what the TechnicalStatisticalAgent is calibrated for.
+    # Daily bars would mismatch the resolution the technical agent expects
     now = datetime.now()
     missing_from_cache = [
         t for t in req.tickers

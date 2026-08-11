@@ -44,21 +44,17 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # LLM provider credentials
     groq_api_key: str = Field(default="", description="Groq LLM API key")
     google_ai_api_key: str = Field(default="", description="Google AI / Gemini API key")
 
-    # Market and macroeconomic data providers
     fred_api_key: str = Field(default="", description="FRED (Federal Reserve) API key")
     polygon_api_key: str = Field(default="", description="Polygon.io market data API key")
     alpaca_api_key: str = Field(default="", description="Alpaca trading API key")
     alpaca_secret_key: str = Field(default="", description="Alpaca trading API secret")
 
-    # News and sentiment data providers
     newsapi_key: str = Field(default="", description="NewsAPI.org key")
 
-    # Default equity universe: 20 liquid large-cap tickers spanning 7 GICS sectors.
-    # Broadened to reduce sector concentration risk in Phase 2 walk-forward validation.
+    # Broadened to 20 tickers across 7 GICS sectors to reduce sector concentration risk
     UNIVERSE_DEFAULT: List[str] = [
         "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN",
         "META", "TSLA", "JPM", "V", "UNH",
@@ -66,14 +62,12 @@ class Settings(BaseSettings):
         "MRK", "ABBV", "LLY", "AVGO", "CVX",
     ]
 
-    # MFT pipeline timing parameters. Numeric defaults live in argus/params.py,
-    # tagged with provenance (literature/convention/calibrated/arbitrary); this
-    # class only adds env-var override capability on top of them.
+    # Numeric defaults live in argus/params.py, tagged with provenance; this class
+    # only adds env-var override capability on top of them
     MFT_CANDLE_INTERVAL: str = "5m"
     MFT_DECISION_INTERVAL_SECONDS: int = SYSTEM.mft_decision_interval_seconds
     CANDLE_BUFFER_SIZE: int = SYSTEM.candle_buffer_size
 
-    # Technical indicator scoring weights
     TECHNICAL_INDICATOR_WEIGHTS: Dict[str, float] = {
         "rsi": _TECHNICAL_WEIGHTS.rsi,
         "macd": _TECHNICAL_WEIGHTS.macd,
@@ -88,7 +82,6 @@ class Settings(BaseSettings):
     MAX_SECTOR_CONCENTRATION: float = SYSTEM.max_sector_concentration
     MAX_PORTFOLIO_BETA: float = SYSTEM.max_portfolio_beta
 
-    # Kill-switch circuit breaker thresholds
     VIX_BLACKOUT_THRESHOLD: float = SYSTEM.vix_blackout_threshold
     MAX_DRAWDOWN_HALT: float = SYSTEM.max_drawdown_halt
 
