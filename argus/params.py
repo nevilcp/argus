@@ -191,12 +191,31 @@ class RiskParams:
     reduce_weight_multiplier: float = p(0.5, Provenance.ARBITRARY, "no basis for this specific haircut on statistical violation")
 
 
+@dataclass(frozen=True)
+class ReconciliationParams:
+    """Outcome-reconciliation horizon (orchestration/reconciliation.py)."""
+
+    horizon_days: int = p(
+        5,
+        Provenance.ARBITRARY,
+        "provisional; PR 10 pre-registers the real evaluation horizon H "
+        "before observing any result, per docs/adr/0010",
+    )
+    min_abs_return_for_storage: float = p(
+        0.01,
+        Provenance.ARBITRARY,
+        "matches cultural.store_trade_outcome's existing |return| > 1% "
+        "storage filter; kept here so both live in one place",
+    )
+
+
 SYSTEM = SystemParams()
 TECHNICAL_INDICATOR_WEIGHTS = TechnicalIndicatorWeights()
 TECHNICAL = TechnicalParams()
 AGGREGATOR = AggregatorParams()
 PORTFOLIO = PortfolioParams()
 RISK = RiskParams()
+RECONCILIATION = ReconciliationParams()
 
 _ALL_GROUPS: dict[str, Any] = {
     "SYSTEM": SYSTEM,
@@ -205,6 +224,7 @@ _ALL_GROUPS: dict[str, Any] = {
     "AGGREGATOR": AGGREGATOR,
     "PORTFOLIO": PORTFOLIO,
     "RISK": RISK,
+    "RECONCILIATION": RECONCILIATION,
 }
 
 
