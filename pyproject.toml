@@ -43,6 +43,7 @@ dev = [
     "pytest-asyncio>=0.24.0",
     "pytest-cov>=5.0.0",
     "pytest-mock>=3.14.0",
+    "hypothesis>=6.100.0",
     "ruff>=0.7.0",
     "mypy>=1.13.0",
 ]
@@ -50,6 +51,7 @@ test = [
     "pytest>=8.0.0",
     "pytest-mock>=3.14.0",
     "pytest-asyncio>=0.24.0",
+    "hypothesis>=6.100.0",
 ]
 # FinBERT (sentiment.py) and the cultural-memory embedding function
 # (memory/cultural.py) both lazy-import from this extra on first actual use,
@@ -67,3 +69,19 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+plugins = ["pydantic.mypy"]
+# backtesting/{engine,walk_forward,phase1_calibration,phase2_validation,bias_auditor,pit_enforcer}.py
+# are deleted in PR 7 (ADR: "why ARGUS cannot be backtested over multi-year windows") — not worth
+# typing precisely for a module about to go away. metrics.py is kept and stays in scope.
+exclude = [
+    "argus/backtesting/engine.py",
+    "argus/backtesting/walk_forward.py",
+    "argus/backtesting/phase1_calibration.py",
+    "argus/backtesting/phase2_validation.py",
+    "argus/backtesting/bias_auditor.py",
+    "argus/backtesting/pit_enforcer.py",
+]

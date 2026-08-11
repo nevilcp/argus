@@ -33,7 +33,7 @@ from pydantic import ValidationError
 
 from argus.config import settings
 from argus.orchestration.governor import governor
-from argus.schemas.signals import SentimentSignal, Signal
+from argus.schemas.signals import SentimentSignal
 from argus.seams import GroqLLMClient, LiveMarketDataProvider, LLMClient, MarketDataProvider
 
 logger = logging.getLogger("argus.sentiment")
@@ -79,10 +79,10 @@ def score_headlines_with_finbert(headlines: list[str]) -> list[dict]:
         List of dicts with keys ``headline``, ``label``, ``raw_score``, ``numeric``.
         Returns an empty list if headlines is empty.
     """
-    finbert = get_finbert()
     if not headlines:
         return []
 
+    finbert = get_finbert()
     results = []
     # Cap at 25 to limit CPU blocking duration on large fetches
     for headline in headlines[:25]:

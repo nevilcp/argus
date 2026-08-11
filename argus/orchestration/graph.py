@@ -47,7 +47,7 @@ from argus.agents.technical import TechnicalStatisticalAgent
 from argus.memory.cultural import get_cultural_memory
 from argus.orchestration.aggregator import HybridSignalAggregator
 from argus.orchestration.state import ARGUSState
-from argus.schemas.signals import ARGUSDecision, RiskVerdict
+from argus.schemas.signals import AggregatedSignal, ARGUSDecision, RiskVerdict
 from argus.seams import LiveMarketDataProvider, LLMClient, MarketDataProvider
 
 logger = logging.getLogger("argus.graph")
@@ -210,7 +210,7 @@ def build_graph(
         Returns:
             Partial state update with ``aggregated_signals``.
         """
-        aggs = {}
+        aggs: dict[str, AggregatedSignal] = {}
         macro = state["macro_context"]
         if not macro:
             return {"aggregated_signals": aggs}
@@ -245,7 +245,8 @@ def build_graph(
             ticker: pd.Series(data["prices"], index=pd.to_datetime(data["dates"]))
             for ticker, data in history_raw.items()
         }
-        vix = state["macro_context"].vix_level if state.get("macro_context") else 20.0
+        macro_ctx = state.get("macro_context")
+        vix = macro_ctx.vix_level if macro_ctx else 20.0
         universe = state["universe"]
 
         # Extract signed convictions: positive = BULLISH, negative = BEARISH, zero = NEUTRAL

@@ -4,7 +4,6 @@ Tests for the Fundamental Agent and its pure-Python helpers.
 
 from datetime import datetime, timedelta
 
-import pytest
 
 from argus.agents.fundamental import anonymize_ticker, build_compact_prompt, FundamentalCache
 from argus.schemas.signals import FundamentalSignal, Signal

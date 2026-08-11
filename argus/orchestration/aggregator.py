@@ -20,7 +20,6 @@ Dependencies:
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from typing import Optional
 
 from argus.params import AGGREGATOR
@@ -29,7 +28,6 @@ from argus.schemas.signals import (
     FundamentalSignal,
     MacroContext,
     Regime,
-    RiskVerdict,
     SentimentSignal,
     Signal,
     TechnicalSignal,

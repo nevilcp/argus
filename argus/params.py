@@ -110,7 +110,6 @@ class TechnicalParams:
     rsi_bearish_transition: float = p(70, Provenance.CONVENTION, "standard RSI overbought boundary")
     rsi_neutral_low: float = p(45.0, Provenance.ARBITRARY, "dead-zone boundary; no basis beyond symmetry around 50")
     rsi_neutral_high: float = p(55.0, Provenance.ARBITRARY, "dead-zone boundary; no basis beyond symmetry around 50")
-    rsi_neutral_span: float = p(25.0, Provenance.ARBITRARY, "normalization divisor for the neutral-zone interpolation")
 
     macd_normalization_scale: float = p(0.5, Provenance.ARBITRARY, "no basis for this specific scale")
 
@@ -199,7 +198,7 @@ AGGREGATOR = AggregatorParams()
 PORTFOLIO = PortfolioParams()
 RISK = RiskParams()
 
-_ALL_GROUPS = {
+_ALL_GROUPS: dict[str, Any] = {
     "SYSTEM": SYSTEM,
     "TECHNICAL_INDICATOR_WEIGHTS": TECHNICAL_INDICATOR_WEIGHTS,
     "TECHNICAL": TECHNICAL,

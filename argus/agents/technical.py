@@ -50,8 +50,11 @@ def _score_rsi(s: dict) -> float:
     """Evaluates the 14-period RSI and returns a sentiment score in [-1, 1].
 
     Camps at extreme thresholds (< 25 oversold, > 75 overbought) then
-    linearly interpolates through transition bands. A neutral dead-zone
-    of ±0.2 score is preserved around RSI 50 to reduce noise.
+    linearly interpolates through transition bands down toward a flat
+    dead-zone of score 0 around RSI 50 (rsi_neutral_low..rsi_neutral_high),
+    to reduce noise from small RSI wobbles near the midpoint. The whole
+    function is monotonically non-increasing in rsi — see
+    tests/test_technical_properties.py.
 
     Args:
         s: Session state dict containing the key ``rsi_14``.
@@ -68,7 +71,6 @@ def _score_rsi(s: dict) -> float:
     bearish_transition = TECHNICAL.rsi_bearish_transition
     neutral_low = TECHNICAL.rsi_neutral_low
     neutral_high = TECHNICAL.rsi_neutral_high
-    neutral_span = TECHNICAL.rsi_neutral_span
 
     if rsi < oversold:
         return 1.0
@@ -81,15 +83,13 @@ def _score_rsi(s: dict) -> float:
         return -bullish_transition_score - (rsi - bearish_transition) / (overbought - bearish_transition) * (1.0 - bullish_transition_score)
 
     if neutral_low <= rsi <= neutral_high:
-        return (rsi - 50.0) / neutral_span
+        return 0.0
 
     if bullish_transition <= rsi < neutral_low:
-        lo, hi = bullish_transition_score, (neutral_low - 50.0) / neutral_span
-        return lo + (rsi - bullish_transition) / (neutral_low - bullish_transition) * (hi - lo)
+        return bullish_transition_score * (1.0 - (rsi - bullish_transition) / (neutral_low - bullish_transition))
 
-    # Bearish transition band: RSI in [55, 70] (implicit else-branch after all earlier guards)
-    lo, hi = (neutral_high - 50.0) / neutral_span, -bullish_transition_score
-    return lo + (rsi - neutral_high) / (bearish_transition - neutral_high) * (hi - lo)
+    # Bearish transition band: RSI in (neutral_high, bearish_transition] (implicit else-branch)
+    return -bullish_transition_score * (rsi - neutral_high) / (bearish_transition - neutral_high)
 
 
 def _score_macd(s: dict) -> float:

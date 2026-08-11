@@ -168,7 +168,7 @@ class GroqLLMClient:
 
     def __init__(self, model: str, temperature: float, max_tokens: int, api_key: str) -> None:
         self._llm = ChatGroq(
-            model=model,
+            model_name=model,
             temperature=temperature,
             max_tokens=max_tokens,
             groq_api_key=api_key,

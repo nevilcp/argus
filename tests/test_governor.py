@@ -2,8 +2,6 @@
 Tests for the RateLimitGovernor.
 """
 
-import time
-from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
@@ -11,7 +9,6 @@ import pytest
 from argus.orchestration.governor import (
     RateLimitExceeded,
     RateLimitGovernor,
-    ModelUsage,
     MODEL_LIMITS,
 )
 

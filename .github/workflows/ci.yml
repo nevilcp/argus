@@ -21,21 +21,23 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Install package with test extras
+      - name: Install package with dev extras
         run: |
-          pip install -e ".[test]"
+          pip install -e ".[dev]"
 
-      - name: Run unit + integration tests (mocked LLMs)
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Type-check (mypy)
+        run: mypy argus/
+
+      - name: Run test suite
         run: |
-          python -m pytest \
-            tests/test_technical.py \
-            tests/test_macro.py \
-            tests/test_risk.py \
-            tests/test_integration.py \
-            -v --tb=short
+          python -m pytest tests/ -v --tb=short
         env:
           # FRED key provided for macro data fetching in tests
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-          # Groq/Gemini keys intentionally omitted — LLM agents are mocked in CI
+          # Groq/Gemini keys intentionally omitted — LLM agents are mocked or
+          # fixture-backed in CI (see argus/seams.py, ADR 0007)
           GROQ_API_KEY: ""
           GOOGLE_AI_API_KEY: ""
