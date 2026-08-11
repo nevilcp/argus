@@ -103,13 +103,11 @@ flowchart TD
         direction LR
         KS["KillSwitch Daemon\nBackground thread · 60s poll\nDrawdown: 8/12/18% by tolerance\nVIX Blackout ≥ 35 → block positions\nHalt file → manual reset required"]
         GOV["RateLimitGovernor\nSingleton · thread-safe\nRPM sliding window (sleep)\nRPD hard cap (exception)\nTPM warning"]
-        PIT["PointInTimeEnforcer\nBacktest mode gate\nMasks all data after sim date\nLook-ahead bias prevention"]
     end
 
     YF -->|"^VIX every 60s"| KS
     KS -->|"is_halted / new_positions_allowed\nchecked before graph invoke"| GATE
     GOV -.-|"wait_if_needed() before\nevery LLM call"| N3 & N4 & N8
-    PIT -.-|"date-gates yfinance\n& FRED fetchers"| N0 & N1
 
     %% ── Styles ───────────────────────────────────────────────────────────
     classDef stat   fill:#1e3a5f,stroke:#4a90d9,color:#e8f4f8
@@ -194,28 +192,15 @@ Required environment variables must be placed in a `.env` file at the project ro
 
 ## Quick Start / Usage
 
-### Running a Backtest
-Initiate a backtest job across a specific ticker universe to evaluate the strategy historically.
+### Replaying a recorded session
+There is no `/backtest` API endpoint — see
+[`docs/adr/0009-no-multiyear-backtest.md`](docs/adr/0009-no-multiyear-backtest.md)
+for why a multi-year walk-forward backtest isn't offered.
+`scripts/replay_backtest.py` replays recorded fixture sessions through the
+real graph instead:
 
 ```bash
-curl -X POST http://localhost:8000/backtest \
-  -H "Content-Type: application/json" \
-  -d '{
-    "tickers": ["AAPL","MSFT","NVDA","JPM","XOM"],
-    "start_date": "2023-01-01",
-    "end_date":   "2023-12-31",
-    "initial_cash": 100000,
-    "risk_tolerance": "MODERATE",
-    "run_bias_audit": true
-  }'
-```
-
-```json
-{
-  "job_id": "bt_179a6d92_44cf",
-  "status": "queued",
-  "message": "Backtest initiated."
-}
+.venv/bin/python -m scripts.replay_backtest
 ```
 
 ## Project Structure
@@ -225,7 +210,7 @@ curl -X POST http://localhost:8000/backtest \
 ├── api/                  # FastAPI entrypoint, HTTP routing, and market-hours gating
 ├── argus/
 │   ├── agents/           # Core AI components (Macro, Fundamental, Sentiment, Risk, Portfolio)
-│   ├── backtesting/      # Walk-forward validation engine and Point-In-Time enforcers
+│   ├── backtesting/      # Return-series metrics and fixture-session replay (see ADR 0009)
 │   ├── data/             # MFT Pipeline, OHLCV SQLite buffer, and external API fetchers
 │   ├── memory/           # ChromaDB-backed cultural wisdom retrieval mechanisms
 │   ├── orchestration/    # LangGraph definition, safety governors, and kill-switches
@@ -266,4 +251,3 @@ Under active rebuild — see [issue #1](https://github.com/nevilcp/argus/issues/
 **Acknowledgements**:
 - [LangGraph](https://github.com/langchain-ai/langgraph) for cyclic agent orchestration.
 - [ProsusAI/finbert](https://huggingface.co/ProsusAI/finbert) for financial domain sentiment classification.
-- [Backtrader](https://www.backtrader.com/) for the foundational event-driven backtesting engine.

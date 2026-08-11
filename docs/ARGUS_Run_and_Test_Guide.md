@@ -91,7 +91,7 @@ pip install -e .
 
 # 4. Verify core imports
 python -c "import langgraph, langchain_groq, langchain_google_genai, \
-           pandas_ta, hmmlearn, backtrader, chromadb, transformers; \
+           pandas_ta, hmmlearn, chromadb, transformers; \
            print('All core dependencies installed successfully.')"
 ```
 
@@ -349,138 +349,33 @@ curl http://localhost:8000/governor/report | python -m json.tool
 
 ---
 
-## 7. Running Backtests (3 Phases)
+## 7. Replaying Recorded Sessions
 
-> ⚠️ **Important:** Run phases in order. Never use Phase 3 (2025) data until Phases 1 and 2 are complete and parameters are locked. This is what makes the forward test scientifically valid.
+There is no multi-year walk-forward backtest, no phased calibration, and no
+`/backtest` API endpoint — see
+[`docs/adr/0009-no-multiyear-backtest.md`](adr/0009-no-multiyear-backtest.md)
+for why: Yahoo Finance's 5-minute intraday data is only available for the
+trailing ~60 days, and ARGUS's live technical-indicator snapshot can't be
+reconstructed for older dates without fabricating it.
 
-### Phase 1 — In-Sample Calibration (2021–2022)
-
-**Purpose:** Fit the HMM, calibrate indicator weights, establish baseline.  
-**Estimated time:** 60–120 minutes.  
-**API calls consumed:** ~50 (fundamental + sentiment, batched weekly).
-
-```bash
-python -m argus.backtesting.phase1_calibration
-```
-
-Monitor progress — logs appear every few minutes. Key things to watch for:
-```
-INFO: HMM fitted. Regime mapping: {0: 'EXPANSION', 1: 'CONTRACTION', 2: 'TRANSITIONAL'}
-INFO: Baseline Sharpe: 0.XXX
-INFO: New best weights: {...} → Sharpe X.XXX
-INFO: PHASE 1 COMPLETE. Locked Sharpe: X.XXX
-INFO: Calibration saved to: calibration_report.json
-```
-
-Verify the output file was created:
-```bash
-cat calibration_report.json | python -m json.tool
-```
-
-**Do not proceed to Phase 2 if** the bias audit returns any `FAIL` status.
-
-### Phase 2 — Walk-Forward Validation (2023–2024)
-
-**Purpose:** 18-window rolling validation with locked parameters. Must pass minimum Sharpe ≥ 0.80.  
-**Estimated time:** 90–180 minutes.  
-**API calls consumed:** ~100.
+`argus/backtesting/replay.py` replays recorded fixture *sessions* (captured,
+point-in-time snapshots of everything the graph needs — see
+`scripts/capture_fixtures.py`) through the real, compiled graph instead:
 
 ```bash
-python -c "
-from argus.backtesting.walk_forward import run_walk_forward_validation
-from argus.config import settings
-import json
-
-# Load locked weights from Phase 1
-with open('calibration_report.json') as f:
-    cal = json.load(f)
-settings.TECHNICAL_INDICATOR_WEIGHTS = cal['locked_indicator_weights']
-
-print('Running Phase 2: Walk-forward validation (2023-2024)...')
-results = run_walk_forward_validation(
-    universe=settings.UNIVERSE_DEFAULT,
-    start='2023-01-03',
-    end='2024-12-31',
-    train_months=6,
-    test_months=1,
-    risk_tolerance='MODERATE'
-)
-
-print(f'Windows completed: {results[\"n_windows\"]}')
-print(f'Average Sharpe:    {results[\"avg_sharpe\"]:.3f} (minimum required: 0.80)')
-print(f'Sharpe std dev:    {results[\"std_sharpe\"]:.3f} (lower = more consistent)')
-print(f'Consistency score: {results[\"consistency_score\"]:.3f}')
-print(f'PASS criteria met: {results[\"pass_criteria\"]}')
-
-if not results['pass_criteria']:
-    print()
-    print('PHASE 2 FAILED minimum criteria.')
-    print('Do NOT proceed to Phase 3 or live use.')
-    print('Review agent weights and re-run Phase 1 calibration.')
-else:
-    print()
-    print('PHASE 2 PASSED. Safe to proceed to Phase 3 (2025 forward test).')
-" 2>&1 | tee phase2_results.log
+.venv/bin/python -m scripts.replay_backtest
 ```
 
-### Phase 3 — 2025 Forward Test (Out-of-Sample)
-
-**Purpose:** True out-of-sample validation. Zero parameter changes from this point forward.  
-**Run this continuously** — it generates a monthly performance report.
-
-```bash
-python -c "
-from argus.backtesting.engine import run_backtest
-from argus.backtesting.metrics import compute_all_metrics
-from argus.backtesting.bias_auditor import BiasAuditor
-from argus.config import settings
-import yfinance as yf
-import pandas as pd
-import json
-
-print('Phase 3: 2025 Forward Test (out-of-sample)')
-print('ZERO parameter changes are permitted from this point forward.')
-print()
-
-result = run_backtest(
-    universe=settings.UNIVERSE_DEFAULT,
-    start='2025-01-02',
-    end=pd.Timestamp.today().strftime('%Y-%m-%d'),  # Run through today
-    initial_cash=100_000.0,
-    risk_tolerance='MODERATE'
-)
-
-print(f'Cumulative return:   {result[\"cumulative_return\"]:.1%}')
-print(f'Sharpe ratio:        {result[\"sharpe\"]:.3f} (minimum required: 0.70)')
-print(f'Max drawdown:        {result[\"max_drawdown\"]:.1%} (limit: 22%)')
-print(f'Alpha vs SPY:        {result[\"alpha_annualized\"]:.2%} (minimum: >1%)')
-print(f'Win rate:            {result[\"win_rate\"]:.1%}')
-print()
-print('Phase 3 performance report saved to: phase3_results.json')
-with open('phase3_results.json', 'w') as f:
-    json.dump(result, f, indent=2, default=str)
-" 2>&1 | tee phase3_results.log
-```
-
-### Quick Backtest Smoke Test (5 stocks, 3 months — ~10 minutes)
-
-Use this to verify the backtest engine works before running the full 4-year test:
+This runs the one session captured so far (`tests/fixtures/`) and prints its
+resulting portfolio allocation. Pass one or more session directories to
+replay a longer recorded history once more sessions exist:
 
 ```bash
-python -c "
-from argus.backtesting.engine import run_backtest
-result = run_backtest(
-    universe=['AAPL', 'MSFT', 'NVDA', 'JPM', 'XOM'],
-    start='2023-01-03',
-    end='2023-03-31',
-    initial_cash=100_000.0
-)
-print(f'Smoke test passed. Sharpe: {result.get(\"sharpe\", \"N/A\")}')
-print(f'Final portfolio value: \${result.get(\"final_value\", 100000):,.0f}')
-"
+.venv/bin/python -m scripts.replay_backtest path/to/session_1 path/to/session_2
 ```
 
 ---
+
 
 ## 8. Running with Docker
 
@@ -622,18 +517,6 @@ You're hitting the 15 RPM limit. The governor handles this automatically. If it 
 python -c "from argus.orchestration.governor import governor; print(governor.get_usage_report())"
 ```
 
-### "No data found for ticker" during backtest
-The ticker was not publicly traded at the backtest start date (correct behavior — survivorship bias prevention). The bias auditor flags this:
-```bash
-python -c "
-from argus.backtesting.bias_auditor import BiasAuditor
-from datetime import date
-auditor = BiasAuditor()
-result = auditor.check_survivorship_bias(['AAPL','MSFT','META'], date(2021,1,4))
-print(result)
-"
-```
-
 ### Docker build fails at FinBERT step
 ```bash
 # Increase Docker memory limit to at least 4GB
@@ -672,10 +555,8 @@ python -m pytest tests/ -v                               # All tests
 python -m pytest tests/test_technical.py -v             # Stats only (no API)
 python -m pytest tests/test_integration.py -v -s        # Integration (uses API)
 
-# Backtesting
-python -m argus.backtesting.phase1_calibration          # Phase 1 (2021-22)
-python phase2_validation.py                              # Phase 2 (2023-24)
-python phase3_forward.py                                 # Phase 3 (2025)
+# Replay a recorded session (no multi-year backtest — see ADR 0009)
+python -m scripts.replay_backtest
 
 # Docker
 docker compose up -d          # Start

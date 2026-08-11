@@ -20,7 +20,6 @@ from argus.agents.macro import MacroStatisticalAgent
 from argus.agents.portfolio import half_kelly_weight
 from argus.agents.risk import RiskStatisticalEngine
 from argus.agents.technical import TechnicalStatisticalAgent
-from argus.backtesting.pit_enforcer import PointInTimeEnforcer
 from argus.data.pipeline import MFTDataPipeline
 from argus.orchestration.governor import RateLimitExceeded, governor
 from argus.orchestration.graph import graph
@@ -179,20 +178,6 @@ class TestEndToEnd:
                 pass
             else:
                 raise e
-
-    def test_pit_enforcer_prevents_future_data(self):
-        pit = PointInTimeEnforcer(simulation_date=date(2022, 6, 15))
-        series = pit.get_close_series("AAPL", lookback_days=30)
-        if not series.empty:
-            assert series.index[-1].date() <= date(2022, 6, 15)
-
-        fundamentals_df = pd.DataFrame(
-            {"ticker": ["NVDA", "NVDA"], "eps": [1.0, 1.2]},
-            index=pd.to_datetime(["2022-01-15", "2022-08-15"]),
-        )
-        snapshot = pit.get_fundamental_snapshot("NVDA", fundamentals_df)
-        assert not snapshot.empty
-        assert snapshot["eps"] == 1.0
 
     def test_kill_switch_drawdown_trigger(self):
         ks = KillSwitch("MODERATE", check_interval_seconds=1)
