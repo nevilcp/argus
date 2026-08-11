@@ -1,5 +1,21 @@
 # ARGUS — Architecture Deep Dive
 
+> **Historical document — pre-rebuild (superseded 2026-08-11).**
+>
+> This is the architecture description as it stood *before* the rebuild
+> documented in [issue #1](https://github.com/nevilcp/argus/issues/1). It is
+> kept unmodified, and moved here rather than deleted, because it is the
+> primary evidence for the central finding of
+> [`docs/case-study.md`](../case-study.md): that this document described
+> mechanisms the code did not implement. Most notably it describes a
+> `_resolve_conflict()` LLM call for breaking split votes that was never in
+> the repository at all. [ADR 0010](../adr/0010-closing-the-decision-outcome-loop.md)
+> and [ADR 0011](../adr/0011-reliability-weighting.md) cite it for the same
+> reason.
+>
+> **Do not read this as a description of the current system.** For that, see
+> `README.md` and `docs/adr/`.
+
 This document walks through the Mermaid diagram in `README.md` layer by layer, mapping every box and arrow to the actual source code so you can understand precisely what runs, when, why, and how it connects to everything else.
 
 ---
@@ -132,7 +148,7 @@ technical_analysis   fundamental_analysis  sentiment  retrieve_cultural_memory
 
 **Output into state:** `price_history` — a dict of `{ticker: {dates: [...], prices: [...]}}`.
 
-**Triggered by:** Either the `_session_loop`'s `on_session_ready` callback (live mode) or directly by the API/backtest runner. Both paths feed `ARGUSState.universe` as the starting input.
+**Triggered by:** Either the `_session_loop`'s `on_session_ready` callback (live mode) or `argus/backtesting/replay.py` (fixture-session replay). Both paths feed `ARGUSState.universe` as the starting input.
 
 ---
 
@@ -264,40 +280,35 @@ Also ingests the current VIX level from `macro_context` — a high VIX inflates 
 
 This is the most intellectually interesting part of the DAG. The `HybridSignalAggregator` combines the outputs of the four parallel agents into a single `AggregatedSignal` per ticker.
 
-#### Step 1 — Weighted Conviction Voting
+#### Weighted Conviction Voting
 
 Each agent's signal (BULLISH / BEARISH / NEUTRAL) is cast as a weighted vote:
 
 ```
-vote weight = agent.conviction × macro.agent_multipliers[agent_name]
+vote weight = agent.conviction × macro.agent_multipliers[agent_name] × (agent_reliability / 0.5)
 ```
 
 The `agent_multipliers` come from `MacroContext` — the macro regime directly adjusts how much each agent's vote counts. Example:
 - In **EXPANSION**: fundamental multiplier is boosted (good earnings matter more), technical is slightly dampened
 - In **CONTRACTION**: technical multiplier rises (price action matters more), fundamental is dampened (earnings lag)
 
-The signal with the highest total weighted vote wins. `best_score` = that signal's fraction of total votes.
+`agent_reliability` is that agent's shrinkage-adjusted historical win rate for the
+current regime, from `cultural.get_agent_accuracy()` (see ADR 0011): an agent
+sitting at the neutral 0.5 prior — no history yet, or exactly break-even — votes
+at its unscaled base weight; a regime-specific track record above or below 0.5
+scales its vote up or down accordingly. This is the mechanism that closes the
+decision→outcome→reliability loop: agents that have been right in this regime
+count for more.
 
-#### Step 2 — The Debate Loop (Conflict Arbitration)
+The bull/bear/neutral vote pools are summed and normalized to a percentage of
+the total; the highest-percentage pool wins, capped at `AGGREGATOR.max_conviction`
+so no aggregate ever claims certainty. There is no separate conflict-resolution
+LLM call — the whole aggregation is a pure, deterministic function of the four
+signal inputs plus reliability, which is what makes it property-testable
+(`tests/test_aggregator_properties.py`) and reusable, unmodified, as the ablation
+step in `orchestration/reconciliation.py`'s credit assignment.
 
-The diamond in the diagram:
-
-```
-Fundamental ≠ Sentiment
-AND best_score < 52%?
-```
-
-This triggers if and only if **all three** conditions are met:
-1. Fundamental and Sentiment have *opposite non-neutral signals* (genuine disagreement)
-2. The winning signal has less than 52% of votes (the vote is too close to call)
-
-If triggered, `_resolve_conflict()` calls **Llama 3.1-8b** (Groq) with a short prompt: *"Fundamental says X, Sentiment says Y, moat_score=Z, finbert_score=W. Which is more reliable? Respond: BULLISH, BEARISH, or NEUTRAL."*
-
-The winning side gets **+0.25 added to its vote weight**, which breaks the tie deterministically.
-
-This is a clever architectural choice: the conflict arbitration LLM is only called when genuinely needed (avoiding unnecessary API calls), and it uses the lightweight 8b model (fast, cheap) rather than the expensive 70b model.
-
-**Output:** `AggregatedSignal` per ticker with `signal`, `conviction`, `weighted_votes`, `debate_triggered`.
+**Output:** `AggregatedSignal` per ticker with `signal`, `conviction`, `weighted_votes`.
 
 ---
 
@@ -319,7 +330,15 @@ This is a clever architectural choice: the conflict arbitration LLM is only call
 
 ### Nodes 8 & END — `log_decisions` → END
 
-Currently a lightweight decision logger that appends `ARGUSDecision` objects to the state's audit trail (using LangGraph's `operator.add` reducer). The `argus_graph.db` checkpoint file preserves the full decision history across runs.
+Appends `ARGUSDecision` objects to the state's audit trail (using LangGraph's `operator.add` reducer) and snapshots each one to ChromaDB as `PENDING` via `CulturalMemoryManager.store_decision_snapshot`. The `argus_graph.db` checkpoint file preserves the full decision history — including nested technical/fundamental/sentiment signals — across runs, keyed by `thread_id` per session.
+
+**Closing the loop (PR 8):** `argus/orchestration/reconciliation.py` is the second half of the story `log_decisions` starts. Run periodically (`scripts/reconcile_outcomes.py`), it reads every session's decisions back out of `argus_graph.db` (`load_decisions_from_checkpoints`), and for any decision whose `RECONCILIATION.horizon_days` has elapsed since `session_timestamp`:
+
+1. **Credit assignment** — `credit_primary_driver()` reruns `HybridSignalAggregator.aggregate()` once per specialist agent with that agent's signal removed (leave-one-out ablation), and credits whichever removal either flips the consensus direction or, failing that, contributed the largest raw vote.
+2. **Outcome** — `compute_realized_return()` pairs the decision's entry price (`technical.current_price`) with the close price at or after the target exit date, via the same `MarketDataProvider` seam every other node uses.
+3. **Persistence** — `cultural.store_trade_outcome()` (previously written, never called — the original defect this whole rebuild started from) writes the realized return, holding period, and ablation-derived `primary_driver` to ChromaDB, upserted as a separate `trade_{decision_id}` document alongside the original `snapshot_{decision_id}` one.
+
+See [`docs/adr/0010-closing-the-decision-outcome-loop.md`](adr/0010-closing-the-decision-outcome-loop.md) for why decisions are read back from the existing checkpoint rather than a dedicated archive (the now-deleted `DecisionLogger` used to fill that role and was never instantiated), and why the ablation metric compares direction-flip-then-magnitude rather than a raw conviction delta.
 
 ---
 
@@ -346,7 +365,7 @@ Runs as a **background daemon thread** (`threading.Thread(daemon=True)`) that wa
 **Why the halt file?** The halt condition requires a human to manually `rm argus_halt_*.json` and call `/kill-switch/reset`. This is an intentional circuit-breaker pattern — no automated restart is allowed after a drawdown event. A human must review what happened.
 
 > [!IMPORTANT]
-> The halt files you can see in the project root (`argus_halt_20260518_*.json`) are real prior halt events from live runs. The system genuinely triggered on a drawdown during testing.
+> Halt events are written to `runs/argus_halt_<timestamp>.json` (gitignored, not checked into the repo) — the kill switch has genuinely triggered on a drawdown during testing. `runs/` is empty in a fresh checkout; a halt file only appears after a real trigger.
 
 ### RateLimitGovernor 🔴
 
@@ -374,15 +393,27 @@ governor.wait_if_needed() → called by:
 
 The purely statistical nodes (N1, N2, N6) never call the governor because they make no LLM calls.
 
-### PointInTimeEnforcer 🔴
+### Point-in-time correctness (structural, not a runtime enforcer)
 
-**File:** (referenced in README/project_concepts; enforced in `argus/data/fetchers.py`)
+**File:** `argus/backtesting/replay.py`
 
-A date-gating mechanism that intercepts all calls to `yfinance` and FRED fetchers during backtest mode. When `backtest_mode=True` and a `session_seed` date is set, any data after that date is masked/excluded from results.
+There used to be a `PointInTimeEnforcer` here: a date-gating mechanism that
+intercepted `yfinance`/FRED calls during backtest mode and masked data after
+a simulated date. It's gone — deleted along with the rest of the
+walk-forward backtesting engine it existed to serve (see
+[`docs/adr/0009-no-multiyear-backtest.md`](adr/0009-no-multiyear-backtest.md)
+for why multi-year backtesting isn't offered at all).
 
-**Why this matters:** Without it, backtesting is fraudulent. An agent analyzing "January 2021" that can see OHLCV data from March 2021 would have unfair foresight (look-ahead bias). The `PointInTimeEnforcer` makes backtests genuinely out-of-sample.
+What replaced it isn't a runtime check but a structural property: PR 7's
+`replay.py` replays recorded fixture *sessions* through the real graph, and
+each session's `FixtureMarketDataProvider` is scoped to its own directory —
+there is no code path by which a later session's data could reach an
+earlier one, so there's nothing for a runtime enforcer to guard against.
 
-The `ARGUSState` TypedDict carries both `backtest_mode: bool` and `session_seed: Optional[int]` — these are checked by `node_fundamental_analysis` and `node_fetch_price_history` before making any fetches.
+`ARGUSState` still carries `backtest_mode: bool` and
+`session_seed: Optional[int]`, consumed by `FundamentalAgent.analyze` for
+ticker anonymization (`argus/agents/fundamental.py`) — that mechanism is
+separate from point-in-time data gating and remains in place.
 
 ---
 
@@ -443,7 +474,7 @@ LangGraph DAG invoked with ARGUSState
 |---|---|---|
 | 🔵 Dark blue | **Statistical** (no LLM, pure math) | `macro_analysis`, `technical_analysis`, `risk_evaluation` |
 | 🟣 Purple | **LLM** (language model involved) | `fundamental_analysis`, `sentiment_analysis`, conflict arbitrator, `portfolio_allocation` |
-| 🔴 Dark red | **Safety** (daemons/guards) | `KillSwitch`, `RateLimitGovernor`, `PointInTimeEnforcer` |
+| 🔴 Dark red | **Safety** (daemons/guards) | `KillSwitch`, `RateLimitGovernor` |
 | 🟢 Dark green | **Data/Memory** | `OHLCVBuffer`, `retrieve_cultural_memory` |
 | 🟡 Dark yellow | **I/O** (data fetch nodes) | `fetch_price_history`, `_fetch_loop`, `_session_loop` |
 
@@ -461,4 +492,4 @@ This color-coding is a key design communication: the diagram immediately tells y
 
 4. **Conflict resolution is lazy**: The debate loop only fires when there is a genuine, close disagreement between fundamental and sentiment. This saves LLM calls in ~80% of cases where the signals agree or the margin is clear.
 
-5. **Backtest integrity by design**: `PointInTimeEnforcer` is wired at the data fetcher level, not the agent level. Agents don't need to know they're in backtest mode — the data they receive is already gated.
+5. **Backtest integrity by construction**: `replay.py` doesn't gate data at fetch time — each recorded session is scoped to its own fixture directory, so there is no code path by which a later session's data could reach an earlier one. See [`docs/adr/0009-no-multiyear-backtest.md`](adr/0009-no-multiyear-backtest.md).

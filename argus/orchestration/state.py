@@ -96,7 +96,9 @@ class ARGUSState(TypedDict):
 
     # ── Node 7: log_decisions ────────────────────────────────────────────────
     decisions: list[Any]
-    """List of completed ARGUSDecision snapshots persisted to DecisionLogger."""
+    """List of completed ARGUSDecision snapshots for this session, accumulated
+    into the LangGraph checkpoint (argus_graph.db) and readable later by
+    orchestration/reconciliation.py's load_decisions_from_checkpoints()."""
 
     errors: list[str]
     """Accumulated error messages from all nodes, used for diagnostics and alerting."""

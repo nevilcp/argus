@@ -29,15 +29,12 @@ from datetime import datetime
 from typing import Optional
 
 import numpy as np
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_groq import ChatGroq
 from pydantic import ValidationError
-from transformers import pipeline
 
 from argus.config import settings
-from argus.data.fetchers import fetch_news, fetch_social_sentiment
 from argus.orchestration.governor import governor
-from argus.schemas.signals import SentimentSignal, Signal
+from argus.schemas.signals import SentimentSignal
+from argus.seams import GroqLLMClient, LiveMarketDataProvider, LLMClient, MarketDataProvider
 
 logger = logging.getLogger("argus.sentiment")
 
@@ -53,6 +50,8 @@ def get_finbert():
     """
     global _FINBERT_PIPELINE
     if _FINBERT_PIPELINE is None:
+        from transformers import pipeline
+
         logger.debug("[FinBERT] Loading ProsusAI/finbert pipeline (first load may take ~30s)...")
         _FINBERT_PIPELINE = pipeline(
             task="text-classification",
@@ -80,10 +79,10 @@ def score_headlines_with_finbert(headlines: list[str]) -> list[dict]:
         List of dicts with keys ``headline``, ``label``, ``raw_score``, ``numeric``.
         Returns an empty list if headlines is empty.
     """
-    finbert = get_finbert()
     if not headlines:
         return []
 
+    finbert = get_finbert()
     results = []
     # Cap at 25 to limit CPU blocking duration on large fetches
     for headline in headlines[:25]:
@@ -233,7 +232,6 @@ _SENTIMENT_METRIC_LABELS: dict[str, str] = {
     "(caps at 1.0 when ≥10 articles)",
     "news_volume_7d": "[integer]        total news articles fetched in the last 7 days",
     "social_mention_surge": "[bool]           True if social mention volume is unusually high",
-    "social_mention_count": "[integer]        raw social mention count over 7 days",
     "upcoming_catalyst": "[bool]           True if earnings are expected within 14 days",
 }
 
@@ -298,7 +296,6 @@ SYSTEM_PROMPT = (
     "                         Values below 0.30 indicate thin evidence — reduce conviction accordingly.\n"
     "  news_volume_7d       : integer              Total articles fetched in the prior 7-day window.\n"
     "  social_mention_surge : boolean              True if 7-day social volume is statistically abnormal.\n"
-    "  social_mention_count : integer              Raw social mention count over 7 days.\n"
     "  upcoming_catalyst    : boolean              True if an earnings event falls within 14 calendar days.\n"
     "                         Presence elevates sentiment_decay_risk because event-driven sentiment\n"
     "                         typically reverts rapidly post-announcement.\n"
@@ -324,18 +321,25 @@ class SentimentAgent:
     on parse or validation failures.
     """
 
-    def __init__(self) -> None:
-        api_key = settings.groq_api_key
-        if not api_key:
-            logger.warning(
-                "SentimentAgent: GROQ_API_KEY is not set — LLM calls will fail at invocation time."
+    def __init__(
+        self,
+        llm_client: Optional[LLMClient] = None,
+        market_data: Optional[MarketDataProvider] = None,
+    ) -> None:
+        if llm_client is None:
+            api_key = settings.groq_api_key
+            if not api_key:
+                logger.warning(
+                    "SentimentAgent: GROQ_API_KEY is not set — LLM calls will fail at invocation time."
+                )
+            llm_client = GroqLLMClient(
+                model="llama-3.1-8b-instant",
+                temperature=0.1,
+                max_tokens=350,
+                api_key=api_key,
             )
-        self.llm = ChatGroq(
-            model="llama-3.1-8b-instant",
-            temperature=0.1,
-            max_tokens=350,
-            groq_api_key=api_key,
-        )
+        self.llm_client = llm_client
+        self.market_data = market_data or LiveMarketDataProvider()
         self.cache = SentimentDailyCache()
 
     def analyze(self, ticker: str, company_name: Optional[str] = None) -> Optional[SentimentSignal]:
@@ -353,8 +357,8 @@ class SentimentAgent:
             if cached:
                 return cached
 
-        news = fetch_news(ticker, company_name or ticker, days_back=7)
-        social = fetch_social_sentiment(ticker)
+        news = self.market_data.news(ticker, company_name or ticker, days_back=7)
+        social = self.market_data.social_sentiment(ticker)
 
         headlines = [a.get("title", "") for a in news if a.get("title")]
         scored = score_headlines_with_finbert(headlines)
@@ -367,9 +371,7 @@ class SentimentAgent:
             "finbert_confidence": agg["confidence"],
             "news_volume_7d": len(news),
             "social_mention_surge": social.get("mention_surge", False),
-            "social_mention_count": social.get("mention_count_7d", 0),
             "social_volume_change_pct": social.get("volume_change_pct", 0.0),
-            "social_avg_score": social.get("avg_score", 0.0),
             "upcoming_catalyst": _check_earnings_calendar(ticker),
         }
 
@@ -380,20 +382,7 @@ class SentimentAgent:
 
         for attempt in range(3):
             try:
-                response = self.llm.invoke(
-                    [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
-                )
-                raw = response.content
-                if isinstance(raw, list):
-                    raw = "".join(
-                        item.get("text", "")
-                        for item in raw
-                        if isinstance(item, dict) and item.get("type") == "text"
-                    )
-                elif not isinstance(raw, str):
-                    raw = str(raw)
-
-                raw = raw.strip()
+                raw = self.llm_client.complete(SYSTEM_PROMPT, prompt).strip()
                 if raw.startswith("```"):
                     parts = raw.split("```")
                     if len(parts) >= 3:
@@ -412,9 +401,7 @@ class SentimentAgent:
                     pct_positive=metrics["pct_positive"],
                     pct_negative=metrics["pct_negative"],
                     news_volume_7d=metrics["news_volume_7d"],
-                    mention_count_7d=metrics["social_mention_count"],
                     social_volume_change_pct=metrics["social_volume_change_pct"],
-                    social_avg_score=metrics["social_avg_score"],
                     social_mention_surge=metrics["social_mention_surge"],
                     upcoming_catalyst=metrics["upcoming_catalyst"],
                     signal=data["signal"],

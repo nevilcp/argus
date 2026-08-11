@@ -2,10 +2,8 @@
 Tests for the MFT Data Pipeline.
 """
 
-from datetime import datetime
 
 import pandas as pd
-import pytest
 
 from argus.data.pipeline import MFTDataPipeline
 from argus.data.cache import OHLCVBuffer

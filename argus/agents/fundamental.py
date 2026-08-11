@@ -26,16 +26,14 @@ import json
 import logging
 import time
 from datetime import date, datetime
-from typing import Optional
+from typing import Any, Optional
 
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_groq import ChatGroq
 from pydantic import ValidationError
 
 from argus.config import settings
-from argus.data.fetchers import fetch_fundamentals
 from argus.orchestration.governor import governor
 from argus.schemas.signals import FundamentalSignal
+from argus.seams import GroqLLMClient, LiveMarketDataProvider, LLMClient, MarketDataProvider
 
 logger = logging.getLogger("argus.fundamental")
 
@@ -95,10 +93,6 @@ def build_compact_prompt(ticker: str, pit_data: dict, anon_id: Optional[str] = N
     as_of = pit_data.get("as_of_date", "")
 
     sector = fundamentals.get("sector", "Unknown")
-    sector_str = (
-        f"[{sector} sector company]" if anon_id else f"{ticker} operates in the {sector} sector."
-    )
-
     industry_median_pe = _SECTOR_PE_MEDIANS.get(sector, _DEFAULT_PE_MEDIAN)
 
     METRIC_LABELS = {
@@ -243,23 +237,31 @@ class FundamentalCache:
 class FundamentalAgent:
     """Agent coordinating LLM valuation and economic moat auditing.
 
-    Uses ChatGroq to construct structured investment theses from
-    ratio payloads, applying local caches, governor rate limits, and exponential
-    back-off on transient failures.
+    Uses an injected LLMClient (Groq by default) to construct structured
+    investment theses from ratio payloads fetched via an injected
+    MarketDataProvider, applying local caches, governor rate limits, and
+    exponential back-off on transient failures.
     """
 
-    def __init__(self) -> None:
-        api_key = settings.groq_api_key
-        if not api_key:
-            logger.warning(
-                "FundamentalAgent: GROQ_API_KEY is not set — LLM calls will fail at invocation time."
+    def __init__(
+        self,
+        llm_client: Optional[LLMClient] = None,
+        market_data: Optional[MarketDataProvider] = None,
+    ) -> None:
+        if llm_client is None:
+            api_key = settings.groq_api_key
+            if not api_key:
+                logger.warning(
+                    "FundamentalAgent: GROQ_API_KEY is not set — LLM calls will fail at invocation time."
+                )
+            llm_client = GroqLLMClient(
+                model="llama-3.3-70b-versatile",
+                temperature=0.1,
+                max_tokens=600,
+                api_key=api_key,
             )
-        self.llm = ChatGroq(
-            model="llama-3.3-70b-versatile",
-            temperature=0.1,
-            max_tokens=600,
-            groq_api_key=api_key,
-        )
+        self.llm_client = llm_client
+        self.market_data = market_data or LiveMarketDataProvider()
         self.cache = FundamentalCache()
 
     def analyze(
@@ -292,12 +294,12 @@ class FundamentalAgent:
             return None
 
         try:
-            fundamentals = fetch_fundamentals(ticker)
+            fundamentals = self.market_data.fundamentals(ticker)
         except Exception as e:
             logger.warning("[Fundamental] Failed to fetch fundamentals for %s: %s", ticker, e)
             return None
 
-        pit_data = {
+        pit_data: dict[str, Any] = {
             "fundamentals": fundamentals,
             "as_of_date": date.today().isoformat(),
         }
@@ -310,20 +312,7 @@ class FundamentalAgent:
 
         for attempt in range(3):
             try:
-                response = self.llm.invoke(
-                    [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
-                )
-                raw = response.content
-                if isinstance(raw, list):
-                    raw = "".join(
-                        item.get("text", "")
-                        for item in raw
-                        if isinstance(item, dict) and item.get("type") == "text"
-                    )
-                elif not isinstance(raw, str):
-                    raw = str(raw)
-
-                raw = raw.strip()
+                raw = self.llm_client.complete(SYSTEM_PROMPT, prompt).strip()
 
                 if raw.startswith("```"):
                     parts = raw.split("```")

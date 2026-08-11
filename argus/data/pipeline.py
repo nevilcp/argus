@@ -24,13 +24,12 @@ import asyncio
 import logging
 from collections.abc import Callable
 from datetime import datetime, time as dtime
-from typing import Optional
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 from argus.data.cache import OHLCVBuffer
-from argus.data.fetchers import DataFetchError, fetch_ohlcv_intraday
+from argus.data.fetchers import fetch_ohlcv_intraday
 
 logger = logging.getLogger("argus.pipeline")
 

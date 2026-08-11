@@ -1,0 +1,80 @@
+{
+  "AAPL": {
+    "rsi_14": 78.6302,
+    "macd_histogram": 0.990848,
+    "bb_percent_b": 0.8912,
+    "atr_pct": 0.019234,
+    "adx_14": 37.0062,
+    "vwap_distance": 0.000432,
+    "volume_ratio": 0.9015,
+    "momentum_30m": 0.035579,
+    "momentum_1d": 0.192361,
+    "close": 308.82,
+    "timestamp": "2026-05-22T00:00:00"
+  },
+  "MSFT": {
+    "rsi_14": 55.1051,
+    "macd_histogram": -0.279221,
+    "bb_percent_b": 0.6079,
+    "atr_pct": 0.026267,
+    "adx_14": 17.1861,
+    "vwap_distance": -0.002851,
+    "volume_ratio": 0.654,
+    "momentum_30m": 0.024538,
+    "momentum_1d": -0.022905,
+    "close": 418.57,
+    "timestamp": "2026-05-22T00:00:00"
+  },
+  "NVDA": {
+    "rsi_14": 53.7138,
+    "macd_histogram": -0.870839,
+    "bb_percent_b": 0.5142,
+    "atr_pct": 0.035236,
+    "adx_14": 28.726,
+    "vwap_distance": -0.007909,
+    "volume_ratio": 1.0353,
+    "momentum_30m": -0.086578,
+    "momentum_1d": 0.126676,
+    "close": 215.33,
+    "timestamp": "2026-05-22T00:00:00"
+  },
+  "JPM": {
+    "rsi_14": 52.807,
+    "macd_histogram": -0.407487,
+    "bb_percent_b": 0.5424,
+    "atr_pct": 0.01962,
+    "adx_14": 20.1186,
+    "vwap_distance": 0.001602,
+    "volume_ratio": 0.7466,
+    "momentum_30m": 0.021573,
+    "momentum_1d": 0.006728,
+    "close": 306.38,
+    "timestamp": "2026-05-22T00:00:00"
+  },
+  "XOM": {
+    "rsi_14": 52.7283,
+    "macd_histogram": 0.806957,
+    "bb_percent_b": 0.6375,
+    "atr_pct": 0.02865,
+    "adx_14": 14.9438,
+    "vwap_distance": 0.002416,
+    "volume_ratio": 0.7449,
+    "momentum_30m": 0.02089,
+    "momentum_1d": 0.110404,
+    "close": 154.92,
+    "timestamp": "2026-05-22T00:00:00"
+  },
+  "GOOGL": {
+    "rsi_14": 57.4929,
+    "macd_histogram": -3.535834,
+    "bb_percent_b": 0.4609,
+    "atr_pct": 0.025807,
+    "adx_14": 44.5432,
+    "vwap_distance": -0.003962,
+    "volume_ratio": 0.6904,
+    "momentum_30m": -0.045129,
+    "momentum_1d": 0.133845,
+    "close": 382.97,
+    "timestamp": "2026-05-22T00:00:00"
+  }
+}

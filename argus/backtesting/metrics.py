@@ -1,15 +1,16 @@
 """
 argus/backtesting/metrics.py
 
-Calculates institutional-grade risk and performance metrics for portfolio backtests.
+Pure return-series risk and performance metrics, reused by PR 10's
+pre-registered evaluation (rank IC, hit-rate-with-dead-band, Sharpe,
+Sortino, max drawdown).
 
 Responsibilities:
   - Compute return, drawdown, benchmark-adjusted, tail-risk, and trade-level statistics
-  - Produce a flat dict suitable for JSON reporting and Phase 2 pass/fail evaluation
+  - Produce a flat dict suitable for JSON reporting
 
 Not responsible for:
-  - Running the backtest simulation (see backtesting/engine.py)
-  - Walk-forward orchestration (see backtesting/walk_forward.py)
+  - Running a backtest or replaying sessions (see backtesting/replay.py)
 
 Dependencies:
   - numpy

@@ -4,7 +4,6 @@ Tests for the Sentiment Agent and its pure-Python helpers.
 
 from datetime import datetime, timedelta
 
-import pytest
 
 from argus.agents.sentiment import aggregate_finbert_scores, SentimentDailyCache
 from argus.schemas.signals import SentimentSignal, Signal
@@ -41,9 +40,7 @@ def test_sentiment_daily_cache():
         pct_positive=0.7,
         pct_negative=0.1,
         news_volume_7d=12,
-        mention_count_7d=100,
         social_volume_change_pct=10.0,
-        social_avg_score=0.5,
         social_mention_surge=True,
         upcoming_catalyst=False,
         signal=Signal.BULLISH,

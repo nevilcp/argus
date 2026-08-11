@@ -20,7 +20,6 @@ from argus.agents.macro import MacroStatisticalAgent
 from argus.agents.portfolio import half_kelly_weight
 from argus.agents.risk import RiskStatisticalEngine
 from argus.agents.technical import TechnicalStatisticalAgent
-from argus.backtesting.pit_enforcer import PointInTimeEnforcer
 from argus.data.pipeline import MFTDataPipeline
 from argus.orchestration.governor import RateLimitExceeded, governor
 from argus.orchestration.graph import graph
@@ -88,10 +87,23 @@ class TestEndToEnd:
         assert r_sig.api_calls_used == 0
 
     @pytest.mark.asyncio
+    @mock.patch("argus.orchestration.graph.get_cultural_memory")
     @mock.patch("argus.agents.fundamental.FundamentalAgent.analyze")
     @mock.patch("argus.agents.sentiment.SentimentAgent.analyze")
-    async def test_full_graph_smoke(self, mock_sent, mock_fund):
-        """Runs the complete LangGraph graph for AAPL, MSFT using mocked LLMs."""
+    async def test_full_graph_smoke(self, mock_sent, mock_fund, mock_cultural_memory):
+        """Runs the complete LangGraph graph for AAPL, MSFT using mocked LLMs.
+
+        Cultural memory is mocked out (not just left real) because its embedding
+        function needs the optional `[models]` extra (sentence-transformers) that
+        default installs/CI don't have — see ADR 0007 — and because this smoke
+        test is about graph wiring, not vector-DB behavior.
+        """
+        mock_cultural_memory.return_value = mock.Mock(
+            retrieve_wisdom=mock.Mock(return_value=[]),
+            retrieve_warnings=mock.Mock(return_value=[]),
+            get_agent_accuracy=mock.Mock(return_value=0.5),
+            store_decision_snapshot=mock.Mock(),
+        )
 
         # analyze(self, ticker, backtest_mode=False, session_seed=None)
         def fund_side_effect(ticker, backtest_mode=False, session_seed=None):
@@ -119,9 +131,7 @@ class TestEndToEnd:
                 pct_positive=0.6,
                 pct_negative=0.1,
                 news_volume_7d=10,
-                mention_count_7d=100,
                 social_volume_change_pct=10.0,
-                social_avg_score=0.4,
                 social_mention_surge=False,
                 upcoming_catalyst=False,
                 sentiment_decay_risk="LOW",
@@ -169,16 +179,6 @@ class TestEndToEnd:
                 pass
             else:
                 raise e
-
-    def test_pit_enforcer_prevents_future_data(self):
-        pit = PointInTimeEnforcer(simulation_date=date(2022, 6, 15))
-        df = pit.get_ohlcv("AAPL", lookback_days=30)
-        assert df.index[-1].date() <= date(2022, 6, 15)
-
-        fund_data = pit.get_fundamentals_pit("NVDA")
-        if "error" not in fund_data:
-            data_date = date.fromisoformat(fund_data["data_as_of_date"])
-            assert data_date <= date(2022, 5, 1)
 
     def test_kill_switch_drawdown_trigger(self):
         ks = KillSwitch("MODERATE", check_interval_seconds=1)
@@ -235,21 +235,22 @@ class TestEndToEnd:
         from argus.orchestration.governor import MODEL_LIMITS
 
         model = "llama-3.3-70b-versatile"
-        limit = MODEL_LIMITS[model].rpd  # e.g., 1000
+        limit = MODEL_LIMITS[model]["requests_per_day"]
 
         # Wind the counter up to one below the limit
-        governor._daily_counts[model] = limit - 1
+        usage = governor._get_usage(model)
+        usage.requests_today = limit - 1
 
         # This call should succeed (count becomes == limit)
         governor.wait_if_needed(model)
-        assert governor._daily_counts[model] == limit
+        assert usage.requests_today == limit
 
         # Next call must raise because count >= limit
         with pytest.raises(RateLimitExceeded):
             governor.wait_if_needed(model)
 
         # Cleanup: reset so other tests aren't affected
-        governor._daily_counts[model] = 0
+        usage.requests_today = 0
 
     def test_half_kelly_formula(self):
         weight = half_kelly_weight(

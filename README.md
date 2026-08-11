@@ -9,7 +9,7 @@ Multi-agent financial intelligence system orchestrating specialist LLMs and stat
 
 ## Overview
 
-ARGUS is an institutional-grade, multi-agent artificial intelligence system designed to automate quantitative equity research. By orchestrating six specialized agents (Technical, Macro, Fundamental, Sentiment, Risk, and Portfolio) as a directed acyclic graph (DAG), ARGUS synthesizes structured investment theses and asset allocations. It is built for quantitative researchers and developers who require a deterministic, auditable, and bias-free pipeline for testing AI-driven trading strategies.
+ARGUS is a multi-agent artificial intelligence system for quantitative equity research. By orchestrating six specialized agents (Technical, Macro, Fundamental, Sentiment, Risk, and Portfolio) as a directed acyclic graph (DAG), ARGUS synthesizes structured investment theses and asset allocations. See [`limitations.md`](limitations.md) for the current, honestly-stated gaps in this system.
 
 - **Parallel Agent Orchestration** — delegates analysis to domain-specific statistical models and LLMs, improving decision accuracy over monolithic prompts.
 - **Strict Point-in-Time Gating** — masks future data during historical backtesting, completely preventing look-ahead and survivorship biases.
@@ -20,7 +20,7 @@ ARGUS is an institutional-grade, multi-agent artificial intelligence system desi
 
 ## Architecture
 
-ARGUS operates as a stateful LangGraph workflow. Data ingestion is handled by an asynchronous pipeline, while decision logic is distributed across parallel analyst nodes before being aggregated and subjected to a quantitative risk audit.
+ARGUS operates as a stateful LangGraph workflow. Data ingestion is handled by an asynchronous pipeline, while decision logic is distributed across parallel analyst nodes before being aggregated and subjected to a quantitative risk audit. See [`docs/adr/`](docs/adr/) for the reasoning behind specific design decisions.
 
 ```mermaid
 flowchart TD
@@ -103,13 +103,11 @@ flowchart TD
         direction LR
         KS["KillSwitch Daemon\nBackground thread · 60s poll\nDrawdown: 8/12/18% by tolerance\nVIX Blackout ≥ 35 → block positions\nHalt file → manual reset required"]
         GOV["RateLimitGovernor\nSingleton · thread-safe\nRPM sliding window (sleep)\nRPD hard cap (exception)\nTPM warning"]
-        PIT["PointInTimeEnforcer\nBacktest mode gate\nMasks all data after sim date\nLook-ahead bias prevention"]
     end
 
     YF -->|"^VIX every 60s"| KS
     KS -->|"is_halted / new_positions_allowed\nchecked before graph invoke"| GATE
     GOV -.-|"wait_if_needed() before\nevery LLM call"| N3 & N4 & N8
-    PIT -.-|"date-gates yfinance\n& FRED fetchers"| N0 & N1
 
     %% ── Styles ───────────────────────────────────────────────────────────
     classDef stat   fill:#1e3a5f,stroke:#4a90d9,color:#e8f4f8
@@ -194,34 +192,29 @@ Required environment variables must be placed in a `.env` file at the project ro
 
 ## Quick Start / Usage
 
-### Running a Backtest
-Initiate a backtest job across a specific ticker universe to evaluate the strategy historically.
+### Replaying a recorded session
+There is no `/backtest` API endpoint — see
+[`docs/adr/0009-no-multiyear-backtest.md`](docs/adr/0009-no-multiyear-backtest.md)
+for why a multi-year walk-forward backtest isn't offered.
+`scripts/replay_backtest.py` replays recorded fixture sessions through the
+real graph instead:
 
 ```bash
-curl -X POST http://localhost:8000/backtest \
-  -H "Content-Type: application/json" \
-  -d '{
-    "tickers": ["AAPL","MSFT","NVDA","JPM","XOM"],
-    "start_date": "2023-01-01",
-    "end_date":   "2023-12-31",
-    "initial_cash": 100000,
-    "risk_tolerance": "MODERATE",
-    "run_bias_audit": true
-  }'
+.venv/bin/python -m scripts.replay_backtest
 ```
 
-```json
-{
-  "job_id": "bt_179a6d92_44cf",
-  "status": "queued",
-  "message": "Backtest initiated."
-}
-```
+### Pre-registered evaluation
 
-### Accessing the Dashboard
-ARGUS includes a Streamlit UI for reviewing live signals and system health.
+`scripts/run_evaluation.py` scores replayed decisions against real forward
+returns (rank IC, hit-rate-with-dead-band, open-loop vs. closed-loop
+reliability weighting), per
+[`docs/adr/0012-pre-registered-evaluation.md`](docs/adr/0012-pre-registered-evaluation.md).
+Results are committed at
+[`docs/evaluation-results.md`](docs/evaluation-results.md) — including
+where reliability weighting did not measurably help.
+
 ```bash
-streamlit run ui/app.py --server.port 8501
+.venv/bin/python -m scripts.run_evaluation
 ```
 
 ## Project Structure
@@ -231,14 +224,16 @@ streamlit run ui/app.py --server.port 8501
 ├── api/                  # FastAPI entrypoint, HTTP routing, and market-hours gating
 ├── argus/
 │   ├── agents/           # Core AI components (Macro, Fundamental, Sentiment, Risk, Portfolio)
-│   ├── backtesting/      # Walk-forward validation engine and Point-In-Time enforcers
+│   ├── backtesting/      # Return-series metrics and fixture-session replay (see ADR 0009)
 │   ├── data/             # MFT Pipeline, OHLCV SQLite buffer, and external API fetchers
 │   ├── memory/           # ChromaDB-backed cultural wisdom retrieval mechanisms
 │   ├── orchestration/    # LangGraph definition, safety governors, and kill-switches
 │   └── schemas/          # Pydantic data contracts defining all inter-agent signaling
 ├── chroma_db/            # (Auto-generated) Local persistent vector database
+├── docs/                 # Case study, evaluation results, project notes
+│   ├── adr/              # Architecture decision records
+│   └── historical/       # Pre-rebuild docs, kept as evidence for the case study
 ├── tests/                # Deterministic unit tests covering agents and pipelines
-├── ui/                   # Streamlit frontend dashboard
 ├── argus_graph.db        # (Auto-generated) SQLite state checkpointer for LangGraph
 ├── pyproject.toml        # Project dependencies and build configuration
 └── docker-compose.yml    # Multi-container orchestration definition
@@ -246,7 +241,7 @@ streamlit run ui/app.py --server.port 8501
 
 ## Testing
 
-ARGUS includes a comprehensive suite of deterministic unit tests that execute without triggering external API calls (via `pytest-mock`), covering core agents, rate limit governors, and the intraday MFT pipeline.
+ARGUS includes a suite of deterministic unit tests that execute without triggering external API calls (via `pytest-mock`), covering core agents, rate limit governors, and the intraday MFT pipeline.
 
 **Run the full test suite:**
 ```bash
@@ -258,11 +253,13 @@ pytest tests/ -v
 
 ## Contributing
 
-N/A — ARGUS is currently maintained as a private research and portfolio project. External pull requests are closed, though forks for personal experimentation are welcome.
+N/A — ARGUS is currently maintained as a private research and portfolio project. External pull requests are closed, though forks for personal experimentation are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the standing agent rules used while developing this repo.
 
 ## Roadmap
 
-N/A — The core architecture is feature-complete for its current research scope.
+The rebuild planned in [issue #1](https://github.com/nevilcp/argus/issues/1) is complete: the decision→outcome loop is closed, the eleven unwired mechanisms are wired or deleted, and the result is measured against a pre-registered bar. [`docs/case-study.md`](docs/case-study.md) is the investigation behind it, written up end to end — including where the change did not help.
+
+Next, in rough priority order: accumulate enough resolved outcomes for reliability weighting to have evidence to work with (the evaluation ran at n=6 with zero resolved outcomes, so weighting could not yet differ from the 0.5 prior), then re-run the pre-registered evaluation at a sample size that can actually reject the null.
 
 ## License & Acknowledgements
 
@@ -271,4 +268,3 @@ N/A — The core architecture is feature-complete for its current research scope
 **Acknowledgements**:
 - [LangGraph](https://github.com/langchain-ai/langgraph) for cyclic agent orchestration.
 - [ProsusAI/finbert](https://huggingface.co/ProsusAI/finbert) for financial domain sentiment classification.
-- [Backtrader](https://www.backtrader.com/) for the foundational event-driven backtesting engine.
