@@ -32,8 +32,9 @@ import yfinance as yf
 from hmmlearn.hmm import GaussianHMM
 from sklearn.preprocessing import StandardScaler
 
-from argus.data.fetchers import fetch_fred_series, fetch_macro_bundle, fetch_ohlcv_daily
+from argus.data.fetchers import fetch_fred_series
 from argus.schemas.signals import MacroContext, Regime, SectorSignal, VixRegime, YieldCurve
+from argus.seams import LiveMarketDataProvider, MarketDataProvider
 
 logger = logging.getLogger("argus.macro")
 
@@ -183,13 +184,19 @@ class MacroStatisticalAgent:
     cached MacroContext objects with a 6-hour TTL to avoid redundant FRED fetches.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, market_data: Optional[MarketDataProvider] = None) -> None:
         self.classifier = RegimeClassifier()
         self._cache: Tuple[MacroContext, datetime] | None = None
         self._cache_ttl_hours = 6
+        self.market_data = market_data or LiveMarketDataProvider()
 
     def fit_on_history(self, start_date: str = "2010-01-01") -> None:
         """Fetches complete macroeconomic histories to fit the latent HMM classifier.
+
+        Not part of the injectable seam: this is an offline training utility,
+        not exercised by the live `analyze()` path graph.py invokes, and its
+        direct `yf.download` call for VIX history has no equivalent in
+        MarketDataProvider (see docs/adr/0007-injection-seam.md).
 
         Args:
             start_date: ISO date string defining the beginning of the training window.
@@ -247,7 +254,7 @@ class MacroStatisticalAgent:
                 logger.debug("MacroStatisticalAgent.analyze: Cache hit.")
                 return ctx
 
-        current = fetch_macro_bundle()
+        current = self.market_data.macro_bundle()
         regime_str, confidence = self.classifier.predict(current)
         regime = Regime(regime_str)
 
@@ -270,7 +277,7 @@ class MacroStatisticalAgent:
 
         vix_percentile = 50.0
         try:
-            vix_hist = fetch_ohlcv_daily("^VIX", period="2y")
+            vix_hist = self.market_data.ohlcv_daily("^VIX", period="2y")
             closes = vix_hist["close"].dropna()
             if not closes.empty:
                 vix_percentile = float((closes < vix).mean() * 100.0)
@@ -293,7 +300,7 @@ class MacroStatisticalAgent:
         # Determine 6-month trailing interest rate trend against historical baseline
         interest_rate_trend = "STABLE"
         try:
-            ff_hist = fetch_fred_series("FEDFUNDS")
+            ff_hist = self.market_data.fred_series("FEDFUNDS")
             if len(ff_hist) > 6:
                 ff_6m_ago = ff_hist.iloc[-7]
                 if fed_funds > ff_6m_ago + 0.25:
@@ -321,7 +328,7 @@ class MacroStatisticalAgent:
         # Determine 3-month trailing inflation trajectory
         inflation_traj = "STABLE"
         try:
-            cpi_hist = fetch_fred_series("CPIAUCSL")
+            cpi_hist = self.market_data.fred_series("CPIAUCSL")
             cpi_yoy_hist = cpi_hist.pct_change(12) * 100.0
             cpi_yoy_hist = cpi_yoy_hist.dropna()
             if len(cpi_yoy_hist) > 3:

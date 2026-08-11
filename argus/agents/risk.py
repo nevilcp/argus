@@ -29,14 +29,16 @@ import pandas as pd
 from scipy.optimize import minimize
 
 from argus.config import settings
+from argus.params import RISK
 from argus.schemas.signals import RiskAssessment, RiskVerdict
+from argus.seams import LiveMarketDataProvider, MarketDataProvider
 
 logger = logging.getLogger("argus.risk")
 
 # Stores (sector_string, cached_at) per ticker. 24-hour TTL ensures corporate
 # reclassifications (acquisitions, spin-offs) are reflected without a restart.
 _SECTOR_CACHE: dict[str, tuple[str, datetime]] = {}
-_SECTOR_CACHE_TTL_SECONDS = 86400  # 24 hours
+_SECTOR_CACHE_TTL_SECONDS = RISK.sector_cache_ttl_seconds  # 24 hours
 
 
 def get_sector(ticker: str) -> str:
@@ -71,7 +73,7 @@ def get_sector(ticker: str) -> str:
 
 
 def compute_portfolio_returns(
-    positions: list[dict], price_history: dict[str, pd.Series], lookback: int = 252
+    positions: list[dict], price_history: dict[str, pd.Series], lookback: int = RISK.returns_lookback_days
 ) -> pd.DataFrame:
     """Calculates daily historical returns adjusted by proposed weights over a lookback window.
 
@@ -95,7 +97,7 @@ def compute_portfolio_returns(
     return df
 
 
-def historical_var(portfolio_returns: pd.Series, confidence: float = 0.99) -> float:
+def historical_var(portfolio_returns: pd.Series, confidence: float = RISK.var_confidence) -> float:
     """Evaluates historical Value-at-Risk (VaR) at a target confidence percentile.
 
     Args:
@@ -112,7 +114,7 @@ def historical_var(portfolio_returns: pd.Series, confidence: float = 0.99) -> fl
     return abs(val)
 
 
-def conditional_var(portfolio_returns: pd.Series, confidence: float = 0.99) -> float:
+def conditional_var(portfolio_returns: pd.Series, confidence: float = RISK.cvar_confidence) -> float:
     """Calculates Conditional Value-at-Risk (CVaR / Expected Shortfall) in the tail distribution.
 
     Args:
@@ -130,7 +132,10 @@ def conditional_var(portfolio_returns: pd.Series, confidence: float = 0.99) -> f
 
 
 def ols_portfolio_beta(
-    positions: list[dict], price_history: dict[str, pd.Series], benchmark_ticker: str = "SPY"
+    positions: list[dict],
+    price_history: dict[str, pd.Series],
+    benchmark_ticker: str = "SPY",
+    market_data: Optional[MarketDataProvider] = None,
 ) -> float:
     """Computes weighted Ordinary Least Squares (OLS) portfolio beta against a benchmark index.
 
@@ -138,6 +143,8 @@ def ols_portfolio_beta(
         positions: List of dicts with keys ``ticker`` and ``weight``.
         price_history: Mapping of ticker → daily close price Series.
         benchmark_ticker: Index to use as market proxy (default 'SPY').
+        market_data: Source for the benchmark series when it isn't already in
+            ``price_history``. Defaults to a live fetch.
 
     Returns:
         Dollar-weighted portfolio beta. Returns 1.0 if the benchmark cannot be fetched or
@@ -148,9 +155,9 @@ def ols_portfolio_beta(
 
     if benchmark_ticker not in price_history:
         try:
-            from argus.data.fetchers import fetch_ohlcv_daily
-
-            spy_df = fetch_ohlcv_daily(benchmark_ticker, period="1y")
+            spy_df = (market_data or LiveMarketDataProvider()).ohlcv_daily(
+                benchmark_ticker, period="1y"
+            )
             spy_returns = spy_df["close"].pct_change().dropna()
         except Exception:
             logger.warning("ols_portfolio_beta: benchmark fetch failed, returning 1.0")
@@ -171,7 +178,7 @@ def ols_portfolio_beta(
         if ticker in price_history:
             ret = price_history[ticker].pct_change().dropna()
             df = pd.DataFrame({"asset": ret, "spy": spy_returns}).dropna()
-            if len(df) > 10:
+            if len(df) > RISK.min_beta_overlap_points:
                 cov = df.cov().iloc[0, 1]
                 beta = cov / spy_var
                 betas.append(beta)
@@ -200,7 +207,7 @@ def avg_pairwise_correlation(returns_matrix: pd.DataFrame) -> float:
 
 
 def atr_stop_losses(
-    positions: list[dict], price_history: dict[str, pd.Series], atr_multiplier: float = 2.5
+    positions: list[dict], price_history: dict[str, pd.Series], atr_multiplier: float = RISK.atr_multiplier
 ) -> dict[str, float]:
     """Derives dynamic stop-loss bounds using Average True Range (ATR-14) metrics.
 
@@ -218,13 +225,13 @@ def atr_stop_losses(
         ticker = pos["ticker"]
         if ticker in price_history:
             series = price_history[ticker]
-            if len(series) > 14:
+            if len(series) > RISK.atr_period:
                 # NOTE: price_history contains only daily close prices, so true_range here is
                 # the absolute daily close-to-close change — not the canonical H-L-Cprev True Range.
                 # This understates ATR for volatile stocks with large intraday gaps.
                 # A full ATR requires OHLCV data; pass it to this function if precision is required.
                 true_range = series.diff().abs().dropna()
-                atr_14 = true_range.tail(14).mean()
+                atr_14 = true_range.tail(RISK.atr_period).mean()
                 latest_close = float(series.iloc[-1])
                 stops[ticker] = max(0.0, latest_close - (atr_14 * atr_multiplier))
     return stops
@@ -263,11 +270,12 @@ class RiskStatisticalEngine:
     Returns a RiskAssessment with APPROVE, REDUCE, or VETO verdict.
     """
 
-    def __init__(self) -> None:
-        self.max_position_pct = getattr(settings, "MAX_SINGLE_POSITION_PCT", 0.15)
-        self.max_sector_pct = getattr(settings, "MAX_SECTOR_CONCENTRATION", 0.35)
-        self.vix_blackout = getattr(settings, "VIX_BLACKOUT_THRESHOLD", 35.0)
-        self.max_port_beta = getattr(settings, "MAX_PORTFOLIO_BETA", 1.5)
+    def __init__(self, market_data: Optional[MarketDataProvider] = None) -> None:
+        self.max_position_pct = settings.MAX_SINGLE_POSITION_PCT
+        self.max_sector_pct = settings.MAX_SECTOR_CONCENTRATION
+        self.vix_blackout = settings.VIX_BLACKOUT_THRESHOLD
+        self.max_port_beta = settings.MAX_PORTFOLIO_BETA
+        self.market_data = market_data or LiveMarketDataProvider()
 
     def evaluate(
         self,
@@ -301,13 +309,19 @@ class RiskStatisticalEngine:
                     f"{pos['ticker']} weight {pos['weight']:.1%} > limit {self.max_position_pct:.1%}"
                 )
 
-        if len(proposed_positions) > 1 and len(proposed_positions) < 5 and total_weight > 0:
+        if (
+            len(proposed_positions) > 1
+            and len(proposed_positions) < RISK.min_positions_diversification
+            and total_weight > 0
+        ):
             violations.append(
-                f"Insufficient diversification: {len(proposed_positions)} positions (min 5)"
+                f"Insufficient diversification: {len(proposed_positions)} positions (min {RISK.min_positions_diversification})"
             )
 
-        if len(proposed_positions) > 20:
-            violations.append(f"Over-diversification: {len(proposed_positions)} positions (max 20)")
+        if len(proposed_positions) > RISK.max_positions:
+            violations.append(
+                f"Over-diversification: {len(proposed_positions)} positions (max {RISK.max_positions})"
+            )
 
         if current_vix >= self.vix_blackout:
             violations.append(
@@ -364,7 +378,7 @@ class RiskStatisticalEngine:
                     if _conv:
                         alpha = sum(w[i] * _conv.get(tickers[i], 0.0) for i in range(n))
                         # Lambda=1.0 trades off return conviction against variance equally
-                        return -alpha + 1.0 * variance
+                        return -alpha + RISK.slsqp_risk_aversion * variance
                     return variance
 
                 w0 = np.full(n, min(self.max_position_pct, 1.0 / n))
@@ -381,7 +395,9 @@ class RiskStatisticalEngine:
                         }
                     )
                 # Require aggregate equity deployment of at least 50%
-                cons.append({"type": "ineq", "fun": lambda w: np.sum(w) - 0.50})
+                cons.append(
+                    {"type": "ineq", "fun": lambda w: np.sum(w) - RISK.slsqp_min_equity_deployment}
+                )
 
                 res = minimize(
                     _obj,
@@ -389,7 +405,7 @@ class RiskStatisticalEngine:
                     method="SLSQP",
                     bounds=bounds,
                     constraints=cons,
-                    options={"ftol": 1e-9, "maxiter": 300},
+                    options={"ftol": RISK.slsqp_ftol, "maxiter": RISK.slsqp_maxiter},
                 )
                 if res.success:
                     optimal_weights = {tickers[i]: float(res.x[i]) for i in range(n)}
@@ -403,18 +419,18 @@ class RiskStatisticalEngine:
 
         var99 = historical_var(port_returns)
         cvar = conditional_var(port_returns)
-        beta = ols_portfolio_beta(proposed_positions, price_history)
+        beta = ols_portfolio_beta(proposed_positions, price_history, market_data=self.market_data)
         corr = avg_pairwise_correlation(returns)
 
         stat_violations: list[str] = []
-        if var99 > 0.03:
-            stat_violations.append(f"VaR 99%: {var99:.2%} > 3% limit")
-        if cvar > 0.05:
-            stat_violations.append(f"CVaR: {cvar:.2%} > 5% limit")
+        if var99 > RISK.var_limit:
+            stat_violations.append(f"VaR 99%: {var99:.2%} > {RISK.var_limit:.0%} limit")
+        if cvar > RISK.cvar_limit:
+            stat_violations.append(f"CVaR: {cvar:.2%} > {RISK.cvar_limit:.0%} limit")
         if beta > self.max_port_beta:
             stat_violations.append(f"Beta {beta:.2f} > {self.max_port_beta:.2f}")
-        if corr > 0.75:
-            stat_violations.append("Avg correlation > 0.75 — reduce overlap")
+        if corr > RISK.correlation_limit:
+            stat_violations.append(f"Avg correlation > {RISK.correlation_limit} — reduce overlap")
         if has_sector_violation:
             for sec, w in sector_weights.items():
                 if w > self.max_sector_pct:
@@ -427,7 +443,7 @@ class RiskStatisticalEngine:
             logger.debug("Risk evaluate: REDUCE due to %s", stat_violations)
             return RiskAssessment(
                 verdict=RiskVerdict.REDUCE,
-                approved_weight=min(total_weight * 0.5, total_weight),
+                approved_weight=min(total_weight * RISK.reduce_weight_multiplier, total_weight),
                 proposed_weight=total_weight,
                 veto_reasons=stat_violations,
                 optimal_weights=optimal_weights,

@@ -4,11 +4,15 @@ api/main.py
 
 FastAPI gateway service for the ARGUS multi-agent decision system.
 
-Exposes REST API endpoints to orchestrate execution graphs, invoke walk-forward
-backtesting simulations, and audit system safety/governor statistics.
+Exposes REST API endpoints to orchestrate execution graphs and audit system
+safety/governor statistics. There is no live /backtest endpoint — see
+docs/adr/0009-no-multiyear-backtest.md for why a multi-year walk-forward
+backtest isn't offered; scripts/replay_backtest.py replays recorded
+fixtures through this same graph over the ~60-day window that is
+genuinely available.
 
 Responsibilities:
-  - Route analysis and backtesting requests to the LangGraph execution pipeline
+  - Route analysis requests to the LangGraph execution pipeline
   - Enforce kill-switch and VIX blackout checks before every allocation request
   - Expose health, memory, governor, and kill-switch management endpoints
   - Host the MFT pipeline as a background asyncio task and maintain a live
@@ -28,7 +32,7 @@ from uuid import uuid4
 
 from dotenv import load_dotenv
 
-# .env must be loaded before any LangChain/Groq/Gemini imports that read env vars
+# .env must be loaded before any LangChain/Groq imports that read env vars
 load_dotenv()
 
 from fastapi import FastAPI, HTTPException
@@ -36,14 +40,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from argus.agents.macro import MacroStatisticalAgent
-from argus.backtesting.engine import run_backtest
-from argus.config import settings
 from argus.data.pipeline import MFTDataPipeline
-from argus.memory.cultural import cultural_memory
+from argus.memory.cultural import get_cultural_memory
 from argus.orchestration.governor import governor
 from argus.orchestration.graph import graph
 from argus.orchestration.state import ARGUSState
-from argus.risk.kill_switch import get_kill_switch
+from argus.risk.kill_switch import get_kill_switch, initialize_kill_switch
 
 logger = logging.getLogger("argus.api")
 
@@ -74,19 +76,6 @@ class AnalysisResponse(BaseModel):
     governor_report: dict
     timestamp: str
 
-
-class BacktestRequest(BaseModel):
-    """Request payload parameters for executing historical walk-forward backtesting."""
-
-    tickers: list[str]
-    start_date: str = "2021-01-04"
-    end_date: str = "2024-12-31"
-    initial_cash: float = 100_000.0
-    risk_tolerance: str = "MODERATE"
-    run_bias_audit: bool = True
-
-
-_backtest_jobs: dict[str, dict] = {}
 
 # Live 5-minute intraday session states keyed by ticker, populated by the MFT
 # background loop. Read by /analyze and injected into ARGUSState before graph
@@ -139,6 +128,11 @@ async def startup_event():
     asyncio.create_task(_mft_pipeline.start(on_session_ready=_mft_session_callback))
     logger.info("[Startup] MFT pipeline background task launched.")
 
+    # Default risk tolerance and inception value; /kill-switch/reset re-bases
+    # this once the actual session's total_wealth and risk_tolerance are known.
+    initialize_kill_switch(risk_tolerance="MODERATE", portfolio_value=100_000.0)
+    logger.info("[Startup] Kill switch initialized.")
+
     logger.info("[Startup] Governor initialized: %s", governor.get_usage_report())
 
 
@@ -156,7 +150,7 @@ async def health():
         "model_versions": {
             "synthesis": "llama-3.3-70b-versatile",
             "sentiment": "llama-3.1-8b-instant",
-            "fundamental": "gemini-3.5-flash",
+            "fundamental": "llama-3.3-70b-versatile",
             "finbert": "ProsusAI/finbert",
         },
         "can_make_calls": can_make_calls,
@@ -267,52 +261,10 @@ async def analyze(req: AnalysisRequest):
     )
 
 
-@app.post("/backtest")
-async def run_backtest_endpoint(req: BacktestRequest):
-    """Executes a synchronous walk-forward historical backtesting simulation.
-
-    Args:
-        req: BacktestRequest with tickers, date range, initial_cash, and risk_tolerance.
-
-    Returns:
-        Dict with job_id, status, and results from the backtest engine.
-
-    Raises:
-        HTTPException 500: If the backtest engine raises an exception.
-    """
-    job_id = str(uuid4())
-    try:
-        results = await asyncio.to_thread(
-            run_backtest,
-            universe=req.tickers,
-            start=req.start_date,
-            end=req.end_date,
-            initial_cash=req.initial_cash,
-            invest_pct=0.80,
-            risk_tolerance=req.risk_tolerance,
-        )
-        return {"job_id": job_id, "status": "COMPLETED", "results": results}
-    except Exception as e:
-        logger.error("[API] Backtest failed: %s", e)
-        raise HTTPException(500, f"Backtest failed: {str(e)}")
-
-
-@app.get("/backtest/{job_id}")
-async def get_backtest_result(job_id: str):
-    """Deprecated endpoint; historical simulation results are returned synchronously.
-
-    Raises:
-        HTTPException 404: Always; async polling is no longer supported.
-    """
-    raise HTTPException(
-        404, "Job ID polling is no longer supported; POST /backtest is now synchronous."
-    )
-
-
 @app.get("/memory/stats")
 async def get_memory_stats():
     """Retrieves high-level metadata and diagnostic stats from the vector DB memory vault."""
-    return cultural_memory.summary_stats()
+    return get_cultural_memory().summary_stats()
 
 
 @app.get("/governor/report")
