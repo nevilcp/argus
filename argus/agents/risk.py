@@ -35,8 +35,8 @@ from argus.seams import LiveMarketDataProvider, MarketDataProvider
 
 logger = logging.getLogger("argus.risk")
 
-# Stores (sector_string, cached_at) per ticker. 24-hour TTL ensures corporate
-# reclassifications (acquisitions, spin-offs) are reflected without a restart.
+# Stores (sector_string, cached_at) per ticker; 24h TTL reflects corporate reclassifications
+# (M&A, spin-offs) without a restart
 _SECTOR_CACHE: dict[str, tuple[str, datetime]] = {}
 _SECTOR_CACHE_TTL_SECONDS = RISK.sector_cache_ttl_seconds  # 24 hours
 
@@ -226,10 +226,8 @@ def atr_stop_losses(
         if ticker in price_history:
             series = price_history[ticker]
             if len(series) > RISK.atr_period:
-                # NOTE: price_history contains only daily close prices, so true_range here is
-                # the absolute daily close-to-close change — not the canonical H-L-Cprev True Range.
-                # This understates ATR for volatile stocks with large intraday gaps.
-                # A full ATR requires OHLCV data; pass it to this function if precision is required.
+                # NOTE: true_range is close-to-close diff, not H-L-Cprev — understates ATR for
+                # volatile stocks with large intraday gaps; pass OHLCV data here for precision
                 true_range = series.diff().abs().dropna()
                 atr_14 = true_range.tail(RISK.atr_period).mean()
                 latest_close = float(series.iloc[-1])
@@ -271,6 +269,11 @@ class RiskStatisticalEngine:
     """
 
     def __init__(self, market_data: Optional[MarketDataProvider] = None) -> None:
+        """Loads gate thresholds from settings.
+
+        Args:
+            market_data: Provider for price/beta lookups; defaults to live fetches.
+        """
         self.max_position_pct = settings.MAX_SINGLE_POSITION_PCT
         self.max_sector_pct = settings.MAX_SECTOR_CONCENTRATION
         self.vix_blackout = settings.VIX_BLACKOUT_THRESHOLD

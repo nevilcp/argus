@@ -56,6 +56,11 @@ class MFTDataPipeline:
         self,
         tickers: list[str],
     ) -> None:
+        """Creates the pipeline with an in-memory candle buffer for the given universe.
+
+        Args:
+            tickers: Initial ticker universe to track.
+        """
         self.tickers = tickers
         self.buffer = OHLCVBuffer(db_path=":memory:", buffer_size=78)
         self.running = False

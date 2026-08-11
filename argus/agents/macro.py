@@ -48,6 +48,12 @@ class RegimeClassifier:
     """
 
     def __init__(self, n_components: int = 3, random_state: int = 42) -> None:
+        """Builds the underlying Gaussian HMM, untrained.
+
+        Args:
+            n_components: Number of latent regime states.
+            random_state: Seed for the HMM's random initialization.
+        """
         self.hmm = GaussianHMM(
             n_components=n_components,
             covariance_type="full",
@@ -185,6 +191,11 @@ class MacroStatisticalAgent:
     """
 
     def __init__(self, market_data: Optional[MarketDataProvider] = None) -> None:
+        """Builds an untrained classifier; call fit_on_history before first use.
+
+        Args:
+            market_data: Provider for FRED/macro fetches; defaults to live fetches.
+        """
         self.classifier = RegimeClassifier()
         self._cache: Tuple[MacroContext, datetime] | None = None
         self._cache_ttl_hours = 6
@@ -196,7 +207,7 @@ class MacroStatisticalAgent:
         Not part of the injectable seam: this is an offline training utility,
         not exercised by the live `analyze()` path graph.py invokes, and its
         direct `yf.download` call for VIX history has no equivalent in
-        MarketDataProvider (see docs/adr/0007-injection-seam.md).
+        MarketDataProvider.
 
         Args:
             start_date: ISO date string defining the beginning of the training window.

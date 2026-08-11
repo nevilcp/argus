@@ -5,8 +5,8 @@ Property-based test on HybridSignalAggregator.aggregate() — a pure function
 of its four signal/macro inputs. The invariant under test: no matter how
 strongly technical/fundamental/sentiment agree, and no matter what macro
 multiplier scales their votes, the aggregated conviction never claims more
-certainty than argus.params.AGGREGATOR.max_conviction (0.95) — see ADR 0006
-("kept below 1.0 so no aggregate claims certainty").
+certainty than argus.params.AGGREGATOR.max_conviction (0.95), kept below 1.0 so no
+aggregate claims certainty.
 """
 
 from datetime import datetime
@@ -127,6 +127,7 @@ def test_aggregated_conviction_never_exceeds_cap(
     tech_signal, tech_conv, fund_signal, fund_conv, sent_signal, sent_conv,
     regime, fund_mult, tech_mult, sent_mult,
 ):
+    """Aggregated conviction stays within [0, max_conviction] for any input combination."""
     aggregator = HybridSignalAggregator()
     result = aggregator.aggregate(
         technical=_technical(tech_signal, tech_conv),

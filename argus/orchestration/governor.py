@@ -90,6 +90,7 @@ class RateLimitGovernor:
     """
 
     def __init__(self) -> None:
+        """Initializes empty per-model usage tracking."""
         self._usage: dict[str, ModelUsage] = {}
         self._lock = threading.Lock()
         logger.info("RateLimitGovernor initialized with %d model profiles", len(MODEL_LIMITS))

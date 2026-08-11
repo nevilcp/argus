@@ -1,9 +1,8 @@
 """
 argus/backtesting/evaluation.py
 
-PR 10's pre-registered evaluation (see docs/adr/0012-pre-registered-evaluation.md
-for what is measured, why, and the success threshold fixed before any of
-this module's output was observed).
+Pre-registered evaluation of the outcome loop: what is measured, why, and
+the success threshold fixed before any of this module's output was observed.
 
 Responsibilities:
   - Pair each decision's signed conviction with its realized forward return
@@ -15,8 +14,8 @@ Responsibilities:
 
 Not responsible for:
   - Running the replay itself (see backtesting/replay.py)
-  - Deciding what horizon/dead-band/threshold to use (fixed in ADR 0012 and
-    read from argus/params.py, not re-derived here)
+  - Deciding what horizon/dead-band/threshold to use (fixed ahead of time
+    and read from argus/params.py, not re-derived here)
 
 Dependencies:
   - numpy, scipy (statistics)
@@ -80,7 +79,7 @@ def collect_paired_outcomes(
     parallel notion of "outcome". Decisions with no aggregated signal, no
     allocation, or whose horizon hasn't cleared against market_data are
     skipped (see compute_realized_return's docstring for why: deferred
-    rather than fabricated, per ADR 0002).
+    rather than fabricated).
 
     Args:
         decisions: Completed ARGUSDecision objects, e.g. from a replayed
@@ -135,7 +134,7 @@ def hit_rate_with_deadband(pairs: Sequence[PairedOutcome], deadband: float) -> t
     Decisions whose forward return falls within +/-deadband are excluded —
     mirroring cultural.store_trade_outcome's own dead band
     (RECONCILIATION.min_abs_return_for_storage), not a second invented
-    threshold (see ADR 0012).
+    threshold.
 
     Args:
         pairs: Paired outcomes to score.
@@ -167,8 +166,8 @@ def bootstrap_ci(
 
     Paired resampling (each resample draws whole PairedOutcome tuples, with
     replacement) rather than a closed-form CI — at the sample sizes this
-    evaluation actually has (see ADR 0012), asymptotic-normality assumptions
-    behind closed-form Spearman CIs don't hold.
+    evaluation actually has, asymptotic-normality assumptions behind
+    closed-form Spearman CIs don't hold.
 
     Args:
         pairs: Paired outcomes to resample from.
@@ -230,9 +229,9 @@ def evaluate_decisions(
         decisions: Completed ARGUSDecision objects.
         market_data: Source of each ticker's daily close price series.
         horizon_days: Calendar days after session_timestamp defining the
-            target exit date (ADR 0012 pre-registers 5).
+            target exit date (pre-registered at 5).
         deadband: Absolute forward-return threshold for hit-rate exclusion
-            (ADR 0012 pre-registers RECONCILIATION.min_abs_return_for_storage).
+            (pre-registered as RECONCILIATION.min_abs_return_for_storage).
 
     Returns:
         EvaluationResult with rank IC, hit-rate, and bootstrap CIs for both.
@@ -258,7 +257,7 @@ def evaluate_decisions(
 @dataclass(frozen=True)
 class SystemBehaviorReport:
     """System-behavior metrics for one replayed session — reported separately from
-    (never blended into) EvaluationResult's predictive metrics. See ADR 0012.
+    (never blended into) EvaluationResult's predictive metrics.
     """
 
     tickers_total: int
@@ -279,7 +278,7 @@ def system_behavior_report(session_result: SessionResult) -> SystemBehaviorRepor
     Constraint violations are reported as 0 by construction:
     RiskAssessment.approved_weight <= proposed_weight is a Pydantic
     model_validator, so a violating instance cannot exist in
-    final_state["decisions"] in the first place (see ADR 0012).
+    final_state["decisions"] in the first place.
     Retries and tokens/decision are not currently instrumented anywhere in
     the codebase at decision granularity — reported as a disclosed gap
     rather than fabricated.
@@ -318,8 +317,7 @@ def check_replay_determinism(session_dir: Path) -> bool:
 
     closed_loop=True is intentionally not checked here — it reads live
     chroma_db state, which reconciliation can mutate between runs, so
-    determinism isn't a property closed-loop replay is expected to have
-    (see ADR 0012).
+    determinism isn't a property closed-loop replay is expected to have.
 
     Args:
         session_dir: Directory shaped like tests/fixtures/.

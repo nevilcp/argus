@@ -4,8 +4,7 @@ argus/params.py
 Single source of truth for every free (hand-set, non-derived) numeric
 parameter in ARGUS, each tagged with where its value came from.
 
-See docs/adr/0006-parameter-provenance.md for the rationale. In short: a
-system that mixes textbook constants (RSI period 14), industry convention
+A system that mixes textbook constants (RSI period 14), industry convention
 (RSI 30/70 overbought/oversold), values tuned against ARGUS's own data, and
 outright guesses reads identically in the source unless the provenance is
 written down next to the value. This module makes that distinction
@@ -19,9 +18,9 @@ Provenance categories:
                 (e.g. RSI 30/70 bands, half-Kelly sizing).
   CALIBRATED  — tuned against ARGUS's own data or backtests. As of this
                 writing there is no honest instance of this category: the
-                Phase 1/2 calibration harness measured a constant (see
-                docs/adr/0006) and PR 7 deletes it. Any future value in
-                this category must point at real evidence.
+                Phase 1/2 calibration harness measured a constant and PR 7
+                deletes it. Any future value in this category must point at
+                real evidence.
   ARBITRARY   — a guess with no basis beyond "seemed reasonable". Writing
                 ARBITRARY where it is arbitrary is the point of this
                 module: it is a to-do list for what needs real evaluation.
@@ -40,6 +39,8 @@ PARAMS_VERSION = 1
 
 
 class Provenance(str, Enum):
+    """Where a parameter's value came from: see the module docstring for definitions."""
+
     LITERATURE = "literature"
     CONVENTION = "convention"
     CALIBRATED = "calibrated"
@@ -53,6 +54,14 @@ def p(value: Any, provenance: Provenance, note: str = "") -> Any:
     other attribute (`TECHNICAL.rsi_oversold`), no unwrapping required. The
     provenance/note live in `__dataclass_fields__[name].metadata` for
     introspection (see `all_params` below).
+
+    Args:
+        value: The default value the field holds.
+        provenance: Category explaining where the value came from.
+        note: Free-text detail supporting the provenance category.
+
+    Returns:
+        A dataclasses.field() configured with `value` as its default.
     """
     return field(default=value, metadata={"provenance": provenance, "note": note})
 
@@ -197,8 +206,8 @@ class ReconciliationParams:
     horizon_days: int = p(
         5,
         Provenance.ARBITRARY,
-        "pre-registered by docs/adr/0012 before any evaluation result was "
-        "observed; still no empirical basis for this specific value",
+        "pre-registered before any evaluation result was observed; still no "
+        "empirical basis for this specific value",
     )
     min_abs_return_for_storage: float = p(
         0.01,
@@ -216,7 +225,7 @@ class MemoryParams:
         10.0,
         Provenance.ARBITRARY,
         "pseudo-observation count pulling small-sample agent accuracy toward "
-        "the 0.5 prior; no basis for this specific strength, see docs/adr/0011",
+        "the 0.5 prior; no basis for this specific strength",
     )
 
 

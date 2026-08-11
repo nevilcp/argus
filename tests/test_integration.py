@@ -40,9 +40,10 @@ from argus.schemas.signals import (
 
 
 class TestEndToEnd:
+    """Integration tests exercising real agents, the orchestrator graph, and shared state."""
+
     def test_statistical_agents_pipeline(self):
-        """Tests: TechnicalAgent -> MacroAgent -> RiskEngine in sequence with zero LLMs."""
-        # Fetch daily OHLCV directly and compress via pipeline helper
+        """TechnicalAgent -> MacroAgent -> RiskEngine chain runs with zero LLM calls."""
         pipeline = MFTDataPipeline(["AAPL"])
         df = yf.download("AAPL", period="60d", interval="5m", progress=False, threads=False)
         if isinstance(df.columns, pd.MultiIndex):
@@ -51,7 +52,6 @@ class TestEndToEnd:
         df = df.dropna()
 
         if len(df) >= 14:
-            # Insert candles directly into the buffer
             for ts, row in df.iterrows():
                 candle = {
                     "timestamp": ts.isoformat(),
@@ -95,8 +95,13 @@ class TestEndToEnd:
 
         Cultural memory is mocked out (not just left real) because its embedding
         function needs the optional `[models]` extra (sentence-transformers) that
-        default installs/CI don't have — see ADR 0007 — and because this smoke
-        test is about graph wiring, not vector-DB behavior.
+        default installs/CI don't have, and because this smoke test is about graph
+        wiring, not vector-DB behavior.
+
+        Args:
+            mock_sent: Patched SentimentAgent.analyze.
+            mock_fund: Patched FundamentalAgent.analyze.
+            mock_cultural_memory: Patched get_cultural_memory.
         """
         mock_cultural_memory.return_value = mock.Mock(
             retrieve_wisdom=mock.Mock(return_value=[]),
@@ -105,8 +110,17 @@ class TestEndToEnd:
             store_decision_snapshot=mock.Mock(),
         )
 
-        # analyze(self, ticker, backtest_mode=False, session_seed=None)
         def fund_side_effect(ticker, backtest_mode=False, session_seed=None):
+            """Stand in for FundamentalAgent.analyze, matching its real signature.
+
+            Args:
+                ticker: Ticker to build a signal for.
+                backtest_mode: Unused; accepted to match the real signature.
+                session_seed: Unused; accepted to match the real signature.
+
+            Returns:
+                A fixed BULLISH FundamentalSignal for the given ticker.
+            """
             return FundamentalSignal(
                 ticker=ticker,
                 sector="Technology",
@@ -121,8 +135,17 @@ class TestEndToEnd:
 
         mock_fund.side_effect = fund_side_effect
 
-        # analyze(self, ticker, headlines=None, ...)
         def sent_side_effect(ticker, *args, **kwargs):
+            """Stand in for SentimentAgent.analyze, matching its real signature.
+
+            Args:
+                ticker: Ticker to build a signal for.
+                *args: Unused; accepted to match the real signature.
+                **kwargs: Unused; accepted to match the real signature.
+
+            Returns:
+                A fixed BULLISH SentimentSignal for the given ticker.
+            """
             return SentimentSignal(
                 ticker=ticker,
                 signal=Signal.BULLISH,
@@ -174,13 +197,14 @@ class TestEndToEnd:
             for pos in alloc.portfolio:
                 assert pos.stop_loss > 0.0
         except Exception as e:
-            # Catch expected Msgpack dataframe serialization error if thrown by checkpointer
+            # The checkpointer can raise a dataframe serialization error unrelated to graph wiring
             if "msgpack" in str(e).lower() or "not msgpack serializable" in str(e).lower():
                 pass
             else:
                 raise e
 
     def test_kill_switch_drawdown_trigger(self):
+        """The kill switch halts once portfolio value drops past the drawdown threshold."""
         ks = KillSwitch("MODERATE", check_interval_seconds=1)
         ks.start(10000.0)
         ks.update_portfolio_value(8700.0)
@@ -188,6 +212,7 @@ class TestEndToEnd:
         assert ks.is_halted
 
     def test_schema_round_trip(self):
+        """Signal schemas survive a JSON dump/validate round trip unchanged."""
         tech = TechnicalSignal(
             ticker="AAPL",
             current_price=150.0,
@@ -232,27 +257,27 @@ class TestEndToEnd:
         assert macro.macro_regime == macro2.macro_regime
 
     def test_governor_prevents_over_limit(self):
+        """The shared governor raises once a model's daily request count reaches its limit."""
         from argus.orchestration.governor import MODEL_LIMITS
 
         model = "llama-3.3-70b-versatile"
         limit = MODEL_LIMITS[model]["requests_per_day"]
 
-        # Wind the counter up to one below the limit
         usage = governor._get_usage(model)
         usage.requests_today = limit - 1
 
-        # This call should succeed (count becomes == limit)
+        # Reaching exactly the limit still succeeds; only exceeding it raises
         governor.wait_if_needed(model)
         assert usage.requests_today == limit
 
-        # Next call must raise because count >= limit
         with pytest.raises(RateLimitExceeded):
             governor.wait_if_needed(model)
 
-        # Cleanup: reset so other tests aren't affected
+        # governor is a module-level singleton shared across tests
         usage.requests_today = 0
 
     def test_half_kelly_formula(self):
+        """half_kelly_weight() computes half the Kelly-optimal position size."""
         weight = half_kelly_weight(
             win_probability=0.6, avg_win_pct=0.08, avg_loss_pct=0.04, max_position=0.15
         )

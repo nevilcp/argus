@@ -6,8 +6,8 @@ LLM boundary served from tests/fixtures/ — zero network calls, zero LLM API
 calls, zero torch/transformers import — and asserts the output is stable
 across repeated runs.
 
-Cultural memory is mocked, not fixture-backed: per ADR 0007 it isn't part of
-the MarketDataProvider/LLMClient seam (it's inherently stateful, not a
+Cultural memory is mocked, not fixture-backed: it isn't part of the
+MarketDataProvider/LLMClient seam (it's inherently stateful, not a
 replay candidate), and leaving it real would pull in sentence-transformers
 (the optional `[models]` extra) and write to a real ./chroma_db directory on
 every test run — the same reasoning tests/test_integration.py already
@@ -85,9 +85,7 @@ def _initial_state() -> ARGUSState:
     )
 
 
-# Fields that legitimately vary run-to-run even with fixed inputs (wall-clock
-# timestamps, random session/decision IDs) — excluded from the stability
-# comparison, not from the run itself.
+# Excluded from the stability comparison (not from the run itself) since they vary run-to-run
 _VOLATILE_KEYS = {"timestamp", "session_id", "data_as_of_date"}
 
 
@@ -100,6 +98,11 @@ def _strip_volatile(obj):
 
 
 def _run_fixture_graph() -> dict:
+    """Invoke the fixture-backed DAG once, with cultural memory and the governor mocked out.
+
+    Returns:
+        The final ARGUSState dict produced by the graph.
+    """
     graph = build_graph(
         market_data=FixtureMarketDataProvider(),
         fundamental_llm=_per_ticker_llm("fundamental.json"),
@@ -110,10 +113,7 @@ def _run_fixture_graph() -> dict:
 
     with (
         mock.patch("argus.orchestration.graph.get_cultural_memory") as mock_get_cultural_memory,
-        # The real governor enforces a live per-minute token budget shared process-wide;
-        # left real, back-to-back fixture runs (this test invokes the graph twice) hit it
-        # and block for up to 60s per call. Throttling behavior itself is covered by
-        # test_governor.py — irrelevant to whether the fixture-backed DAG is deterministic.
+        # Left real, back-to-back fixture runs would block on the live per-minute token budget
         mock.patch.object(governor, "wait_if_needed"),
     ):
         mock_get_cultural_memory.return_value = mock.Mock(
@@ -128,6 +128,7 @@ def _run_fixture_graph() -> dict:
 
 
 def test_golden_dag_runs_offline_and_produces_a_valid_allocation():
+    """The fixture-backed DAG runs end to end with zero network/LLM/torch dependencies."""
     final_state = _run_fixture_graph()
 
     assert final_state.get("macro_context") is not None
@@ -143,6 +144,7 @@ def test_golden_dag_runs_offline_and_produces_a_valid_allocation():
 
 
 def test_golden_dag_output_is_stable_across_runs():
+    """Two independent invocations of the same fixture-backed graph are byte-identical."""
     first = _run_fixture_graph()
     second = _run_fixture_graph()
 

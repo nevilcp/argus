@@ -36,11 +36,11 @@ def _price_history() -> dict[str, pd.Series]:
     vix=st.floats(min_value=0.0, max_value=100.0, allow_nan=False),
 )
 def test_approved_weight_never_exceeds_proposed(weight: float, vix: float) -> None:
+    """Across the full weight/VIX input space, approved weight never exceeds proposed weight."""
     engine = RiskStatisticalEngine()
     positions = [{"ticker": "AAPL", "weight": weight}]
 
     result = engine.evaluate(positions, _price_history(), current_vix=vix)
 
-    # RiskAssessment's own validator already raises on construction if this is
-    # violated; reaching this assertion is itself part of the proof.
+    # RiskAssessment's validator would raise on construction if this were violated
     assert result.approved_weight <= result.proposed_weight + 1e-9

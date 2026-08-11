@@ -21,12 +21,12 @@ Dependencies:
   - argus.agents.* (all six specialist agents)
   - SQLite checkpointer (argus_graph.db) for resumable runs
 
-Agent wiring is a build_graph() parameter, not a module-level singleton (see
-docs/adr/0007-injection-seam.md): every agent that touches the network or an
-LLM accepts a MarketDataProvider/LLMClient, defaulting to the real
-implementation, so a test can build a fixture-backed graph without patching
-this module's internals. `graph` below is the default, real-data instance —
-the one api/main.py imports.
+Agent wiring is a build_graph() parameter, not a module-level singleton:
+every agent that touches the network or an LLM accepts a
+MarketDataProvider/LLMClient, defaulting to the real implementation, so a
+test can build a fixture-backed graph without patching this module's
+internals. `graph` below is the default, real-data instance — the one
+api/main.py imports.
 """
 
 import logging
@@ -53,13 +53,9 @@ from argus.seams import LiveMarketDataProvider, LLMClient, MarketDataProvider
 
 logger = logging.getLogger("argus.graph")
 
-# Every argus.schemas.signals BaseModel subclass that can end up nested inside
-# ARGUSState's channel values (directly or via ARGUSDecision) needs to be
-# named here, or the checkpointer's msgpack deserializer either logs a
-# deprecation warning today or silently degrades reconstructed objects to
-# plain dicts in a future langgraph version. Shared by build_graph()'s real
-# checkpointer and argus/orchestration/reconciliation.py's checkpoint loader
-# so the two allowlists can't drift apart. See docs/adr/0010.
+# Every schemas.signals model nested in ARGUSState must be listed here or the
+# checkpointer's msgpack deserializer degrades it to a plain dict; shared with
+# reconciliation.py's checkpoint loader so the two allowlists can't drift apart
 _CHECKPOINT_MODEL_CLASSES = (
     "MacroContext",
     "TechnicalSignal",
@@ -304,7 +300,7 @@ def build_graph(
                 )
                 convictions[t] = sig.conviction * sign
 
-        # Joint portfolio evaluation captures inter-asset covariance and global diversification limits
+        # Joint evaluation captures inter-asset covariance and global diversification limits
         base_weight = min(0.15, 1.0 / len(universe)) if universe else 0.15
         full_portfolio = [{"ticker": t, "weight": base_weight} for t in universe]
         portfolio_result = risk_engine.evaluate(full_portfolio, history, vix, convictions=convictions)
@@ -317,7 +313,7 @@ def build_graph(
         for ticker in universe:
             single = risk_engine.evaluate([{"ticker": ticker, "weight": 0.15}], history, vix)
 
-            # Propagate portfolio-level correlation stats to individual records for uniform telemetry
+            # Propagate portfolio-level correlation stats for uniform telemetry
             single = single.model_copy(update={"avg_correlation": portfolio_result.avg_correlation})
 
             if ticker in ticker_cap_map and not portfolio_vetoed:
@@ -407,7 +403,6 @@ def build_graph(
             logger.warning("[log_decisions] No portfolio_allocation in state; skipping.")
             return {"decisions": []}
 
-        # Index allocations by ticker for O(1) lookup during decision assembly
         positions = {pos.ticker: pos for pos in allocation.portfolio}
         now = datetime.now()
         decisions: list[ARGUSDecision] = []
@@ -427,7 +422,7 @@ def build_graph(
                 )
                 decisions.append(decision)
 
-                # Snapshot is stored before outcome confirmation to enable pre-settlement similarity retrieval
+                # Snapshot stored pre-confirmation to enable pre-settlement similarity retrieval
                 get_cultural_memory().store_decision_snapshot(decision)
 
             except Exception as exc:
