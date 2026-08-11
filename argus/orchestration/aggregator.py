@@ -144,8 +144,7 @@ class HybridSignalAggregator:
             consensus = Signal.NEUTRAL
             conviction = neutral_pct
 
-        # Contract-based regime override: CONTRACTION suppresses BULLISH signals below a conviction
-        # threshold of 0.70 to prevent the system from misallocating during elevated-stress regimes
+        # CONTRACTION suppresses low-conviction BULLISH to avoid overallocating in stressed regimes
         if macro and macro.macro_regime == Regime.CONTRACTION:
             if consensus == Signal.BULLISH and conviction < AGGREGATOR.contraction_conviction_threshold:
                 logger.info(

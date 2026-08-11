@@ -9,21 +9,20 @@ from argus.agents.fundamental import anonymize_ticker, build_compact_prompt, Fun
 from argus.schemas.signals import FundamentalSignal, Signal
 
 def test_anonymize_ticker():
-    # Should be deterministic
+    """Anonymized IDs are deterministic per (ticker, seed) and vary if either input changes."""
     id1 = anonymize_ticker("AAPL", 20240101)
     id2 = anonymize_ticker("AAPL", 20240101)
     assert id1 == id2
     assert id1.startswith("COMP_")
 
-    # Should change with different seed
     id3 = anonymize_ticker("AAPL", 20240102)
     assert id1 != id3
 
-    # Should change with different ticker
     id4 = anonymize_ticker("MSFT", 20240101)
     assert id1 != id4
 
 def test_build_compact_prompt():
+    """The compact prompt embeds fundamentals and substitutes the anon ID when provided."""
     pit_data = {
         "as_of_date": "2024-01-01",
         "fundamentals": {
@@ -34,22 +33,22 @@ def test_build_compact_prompt():
         }
     }
 
-    # Test with real ticker
     prompt_real = build_compact_prompt("AAPL", pit_data)
     assert 'ticker="AAPL"' in prompt_real
     assert 'as_of="2024-01-01"' in prompt_real
     assert 'sector="Technology"' in prompt_real
     assert 'P/E Ratio: 25.5' in prompt_real
     assert 'custom_metric: 100' in prompt_real
-    assert 'industry median ~32.0x' in prompt_real # Pulled from _SECTOR_PE_MEDIANS for Technology
+    # Value comes from _SECTOR_PE_MEDIANS, not the input data
+    assert 'industry median ~32.0x' in prompt_real
 
-    # Test with anonymized ticker
     prompt_anon = build_compact_prompt("AAPL", pit_data, anon_id="COMP_XYZ")
     assert 'ticker="COMP_XYZ"' in prompt_anon
     assert 'sector="Technology"' in prompt_anon
     assert "AAPL" not in prompt_anon
 
 def test_fundamental_cache():
+    """A cached signal is served until it exceeds the 7-day TTL, then evicted."""
     cache = FundamentalCache()
     assert cache.is_stale("AAPL")
 
@@ -70,7 +69,7 @@ def test_fundamental_cache():
     assert not cache.is_stale("AAPL")
     assert cache.get("AAPL") == signal
 
-    # Manually expire the cache entry to test TTL (7 days)
+    # Backdate the entry past the 7-day TTL rather than waiting for it to expire
     cache._cache["AAPL"] = (signal, datetime.now() - timedelta(days=8))
     assert cache.is_stale("AAPL")
     assert cache.get("AAPL") is None

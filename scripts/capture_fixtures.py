@@ -13,9 +13,9 @@ session (universe: AAPL, MSFT, NVDA, GOOGL, AMZN, JPM, XOM, ...). This script
 picks the traces for `fetch_price_history`, `macro_analysis`,
 `fundamental_analysis`, `sentiment_analysis`, and `portfolio_allocation`, and
 reshapes their outputs into the schema argus/seams.py's FixtureMarketDataProvider and
-FixtureLLMClient expect — see ADR 0007 for why: existing traces already
-contain a real session's worth of ARGUS output, so this reuses evidence
-already sitting in the repo instead of hand-authoring synthetic fixtures.
+FixtureLLMClient expect: existing traces already contain a real session's
+worth of ARGUS output, so this reuses evidence already sitting in the repo
+instead of hand-authoring synthetic fixtures.
 
 For the LLM-response fixtures, only the fields that genuinely come from the
 model (not the ones the calling code overwrites after `json.loads`, per
@@ -64,8 +64,7 @@ def capture_fundamentals_and_llm_responses() -> None:
         "fcf_yield", "debt_to_equity", "current_ratio", "roe", "roic",
         "sector", "industry", "marketCap", "p_fcf",
     ]
-    # Fields the LLM actually produces — everything else in the parsed JSON is
-    # overwritten by fetched data after the fact (fundamental.py:340-351).
+    # Everything else in the parsed JSON is overwritten by fetched data (fundamental.py:340-351)
     llm_fields = ["signal", "conviction", "moat_score", "reasoning"]
 
     fundamentals_fixture = {}
@@ -90,8 +89,7 @@ def capture_sentiment_llm_responses() -> None:
     trace = _load_trace(TRACE_SENTIMENT_ANALYSIS)
     signals = trace["outputs"]["sentiment_signals"]
 
-    # Fields the LLM actually produces — everything else is FinBERT/news/social
-    # metrics computed before the LLM call (sentiment.py:405-418).
+    # Everything else is FinBERT/news/social metrics computed before the call (sentiment.py:405-418)
     llm_fields = ["signal", "conviction", "sentiment_decay_risk", "reasoning"]
 
     llm_responses_fixture = {
@@ -101,11 +99,8 @@ def capture_sentiment_llm_responses() -> None:
     out.write_text(json.dumps(llm_responses_fixture, indent=2))
     print(f"wrote {out} ({len(llm_responses_fixture)} tickers)")
 
-    # news/social_sentiment inputs weren't captured raw by any trace (the
-    # sentiment_analysis node fetches and consumes them internally) — write
-    # empty maps so FixtureMarketDataProvider.news()/.social_sentiment()
-    # degrade the same way fetchers.py does for an unrecognized ticker
-    # (empty list / empty dict), rather than raising.
+    # No trace captured these raw; empty maps make the fixture provider degrade the same
+    # way fetchers.py does for an unrecognized ticker, rather than raising
     for name in ("news", "social_sentiment"):
         empty_out = FIXTURES_DIR / "market_data" / f"{name}.json"
         if not empty_out.exists():
@@ -167,7 +162,7 @@ def capture_portfolio_llm_response() -> None:
     a single JSON blob, not a per-ticker map. Only fields the model actually
     produces are kept (argus/agents/portfolio.py:296-314): allocation_usd and
     stop_loss are recomputed server-side from investable capital and the risk
-    engine's own stop (ADR 0004), and cash_reserve_pct is forced to
+    engine's own stop, and cash_reserve_pct is forced to
     1 - sum(allocation_pct) regardless of what the model returned.
     """
     trace = _load_trace(TRACE_PORTFOLIO_ALLOCATION)
@@ -187,6 +182,7 @@ def capture_portfolio_llm_response() -> None:
 
 
 def main() -> None:
+    """Runs all fixture-capture steps in sequence, writing outputs under tests/fixtures/."""
     (FIXTURES_DIR / "market_data").mkdir(parents=True, exist_ok=True)
     (FIXTURES_DIR / "llm_responses").mkdir(parents=True, exist_ok=True)
     capture_price_history()

@@ -3,8 +3,8 @@ scripts/replay_backtest.py
 
 CLI entry point for argus/backtesting/replay.py — replays one or more
 recorded fixture sessions through the real ARGUS graph and prints each
-session's portfolio allocation. See that module's docstring, and
-docs/adr/0009-no-multiyear-backtest.md, for what this is and isn't.
+session's portfolio allocation. See that module's docstring for what
+this is and isn't.
 
     .venv/bin/python scripts/replay_backtest.py [session_dir ...]
 
@@ -23,6 +23,7 @@ DEFAULT_SESSION_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtur
 
 
 def main() -> None:
+    """Replays each given session directory (or the default fixtures) and prints allocations."""
     session_dirs = [Path(p) for p in sys.argv[1:]] or [DEFAULT_SESSION_DIR]
 
     results = replay_sessions(session_dirs)

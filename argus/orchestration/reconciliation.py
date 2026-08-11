@@ -6,10 +6,9 @@ realized-return computation against a MarketDataProvider, and pulling
 completed decisions back out of the LangGraph checkpoint so
 cultural.store_trade_outcome has something real to persist.
 
-See docs/adr/0010-closing-the-decision-outcome-loop.md for why decisions are
-read back from the existing LangGraph checkpoint rather than a new archive,
-why credit assignment is leave-one-out ablation rather than exact Shapley,
-and why horizon_days is provisional pending PR 10's pre-registered evaluation.
+Decisions are read back from the existing LangGraph checkpoint rather than a
+new archive, credit assignment uses leave-one-out ablation rather than exact
+Shapley, and horizon_days is provisional pending a pre-registered evaluation.
 
 Responsibilities:
   - credit_primary_driver: leave-one-out ablation over HybridSignalAggregator
@@ -77,8 +76,8 @@ def credit_primary_driver(
     already-computed baseline `weighted_votes` — pools are additive sums of
     independent per-agent votes, so a removed agent's marginal effect on its
     pool total is exactly its own vote, no need to re-derive it per
-    ablation) was the bigger contributor. See docs/adr/0010 for why this is
-    used instead of exact Shapley over the 2^3 - 1 coalitions.
+    ablation) was the bigger contributor. This avoids exact Shapley over the
+    2^3 - 1 coalitions.
 
     Args:
         decision: Completed ARGUSDecision with technical/fundamental/sentiment
@@ -153,7 +152,7 @@ def compute_realized_return(
         nothing to reconcile: no technical signal (no entry price), no
         allocation (no position was taken), or the price series doesn't yet
         extend past the target exit date — horizon not reached, deferred
-        rather than fabricated (see ADR 0002).
+        rather than fabricated.
     """
     if decision.technical is None or decision.allocation is None:
         return None
@@ -258,9 +257,8 @@ def load_decisions_from_checkpoints(db_path: str = "argus_graph.db") -> list[ARG
     Each session runs under its own thread_id (see build_graph()'s callers),
     and SqliteSaver.list() yields checkpoints newest-first; this keeps each
     thread's first (= most recent, most complete) checkpoint's `decisions`
-    channel value and skips the rest. See docs/adr/0010 for why this reads
-    the checkpoint the graph already writes rather than a dedicated decision
-    archive.
+    channel value and skips the rest, reading the checkpoint the graph
+    already writes rather than maintaining a dedicated decision archive.
 
     Args:
         db_path: Path to the SQLite file build_graph() checkpoints to.

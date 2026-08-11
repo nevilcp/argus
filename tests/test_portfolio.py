@@ -10,34 +10,37 @@ from argus.agents.portfolio import half_kelly_weight, build_signal_table
 from argus.schemas.signals import RiskAssessment, RiskVerdict, Signal, MacroContext, Regime
 
 def test_half_kelly_weight_bullish():
-    # p=0.6, win=0.08, loss=0.04 -> b=2, q=0.4
-    # full kelly = (2*0.6 - 0.4)/2 = 0.4
-    # half kelly = 0.2
-    # But max position is 0.15, so clips to 0.15
+    """A half-Kelly weight above the position cap clips to that cap."""
+    # b=2, q=0.4: full kelly 0.4, half kelly 0.2, clipped to the 0.15 cap
     res = half_kelly_weight(0.6, 0.08, 0.04, 0.15)
     assert res == 0.15
 
 def test_half_kelly_weight_bearish():
-    # p=0.3, win=0.08, loss=0.04 -> b=2, q=0.7
-    # full kelly = (2*0.3 - 0.7)/2 = -0.05
-    # half kelly = -0.025
-    # Floor is 0.0
+    """A negative half-Kelly weight floors at 0.0 rather than going short."""
+    # b=2, q=0.7: full kelly is -0.05, so half kelly is negative
     res = half_kelly_weight(0.3, 0.08, 0.04, 0.15)
     assert res == 0.0
 
 def test_half_kelly_weight_moderate():
-    # p=0.5, win=0.08, loss=0.04 -> b=2, q=0.5
-    # full kelly = (1.0 - 0.5)/2 = 0.25
-    # half kelly = 0.125
+    """A half-Kelly weight within the cap passes through unclipped."""
+    # b=2, q=0.5: full kelly 0.25 halves to 0.125, under the 0.15 cap
     res = half_kelly_weight(0.5, 0.08, 0.04, 0.15)
     assert pytest.approx(res) == 0.125
 
 class MockSignal:
+    """Minimal stand-in for a per-agent Signal result.
+
+    Args:
+        signal: Signal direction.
+        conviction: Confidence score for the signal.
+    """
+
     def __init__(self, signal, conviction):
         self.signal = signal
         self.conviction = conviction
 
 def test_build_signal_table():
+    """Vetoed positions are excluded from the table; others render with their approved weight."""
     macro = MacroContext(
         fed_funds=5.25,
         cpi_yoy=3.2,
@@ -76,7 +79,6 @@ def test_build_signal_table():
 
     table = build_signal_table(all_signals, macro)
 
-    # AAPL and MSFT should be present, TSLA should be excluded
     assert "AAPL:" in table
     assert "MSFT:" in table
     assert "TSLA:" not in table

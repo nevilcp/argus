@@ -4,15 +4,14 @@ argus/backtesting/replay.py
 Minimal intraday backtest: replays recorded fixture "sessions" through the
 real ARGUS graph (build_graph()), in strict time order.
 
-See docs/adr/0009-no-multiyear-backtest.md for why this exists instead of a
-multi-year walk-forward backtest: Yahoo's 5-minute intraday data is only
-available for the trailing 60 days, and the MFT session_states dict
-(the technical-indicator snapshot TechnicalStatisticalAgent needs) is itself
-only ever captured live from the running pipeline, not reconstructible for
-an arbitrary past date. There is no historical 5-minute-resolution data to
-backtest against beyond ~60 days, and no way to fabricate session_states for
-older dates without violating ADR 0002 ("return None rather than fabricate
-defaults").
+This exists instead of a multi-year walk-forward backtest because Yahoo's
+5-minute intraday data is only available for the trailing 60 days, and the
+MFT session_states dict (the technical-indicator snapshot
+TechnicalStatisticalAgent needs) is itself only ever captured live from the
+running pipeline, not reconstructible for an arbitrary past date. There is
+no historical 5-minute-resolution data to backtest against beyond ~60 days,
+and no way to fabricate session_states for older dates without violating
+the system's "return None rather than fabricate defaults" rule.
 
 A "session" here is one fixture snapshot directory shaped like
 tests/fixtures/ (market_data/ + llm_responses/ subdirectories) — one real
@@ -25,13 +24,12 @@ earlier one — there is nothing to leak, since each session only ever sees
 its own files, and replay_sessions() only invokes session N+1 after N has
 returned.
 
-Today exactly one such session exists (tests/fixtures/, captured in PR 5).
-Scaling this to the ~60-day / ~780-decision-point window the design targets
-requires capturing that many more sessions from a live MFT pipeline run —
-future work, and the first real consumer is PR 10's pre-registered
-evaluation. This module's job is to prove the replay mechanism itself is
-correct and reusable, not to fabricate a backlog of sessions that were
-never recorded.
+Today exactly one such session exists (tests/fixtures/). Scaling this to
+the ~60-day / ~780-decision-point window the design targets requires
+capturing that many more sessions from a live MFT pipeline run — future
+work, with the pre-registered evaluation as the first real consumer. This
+module's job is to prove the replay mechanism itself is correct and
+reusable, not to fabricate a backlog of sessions that were never recorded.
 """
 
 from __future__ import annotations
@@ -90,6 +88,14 @@ def _portfolio_llm(session_dir: Path) -> FixtureLLMClient:
 
 
 def _load_session_states(session_dir: Path) -> tuple[list[str], dict[str, dict]]:
+    """Loads the fixture's session_states.json and returns its sorted ticker universe.
+
+    Args:
+        session_dir: Directory shaped like tests/fixtures/.
+
+    Returns:
+        Tuple of (sorted ticker list, raw ticker -> session-state dict).
+    """
     with open(session_dir / "market_data" / "session_states.json") as f:
         session_states = json.load(f)
     return sorted(session_states), session_states
@@ -104,11 +110,11 @@ def replay_session(
 ) -> SessionResult:
     """Runs the real graph once against a single captured fixture session.
 
-    The rate-limit governor is always patched to a no-op (its real
-    per-minute throttling is orthogonal to whether fixture replay is
-    correct — see ADR 0008's test_golden_dag.py precedent). Returns the raw
-    final ARGUSState dict; this function makes no judgment about what a
-    "good" outcome looks like — that's PR 10's job.
+    The rate-limit governor is always patched to a no-op, matching the
+    approach test_golden_dag.py takes: its real per-minute throttling is
+    orthogonal to whether fixture replay is correct. Returns the raw final
+    ARGUSState dict; this function makes no judgment about what a "good"
+    outcome looks like — that's the evaluation module's job.
 
     Args:
         session_dir: Directory shaped like tests/fixtures/ (market_data/ +
@@ -117,12 +123,12 @@ def replay_session(
         invest_pct: Fraction of total_wealth eligible for allocation.
         risk_tolerance: 'CONSERVATIVE', 'MODERATE', or 'AGGRESSIVE'.
         closed_loop: When False (default), cultural memory is mocked to
-            return neutral wisdom/warnings/accuracy (per ADR 0007, it isn't
-            a fixture-replay candidate) — reliability weighting is fixed at
+            return neutral wisdom/warnings/accuracy — it isn't a
+            fixture-replay candidate — so reliability weighting is fixed at
             the 0.5 prior. When True, the real `get_cultural_memory()` is
             used, so `wisdom`/`warnings`/reliability weighting read
-            whatever outcome history actually exists in `chroma_db`. See
-            ADR 0012 for why PR 10's evaluation runs both.
+            whatever outcome history actually exists in `chroma_db`. The
+            evaluation runs both so it can compare the two conditions.
 
     Returns:
         SessionResult with the session's universe and the graph's final state.
