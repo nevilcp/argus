@@ -256,7 +256,7 @@ N/A — ARGUS is currently maintained as a private research and portfolio projec
 
 ## Roadmap
 
-Under active rebuild — see [issue #1](https://github.com/nevilcp/argus/issues/1) for the current plan and its rationale.
+Under active rebuild — see [issue #1](https://github.com/nevilcp/argus/issues/1) for the current plan and its rationale, and [`docs/case-study.md`](docs/case-study.md) for the investigation behind it, written up end to end.
 
 ## License & Acknowledgements
 
