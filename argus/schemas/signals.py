@@ -371,16 +371,9 @@ class AggregatedSignal(BaseModel):
         ...,
         description=(
             "Agent name → weighted vote value used in aggregation. "
-            "Keys include 'technical', 'fundamental', 'sentiment'."
+            "Keys include 'technical', 'fundamental', 'sentiment'. Consumed "
+            "by orchestration/reconciliation.py's leave-one-out credit assignment."
         ),
-    )
-    debate_triggered: bool = Field(
-        False,
-        description="True when agent votes are too split for majority rule",
-    )
-    skip_reason: str | None = Field(
-        None,
-        description="If set, this ticker was excluded from portfolio consideration",
     )
 
 

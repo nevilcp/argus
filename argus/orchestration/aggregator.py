@@ -4,9 +4,9 @@ argus/orchestration/aggregator.py
 Multi-agent signal aggregation module implementing conflict arbitration.
 
 Responsibilities:
-  - Weight individual specialist signals by macro multipliers
+  - Weight individual specialist signals by macro multipliers and, optionally,
+    per-regime historical reliability (see cultural.get_agent_accuracy)
   - Apply majority voting and override rules to produce a single AggregatedSignal
-  - Flag split or contested votes for downstream portfolio handling
 
 Not responsible for:
   - LLM inference or data fetching
@@ -55,10 +55,10 @@ class HybridSignalAggregator:
         macro: Optional[MacroContext],
         fundamental: Optional[FundamentalSignal],
         sentiment: Optional[SentimentSignal],
+        reliability: Optional[dict[str, float]] = None,
     ) -> AggregatedSignal:
         """Aggregates specialist signals via conviction-weighted voting with macro multipliers.
 
-        When agents disagree (no majority wins), the `debate_triggered` flag is set.
         At least one of fundamental, technical, or sentiment must be non-None for
         a meaningful signal to be generated.
 
@@ -67,6 +67,12 @@ class HybridSignalAggregator:
             macro: Optional MacroContext from MacroStatisticalAgent; used for multipliers.
             fundamental: Optional FundamentalSignal from FundamentalAgent.
             sentiment: Optional SentimentSignal from SentimentAgent.
+            reliability: Optional agent name -> historical win rate in [0, 1]
+                (see cultural.get_agent_accuracy), scaling that agent's vote
+                weight by win_rate / 0.5. An agent at the 0.5 neutral prior
+                (or missing/omitted entirely) votes at its unscaled base
+                weight — agents that have been right in this regime count
+                for more, agents that haven't count for less.
 
         Returns:
             AggregatedSignal with a consensus direction, conviction, and weighted vote breakdown.
@@ -100,7 +106,8 @@ class HybridSignalAggregator:
 
             base_w = self.DEFAULT_WEIGHTS[name]
             mult = macro_mults.get(name, 1.0)
-            effective_w = base_w * mult
+            reliability_mult = (reliability or {}).get(name, 0.5) / 0.5
+            effective_w = base_w * mult * reliability_mult
             vote = signal.conviction * effective_w
 
             if signal.signal == Signal.BULLISH:
@@ -121,21 +128,11 @@ class HybridSignalAggregator:
                 signal=Signal.NEUTRAL,
                 conviction=0.0,
                 weighted_votes=weighted_votes,
-                debate_triggered=False,
-                skip_reason="No agent signals available",
             )
 
         bull_pct = bull_pool / total
         bear_pct = bear_pool / total
         neutral_pct = neutral_pool / total
-
-        debate_triggered = False
-        max_pct = max(bull_pct, bear_pct, neutral_pct)
-
-        # Debate threshold: no single direction dominates by > 10 pp over the runner-up
-        runner_up = sorted([bull_pct, bear_pct, neutral_pct])[-2]
-        if max_pct - runner_up < AGGREGATOR.debate_trigger_margin:
-            debate_triggered = True
 
         if bull_pct >= bear_pct and bull_pct >= neutral_pct:
             consensus = Signal.BULLISH
@@ -162,14 +159,13 @@ class HybridSignalAggregator:
         conviction = min(conviction, AGGREGATOR.max_conviction)
 
         logger.info(
-            "[Aggregator] %s: %s (conv=%.2f) bull=%.2f bear=%.2f neutral=%.2f debate=%s",
+            "[Aggregator] %s: %s (conv=%.2f) bull=%.2f bear=%.2f neutral=%.2f",
             ticker,
             consensus.value,
             conviction,
             bull_pct,
             bear_pct,
             neutral_pct,
-            debate_triggered,
         )
 
         return AggregatedSignal(
@@ -177,5 +173,4 @@ class HybridSignalAggregator:
             signal=consensus,
             conviction=conviction,
             weighted_votes=weighted_votes,
-            debate_triggered=debate_triggered,
         )
