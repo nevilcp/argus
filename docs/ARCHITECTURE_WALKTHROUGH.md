@@ -319,7 +319,15 @@ This is a clever architectural choice: the conflict arbitration LLM is only call
 
 ### Nodes 8 & END — `log_decisions` → END
 
-Currently a lightweight decision logger that appends `ARGUSDecision` objects to the state's audit trail (using LangGraph's `operator.add` reducer). The `argus_graph.db` checkpoint file preserves the full decision history across runs.
+Appends `ARGUSDecision` objects to the state's audit trail (using LangGraph's `operator.add` reducer) and snapshots each one to ChromaDB as `PENDING` via `CulturalMemoryManager.store_decision_snapshot`. The `argus_graph.db` checkpoint file preserves the full decision history — including nested technical/fundamental/sentiment signals — across runs, keyed by `thread_id` per session.
+
+**Closing the loop (PR 8):** `argus/orchestration/reconciliation.py` is the second half of the story `log_decisions` starts. Run periodically (`scripts/reconcile_outcomes.py`), it reads every session's decisions back out of `argus_graph.db` (`load_decisions_from_checkpoints`), and for any decision whose `RECONCILIATION.horizon_days` has elapsed since `session_timestamp`:
+
+1. **Credit assignment** — `credit_primary_driver()` reruns `HybridSignalAggregator.aggregate()` once per specialist agent with that agent's signal removed (leave-one-out ablation), and credits whichever removal either flips the consensus direction or, failing that, contributed the largest raw vote.
+2. **Outcome** — `compute_realized_return()` pairs the decision's entry price (`technical.current_price`) with the close price at or after the target exit date, via the same `MarketDataProvider` seam every other node uses.
+3. **Persistence** — `cultural.store_trade_outcome()` (previously written, never called — the original defect this whole rebuild started from) writes the realized return, holding period, and ablation-derived `primary_driver` to ChromaDB, upserted as a separate `trade_{decision_id}` document alongside the original `snapshot_{decision_id}` one.
+
+See [`docs/adr/0010-closing-the-decision-outcome-loop.md`](adr/0010-closing-the-decision-outcome-loop.md) for why decisions are read back from the existing checkpoint rather than a dedicated archive (the now-deleted `DecisionLogger` used to fill that role and was never instantiated), and why the ablation metric compares direction-flip-then-magnitude rather than a raw conviction delta.
 
 ---
 
