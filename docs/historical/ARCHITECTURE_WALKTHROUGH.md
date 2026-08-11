@@ -1,5 +1,21 @@
 # ARGUS — Architecture Deep Dive
 
+> **Historical document — pre-rebuild (superseded 2026-08-11).**
+>
+> This is the architecture description as it stood *before* the rebuild
+> documented in [issue #1](https://github.com/nevilcp/argus/issues/1). It is
+> kept unmodified, and moved here rather than deleted, because it is the
+> primary evidence for the central finding of
+> [`docs/case-study.md`](../case-study.md): that this document described
+> mechanisms the code did not implement. Most notably it describes a
+> `_resolve_conflict()` LLM call for breaking split votes that was never in
+> the repository at all. [ADR 0010](../adr/0010-closing-the-decision-outcome-loop.md)
+> and [ADR 0011](../adr/0011-reliability-weighting.md) cite it for the same
+> reason.
+>
+> **Do not read this as a description of the current system.** For that, see
+> `README.md` and `docs/adr/`.
+
 This document walks through the Mermaid diagram in `README.md` layer by layer, mapping every box and arrow to the actual source code so you can understand precisely what runs, when, why, and how it connects to everything else.
 
 ---

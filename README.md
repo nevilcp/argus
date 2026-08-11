@@ -230,8 +230,9 @@ where reliability weighting did not measurably help.
 │   ├── orchestration/    # LangGraph definition, safety governors, and kill-switches
 │   └── schemas/          # Pydantic data contracts defining all inter-agent signaling
 ├── chroma_db/            # (Auto-generated) Local persistent vector database
-├── docs/                 # Architecture walkthrough, run guides, project notes
-│   └── adr/              # Architecture decision records
+├── docs/                 # Case study, evaluation results, project notes
+│   ├── adr/              # Architecture decision records
+│   └── historical/       # Pre-rebuild docs, kept as evidence for the case study
 ├── tests/                # Deterministic unit tests covering agents and pipelines
 ├── argus_graph.db        # (Auto-generated) SQLite state checkpointer for LangGraph
 ├── pyproject.toml        # Project dependencies and build configuration
@@ -256,7 +257,9 @@ N/A — ARGUS is currently maintained as a private research and portfolio projec
 
 ## Roadmap
 
-Under active rebuild — see [issue #1](https://github.com/nevilcp/argus/issues/1) for the current plan and its rationale, and [`docs/case-study.md`](docs/case-study.md) for the investigation behind it, written up end to end.
+The rebuild planned in [issue #1](https://github.com/nevilcp/argus/issues/1) is complete: the decision→outcome loop is closed, the eleven unwired mechanisms are wired or deleted, and the result is measured against a pre-registered bar. [`docs/case-study.md`](docs/case-study.md) is the investigation behind it, written up end to end — including where the change did not help.
+
+Next, in rough priority order: accumulate enough resolved outcomes for reliability weighting to have evidence to work with (the evaluation ran at n=6 with zero resolved outcomes, so weighting could not yet differ from the 0.5 prior), then re-run the pre-registered evaluation at a sample size that can actually reject the null.
 
 ## License & Acknowledgements
 
