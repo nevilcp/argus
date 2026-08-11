@@ -18,7 +18,7 @@ they're the same shape of bug: a value computed and never read.
 handed to `portfolio_allocation`'s `wisdom` argument — `warnings` sat in
 state, unused. And `AggregatedSignal.debate_triggered` / `skip_reason` were
 written by `aggregator.aggregate()` and read by nothing, anywhere — the
-`docs/ARCHITECTURE_WALKTHROUGH.md` description of a `_resolve_conflict()`
+`docs/historical/ARCHITECTURE_WALKTHROUGH.md` description of a `_resolve_conflict()`
 LLM call that spends a Groq request breaking split votes described code that
 was never actually in the repository.
 
