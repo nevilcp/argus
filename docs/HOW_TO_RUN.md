@@ -100,15 +100,7 @@ Once the backend API is running, you can verify system health or trigger a manua
 curl http://localhost:8000/health
 ```
 
-**2. Trigger an Async Backtest (from the terminal):**
+**2. Replay a recorded session (no live API endpoint — see ADR 0009):**
 ```bash
-curl -X POST http://localhost:8000/backtest \
-  -H "Content-Type: application/json" \
-  -d '{
-    "tickers": ["AAPL", "MSFT", "NVDA"],
-    "start_date": "2024-01-01",
-    "end_date": "2024-03-31",
-    "initial_cash": 100000,
-    "risk_tolerance": "MODERATE"
-  }'
+.venv/bin/python -m scripts.replay_backtest
 ```

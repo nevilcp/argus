@@ -132,7 +132,7 @@ technical_analysis   fundamental_analysis  sentiment  retrieve_cultural_memory
 
 **Output into state:** `price_history` — a dict of `{ticker: {dates: [...], prices: [...]}}`.
 
-**Triggered by:** Either the `_session_loop`'s `on_session_ready` callback (live mode) or directly by the API/backtest runner. Both paths feed `ARGUSState.universe` as the starting input.
+**Triggered by:** Either the `_session_loop`'s `on_session_ready` callback (live mode) or `argus/backtesting/replay.py` (fixture-session replay). Both paths feed `ARGUSState.universe` as the starting input.
 
 ---
 
@@ -374,15 +374,27 @@ governor.wait_if_needed() → called by:
 
 The purely statistical nodes (N1, N2, N6) never call the governor because they make no LLM calls.
 
-### PointInTimeEnforcer 🔴
+### Point-in-time correctness (structural, not a runtime enforcer)
 
-**File:** (referenced in README/project_concepts; enforced in `argus/data/fetchers.py`)
+**File:** `argus/backtesting/replay.py`
 
-A date-gating mechanism that intercepts all calls to `yfinance` and FRED fetchers during backtest mode. When `backtest_mode=True` and a `session_seed` date is set, any data after that date is masked/excluded from results.
+There used to be a `PointInTimeEnforcer` here: a date-gating mechanism that
+intercepted `yfinance`/FRED calls during backtest mode and masked data after
+a simulated date. It's gone — deleted along with the rest of the
+walk-forward backtesting engine it existed to serve (see
+[`docs/adr/0009-no-multiyear-backtest.md`](adr/0009-no-multiyear-backtest.md)
+for why multi-year backtesting isn't offered at all).
 
-**Why this matters:** Without it, backtesting is fraudulent. An agent analyzing "January 2021" that can see OHLCV data from March 2021 would have unfair foresight (look-ahead bias). The `PointInTimeEnforcer` makes backtests genuinely out-of-sample.
+What replaced it isn't a runtime check but a structural property: PR 7's
+`replay.py` replays recorded fixture *sessions* through the real graph, and
+each session's `FixtureMarketDataProvider` is scoped to its own directory —
+there is no code path by which a later session's data could reach an
+earlier one, so there's nothing for a runtime enforcer to guard against.
 
-The `ARGUSState` TypedDict carries both `backtest_mode: bool` and `session_seed: Optional[int]` — these are checked by `node_fundamental_analysis` and `node_fetch_price_history` before making any fetches.
+`ARGUSState` still carries `backtest_mode: bool` and
+`session_seed: Optional[int]`, consumed by `FundamentalAgent.analyze` for
+ticker anonymization (`argus/agents/fundamental.py`) — that mechanism is
+separate from point-in-time data gating and remains in place.
 
 ---
 
@@ -443,7 +455,7 @@ LangGraph DAG invoked with ARGUSState
 |---|---|---|
 | 🔵 Dark blue | **Statistical** (no LLM, pure math) | `macro_analysis`, `technical_analysis`, `risk_evaluation` |
 | 🟣 Purple | **LLM** (language model involved) | `fundamental_analysis`, `sentiment_analysis`, conflict arbitrator, `portfolio_allocation` |
-| 🔴 Dark red | **Safety** (daemons/guards) | `KillSwitch`, `RateLimitGovernor`, `PointInTimeEnforcer` |
+| 🔴 Dark red | **Safety** (daemons/guards) | `KillSwitch`, `RateLimitGovernor` |
 | 🟢 Dark green | **Data/Memory** | `OHLCVBuffer`, `retrieve_cultural_memory` |
 | 🟡 Dark yellow | **I/O** (data fetch nodes) | `fetch_price_history`, `_fetch_loop`, `_session_loop` |
 
@@ -461,4 +473,4 @@ This color-coding is a key design communication: the diagram immediately tells y
 
 4. **Conflict resolution is lazy**: The debate loop only fires when there is a genuine, close disagreement between fundamental and sentiment. This saves LLM calls in ~80% of cases where the signals agree or the margin is clear.
 
-5. **Backtest integrity by design**: `PointInTimeEnforcer` is wired at the data fetcher level, not the agent level. Agents don't need to know they're in backtest mode — the data they receive is already gated.
+5. **Backtest integrity by construction**: `replay.py` doesn't gate data at fetch time — each recorded session is scoped to its own fixture directory, so there is no code path by which a later session's data could reach an earlier one. See [`docs/adr/0009-no-multiyear-backtest.md`](adr/0009-no-multiyear-backtest.md).
