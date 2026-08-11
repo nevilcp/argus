@@ -43,8 +43,13 @@ dev = [
     "pytest-cov>=5.0.0",
     "pytest-mock>=3.14.0",
     "hypothesis>=6.100.0",
-    "ruff>=0.7.0",
-    "mypy>=1.13.0",
+    # Linter and type-checker are pinned exactly, not floored. With `ruff>=0.7.0`
+    # the enforced rule set was whatever the installed version happened to default
+    # to: 0.15 defaults to E4/E7/E9/F, 0.16 defaults to a much larger set, so the
+    # same commit passed locally and failed in CI with 232 findings. Pin the tool,
+    # and declare the rule set explicitly under [tool.ruff.lint] below.
+    "ruff==0.16.2",
+    "mypy==2.3.0",
 ]
 test = [
     "pytest>=8.0.0",
@@ -68,6 +73,17 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.ruff.lint]
+# Stated explicitly rather than inherited from whatever the installed ruff
+# version defaults to. This is the set that was actually enforced across the
+# rebuild (ruff 0.15's defaults): pyflakes plus the pycodestyle error subset.
+# Ruff 0.16 would additionally flag ~230 findings, mostly DTZ (naive
+# `datetime.now()`) and UP (PEP 604/585 annotations). Those are real and worth
+# fixing — DTZ especially, in a system whose outcome resolution is date-keyed —
+# but adopting them is a code change, not a CI fix, so it is tracked separately
+# rather than smuggled in here.
+select = ["E4", "E7", "E9", "F"]
 
 [tool.mypy]
 python_version = "3.11"
