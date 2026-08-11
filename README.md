@@ -11,12 +11,12 @@ Multi-agent financial intelligence system orchestrating specialist LLMs and stat
 
 ARGUS is a multi-agent artificial intelligence system for quantitative equity research. By orchestrating six specialized agents (Technical, Macro, Fundamental, Sentiment, Risk, and Portfolio) as a directed acyclic graph (DAG), ARGUS synthesizes structured investment theses and asset allocations. See [`limitations.md`](limitations.md) for the current, honestly-stated gaps in this system.
 
-- **Parallel Agent Orchestration** — delegates analysis to domain-specific statistical models and LLMs, improving decision accuracy over monolithic prompts.
-- **Strict Point-in-Time Gating** — masks future data during historical backtesting, completely preventing look-ahead and survivorship biases.
+- **Parallel Agent Orchestration** — delegates analysis to domain-specific statistical models and LLMs (see [ADR 0001](docs/adr/0001-statistical-vs-llm-agent-split.md) for the split rationale) rather than a single monolithic prompt.
+- **Point-in-Time Fixture Replay** — masks future data when replaying recorded sessions through the real graph. There is no multi-year backtest — see [`docs/adr/0009-no-multiyear-backtest.md`](docs/adr/0009-no-multiyear-backtest.md) — and residual risks (e.g. LLM parametric memory of well-known tickers) are tracked in [`limitations.md`](limitations.md).
 - **High-Frequency Data Pipeline** — buffers intraday OHLCV data using an in-memory SQLite ring buffer, enabling near-real-time technical indicator derivation.
 - **Dual-Gate Rate Limiting** — enforces strict per-minute and per-day token/request quotas, preventing API exhaustion and cost overruns.
-- **Automated Drawdown Kill-Switch** — continuously monitors portfolio risk metrics and automatically halts operations during extreme volatility (e.g., VIX spikes).
-- **Persistent Cultural Memory** — stores past decision rationale in a ChromaDB vector vault, allowing the Portfolio agent to recall historical wisdom across similar market regimes.
+- **Automated Drawdown Kill-Switch** — continuously monitors portfolio risk metrics, blocks new positions and halts the system during extreme volatility (e.g., VIX spikes) or excess drawdown, requiring a manual reset before trading resumes.
+- **Persistent Cultural Memory** — stores past decision rationale in a ChromaDB vector vault, allowing the Portfolio agent to recall past reasoning across similar market regimes as outcomes accumulate and resolve.
 
 ## Architecture
 
@@ -131,16 +131,16 @@ The system runs in two primary modes:
 
 ## Prerequisites
 
-- **Python**: ≥ 3.12
-- **Docker**: Optional, for containerized deployments.
-- **System Memory**: Minimum 4GB RAM (due to local FinBERT inference).
+- **Python**: ≥ 3.11
+- **Docker**: Optional, for containerized deployments (`Dockerfile.api`, one service).
+- **System Memory**: Minimum 4GB RAM only if installing the optional `models` extra (`pip install -e ".[models]"`), which pulls in local FinBERT inference. The default install and the test suite don't need it.
 
 ## Installation
 
 ### Method 1: Docker (Recommended)
 ```bash
 # 1. Clone the repository
-git clone https://github.com/your-org/argus.git
+git clone https://github.com/nevilcp/argus.git
 cd argus
 
 # 2. Configure environment keys
@@ -150,15 +150,16 @@ cp .env.example .env
 # 3. Build and launch
 docker compose up --build -d
 ```
+`docker-compose.yml` defines a single `argus-api` service (`Dockerfile.api`) and passes `GROQ_API_KEY`, `GOOGLE_AI_API_KEY`, `FRED_API_KEY`, and `NEWSAPI_KEY` through from `.env`.
 
 ### Method 2: Local Source
 ```bash
 # 1. Clone and enter directory
-git clone https://github.com/your-org/argus.git
+git clone https://github.com/nevilcp/argus.git
 cd argus
 
 # 2. Create virtual environment
-python3.12 -m venv .venv
+python3.11 -m venv .venv
 source .venv/bin/activate
 
 # 3. Install dependencies
@@ -172,8 +173,18 @@ uvicorn api.main:app --host 0.0.0.0 --port 8000
 ```bash
 curl http://localhost:8000/health
 ```
-```text
-{"status": "ok", "system_time": "2024-11-20T10:15:30Z"}
+```json
+{
+  "status": "ok",
+  "model_versions": {
+    "synthesis": "llama-3.3-70b-versatile",
+    "sentiment": "llama-3.1-8b-instant",
+    "fundamental": "llama-3.3-70b-versatile",
+    "finbert": "ProsusAI/finbert"
+  },
+  "can_make_calls": true,
+  "governor_report": { "...": "per-model request/token usage, see /governor/report" }
+}
 ```
 
 ## Configuration
@@ -185,19 +196,28 @@ Required environment variables must be placed in a `.env` file at the project ro
 | `GROQ_API_KEY` | Yes | Authenticates Llama 3.3-70b/3.1-8b for core agent synthesis. |
 | `FRED_API_KEY` | Yes | Retrieves macroeconomic indicators (CPI, Fed Funds, UNRATE). |
 | `NEWSAPI_KEY` | Yes | Fetches recent headlines for FinBERT sentiment scoring. |
-| `LANGCHAIN_API_KEY` | Optional | Enables LangSmith tracing for LLM observability. |
-| `CHROMA_PERSIST_DIR` | Optional | Defines local directory for the vector database. Default: `./chroma_db` |
+| `GOOGLE_AI_API_KEY` | Optional | Gemini fallback for LLM synthesis. |
+| `POLYGON_API_KEY` | Declared, unused | Present in `.env.example`/`Settings`; no fetcher reads it yet. |
+| `ALPACA_API_KEY` / `ALPACA_SECRET_KEY` | Declared, unused | Present in `.env.example`/`Settings`; no fetcher reads it yet. |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | Optional | Enables Langfuse tracing for LLM observability. |
+| `LANGFUSE_HOST` | Optional | Langfuse instance URL. Default: `https://cloud.langfuse.com` |
+
+Every field above defaults to an empty string (see `argus/config.py`) — the process starts without them, but the feature that depends on a missing key degrades or is skipped rather than failing outright (e.g. macro regime fitting logs a warning and continues).
 
 *Note: Google Trends sentiment analysis does not require an API key.*
 
 ## Quick Start / Usage
+
+For a guided walkthrough — including a fully offline path and a live-API
+path, plus what to do when a demo step fails — see
+[`docs/demo-guide.md`](docs/demo-guide.md).
 
 ### Replaying a recorded session
 There is no `/backtest` API endpoint — see
 [`docs/adr/0009-no-multiyear-backtest.md`](docs/adr/0009-no-multiyear-backtest.md)
 for why a multi-year walk-forward backtest isn't offered.
 `scripts/replay_backtest.py` replays recorded fixture sessions through the
-real graph instead:
+real graph instead. It needs no API keys and makes no required network calls:
 
 ```bash
 .venv/bin/python -m scripts.replay_backtest
@@ -209,12 +229,27 @@ real graph instead:
 returns (rank IC, hit-rate-with-dead-band, open-loop vs. closed-loop
 reliability weighting), per
 [`docs/adr/0012-pre-registered-evaluation.md`](docs/adr/0012-pre-registered-evaluation.md).
-Results are committed at
+Unlike the other commands on this page, it **requires network access** — it
+fetches real forward daily closes to score against. Results are committed at
 [`docs/evaluation-results.md`](docs/evaluation-results.md) — including
 where reliability weighting did not measurably help.
 
 ```bash
 .venv/bin/python -m scripts.run_evaluation
+```
+
+### Reconciling outcomes
+
+`scripts/reconcile_outcomes.py` is the other half of the decision→outcome
+loop described in [ADR 0010](docs/adr/0010-closing-the-decision-outcome-loop.md):
+it reads decisions logged to the LangGraph checkpoint DB, resolves the ones
+past their horizon against live prices, and writes outcomes back to cultural
+memory so reliability weighting has something to learn from. It also
+requires network access, and is meant to run on a schedule (e.g. a daily
+cron), not as part of a demo:
+
+```bash
+.venv/bin/python -m scripts.reconcile_outcomes
 ```
 
 ## Project Structure
@@ -227,16 +262,23 @@ where reliability weighting did not measurably help.
 │   ├── backtesting/      # Return-series metrics and fixture-session replay (see ADR 0009)
 │   ├── data/             # MFT Pipeline, OHLCV SQLite buffer, and external API fetchers
 │   ├── memory/           # ChromaDB-backed cultural wisdom retrieval mechanisms
-│   ├── orchestration/    # LangGraph definition, safety governors, and kill-switches
-│   └── schemas/          # Pydantic data contracts defining all inter-agent signaling
+│   ├── orchestration/    # LangGraph definition, aggregator, safety governors, reconciliation
+│   ├── risk/             # Kill-switch daemon and drawdown/VIX blackout logic
+│   ├── schemas/          # Pydantic data contracts defining all inter-agent signaling
+│   ├── config.py         # Typed Settings (env vars) shared across all modules
+│   ├── params.py         # Provenance-tagged numeric constants (see ADR 0006)
+│   └── seams.py          # Market-data/LLM injection seam used by tests and replay (ADR 0007)
+├── scripts/              # replay_backtest, run_evaluation, reconcile_outcomes, capture_fixtures
 ├── chroma_db/            # (Auto-generated) Local persistent vector database
-├── docs/                 # Case study, evaluation results, project notes
+├── docs/                 # Demo guide, case study, evaluation results, project notes
 │   ├── adr/              # Architecture decision records
 │   └── historical/       # Pre-rebuild docs, kept as evidence for the case study
 ├── tests/                # Deterministic unit tests covering agents and pipelines
 ├── argus_graph.db        # (Auto-generated) SQLite state checkpointer for LangGraph
+├── limitations.md        # Honestly-stated data, modeling, and architectural gaps
 ├── pyproject.toml        # Project dependencies and build configuration
-└── docker-compose.yml    # Multi-container orchestration definition
+├── Dockerfile.api        # Container image for the FastAPI service
+└── docker-compose.yml    # Single-service (argus-api) orchestration definition
 ```
 
 ## Testing
@@ -249,7 +291,8 @@ pytest tests/ -v
 ```
 
 - **Categories**: Tests cover Pydantic validation boundaries, mathematical boundaries (e.g., Half-Kelly position sizing constraints), caching TTL expiration logic, and thread-safe rate limit assertions.
-- **Approximate Run Time**: ~4 seconds.
+- **Approximate Run Time**: ~35 seconds for 85 tests across 21 files (see [ADR 0008](docs/adr/0008-deterministic-test-suite.md) for why the suite makes no network calls).
+- **CI gate**: `.github/workflows/ci.yml` additionally runs `ruff check .` and `mypy argus/` (pinned `ruff==0.16.2`, `mypy==2.3.0`) before the test step.
 
 ## Contributing
 
