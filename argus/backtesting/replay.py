@@ -44,7 +44,6 @@ from typing import Any
 from unittest import mock
 from uuid import uuid4
 
-from argus.orchestration.governor import governor
 from argus.orchestration.graph import build_graph
 from argus.orchestration.state import ARGUSState
 from argus.seams import FixtureLLMClient, FixtureMarketDataProvider
@@ -110,11 +109,11 @@ def replay_session(
 ) -> SessionResult:
     """Runs the real graph once against a single captured fixture session.
 
-    The rate-limit governor is always patched to a no-op, matching the
-    approach test_golden_dag.py takes: its real per-minute throttling is
-    orthogonal to whether fixture replay is correct. Returns the raw final
-    ARGUSState dict; this function makes no judgment about what a "good"
-    outcome looks like — that's the evaluation module's job.
+    Every agent here is fixture-backed (FixtureLLMClient never reaches the
+    governor — only GroqLLMClient does), so replay is inherently governor-free
+    without needing to patch anything. Returns the raw final ARGUSState dict;
+    this function makes no judgment about what a "good" outcome looks like —
+    that's the evaluation module's job.
 
     Args:
         session_dir: Directory shaped like tests/fixtures/ (market_data/ +
@@ -166,7 +165,6 @@ def replay_session(
     config = {"configurable": {"thread_id": str(uuid4())}}
 
     with contextlib.ExitStack() as stack:
-        stack.enter_context(mock.patch.object(governor, "wait_if_needed"))
         if not closed_loop:
             mock_get_cultural_memory = stack.enter_context(
                 mock.patch("argus.orchestration.graph.get_cultural_memory")

@@ -32,7 +32,6 @@ import numpy as np
 from pydantic import ValidationError
 
 from argus.config import settings
-from argus.orchestration.governor import governor
 from argus.schemas.signals import SentimentSignal
 from argus.seams import GroqLLMClient, LiveMarketDataProvider, LLMClient, MarketDataProvider
 
@@ -383,9 +382,6 @@ class SentimentAgent:
         }
 
         prompt = _build_synthesis_prompt(ticker, metrics)
-        estimated_tokens = 450
-
-        governor.wait_if_needed("llama-3.1-8b-instant", estimated_tokens)
 
         for attempt in range(3):
             try:

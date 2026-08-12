@@ -24,7 +24,6 @@ from pathlib import Path
 from unittest import mock
 from uuid import uuid4
 
-from argus.orchestration.governor import governor
 from argus.orchestration.graph import build_graph
 from argus.orchestration.state import ARGUSState
 from argus.seams import FixtureLLMClient, FixtureMarketDataProvider
@@ -98,7 +97,10 @@ def _strip_volatile(obj):
 
 
 def _run_fixture_graph() -> dict:
-    """Invoke the fixture-backed DAG once, with cultural memory and the governor mocked out.
+    """Invoke the fixture-backed DAG once, with cultural memory mocked out.
+
+    The governor needs no patch: every LLM call here is fixture-backed, and
+    FixtureLLMClient never reaches it (only GroqLLMClient does).
 
     Returns:
         The final ARGUSState dict produced by the graph.
@@ -111,11 +113,7 @@ def _run_fixture_graph() -> dict:
     )
     config = {"configurable": {"thread_id": str(uuid4())}}
 
-    with (
-        mock.patch("argus.orchestration.graph.get_cultural_memory") as mock_get_cultural_memory,
-        # Left real, back-to-back fixture runs would block on the live per-minute token budget
-        mock.patch.object(governor, "wait_if_needed"),
-    ):
+    with mock.patch("argus.orchestration.graph.get_cultural_memory") as mock_get_cultural_memory:
         mock_get_cultural_memory.return_value = mock.Mock(
             retrieve_wisdom=mock.Mock(return_value=[]),
             retrieve_warnings=mock.Mock(return_value=[]),
