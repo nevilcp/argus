@@ -78,7 +78,7 @@ class AnalysisResponse(BaseModel):
 
 # Entries older than _SESSION_STATE_TTL_SECONDS are treated as missing so a prior
 # session's stale intraday data is never injected silently
-_SESSION_STATE_TTL_SECONDS = 2100  # 35 min = one _SESSION_INTERVAL + 5 min buffer
+_SESSION_STATE_TTL_SECONDS = 2100  # 35 min = one MFT_DECISION_INTERVAL_SECONDS + 5 min buffer
 _live_session_cache: dict[str, tuple[dict, datetime]] = {}
 
 # Initialized empty; tickers are registered dynamically per /analyze request
