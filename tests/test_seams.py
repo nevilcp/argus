@@ -8,11 +8,16 @@ stale or the seam breaks, these tests fail; nothing here is decorative.
 
 import json
 from pathlib import Path
+from unittest import mock
+
+import groq
+import httpx
+import pytest
 
 from argus.agents.fundamental import FundamentalAgent
 from argus.agents.sentiment import SentimentAgent
 from argus.schemas.signals import FundamentalSignal, SentimentSignal
-from argus.seams import FixtureLLMClient, FixtureMarketDataProvider
+from argus.seams import FixtureLLMClient, FixtureMarketDataProvider, GroqLLMClient, _groq_retry_delay
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
@@ -82,3 +87,116 @@ def test_fixture_market_data_provider_missing_ticker_raises():
         assert False, "expected KeyError for a ticker with no fixture"
     except KeyError:
         pass
+
+
+def _synthetic_rate_limit_error(retry_after: str | None) -> groq.RateLimitError:
+    """Builds a groq.RateLimitError with synthetic headers — no real httpx.Client involved.
+
+    Args:
+        retry_after: Value for the Retry-After header, or None to omit it.
+
+    Returns:
+        A RateLimitError carrying an in-memory httpx.Response with those headers.
+    """
+    request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+    headers = {"retry-after": retry_after} if retry_after is not None else {}
+    response = httpx.Response(429, headers=headers, request=request)
+    return groq.RateLimitError("rate limited", response=response, body=None)
+
+
+def test_groq_retry_delay_honors_retry_after():
+    """A RateLimitError's Retry-After header is honored verbatim, not re-jittered."""
+    exc = _synthetic_rate_limit_error(retry_after="12.5")
+    assert _groq_retry_delay(exc, attempt=0) == 12.5
+
+
+def test_groq_retry_delay_falls_back_to_jittered_backoff_without_header():
+    """Without a Retry-After header, delay is jittered exponential back-off capped at 30s."""
+    exc = _synthetic_rate_limit_error(retry_after=None)
+    for attempt in range(6):
+        delay = _groq_retry_delay(exc, attempt)
+        assert 0.0 <= delay <= 30.0
+
+
+def _fake_success_response(prompt_tokens: int = 10, completion_tokens: int = 5):
+    """Minimal stand-in for a ChatGroq.invoke() return value.
+
+    Args:
+        prompt_tokens: Value reported under response_metadata["token_usage"].
+        completion_tokens: Value reported under response_metadata["token_usage"].
+
+    Returns:
+        A Mock exposing the ``content``/``response_metadata`` attributes complete() reads.
+    """
+    return mock.Mock(
+        content="synthetic response",
+        response_metadata={
+            "token_usage": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens}
+        },
+    )
+
+
+def _client_with_mocked_llm() -> GroqLLMClient:
+    """Builds a GroqLLMClient with a real (network-free) httpx.Client but a mocked ChatGroq.
+
+    Construction alone never touches the network — only ``._llm.invoke()`` would —
+    so swapping in a Mock for that one call is enough to test complete()'s retry
+    and governance logic without a live Groq key.
+
+    Returns:
+        A GroqLLMClient for a registered model, ready to have ``._llm.invoke``
+        given a side_effect.
+    """
+    client = GroqLLMClient(
+        model="llama-3.1-8b-instant", temperature=0.1, max_tokens=50, api_key="test-key"
+    )
+    client._llm = mock.Mock()
+    return client
+
+
+def test_groq_llm_client_retries_retryable_error_then_succeeds():
+    """A transient APIConnectionError is retried and the eventual success is returned."""
+    client = _client_with_mocked_llm()
+    request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+    client._llm.invoke.side_effect = [
+        groq.APIConnectionError(request=request),
+        _fake_success_response(),
+    ]
+
+    with mock.patch("argus.seams.time.sleep"):
+        result = client.complete("system", "user")
+
+    assert result == "synthetic response"
+    assert client._llm.invoke.call_count == 2
+
+
+def test_groq_llm_client_terminal_error_raises_without_retry():
+    """AuthenticationError propagates on the first attempt — retrying a bad key wastes nothing but time."""
+    client = _client_with_mocked_llm()
+    request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+    response = httpx.Response(401, request=request)
+    client._llm.invoke.side_effect = groq.AuthenticationError(
+        "bad key", response=response, body=None
+    )
+
+    with mock.patch("argus.seams.time.sleep") as mock_sleep:
+        with pytest.raises(groq.AuthenticationError):
+            client.complete("system", "user")
+
+    assert client._llm.invoke.call_count == 1
+    assert mock_sleep.call_count == 0
+
+
+def test_groq_llm_client_exhausts_retries_and_raises():
+    """A persistently retryable error is retried up to the attempt cap, then propagates."""
+    client = _client_with_mocked_llm()
+    request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+    client._llm.invoke.side_effect = groq.APIConnectionError(request=request)
+
+    with mock.patch("argus.seams.time.sleep"):
+        with pytest.raises(groq.APIConnectionError):
+            client.complete("system", "user")
+
+    from argus.seams import _MAX_COMPLETE_ATTEMPTS
+
+    assert client._llm.invoke.call_count == _MAX_COMPLETE_ATTEMPTS

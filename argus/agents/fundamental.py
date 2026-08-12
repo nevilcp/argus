@@ -313,9 +313,6 @@ class FundamentalAgent:
 
         anon_id = anonymize_ticker(ticker, session_seed) if backtest_mode and session_seed else None
         prompt = build_compact_prompt(ticker, pit_data, anon_id)
-        estimated_tokens = len(prompt.split()) * 1.3
-
-        governor.wait_if_needed("llama-3.3-70b-versatile", int(estimated_tokens + 600))
 
         for attempt in range(3):
             try:
