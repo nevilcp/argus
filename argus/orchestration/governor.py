@@ -119,12 +119,18 @@ class RateLimitGovernor:
             usage.tokens_this_minute = 0
             usage.current_minute = now_minute
 
+    _MAX_WAIT_ATTEMPTS = 3
+
     def wait_if_needed(self, model: str, estimated_tokens: int = 500) -> None:
         """Blocks the calling thread until per-minute rate limits allow the next request.
 
         Groq publishes no daily cap for either registered model, so only the
         published tokens-per-minute and requests-per-minute ceilings are enforced.
-        If a per-minute limit would be exceeded, sleeps until the next UTC minute.
+        If a per-minute limit would be exceeded, releases the lock, sleeps out the
+        remainder of the current minute, then re-checks — the reservation only
+        happens once a check inside the lock finds the request admissible. Sleeping
+        outside the lock means a stall on one model never blocks other threads'
+        calls for a different model.
 
         Args:
             model: Provider model identifier string.
@@ -132,44 +138,57 @@ class RateLimitGovernor:
 
         Raises:
             UnregisteredModel: If ``model`` has no known rate-limit profile.
+            RateLimitExceeded: If the request still doesn't fit after
+                ``_MAX_WAIT_ATTEMPTS`` sleeps — typically because estimated_tokens
+                alone exceeds the model's tokens-per-minute budget.
         """
         if model not in MODEL_LIMITS:
             raise UnregisteredModel(f"{model!r} has no registered rate-limit profile")
 
         limits = MODEL_LIMITS[model]
-        with self._lock:
-            usage = self._get_usage(model)
-            self._reset_if_new_day(usage)
-            self._reset_if_new_minute(usage)
 
-            minute_req_ok = usage.requests_this_minute < limits["requests_per_minute"]
-            minute_tok_ok = (
-                usage.tokens_this_minute + estimated_tokens <= limits["tokens_per_minute"]
-            )
-
-            if not (minute_req_ok and minute_tok_ok):
-                seconds_left = 60 - datetime.now(timezone.utc).second
-                logger.warning(
-                    "[Governor] Minute limit approached for %s. Sleeping %ds.",
-                    model,
-                    seconds_left + 1,
-                )
-                time.sleep(seconds_left + 1)
+        for attempt in range(self._MAX_WAIT_ATTEMPTS):
+            with self._lock:
+                usage = self._get_usage(model)
+                self._reset_if_new_day(usage)
                 self._reset_if_new_minute(usage)
 
-            usage.requests_today += 1
-            usage.tokens_today += estimated_tokens
-            usage.requests_this_minute += 1
-            usage.tokens_this_minute += estimated_tokens
+                minute_req_ok = usage.requests_this_minute < limits["requests_per_minute"]
+                minute_tok_ok = (
+                    usage.tokens_this_minute + estimated_tokens <= limits["tokens_per_minute"]
+                )
 
-            logger.debug(
-                "[Governor] %s — today: %d req, %d tok | this min: %d req, %d tok",
-                model,
-                usage.requests_today,
-                usage.tokens_today,
-                usage.requests_this_minute,
-                usage.tokens_this_minute,
-            )
+                if minute_req_ok and minute_tok_ok:
+                    usage.requests_today += 1
+                    usage.tokens_today += estimated_tokens
+                    usage.requests_this_minute += 1
+                    usage.tokens_this_minute += estimated_tokens
+                    logger.debug(
+                        "[Governor] %s — today: %d req, %d tok | this min: %d req, %d tok",
+                        model,
+                        usage.requests_today,
+                        usage.tokens_today,
+                        usage.requests_this_minute,
+                        usage.tokens_this_minute,
+                    )
+                    return
+
+                wait_seconds = 60 - datetime.now(timezone.utc).second + 1
+                logger.warning(
+                    "[Governor] Minute limit approached for %s (attempt %d/%d). Sleeping %ds.",
+                    model,
+                    attempt + 1,
+                    self._MAX_WAIT_ATTEMPTS,
+                    wait_seconds,
+                )
+
+            time.sleep(wait_seconds)
+
+        raise RateLimitExceeded(
+            f"{model} still over its per-minute quota after {self._MAX_WAIT_ATTEMPTS} "
+            f"sleep(s); estimated_tokens={estimated_tokens} may itself exceed the "
+            "model's tokens-per-minute budget"
+        )
 
     def get_remaining_capacity(self, model: str) -> int:
         """Returns the remaining per-minute request capacity for a given model.

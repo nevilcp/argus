@@ -264,8 +264,16 @@ class TestEndToEnd:
         usage = governor._get_usage(model)
         usage.requests_this_minute = limit - 1
 
+        # Simulates the minute rolling over during the sleep, so the retry loop's
+        # re-check finds room on its second pass rather than exhausting every
+        # attempt against a mock that never advances real time.
+        def _advance_minute(_seconds):
+            usage.current_minute = "1970-01-01T00:00"
+
         # Reaching exactly the limit still succeeds without sleeping
-        with mock.patch("argus.orchestration.governor.time.sleep") as mock_sleep:
+        with mock.patch(
+            "argus.orchestration.governor.time.sleep", side_effect=_advance_minute
+        ) as mock_sleep:
             governor.wait_if_needed(model)
             assert usage.requests_this_minute == limit
             assert mock_sleep.call_count == 0
