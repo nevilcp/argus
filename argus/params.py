@@ -35,7 +35,7 @@ from dataclasses import dataclass, field, fields
 from enum import Enum
 from typing import Any
 
-PARAMS_VERSION = 2
+PARAMS_VERSION = 3
 
 
 class Provenance(str, Enum):
@@ -73,8 +73,12 @@ class SystemParams:
     mft_decision_interval_seconds: int = p(
         1800, Provenance.ARBITRARY, "30-minute decision cadence; not evaluated against alternatives"
     )
-    candle_buffer_size: int = p(
-        78, Provenance.ARBITRARY, "buffer sized to ~1 trading day of 5m candles (78 = 6.5h / 5m)"
+    candle_buffer_days_retained: int = p(
+        2,
+        Provenance.CONVENTION,
+        "buffer retains this many trading days of intraday bars; matches "
+        "data/pipeline.py's yf.download() fetch period so a sweep's candles "
+        "always fit without evicting same-day history",
     )
     max_single_position_pct: float = p(
         0.15, Provenance.CONVENTION, "common retail/advisory single-name concentration ceiling"

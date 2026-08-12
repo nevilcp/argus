@@ -4,8 +4,10 @@ argus/data/pipeline.py
 Mid-Frequency Trading (MFT) data pipeline for real-time asset ingestion.
 
 Responsibilities:
-  - Asynchronously fetch 5-minute intraday candles across the target ticker universe
-  - Buffer candles in OHLCVBuffer and compress them into technical feature dicts
+  - Asynchronously fetch intraday candles, at a configurable resolution, across
+    the target ticker universe
+  - Buffer candles in OHLCVBuffer and compress them into technical feature dicts,
+    resampling to a coarser resolution for indicators that need it
   - Trigger downstream agent decision cycles at configurable intervals
 
 Not responsible for:
@@ -22,14 +24,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Callable
 from datetime import datetime, time as dtime
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from argus.config import settings
 from argus.data.cache import OHLCVBuffer
 from argus.data.fetchers import fetch_ohlcv_intraday
+from argus.params import SYSTEM
 
 logger = logging.getLogger("argus.pipeline")
 
@@ -37,11 +42,85 @@ _ET = ZoneInfo("America/New_York")
 _MARKET_OPEN = dtime(9, 30)
 _MARKET_CLOSE = dtime(16, 0)
 
-# Tuned to stay under yfinance's 5 req/min informal rate ceiling for intraday data
-_BATCH_SIZE = 4
-_INTER_REQUEST_SLEEP = 13
+# 6.5h regular session (9:30-16:00 ET) in minutes
+_TRADING_MINUTES_PER_DAY = 390
+
+# yf.download's chart endpoint returns the whole series in one request regardless
+# of interval granularity, so this costs nothing extra against any rate limit
+_FETCH_PERIOD_DAYS = SYSTEM.candle_buffer_days_retained
+_FETCH_PERIOD = f"{_FETCH_PERIOD_DAYS}d"
+
+# RSI/MACD/BB/ATR/ADX/VWAP/volume-ratio are computed on bars resampled to this
+# resolution regardless of the raw fetch interval — RSI-14 on 1m bars is a
+# 14-minute lookback, too twitchy for a decision cadence measured in tens of minutes
+_INDICATOR_RESAMPLE_MINUTES = 5
+
 _FETCH_INTERVAL = 300
-_SESSION_INTERVAL = 1800
+
+# Conservative, unmeasured estimate of one yfinance round-trip; used only to
+# derive inter-ticker spacing so a sweep finishes within _FETCH_INTERVAL
+_ESTIMATED_FETCH_SECONDS_PER_TICKER = 1.0
+
+_INTERVAL_RE = re.compile(r"^(\d+)(m|h)$")
+
+
+def _parse_interval_minutes(interval: str) -> int:
+    """Converts a yfinance interval string (e.g. "1m", "30m", "1h") to minutes.
+
+    Args:
+        interval: yfinance-style interval string.
+
+    Returns:
+        Interval length in minutes.
+
+    Raises:
+        ValueError: If the string doesn't match the supported "<n>m" / "<n>h" shape.
+    """
+    match = _INTERVAL_RE.match(interval)
+    if not match:
+        raise ValueError(f"unsupported interval string: {interval!r}")
+    value, unit = match.groups()
+    return int(value) * (60 if unit == "h" else 1)
+
+
+def _bars_per_day(interval_minutes: int) -> int:
+    """Returns how many candles a full trading session yields at the given interval."""
+    return max(1, _TRADING_MINUTES_PER_DAY // interval_minutes)
+
+
+def _derive_buffer_size(interval_minutes: int) -> int:
+    """Sizes the rolling buffer to hold `_FETCH_PERIOD_DAYS` of candles at the given interval.
+
+    Matches fetch_ohlcv_intraday's fetch period so a single sweep's candles
+    always fit without evicting same-day history.
+
+    Args:
+        interval_minutes: Native candle resolution in minutes.
+
+    Returns:
+        Buffer row capacity per ticker.
+    """
+    return _bars_per_day(interval_minutes) * _FETCH_PERIOD_DAYS
+
+
+def _resample_ohlcv(df: pd.DataFrame, interval_minutes: int, target_minutes: int) -> pd.DataFrame:
+    """Resamples raw OHLCV candles to a coarser resolution.
+
+    Args:
+        df: Raw candles at `interval_minutes` resolution, indexed by timestamp.
+        interval_minutes: Native resolution of `df`.
+        target_minutes: Desired output resolution.
+
+    Returns:
+        Resampled OHLCV DataFrame, or `df` unchanged if it's already at or
+        coarser than `target_minutes`.
+    """
+    if target_minutes <= interval_minutes:
+        return df
+    resampled = df.resample(f"{target_minutes}min").agg(
+        {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+    )
+    return resampled.dropna(subset=["close"])
 
 
 class MFTDataPipeline:
@@ -55,16 +134,28 @@ class MFTDataPipeline:
     def __init__(
         self,
         tickers: list[str],
+        interval: str | None = None,
     ) -> None:
         """Creates the pipeline with an in-memory candle buffer for the given universe.
 
         Args:
             tickers: Initial ticker universe to track.
+            interval: yfinance interval string overriding `settings.MFT_CANDLE_INTERVAL`.
+                Exposed mainly for tests; production call sites rely on the default.
         """
         self.tickers = tickers
-        self.buffer = OHLCVBuffer(db_path=":memory:", buffer_size=78)
+        self.interval = interval or settings.MFT_CANDLE_INTERVAL
+        self.interval_minutes = _parse_interval_minutes(self.interval)
+        self.session_interval_seconds = settings.MFT_DECISION_INTERVAL_SECONDS
+        buffer_size = settings.CANDLE_BUFFER_SIZE or _derive_buffer_size(self.interval_minutes)
+        self.buffer = OHLCVBuffer(db_path=":memory:", buffer_size=buffer_size)
         self.running = False
-        logger.info("MFTDataPipeline initialised: %d tickers", len(tickers))
+        logger.info(
+            "MFTDataPipeline initialised: %d tickers, interval=%s, buffer_size=%d",
+            len(tickers),
+            self.interval,
+            buffer_size,
+        )
 
     async def start(self, on_session_ready: Callable) -> None:
         """Starts concurrent fetch and session cycles, blocking until stopped.
@@ -107,25 +198,51 @@ class MFTDataPipeline:
     async def _fetch_loop(self) -> None:
         """Periodically downloads the latest intraday candlesticks for the tracking universe.
 
-        Batches requests by ``_BATCH_SIZE`` with ``_INTER_REQUEST_SLEEP`` seconds between
-        each fetch to avoid triggering yfinance throttling. Iterates over a snapshot of
+        Spaces requests across the sweep so it finishes within ``_FETCH_INTERVAL``
+        rather than on a fixed per-batch schedule. Iterates over a snapshot of
         ``self.tickers`` so that concurrent ``register_tickers`` calls cannot corrupt iteration.
         """
         while self.running:
             if self._is_market_hours():
                 tickers_snapshot = list(self.tickers)
                 logger.debug("_fetch_loop: starting universe sweep (%d tickers)", len(tickers_snapshot))
-                for i in range(0, len(tickers_snapshot), _BATCH_SIZE):
-                    batch = tickers_snapshot[i : i + _BATCH_SIZE]
-                    for j, ticker in enumerate(batch):
-                        await self._fetch_one_ticker(ticker)
-                        # Sleep between tickers but not after the last one in the final batch
-                        if not (i + j + 1 >= len(tickers_snapshot)):
-                            await asyncio.sleep(_INTER_REQUEST_SLEEP)
+                sleep_seconds = self._inter_request_sleep(len(tickers_snapshot))
+                last = len(tickers_snapshot) - 1
+                for i, ticker in enumerate(tickers_snapshot):
+                    await self._fetch_one_ticker(ticker)
+                    if i < last:
+                        await asyncio.sleep(sleep_seconds)
             else:
                 logger.debug("_fetch_loop: outside market hours — idle")
 
             await asyncio.sleep(_FETCH_INTERVAL)
+
+    def _inter_request_sleep(self, n_tickers: int) -> float:
+        """Derives the per-ticker sleep so a sweep finishes within `_FETCH_INTERVAL`.
+
+        Args:
+            n_tickers: Number of tickers in the current sweep.
+
+        Returns:
+            Seconds to sleep between consecutive ticker fetches. 0.0 if there's
+            nothing to space out, or if the universe is too large to fit even an
+            unpaced sweep inside `_FETCH_INTERVAL` — in which case candles simply
+            refresh less often than `_FETCH_INTERVAL` implies.
+        """
+        if n_tickers <= 1:
+            return 0.0
+        estimated_fetch_seconds = n_tickers * _ESTIMATED_FETCH_SECONDS_PER_TICKER
+        slack = _FETCH_INTERVAL - estimated_fetch_seconds
+        if slack <= 0:
+            logger.warning(
+                "_inter_request_sleep: %d tickers won't fit an estimated %.0fs fetch "
+                "into the %ds cycle even unpaced; sweeping back-to-back",
+                n_tickers,
+                estimated_fetch_seconds,
+                _FETCH_INTERVAL,
+            )
+            return 0.0
+        return slack / n_tickers
 
     async def _session_loop(self, callback: Callable) -> None:
         """Periodically compiles buffered candlesticks and triggers downstream agent actions.
@@ -134,7 +251,7 @@ class MFTDataPipeline:
             callback: Async callable receiving the ``session_states`` dict.
         """
         while self.running:
-            await asyncio.sleep(_SESSION_INTERVAL)
+            await asyncio.sleep(self.session_interval_seconds)
             if self._is_market_hours():
                 logger.info("_session_loop: triggering decision cycle")
                 session_states = self.compress_all()
@@ -148,19 +265,21 @@ class MFTDataPipeline:
                     )
 
     async def _fetch_one_ticker(self, ticker: str) -> None:
-        """Downloads and bulk-inserts all available 5-minute candles for a specific symbol.
+        """Downloads and bulk-inserts all available candles for a specific symbol.
 
-        Fetches up to 2 trading days of 5-minute candles and inserts every row into the
-        buffer. This warms the buffer to a full indicator-ready depth on the very first
-        fetch cycle, eliminating the 70-minute cold start that would result from
-        inserting only the latest candle. Duplicate timestamps are safely overwritten
-        via the buffer's INSERT OR REPLACE contract.
+        Fetches `_FETCH_PERIOD` of candles at `self.interval` and inserts every row
+        into the buffer. This warms the buffer to a full indicator-ready depth on
+        the very first fetch cycle, eliminating the cold start that would result
+        from inserting only the latest candle. Duplicate timestamps are safely
+        overwritten via the buffer's INSERT OR REPLACE contract.
 
         Args:
             ticker: Equity ticker symbol to fetch.
         """
         try:
-            df: pd.DataFrame = await asyncio.to_thread(fetch_ohlcv_intraday, ticker, "5m", "2d")
+            df: pd.DataFrame = await asyncio.to_thread(
+                fetch_ohlcv_intraday, ticker, self.interval, _FETCH_PERIOD
+            )
             if df is None or df.empty:
                 logger.warning("_fetch_one_ticker: empty result for %s", ticker)
                 return
@@ -221,7 +340,8 @@ class MFTDataPipeline:
         which is particularly important in serverless and cold-start environments.
 
         Args:
-            df: OHLCV DataFrame with float columns and a datetime index.
+            df: Raw OHLCV DataFrame at `self.interval` resolution, float columns,
+                datetime index.
 
         Returns:
             Dict with keys: rsi_14, macd_histogram, bb_percent_b, atr_pct, adx_14,
@@ -229,12 +349,14 @@ class MFTDataPipeline:
         """
         import pandas_ta as ta  # Lazy import to avoid heavy C extension load on startup
 
-        rsi_series = ta.rsi(df["close"], length=14)
+        ind_df = _resample_ohlcv(df, self.interval_minutes, _INDICATOR_RESAMPLE_MINUTES)
+
+        rsi_series = ta.rsi(ind_df["close"], length=14)
         rsi_14 = (
             float(rsi_series.iloc[-1]) if rsi_series is not None and not rsi_series.empty else 50.0
         )
 
-        macd_df = ta.macd(df["close"], fast=12, slow=26, signal=9)
+        macd_df = ta.macd(ind_df["close"], fast=12, slow=26, signal=9)
         macd_hist = 0.0
         if macd_df is not None and not macd_df.empty:
             # pandas_ta names the histogram column with an 'h' suffix, e.g. MACDh_12_26_9
@@ -244,7 +366,7 @@ class MFTDataPipeline:
             else:
                 logger.warning("_compress_candles: MACD histogram column not found in %s", list(macd_df.columns))
 
-        bb_df = ta.bbands(df["close"], length=20, std=2)
+        bb_df = ta.bbands(ind_df["close"], length=20, std=2)
         bb_pct_b = 0.5
         if bb_df is not None and not bb_df.empty:
             # pandas_ta names the %B column with a 'BBP_' prefix, e.g. BBP_20_2.0
@@ -254,7 +376,7 @@ class MFTDataPipeline:
             else:
                 logger.warning("_compress_candles: BB %%B column not found in %s", list(bb_df.columns))
 
-        atr_series = ta.atr(df["high"], df["low"], df["close"], length=14)
+        atr_series = ta.atr(ind_df["high"], ind_df["low"], ind_df["close"], length=14)
         close_last = float(df["close"].iloc[-1])
         atr_pct = (
             (float(atr_series.iloc[-1]) / close_last)
@@ -262,7 +384,7 @@ class MFTDataPipeline:
             else 0.0
         )
 
-        adx_df = ta.adx(df["high"], df["low"], df["close"], length=14)
+        adx_df = ta.adx(ind_df["high"], ind_df["low"], ind_df["close"], length=14)
         adx_14 = 20.0
         if adx_df is not None and not adx_df.empty:
             adx_col = [c for c in adx_df.columns if c.upper().startswith("ADX_")]
@@ -271,7 +393,7 @@ class MFTDataPipeline:
 
         vwap_distance = 0.0
         try:
-            vwap_series = ta.vwap(df["high"], df["low"], df["close"], df["volume"])
+            vwap_series = ta.vwap(ind_df["high"], ind_df["low"], ind_df["close"], ind_df["volume"])
             if vwap_series is not None and not vwap_series.empty:
                 vwap_val = float(vwap_series.iloc[-1])
                 if vwap_val and close_last:
@@ -280,7 +402,7 @@ class MFTDataPipeline:
             # pandas_ta raises on zero-volume days; default to 0.0 (no VWAP deviation)
             pass
 
-        vol_series = df["volume"]
+        vol_series = ind_df["volume"]
         vol_mean = (
             float(vol_series.rolling(20).mean().iloc[-1])
             if len(vol_series) >= 20
@@ -290,9 +412,14 @@ class MFTDataPipeline:
 
         close_s = df["close"]
         n = len(close_s)
-        # 7-bar lookback ≈ 35 minutes at 5m resolution; 79-bar lookback ≈ 1 trading day
-        momentum_30m = (float(close_s.iloc[-1]) / float(close_s.iloc[max(-7, -n)])) - 1.0
-        momentum_1d = (float(close_s.iloc[-1]) / float(close_s.iloc[max(-79, -n)])) - 1.0
+        momentum_30m_bars = max(1, 30 // self.interval_minutes)
+        momentum_1d_bars = _bars_per_day(self.interval_minutes)
+        momentum_30m = (
+            float(close_s.iloc[-1]) / float(close_s.iloc[max(-momentum_30m_bars, -n)])
+        ) - 1.0
+        momentum_1d = (
+            float(close_s.iloc[-1]) / float(close_s.iloc[max(-momentum_1d_bars, -n)])
+        ) - 1.0
 
         return {
             "rsi_14": round(rsi_14, 4),
