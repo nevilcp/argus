@@ -150,7 +150,7 @@ cp .env.example .env
 # 3. Build and launch
 docker compose up --build -d
 ```
-`docker-compose.yml` defines a single `argus-api` service (`Dockerfile.api`) and passes `GROQ_API_KEY`, `GOOGLE_AI_API_KEY`, `FRED_API_KEY`, and `NEWSAPI_KEY` through from `.env`.
+`docker-compose.yml` defines a single `argus-api` service (`Dockerfile.api`) and passes `GROQ_API_KEY`, `FRED_API_KEY`, and `NEWSAPI_KEY` through from `.env`.
 
 ### Method 2: Local Source
 ```bash
@@ -196,9 +196,6 @@ Required environment variables must be placed in a `.env` file at the project ro
 | `GROQ_API_KEY` | Yes | Authenticates Llama 3.3-70b/3.1-8b for core agent synthesis. |
 | `FRED_API_KEY` | Yes | Retrieves macroeconomic indicators (CPI, Fed Funds, UNRATE). |
 | `NEWSAPI_KEY` | Yes | Fetches recent headlines for FinBERT sentiment scoring. |
-| `GOOGLE_AI_API_KEY` | Optional | Gemini fallback for LLM synthesis. |
-| `POLYGON_API_KEY` | Declared, unused | Present in `.env.example`/`Settings`; no fetcher reads it yet. |
-| `ALPACA_API_KEY` / `ALPACA_SECRET_KEY` | Declared, unused | Present in `.env.example`/`Settings`; no fetcher reads it yet. |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | Optional | Enables Langfuse tracing for LLM observability. |
 | `LANGFUSE_HOST` | Optional | Langfuse instance URL. Default: `https://cloud.langfuse.com` |
 
