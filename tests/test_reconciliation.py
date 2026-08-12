@@ -450,10 +450,7 @@ def test_load_decisions_from_checkpoints_round_trips_a_real_graph_run(tmp_path):
         errors=[],
     )
 
-    with (
-        mock.patch("argus.orchestration.graph.get_cultural_memory") as mock_get_cultural_memory,
-        mock.patch("argus.orchestration.governor.governor.wait_if_needed"),
-    ):
+    with mock.patch("argus.orchestration.graph.get_cultural_memory") as mock_get_cultural_memory:
         mock_get_cultural_memory.return_value = mock.Mock(
             retrieve_wisdom=mock.Mock(return_value=[]),
             retrieve_warnings=mock.Mock(return_value=[]),

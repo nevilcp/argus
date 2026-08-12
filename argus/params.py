@@ -35,7 +35,7 @@ from dataclasses import dataclass, field, fields
 from enum import Enum
 from typing import Any
 
-PARAMS_VERSION = 1
+PARAMS_VERSION = 3
 
 
 class Provenance(str, Enum):
@@ -73,8 +73,12 @@ class SystemParams:
     mft_decision_interval_seconds: int = p(
         1800, Provenance.ARBITRARY, "30-minute decision cadence; not evaluated against alternatives"
     )
-    candle_buffer_size: int = p(
-        78, Provenance.ARBITRARY, "buffer sized to ~1 trading day of 5m candles (78 = 6.5h / 5m)"
+    candle_buffer_days_retained: int = p(
+        2,
+        Provenance.CONVENTION,
+        "buffer retains this many trading days of intraday bars; matches "
+        "data/pipeline.py's yf.download() fetch period so a sweep's candles "
+        "always fit without evicting same-day history",
     )
     max_single_position_pct: float = p(
         0.15, Provenance.CONVENTION, "common retail/advisory single-name concentration ceiling"
@@ -170,8 +174,6 @@ class PortfolioParams:
     llm_temperature: float = p(0.05, Provenance.CONVENTION, "near-zero temperature for reproducible structured output")
     llm_max_tokens: int = p(2400, Provenance.ARBITRARY, "sized to fit observed response length with headroom")
     equity_floor_adjustment: float = p(0.05, Provenance.ARBITRARY, "no basis for this specific adjustment")
-    token_estimate_multiplier: float = p(1.3, Provenance.ARBITRARY, "rough word-to-token overhead factor")
-    token_estimate_overhead: int = p(1200, Provenance.ARBITRARY, "rough fixed overhead for schema + system prompt")
     thesis_char_limit: int = p(120, Provenance.ARBITRARY, "no basis beyond keeping per-position text short")
     advisor_note_char_limit: int = p(600, Provenance.ARBITRARY, "no basis beyond keeping the rationale readable")
 

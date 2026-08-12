@@ -19,7 +19,7 @@ Not responsible for:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -45,12 +45,8 @@ class Settings(BaseSettings):
     )
 
     groq_api_key: str = Field(default="", description="Groq LLM API key")
-    google_ai_api_key: str = Field(default="", description="Google AI / Gemini API key")
 
     fred_api_key: str = Field(default="", description="FRED (Federal Reserve) API key")
-    polygon_api_key: str = Field(default="", description="Polygon.io market data API key")
-    alpaca_api_key: str = Field(default="", description="Alpaca trading API key")
-    alpaca_secret_key: str = Field(default="", description="Alpaca trading API secret")
 
     newsapi_key: str = Field(default="", description="NewsAPI.org key")
 
@@ -64,9 +60,16 @@ class Settings(BaseSettings):
 
     # Numeric defaults live in argus/params.py, tagged with provenance; this class
     # only adds env-var override capability on top of them
-    MFT_CANDLE_INTERVAL: str = "5m"
+    #
+    # yfinance's chart endpoint returns the whole requested period in one HTTP
+    # call regardless of interval granularity, so 1m candles cost nothing extra
+    # against any rate limit — see data/pipeline.py for how coarser resolutions
+    # are derived locally via resampling rather than fetched separately
+    MFT_CANDLE_INTERVAL: str = "1m"
     MFT_DECISION_INTERVAL_SECONDS: int = SYSTEM.mft_decision_interval_seconds
-    CANDLE_BUFFER_SIZE: int = SYSTEM.candle_buffer_size
+    # None means "derive from MFT_CANDLE_INTERVAL" (see data/pipeline.py's
+    # _derive_buffer_size); set explicitly only to override that derivation
+    CANDLE_BUFFER_SIZE: Optional[int] = None
 
     TECHNICAL_INDICATOR_WEIGHTS: Dict[str, float] = {
         "rsi": _TECHNICAL_WEIGHTS.rsi,

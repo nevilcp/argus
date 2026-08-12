@@ -32,11 +32,17 @@ import numpy as np
 from pydantic import ValidationError
 
 from argus.config import settings
-from argus.orchestration.governor import governor
+from argus.data import fetchers
 from argus.schemas.signals import SentimentSignal
 from argus.seams import GroqLLMClient, LiveMarketDataProvider, LLMClient, MarketDataProvider
 
 logger = logging.getLogger("argus.sentiment")
+
+# Rough estimate of one fundamental_analysis Groq 70B round-trip, used only to
+# pace batch_analyze's scraper calls against a live provider — see its docstring.
+# Not tuned against real latency measurements; revisit if fundamental_analysis's
+# actual per-ticker duration diverges enough to reintroduce burst risk.
+_FANOUT_PACE_SECONDS_PER_TICKER = 2.5
 
 # Module-level singleton prevents repeated model initialization (~30s first load)
 _FINBERT_PIPELINE = None
@@ -190,20 +196,20 @@ class SentimentDailyCache:
 def _check_earnings_calendar(ticker: str) -> bool:
     """Returns True if an earnings date falls within the next 14 days.
 
-    Uses yfinance calendar API, which returns varying structures across versions;
-    both DataFrame and dict formats are parsed to ensure cross-version compatibility.
+    Uses yfinance's calendar API via fetchers.fetch_ticker_calendar (retried,
+    rate-limit-classified) rather than calling yfinance directly. The response
+    shape (DataFrame or dict) varies across yfinance versions; both are parsed
+    for cross-version compatibility.
 
     Args:
         ticker: Equity ticker symbol.
 
     Returns:
-        True if an upcoming earnings event is within 14 days, False otherwise.
+        True if an upcoming earnings event is within 14 days, False otherwise
+        (including when the calendar can't be fetched at all).
     """
     try:
-        import yfinance as yf
-
-        t = yf.Ticker(ticker)
-        cal = t.calendar
+        cal = fetchers.fetch_ticker_calendar(ticker)
         import pandas as pd
 
         if isinstance(cal, pd.DataFrame) and not cal.empty and "Earnings Date" in cal.index:
@@ -232,7 +238,11 @@ _SENTIMENT_METRIC_LABELS: dict[str, str] = {
     "finbert_confidence": "[0.0 to 1.0]    confidence proxy based on article volume "
     "(caps at 1.0 when ≥10 articles)",
     "news_volume_7d": "[integer]        total news articles fetched in the last 7 days",
+    "news_data_available": "[bool]           False means the news fetch failed or hit its daily "
+    "quota — news_volume_7d is a placeholder 0, not a real zero",
     "social_mention_surge": "[bool]           True if social mention volume is unusually high",
+    "social_data_available": "[bool]           False means social data couldn't be fetched — "
+    "social_mention_surge/social_volume_change_pct are placeholders, not real observations",
     "upcoming_catalyst": "[bool]           True if earnings are expected within 14 days",
 }
 
@@ -286,7 +296,9 @@ SYSTEM_PROMPT = (
     "\n"
     "EPISTEMIC STANDARD: If the provided data is insufficient to determine a signal with confidence, "
     "assign signal=NEUTRAL and cap conviction at 0.40. Do not infer or recall any information "
-    "about the ticker beyond what is explicitly supplied.\n"
+    "about the ticker beyond what is explicitly supplied. When news_data_available or "
+    "social_data_available is False, treat the corresponding metrics as unknown, not as zero — "
+    "a failed fetch is not evidence of a neutral or absent signal.\n"
     "\n"
     "DATA SCHEMA — interpret each field strictly per the following units and ranges:\n"
     "  net_finbert_score    : float [-1.0, +1.0]  Exponential-decay-weighted mean FinBERT polarity\n"
@@ -367,7 +379,9 @@ class SentimentAgent:
         news = self.market_data.news(ticker, company_name or ticker, days_back=7)
         social = self.market_data.social_sentiment(ticker)
 
-        headlines = [a.get("title", "") for a in news if a.get("title")]
+        news_available = news is not None
+        news_list = news or []
+        headlines = [a.get("title", "") for a in news_list if a.get("title")]
         scored = score_headlines_with_finbert(headlines)
         agg = aggregate_finbert_scores(scored)
 
@@ -376,16 +390,17 @@ class SentimentAgent:
             "pct_positive": agg["pct_pos"],
             "pct_negative": agg["pct_neg"],
             "finbert_confidence": agg["confidence"],
-            "news_volume_7d": len(news),
+            "news_volume_7d": len(news_list),
+            "news_data_available": news_available,
             "social_mention_surge": social.get("mention_surge", False),
             "social_volume_change_pct": social.get("volume_change_pct", 0.0),
+            # fetch_social_sentiment always sets this key live; the default only covers
+            # fixtures captured before the key existed, which hold real data
+            "social_data_available": social.get("social_data_available", True),
             "upcoming_catalyst": _check_earnings_calendar(ticker),
         }
 
         prompt = _build_synthesis_prompt(ticker, metrics)
-        estimated_tokens = 450
-
-        governor.wait_if_needed("llama-3.1-8b-instant", estimated_tokens)
 
         for attempt in range(3):
             try:
@@ -437,6 +452,15 @@ class SentimentAgent:
     def batch_analyze(self, tickers: list[str]) -> dict[str, SentimentSignal]:
         """Generates SentimentSignals sequentially for a list of tickers.
 
+        Against a live market-data provider, paces each ticker's scraper calls
+        (pytrends + NewsAPI + the yfinance earnings-calendar lookup) rather than
+        bursting all of them in the first few seconds. In graph.py's fan-out,
+        this node runs concurrently with fundamental_analysis's ~20 sequential
+        Groq round-trips — the slower node either way — so spreading sentiment's
+        requests across that same slack costs no wall-clock time while sharply
+        cutting 429 risk on the scrapers. Fixture-backed providers skip pacing:
+        there's no live burst to smooth, and it would only slow down tests.
+
         Args:
             tickers: List of equity ticker symbols.
 
@@ -444,8 +468,11 @@ class SentimentAgent:
             Mapping of ticker → SentimentSignal for each successfully analyzed ticker.
             Failed tickers are omitted silently (already logged inside analyze).
         """
+        pace = isinstance(self.market_data, LiveMarketDataProvider)
         results = {}
-        for ticker in tickers:
+        for i, ticker in enumerate(tickers):
+            if pace and i > 0:
+                time.sleep(_FANOUT_PACE_SECONDS_PER_TICKER)
             res = self.analyze(ticker)
             if res is not None:
                 results[ticker] = res
