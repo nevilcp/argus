@@ -7,10 +7,11 @@ from unittest.mock import patch
 import pytest
 
 from argus.orchestration.governor import (
-    RateLimitExceeded,
-    RateLimitGovernor,
     MODEL_LIMITS,
+    RateLimitGovernor,
+    UnregisteredModel,
 )
+
 
 @pytest.fixture
 def governor():
@@ -21,6 +22,7 @@ def governor():
     """
     gov = RateLimitGovernor()
     return gov
+
 
 @patch("argus.orchestration.governor.time.sleep")
 def test_governor_minute_limit(mock_sleep, governor):
@@ -38,42 +40,35 @@ def test_governor_minute_limit(mock_sleep, governor):
     governor.wait_if_needed(model, 100)
     assert mock_sleep.call_count == 1
 
-@patch("argus.orchestration.governor.time.sleep")
-def test_governor_daily_limit(mock_sleep, governor):
-    """Exceeding the daily request limit raises rather than sleeping."""
-    model = list(MODEL_LIMITS.keys())[0]
-    limits = MODEL_LIMITS[model]
 
-    req_limit = limits["requests_per_day"]
+def test_governor_unregistered_model_raises(governor):
+    """A model absent from MODEL_LIMITS raises rather than being silently ungoverned."""
+    with pytest.raises(UnregisteredModel):
+        governor.wait_if_needed("some-typo-d-model-id", 100)
 
-    # Seed usage directly rather than making req_limit - 1 real calls
-    usage = governor._get_usage(model)
-    usage.requests_today = req_limit - 1
 
-    governor.wait_if_needed(model, 10)
-    assert mock_sleep.call_count == 0
-    assert usage.requests_today == req_limit
+def test_governor_get_capacity_unregistered_model(governor):
+    """Remaining capacity for an unregistered model is 0, not a silent pass-through."""
+    assert governor.get_remaining_capacity("some-typo-d-model-id") == 0
 
-    # Unlike the per-minute limit, the daily limit raises instead of blocking
-    with pytest.raises(RateLimitExceeded):
-        governor.wait_if_needed(model, 10)
-    assert mock_sleep.call_count == 0
-    assert usage.requests_today == req_limit
 
 def test_governor_get_capacity(governor):
-    """Remaining capacity decrements by one for each request recorded."""
+    """Remaining per-minute capacity decrements by one for each request recorded."""
     model = list(MODEL_LIMITS.keys())[0]
     initial_capacity = governor.get_remaining_capacity(model)
-    
+
     governor.wait_if_needed(model, 10)
     assert governor.get_remaining_capacity(model) == initial_capacity - 1
 
+
 def test_governor_report(governor):
-    """The usage report reflects the requests and tokens recorded for a model."""
+    """The usage report reflects today's usage alongside the published per-minute limits."""
     model = list(MODEL_LIMITS.keys())[0]
     governor.wait_if_needed(model, 100)
-    
+
     report = governor.get_usage_report()
     assert model in report
     assert report[model]["requests_today"] == 1
     assert report[model]["tokens_today"] == 100
+    assert report[model]["requests_per_minute_limit"] == MODEL_LIMITS[model]["requests_per_minute"]
+    assert report[model]["tokens_per_minute_limit"] == MODEL_LIMITS[model]["tokens_per_minute"]

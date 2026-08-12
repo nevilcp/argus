@@ -21,7 +21,7 @@ from argus.agents.portfolio import half_kelly_weight
 from argus.agents.risk import RiskStatisticalEngine
 from argus.agents.technical import TechnicalStatisticalAgent
 from argus.data.pipeline import MFTDataPipeline
-from argus.orchestration.governor import RateLimitExceeded, governor
+from argus.orchestration.governor import MODEL_LIMITS, governor
 from argus.orchestration.graph import graph
 from argus.orchestration.state import ARGUSState
 from argus.risk.kill_switch import KillSwitch
@@ -257,24 +257,25 @@ class TestEndToEnd:
         assert macro.macro_regime == macro2.macro_regime
 
     def test_governor_prevents_over_limit(self):
-        """The shared governor raises once a model's daily request count reaches its limit."""
-        from argus.orchestration.governor import MODEL_LIMITS
-
+        """The shared governor sleeps once a model's per-minute request count reaches its limit."""
         model = "llama-3.3-70b-versatile"
-        limit = MODEL_LIMITS[model]["requests_per_day"]
+        limit = MODEL_LIMITS[model]["requests_per_minute"]
 
         usage = governor._get_usage(model)
-        usage.requests_today = limit - 1
+        usage.requests_this_minute = limit - 1
 
-        # Reaching exactly the limit still succeeds; only exceeding it raises
-        governor.wait_if_needed(model)
-        assert usage.requests_today == limit
-
-        with pytest.raises(RateLimitExceeded):
+        # Reaching exactly the limit still succeeds without sleeping
+        with mock.patch("argus.orchestration.governor.time.sleep") as mock_sleep:
             governor.wait_if_needed(model)
+            assert usage.requests_this_minute == limit
+            assert mock_sleep.call_count == 0
+
+            # Exceeding it sleeps out the remainder of the current minute
+            governor.wait_if_needed(model)
+            assert mock_sleep.call_count == 1
 
         # governor is a module-level singleton shared across tests
-        usage.requests_today = 0
+        usage.requests_this_minute = 0
 
     def test_half_kelly_formula(self):
         """half_kelly_weight() computes half the Kelly-optimal position size."""

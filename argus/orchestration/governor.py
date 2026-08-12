@@ -4,7 +4,7 @@ argus/orchestration/governor.py
 Centralized API rate-limit governance module across all LLM and data providers.
 
 Responsibilities:
-  - Enforce per-model daily request and token quotas
+  - Enforce per-model tokens-per-minute and requests-per-minute quotas
   - Provide cooperative back-pressure via timed waits before each API call
   - Expose usage telemetry for health checks and governor reports
 
@@ -26,21 +26,25 @@ logger = logging.getLogger("argus.governor")
 
 
 class RateLimitExceeded(Exception):
-    """Raised when a model's daily request or token quota is exhausted."""
+    """Raised when a model's token or request quota is exhausted."""
 
-# Per-model token and request limits; tuned against each provider's free-tier daily caps
+
+class UnregisteredModel(ValueError):
+    """Raised when a model with no known rate-limit profile is passed to the governor."""
+
+
+# Source: Groq's published Developer-plan model table (console.groq.com/docs/models),
+# read 2026-08-12. Groq publishes only tokens-per-minute and requests-per-minute for
+# these models — no daily request or token cap is published for either, so none is
+# invented or enforced here.
 MODEL_LIMITS: dict[str, dict[str, int]] = {
     "llama-3.3-70b-versatile": {
-        "requests_per_day": 1_000,
-        "tokens_per_day": 100_000,
-        "tokens_per_minute": 6_000,
-        "requests_per_minute": 30,
+        "tokens_per_minute": 300_000,
+        "requests_per_minute": 1_000,
     },
     "llama-3.1-8b-instant": {
-        "requests_per_day": 14_400,
-        "tokens_per_day": 500_000,
-        "tokens_per_minute": 20_000,
-        "requests_per_minute": 30,
+        "tokens_per_minute": 250_000,
+        "requests_per_minute": 1_000,
     },
 }
 
@@ -116,21 +120,21 @@ class RateLimitGovernor:
             usage.current_minute = now_minute
 
     def wait_if_needed(self, model: str, estimated_tokens: int = 500) -> None:
-        """Blocks the calling thread until rate limits allow the next API request.
+        """Blocks the calling thread until per-minute rate limits allow the next request.
 
-        Checks both daily and per-minute quotas. If a per-minute limit would be
-        exceeded, sleeps until the next UTC minute begins. If the daily limit is
-        exhausted, raises ``RateLimitExceeded`` rather than proceeding.
+        Groq publishes no daily cap for either registered model, so only the
+        published tokens-per-minute and requests-per-minute ceilings are enforced.
+        If a per-minute limit would be exceeded, sleeps until the next UTC minute.
 
         Args:
             model: Provider model identifier string.
             estimated_tokens: Estimated token consumption of the upcoming request.
 
         Raises:
-            RateLimitExceeded: If the model's daily request or token quota is exhausted.
+            UnregisteredModel: If ``model`` has no known rate-limit profile.
         """
         if model not in MODEL_LIMITS:
-            return
+            raise UnregisteredModel(f"{model!r} has no registered rate-limit profile")
 
         limits = MODEL_LIMITS[model]
         with self._lock:
@@ -138,27 +142,10 @@ class RateLimitGovernor:
             self._reset_if_new_day(usage)
             self._reset_if_new_minute(usage)
 
-            daily_req_ok = usage.requests_today < limits["requests_per_day"]
-            daily_tok_ok = usage.tokens_today + estimated_tokens <= limits["tokens_per_day"]
             minute_req_ok = usage.requests_this_minute < limits["requests_per_minute"]
             minute_tok_ok = (
                 usage.tokens_this_minute + estimated_tokens <= limits["tokens_per_minute"]
             )
-
-            if not (daily_req_ok and daily_tok_ok):
-                logger.critical(
-                    "[Governor] Daily limit reached for %s. req=%d/%d tok=%d/%d",
-                    model,
-                    usage.requests_today,
-                    limits["requests_per_day"],
-                    usage.tokens_today,
-                    limits["tokens_per_day"],
-                )
-                raise RateLimitExceeded(
-                    f"Daily quota exhausted for {model}: "
-                    f"req={usage.requests_today}/{limits['requests_per_day']} "
-                    f"tok={usage.tokens_today}/{limits['tokens_per_day']}"
-                )
 
             if not (minute_req_ok and minute_tok_ok):
                 seconds_left = 60 - datetime.now(timezone.utc).second
@@ -185,26 +172,29 @@ class RateLimitGovernor:
             )
 
     def get_remaining_capacity(self, model: str) -> int:
-        """Returns the remaining daily request capacity for a given model.
+        """Returns the remaining per-minute request capacity for a given model.
 
         Args:
             model: Provider model identifier string.
 
         Returns:
-            Remaining requests allowed today, or 0 if the model is unregistered.
+            Remaining requests allowed in the current minute, or 0 if unregistered.
         """
         if model not in MODEL_LIMITS:
             return 0
         with self._lock:
             usage = self._get_usage(model)
-            self._reset_if_new_day(usage)
-            return max(0, MODEL_LIMITS[model]["requests_per_day"] - usage.requests_today)
+            self._reset_if_new_minute(usage)
+            return max(
+                0, MODEL_LIMITS[model]["requests_per_minute"] - usage.requests_this_minute
+            )
 
     def get_usage_report(self) -> dict:
         """Compiles a per-model usage snapshot for health check endpoints.
 
         Returns:
-            Dict mapping model name → dict of today's request and token usage with limits.
+            Dict mapping model name → dict of today's cumulative usage alongside
+            the published per-minute limits (no daily limit exists to report).
         """
         report: dict[str, dict] = {}
         with self._lock:
@@ -214,9 +204,9 @@ class RateLimitGovernor:
                 lim = MODEL_LIMITS[model]
                 report[model] = {
                     "requests_today": usage.requests_today,
-                    "requests_limit": lim["requests_per_day"],
                     "tokens_today": usage.tokens_today,
-                    "tokens_limit": lim["tokens_per_day"],
+                    "requests_per_minute_limit": lim["requests_per_minute"],
+                    "tokens_per_minute_limit": lim["tokens_per_minute"],
                 }
         return report
 
