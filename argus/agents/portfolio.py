@@ -30,7 +30,6 @@ from uuid import uuid4
 import numpy as np
 
 from argus.config import settings
-from argus.orchestration.governor import governor
 from argus.params import PORTFOLIO
 from argus.schemas.signals import MacroContext, PortfolioAllocation, RiskVerdict
 from argus.seams import GroqLLMClient, LLMClient
@@ -289,9 +288,6 @@ class PortfolioManagerAgent:
             '"composite_conviction":0.0,"time_horizon":"3-6 months"}],'
             '"cash_reserve_pct":0.0,"expected_sharpe":null,"rebalance_trigger":"MONTHLY"}'
         )
-        estimated_tokens = int(len(prompt.split()) * PORTFOLIO.token_estimate_multiplier) + PORTFOLIO.token_estimate_overhead
-        governor.wait_if_needed("llama-3.3-70b-versatile", estimated_tokens)
-
         for attempt in range(3):
             try:
                 raw = self.llm_client.complete(SYSTEM_PROMPT, prompt).strip()

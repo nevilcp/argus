@@ -15,7 +15,7 @@ Not responsible for:
 
 Dependencies:
   - scipy (SLSQP optimizer)
-  - yfinance (GICS sector lookup)
+  - yfinance, via data/fetchers.py (GICS sector lookup)
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ import pandas as pd
 from scipy.optimize import minimize
 
 from argus.config import settings
+from argus.data import fetchers
 from argus.params import RISK
 from argus.schemas.signals import RiskAssessment, RiskVerdict
 from argus.seams import LiveMarketDataProvider, MarketDataProvider
@@ -46,7 +47,9 @@ def get_sector(ticker: str) -> str:
 
     Uses a module-level dict with a 24-hour TTL to avoid redundant yfinance
     round-trips within a session while still reflecting corporate reclassifications
-    (e.g. acquisitions, spin-offs) across multi-day server runs.
+    (e.g. acquisitions, spin-offs) across multi-day server runs. Routes through
+    fetchers.fetch_ticker_info rather than calling yfinance directly, so this
+    lookup gets the same retry/back-off classification as every other fetch.
 
     Args:
         ticker: Equity ticker symbol.
@@ -60,9 +63,7 @@ def get_sector(ticker: str) -> str:
             return sector
 
     try:
-        import yfinance as yf
-
-        info = yf.Ticker(ticker).info
+        info = fetchers.fetch_ticker_info(ticker)
         sector = info.get("sector", "Unknown")
         _SECTOR_CACHE[ticker] = (sector, datetime.now())
         return sector

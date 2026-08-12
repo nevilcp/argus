@@ -4,14 +4,19 @@ argus/data/fetchers.py
 Centralized data access layer for fetching pricing, fundamentals, and macro series.
 
 Responsibilities:
-  - Provide retried access to Yahoo Finance OHLCV and fundamentals
+  - Provide retried access to Yahoo Finance OHLCV and fundamentals, retrying
+    only failures a second attempt could plausibly fix
   - Fetch and cache macroeconomic FRED series with a 6-hour TTL
-  - Aggregate news headlines and social sentiment from free-tier APIs
+  - Cache daily OHLCV bars per (ticker, trading day) so a sweep only pays for
+    the first fetch of each trading day
+  - Aggregate news headlines and social sentiment from free-tier APIs,
+    enforcing NewsAPI's 100 request/day budget and returning None — never a
+    fabricated empty result — when a source can't be reached
 
 Not responsible for:
   - Data compression or indicator calculation (see data/pipeline.py)
-  - SQLite buffering (see data/cache.py)
-  - Rate-limit governance (see orchestration/governor.py)
+  - Rolling intraday SQLite buffering (see data/cache.py's OHLCVBuffer)
+  - Rate-limit governance for Groq LLM calls (see orchestration/governor.py)
 
 Dependencies:
   - yfinance
@@ -23,19 +28,25 @@ Dependencies:
 from __future__ import annotations
 
 import logging
+import random
 import time
 import functools
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from threading import Lock
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Optional, TypeVar
 
 import pandas as pd
 import yfinance as yf
 
 from argus.config import settings
+from argus.data.cache import DailyBarCache
 
 logger = logging.getLogger("argus.fetchers")
+
+# yfinance ships its own retry/backoff but defaults it off; this is the one
+# place that turns it on, per-process, for every yf.download/yf.Ticker call.
+yf.config.network.retries = 2
 
 
 class DataFetchError(Exception):
@@ -45,15 +56,98 @@ class DataFetchError(Exception):
 F = TypeVar("F", bound=Callable[..., Any])
 
 _RETRY_ATTEMPTS = 3
-# Doubles on each consecutive attempt: 1.5s, 3.0s, 6.0s
+# Full-jitter backoff base; doubles the ceiling each attempt (base, 2*base, 4*base)
 _RETRY_BASE_DELAY = 1.5
 
 
+def _status_code_of(exc: Exception) -> Optional[int]:
+    """Extracts an HTTP status code from an exception's attached response, if any.
+
+    Args:
+        exc: An exception potentially carrying a ``requests``/``httpx``-style
+            ``.response`` attribute.
+
+    Returns:
+        The response's status code, or None if the exception carries none.
+    """
+    response = getattr(exc, "response", None)
+    return getattr(response, "status_code", None)
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """Classifies whether a second attempt at the same call could plausibly succeed.
+
+    An invalid API key or a missing resource fails identically on every retry, so
+    retrying it only burns time; a rate limit or a transient 5xx often clears within
+    seconds. Unrecognized exceptions default to retryable, matching this module's
+    prior blanket-retry behavior for anything not explicitly known to be terminal.
+
+    Args:
+        exc: The exception a fetch attempt raised.
+
+    Returns:
+        True if retrying is worthwhile; False for 401/403/404 and their
+        provider-specific equivalents.
+    """
+    import yfinance.exceptions as yf_exceptions
+    from pytrends.exceptions import TooManyRequestsError
+
+    if isinstance(exc, (yf_exceptions.YFRateLimitError, TooManyRequestsError)):
+        return True
+
+    try:
+        from newsapi.newsapi_exception import NewsAPIException
+
+        if isinstance(exc, NewsAPIException):
+            return exc.get_code() == "rateLimited"
+    except ImportError:
+        pass
+
+    import requests
+
+    if isinstance(exc, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)):
+        return True
+
+    status_code = _status_code_of(exc)
+    if status_code is not None:
+        if status_code in (401, 403, 404):
+            return False
+        return status_code in (429, 423) or status_code >= 500
+
+    return True
+
+
+def _retry_after_seconds(exc: Exception) -> Optional[float]:
+    """Reads a Retry-After response header off an exception, if one is attached.
+
+    Args:
+        exc: The exception a fetch attempt raised.
+
+    Returns:
+        Seconds to wait before retrying, taken verbatim from the provider's own
+        Retry-After header, or None if no such header is present.
+    """
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return None
+    retry_after = headers.get("Retry-After") or headers.get("retry-after")
+    if retry_after is None:
+        return None
+    try:
+        return float(retry_after)
+    except (ValueError, TypeError):
+        return None
+
+
 def _with_retry(fn: F) -> F:
-    """Decorator implementing exponential back-off retries on network failures.
+    """Decorator implementing jittered back-off retries on retryable failures only.
 
     Wraps transient exceptions in DataFetchError after exhausting all attempts.
     Re-raises DataFetchError immediately without re-wrapping to avoid stacking.
+    A terminal (non-retryable) failure raises DataFetchError on the first
+    attempt rather than burning the full retry budget on a call that would
+    fail identically every time.
 
     Args:
         fn: The function to wrap.
@@ -72,7 +166,23 @@ def _with_retry(fn: F) -> F:
                 raise
             except Exception as exc:
                 last_exc = exc
-                delay = _RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                if not _is_retryable(exc):
+                    logger.warning(
+                        "%s failed with a non-retryable error (%s: %s); not retrying",
+                        fn.__name__,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    raise DataFetchError(
+                        f"{fn.__name__} failed with a non-retryable error: {exc}"
+                    ) from exc
+
+                retry_after = _retry_after_seconds(exc)
+                delay = (
+                    retry_after
+                    if retry_after is not None
+                    else random.uniform(0.0, _RETRY_BASE_DELAY * (2 ** (attempt - 1)))
+                )
                 logger.warning(
                     "%s attempt %d/%d failed (%s: %s); retrying in %.1fs",
                     fn.__name__,
@@ -197,8 +307,19 @@ def fetch_ohlcv_intraday(ticker: str, interval: str = "5m", period: str = "5d") 
     return df
 
 
+_MULTI_DAILY_MAX_WORKERS = 5
+
+# Daily bars change once per trading day; caching them turns every run after
+# the first of the day into 0 requests for this node instead of one per ticker.
+_DAILY_BAR_CACHE = DailyBarCache()
+
+
 def fetch_multiple_daily(tickers: list[str], period: str = "1y") -> dict[str, pd.DataFrame]:
     """Fetches daily candlestick histories in parallel across a list of tickers.
+
+    Tickers already refreshed today (UTC) are served from the on-disk
+    DailyBarCache instead of hitting the network — daily bars only change once
+    per trading day, so a same-day re-run costs 0 requests per cached ticker.
 
     Args:
         tickers: List of equity ticker symbols.
@@ -208,27 +329,39 @@ def fetch_multiple_daily(tickers: list[str], period: str = "1y") -> dict[str, pd
         Mapping of ticker → DataFrame. Failed tickers are omitted with a warning.
     """
     results: dict[str, pd.DataFrame] = {}
+    to_fetch: list[str] = []
 
-    with ThreadPoolExecutor(max_workers=5) as pool:
-        future_to_ticker = {
-            pool.submit(fetch_ohlcv_daily, ticker, period): ticker for ticker in tickers
-        }
-        for future in as_completed(future_to_ticker):
-            ticker = future_to_ticker[future]
-            try:
-                results[ticker] = future.result()
-            except Exception as exc:
-                logger.warning(
-                    "fetch_multiple_daily: failed for %s — %s: %s",
-                    ticker,
-                    type(exc).__name__,
-                    exc,
-                )
+    for ticker in tickers:
+        cached = _DAILY_BAR_CACHE.get(ticker)
+        if cached is not None:
+            results[ticker] = cached
+        else:
+            to_fetch.append(ticker)
+
+    if to_fetch:
+        with ThreadPoolExecutor(max_workers=_MULTI_DAILY_MAX_WORKERS) as pool:
+            future_to_ticker = {
+                pool.submit(fetch_ohlcv_daily, ticker, period): ticker for ticker in to_fetch
+            }
+            for future in as_completed(future_to_ticker):
+                ticker = future_to_ticker[future]
+                try:
+                    df = future.result()
+                    results[ticker] = df
+                    _DAILY_BAR_CACHE.put(ticker, df)
+                except Exception as exc:
+                    logger.warning(
+                        "fetch_multiple_daily: failed for %s — %s: %s",
+                        ticker,
+                        type(exc).__name__,
+                        exc,
+                    )
 
     logger.info(
-        "fetch_multiple_daily: %d/%d tickers fetched successfully",
+        "fetch_multiple_daily: %d/%d tickers fetched successfully (%d from cache)",
         len(results),
         len(tickers),
+        len(tickers) - len(to_fetch),
     )
     return results
 
@@ -283,6 +416,44 @@ def fetch_fundamentals(ticker: str) -> dict:
         sum(1 for v in result.values() if v is not None),
     )
     return result
+
+
+@_with_retry
+def fetch_ticker_info(ticker: str) -> dict:
+    """Fetches yfinance's raw ``.info`` dict for a ticker.
+
+    Shared retried entry point for callers that only need a slice of `.info`
+    (e.g. `sector`) — previously agents/risk.py called `yf.Ticker(ticker).info`
+    directly, bypassing retry/back-off entirely.
+
+    Args:
+        ticker: Equity ticker symbol.
+
+    Returns:
+        Raw info dict as returned by yfinance.Ticker(ticker).info.
+    """
+    logger.debug("fetch_ticker_info: ticker=%s", ticker)
+    return yf.Ticker(ticker).info
+
+
+@_with_retry
+def fetch_ticker_calendar(ticker: str) -> Any:
+    """Fetches yfinance's raw ``.calendar`` object for a ticker.
+
+    Shared retried entry point for earnings-date lookups — previously
+    agents/sentiment.py called `yf.Ticker(ticker).calendar` directly,
+    bypassing retry/back-off entirely.
+
+    Args:
+        ticker: Equity ticker symbol.
+
+    Returns:
+        Raw calendar object from yfinance.Ticker(ticker).calendar. Shape
+        (DataFrame or dict) varies across yfinance versions; callers must
+        handle both.
+    """
+    logger.debug("fetch_ticker_calendar: ticker=%s", ticker)
+    return yf.Ticker(ticker).calendar
 
 
 _FRED_CACHE: dict[str, tuple[datetime, pd.Series]] = {}
@@ -384,15 +555,93 @@ def fetch_macro_bundle() -> dict:
     return bundle
 
 
+_NEWSAPI_DAILY_LIMIT = 100
+# NewsAPI's maximum page size; larger than the default 20, so each of the
+# scarce daily requests returns as many articles as the tier allows.
+_NEWSAPI_PAGE_SIZE = 100
+
+
+class _NewsApiBudget:
+    """Tracks NewsAPI's free-tier 100 request/day budget with UTC-day rollover.
+
+    A 20-ticker sweep spends 20 of the 100 — a 5-run/day ceiling, tighter than
+    anything Groq imposes — so this is checked before every request rather
+    than discovered from a 426/429 response.
+    """
+
+    def __init__(self, daily_limit: int = _NEWSAPI_DAILY_LIMIT) -> None:
+        """Initializes an empty budget tracker.
+
+        Args:
+            daily_limit: Maximum requests permitted per UTC day.
+        """
+        self._daily_limit = daily_limit
+        self._lock = Lock()
+        self._requests_today = 0
+        self._date = datetime.now(timezone.utc).date()
+
+    def try_reserve(self) -> bool:
+        """Reserves one request against today's budget if any remains.
+
+        Returns:
+            True if a request was reserved, False if today's budget is spent.
+        """
+        with self._lock:
+            today = datetime.now(timezone.utc).date()
+            if today != self._date:
+                self._requests_today = 0
+                self._date = today
+            if self._requests_today >= self._daily_limit:
+                return False
+            self._requests_today += 1
+            return True
+
+
+_NEWSAPI_BUDGET = _NewsApiBudget()
+
+
+@_with_retry
+def _fetch_news_page(client: Any, query: str, from_date: str) -> list[dict]:
+    """Fetches and normalizes one page of NewsAPI articles.
+
+    Args:
+        client: An initialized NewsApiClient.
+        query: NewsAPI query string (e.g. "AAPL OR Apple Inc").
+        from_date: ISO date string for the start of the search window.
+
+    Returns:
+        List of dicts with keys: title, description, published_at, source.
+    """
+    response = client.get_everything(
+        q=query,
+        language="en",
+        from_param=from_date,
+        sort_by="relevancy",
+        page_size=_NEWSAPI_PAGE_SIZE,
+    )
+    articles = response.get("articles", [])
+    return [
+        {
+            "title": a.get("title", ""),
+            "description": a.get("description", ""),
+            "published_at": a.get("publishedAt", ""),
+            "source": a.get("source", {}).get("name", ""),
+        }
+        for a in articles
+        if a.get("title")
+    ]
+
+
 def fetch_news(
     ticker: str,
     company_name: str,
     days_back: int = 7,
-) -> list[dict]:
+) -> Optional[list[dict]]:
     """Retrieves recent news articles matching a ticker from NewsAPI.
 
-    Returns an empty list without error when NEWSAPI_KEY is not configured,
-    so callers operate in a degraded but non-failing state.
+    NewsAPI's free Developer tier delays article availability by roughly 24
+    hours and caps history at one month, so results are never same-day and a
+    backtest window further back than that returns nothing.
 
     Args:
         ticker: Equity ticker symbol used in the search query.
@@ -401,10 +650,19 @@ def fetch_news(
 
     Returns:
         List of dicts with keys: title, description, published_at, source.
+        None if NEWSAPI_KEY is not configured, the 100 request/day budget is
+        exhausted, or the request failed after retries — distinguishable from
+        an empty list, which means the request succeeded but found nothing.
     """
     if not settings.newsapi_key:
-        logger.debug("fetch_news: NEWSAPI_KEY not set — returning empty list")
-        return []
+        logger.debug("fetch_news: NEWSAPI_KEY not set")
+        return None
+
+    if not _NEWSAPI_BUDGET.try_reserve():
+        logger.warning(
+            "fetch_news: daily budget of %d requests exhausted", _NEWSAPI_DAILY_LIMIT
+        )
+        return None
 
     try:
         from newsapi import NewsApiClient  # Lazy import; only loaded when NewsAPI is used
@@ -413,93 +671,105 @@ def fetch_news(
         from_date = (datetime.utcnow() - timedelta(days=days_back)).strftime("%Y-%m-%d")
         query = f"{ticker} OR {company_name}"
 
-        response = client.get_everything(
-            q=query,
-            language="en",
-            from_param=from_date,
-            sort_by="relevancy",
-            page_size=50,
-        )
-
-        articles = response.get("articles", [])
-        result = [
-            {
-                "title": a.get("title", ""),
-                "description": a.get("description", ""),
-                "published_at": a.get("publishedAt", ""),
-                "source": a.get("source", {}).get("name", ""),
-            }
-            for a in articles
-            if a.get("title")
-        ]
+        result = _fetch_news_page(client, query, from_date)
         logger.info("fetch_news: %s → %d articles", ticker, len(result))
         return result
 
-    except Exception as exc:
-        logger.warning("fetch_news: %s failed — %s: %s", ticker, type(exc).__name__, exc)
-        return []
+    except DataFetchError as exc:
+        logger.warning("fetch_news: %s failed — %s", ticker, exc)
+        return None
 
 
 def fetch_social_sentiment(ticker: str) -> dict:
     """Aggregates Google Trends signals into a normalized sentiment dict.
 
-    Returns the same dict shape regardless of whether trends data is available
-    to prevent downstream callers from needing to guard against missing keys.
+    Returns the same key set regardless of whether trends data is available,
+    so downstream callers don't need to guard against missing keys — but
+    ``social_data_available`` distinguishes a real observation from the
+    neutral placeholder used when Google Trends couldn't be reached.
 
     Args:
         ticker: Equity ticker symbol.
 
     Returns:
         Dict with keys: mention_surge, volume_change_pct, top_posts,
-        earnings_within_14d.
+        earnings_within_14d, social_data_available.
     """
     trends = _fetch_google_trends(ticker)
-    trend_score = trends.get("trend_score", 50)
-    trend_surge = trends.get("surge", False)
+
+    if trends is None:
+        return {
+            "mention_surge": False,
+            "volume_change_pct": 0.0,
+            "top_posts": [],
+            "earnings_within_14d": False,
+            "social_data_available": False,
+        }
 
     # Maps the 0–100 Google Trends score to a ±1 deviation from baseline (50 = neutral)
-    volume_change_pct = (trend_score - 50) / 50.0
+    volume_change_pct = (trends["trend_score"] - 50) / 50.0
 
     return {
-        "mention_surge": trend_surge,
+        "mention_surge": trends["surge"],
         "volume_change_pct": round(volume_change_pct, 3),
         "top_posts": [],
         "earnings_within_14d": False,
+        "social_data_available": True,
     }
 
 
+@_with_retry
+def _fetch_google_trends_raw(ticker: str) -> pd.DataFrame:
+    """Fetches raw 7-day Google Trends interest-over-time data for a ticker.
 
-def _fetch_google_trends(ticker: str) -> dict:
-    """Fetches 7-day Google search interest for the ticker via pytrends.
-
-    A score > 1.5× the 7-day average is flagged as a surge. Falls back gracefully
-    on any error, returning a neutral (50) score with no surge.
+    ``build_payload()`` internally calls pytrends' token endpoint before
+    ``interest_over_time()`` hits the data endpoint, so each call here costs 2
+    HTTP requests — a 20-ticker sweep is 40 Trends requests, not 20. Retries
+    lean on pytrends' own built-in backoff (retries/backoff_factor) in
+    addition to this module's outer retry loop.
 
     Args:
         ticker: Equity ticker symbol used as the Google Trends keyword.
 
     Returns:
-        Dict with keys: trend_score (int 0–100), surge (bool).
+        Raw interest-over-time DataFrame from pytrends.
+    """
+    from pytrends.request import TrendReq
+
+    pt = TrendReq(hl="en-US", tz=360, timeout=(8, 20), retries=2, backoff_factor=0.5)
+    pt.build_payload([ticker], timeframe="now 7-d")
+    return pt.interest_over_time()
+
+
+def _fetch_google_trends(ticker: str) -> Optional[dict]:
+    """Fetches 7-day Google search interest for the ticker via pytrends.
+
+    A score > 1.5× the 7-day average is flagged as a surge. Returns None — not
+    a fabricated neutral score — when pytrends fails after retries or returns
+    no data for this ticker: 50 is a real score some tickers legitimately
+    report, so it must not double as "unknown."
+
+    Args:
+        ticker: Equity ticker symbol used as the Google Trends keyword.
+
+    Returns:
+        Dict with keys: trend_score (int 0–100), surge (bool). None on failure
+        or when no data is available for this ticker.
     """
     try:
-        from pytrends.request import TrendReq
+        df = _fetch_google_trends_raw(ticker)
+    except DataFetchError as e:
+        logger.warning("[GoogleTrends] Fetch failed for %s: %s", ticker, e)
+        return None
 
-        pt = TrendReq(hl="en-US", tz=360, timeout=(8, 20))
-        pt.build_payload([ticker], timeframe="now 7-d")
-        df = pt.interest_over_time()
+    if df.empty or ticker not in df.columns:
+        return None
 
-        if df.empty or ticker not in df.columns:
-            return {"trend_score": 50, "surge": False}
+    latest = int(df[ticker].iloc[-1])
+    avg = df[ticker].mean()
+    surge = avg > 0 and latest > avg * 1.5
 
-        latest = int(df[ticker].iloc[-1])
-        avg = df[ticker].mean()
-        surge = avg > 0 and latest > avg * 1.5
-
-        return {"trend_score": latest, "surge": bool(surge)}
-
-    except Exception as e:
-        logger.warning(f"[GoogleTrends] Fetch failed for {ticker}: {e}")
-        return {"trend_score": 50, "surge": False}
+    return {"trend_score": latest, "surge": bool(surge)}
 
 
 @_with_retry
