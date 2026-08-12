@@ -52,7 +52,10 @@ class CulturalMemoryManager:
         from chromadb.utils import embedding_functions
 
         os.makedirs(persist_dir, exist_ok=True)
-        self.client = chromadb.PersistentClient(path=persist_dir)
+        self.client = chromadb.PersistentClient(
+            path=persist_dir,
+            settings=chromadb.config.Settings(anonymized_telemetry=False),
+        )
 
         # Model downloaded once to ~/.cache/sentence-transformers on first invocation
         self.ef = embedding_functions.SentenceTransformerEmbeddingFunction(
