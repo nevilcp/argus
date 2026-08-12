@@ -8,7 +8,7 @@ PiT enforcer, and Governor state limits.
 
 import asyncio
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from unittest import mock
 from uuid import uuid4
 
@@ -271,19 +271,23 @@ class TestEndToEnd:
             usage.current_minute = "1970-01-01T00:00"
 
         # Reaching exactly the limit still succeeds without sleeping
-        with mock.patch(
-            "argus.orchestration.governor.time.sleep", side_effect=_advance_minute
-        ) as mock_sleep:
-            governor.wait_if_needed(model)
-            assert usage.requests_this_minute == limit
-            assert mock_sleep.call_count == 0
+        try:
+            with mock.patch(
+                "argus.orchestration.governor.time.sleep", side_effect=_advance_minute
+            ) as mock_sleep:
+                governor.wait_if_needed(model)
+                assert usage.requests_this_minute == limit
+                assert mock_sleep.call_count == 0
 
-            # Exceeding it sleeps out the remainder of the current minute
-            governor.wait_if_needed(model)
-            assert mock_sleep.call_count == 1
-
-        # governor is a module-level singleton shared across tests
-        usage.requests_this_minute = 0
+                # Exceeding it sleeps out the remainder of the current minute
+                governor.wait_if_needed(model)
+                assert mock_sleep.call_count == 1
+        finally:
+            # governor is a module-level singleton shared across tests; the
+            # _advance_minute side effect above stamped a sentinel `current_minute`
+            # onto its ModelUsage, which must not leak into later tests
+            usage.requests_this_minute = 0
+            usage.current_minute = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
 
     def test_half_kelly_formula(self):
         """half_kelly_weight() computes half the Kelly-optimal position size."""
