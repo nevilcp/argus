@@ -76,8 +76,8 @@ class MarketDataProvider(Protocol):
         """Returns the current macro indicator bundle."""
         ...
 
-    def news(self, ticker: str, company_name: str, days_back: int = 7) -> list[dict]:
-        """Returns recent news articles for a ticker."""
+    def news(self, ticker: str, company_name: str, days_back: int = 7) -> Optional[list[dict]]:
+        """Returns recent news articles for a ticker, or None if unavailable."""
         ...
 
     def social_sentiment(self, ticker: str) -> dict:
@@ -112,7 +112,7 @@ class LiveMarketDataProvider:
         """Delegates to fetchers.fetch_macro_bundle."""
         return fetchers.fetch_macro_bundle()
 
-    def news(self, ticker: str, company_name: str, days_back: int = 7) -> list[dict]:
+    def news(self, ticker: str, company_name: str, days_back: int = 7) -> Optional[list[dict]]:
         """Delegates to fetchers.fetch_news."""
         return fetchers.fetch_news(ticker, company_name, days_back=days_back)
 
