@@ -37,7 +37,6 @@ jobs:
         env:
           # FRED key provided for macro data fetching in tests
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-          # Groq/Gemini keys intentionally omitted — LLM agents are mocked or
+          # Groq key intentionally omitted — LLM agents are mocked or
           # fixture-backed in CI (see argus/seams.py, ADR 0007)
           GROQ_API_KEY: ""
-          GOOGLE_AI_API_KEY: ""

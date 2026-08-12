@@ -42,24 +42,6 @@ MODEL_LIMITS: dict[str, dict[str, int]] = {
         "tokens_per_minute": 20_000,
         "requests_per_minute": 30,
     },
-    "gemini-3.5-flash": {
-        "requests_per_day": 1_500,
-        "tokens_per_day": 1_000_000,
-        "tokens_per_minute": 30_000,
-        "requests_per_minute": 30,
-    },
-    "gemini-2.0-flash": {
-        "requests_per_day": 1_500,
-        "tokens_per_day": 1_000_000,
-        "tokens_per_minute": 30_000,
-        "requests_per_minute": 30,
-    },
-    "ProsusAI/finbert": {
-        "requests_per_day": 10_000,
-        "tokens_per_day": 1_000_000,
-        "tokens_per_minute": 100_000,
-        "requests_per_minute": 1_000,
-    },
 }
 
 

@@ -45,12 +45,8 @@ class Settings(BaseSettings):
     )
 
     groq_api_key: str = Field(default="", description="Groq LLM API key")
-    google_ai_api_key: str = Field(default="", description="Google AI / Gemini API key")
 
     fred_api_key: str = Field(default="", description="FRED (Federal Reserve) API key")
-    polygon_api_key: str = Field(default="", description="Polygon.io market data API key")
-    alpaca_api_key: str = Field(default="", description="Alpaca trading API key")
-    alpaca_secret_key: str = Field(default="", description="Alpaca trading API secret")
 
     newsapi_key: str = Field(default="", description="NewsAPI.org key")
 
