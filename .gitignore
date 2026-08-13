@@ -47,3 +47,16 @@ logs/
 # ─── Runtime artifacts ────────────────────────────────────────────────────────
 runs/
 argus_halt_*.json
+data/
+state/
+.env.*
+!.env.example
+
+# ─── Reference-only docs (not committed; see CONTRIBUTING.md) ─────────────────
+docs/
+langsmith/
+scripts/capture_fixtures.py
+
+# ─── Local tooling ──────────────────────────────────────────────────────────
+.claude/
+.hypothesis/
