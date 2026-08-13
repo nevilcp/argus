@@ -27,6 +27,7 @@ import logging
 import re
 from collections.abc import Callable
 from datetime import datetime, time as dtime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -123,6 +124,11 @@ def _resample_ohlcv(df: pd.DataFrame, interval_minutes: int, target_minutes: int
     return resampled.dropna(subset=["close"])
 
 
+# Cold-start warmup poll cadence — much shorter than a real session interval so
+# a fresh buffer doesn't sit idle for the whole interval before its first compress
+_WARMUP_POLL_INTERVAL = 60
+
+
 class MFTDataPipeline:
     """Asynchronous mid-frequency data pipeline coordinating candlestick updates and feature extraction.
 
@@ -135,26 +141,36 @@ class MFTDataPipeline:
         self,
         tickers: list[str],
         interval: str | None = None,
+        db_path: str | None = None,
     ) -> None:
-        """Creates the pipeline with an in-memory candle buffer for the given universe.
+        """Creates the pipeline with a candle buffer for the given universe.
 
         Args:
             tickers: Initial ticker universe to track.
             interval: yfinance interval string overriding `settings.MFT_CANDLE_INTERVAL`.
                 Exposed mainly for tests; production call sites rely on the default.
+            db_path: SQLite path for the candle buffer. Defaults to a file
+                under ``settings.ARGUS_DATA_DIR`` rather than ``:memory:`` so
+                a process restart resumes with a warm buffer instead of the
+                cold start a fresh buffer would otherwise incur.
         """
         self.tickers = tickers
         self.interval = interval or settings.MFT_CANDLE_INTERVAL
         self.interval_minutes = _parse_interval_minutes(self.interval)
         self.session_interval_seconds = settings.MFT_DECISION_INTERVAL_SECONDS
         buffer_size = settings.CANDLE_BUFFER_SIZE or _derive_buffer_size(self.interval_minutes)
-        self.buffer = OHLCVBuffer(db_path=":memory:", buffer_size=buffer_size)
+        if db_path is None:
+            data_dir = Path(settings.ARGUS_DATA_DIR)
+            data_dir.mkdir(parents=True, exist_ok=True)
+            db_path = str(data_dir / "ohlcv_buffer.db")
+        self.buffer = OHLCVBuffer(db_path=db_path, buffer_size=buffer_size)
         self.running = False
         logger.info(
-            "MFTDataPipeline initialised: %d tickers, interval=%s, buffer_size=%d",
+            "MFTDataPipeline initialised: %d tickers, interval=%s, buffer_size=%d, buffer=%s",
             len(tickers),
             self.interval,
             buffer_size,
+            db_path,
         )
 
     async def start(self, on_session_ready: Callable) -> None:
@@ -195,23 +211,45 @@ class MFTDataPipeline:
         self.running = False
         logger.info("MFTDataPipeline.stop: shutdown requested")
 
-    async def _fetch_loop(self) -> None:
-        """Periodically downloads the latest intraday candlesticks for the tracking universe.
+    async def run_once(self) -> dict[str, dict]:
+        """Runs a single fetch-and-compress cycle without the background loops.
+
+        Used by the unattended collector (``argus/orchestration/collector.py``)
+        to force one sweep on demand rather than waiting on ``start()``'s
+        periodic loops. Outside market hours this skips the fetch and just
+        compresses whatever the buffer already holds.
+
+        Returns:
+            Mapping of ticker → technical feature dict. Tickers with fewer
+            than 14 buffered bars are omitted (see ``OHLCVBuffer.get_candles``).
+        """
+        if self._is_market_hours():
+            await self._sweep_once()
+        else:
+            logger.debug("run_once: outside market hours — compressing existing buffer only")
+        return self.compress_all()
+
+    async def _sweep_once(self) -> None:
+        """Fetches the latest candlesticks for every tracked ticker, one pass.
 
         Spaces requests across the sweep so it finishes within ``_FETCH_INTERVAL``
         rather than on a fixed per-batch schedule. Iterates over a snapshot of
         ``self.tickers`` so that concurrent ``register_tickers`` calls cannot corrupt iteration.
         """
+        tickers_snapshot = list(self.tickers)
+        logger.debug("_sweep_once: starting universe sweep (%d tickers)", len(tickers_snapshot))
+        sleep_seconds = self._inter_request_sleep(len(tickers_snapshot))
+        last = len(tickers_snapshot) - 1
+        for i, ticker in enumerate(tickers_snapshot):
+            await self._fetch_one_ticker(ticker)
+            if i < last:
+                await asyncio.sleep(sleep_seconds)
+
+    async def _fetch_loop(self) -> None:
+        """Periodically downloads the latest intraday candlesticks for the tracking universe."""
         while self.running:
             if self._is_market_hours():
-                tickers_snapshot = list(self.tickers)
-                logger.debug("_fetch_loop: starting universe sweep (%d tickers)", len(tickers_snapshot))
-                sleep_seconds = self._inter_request_sleep(len(tickers_snapshot))
-                last = len(tickers_snapshot) - 1
-                for i, ticker in enumerate(tickers_snapshot):
-                    await self._fetch_one_ticker(ticker)
-                    if i < last:
-                        await asyncio.sleep(sleep_seconds)
+                await self._sweep_once()
             else:
                 logger.debug("_fetch_loop: outside market hours — idle")
 
@@ -244,14 +282,29 @@ class MFTDataPipeline:
             return 0.0
         return slack / n_tickers
 
+    def _buffer_warm(self) -> bool:
+        """Checks whether any tracked ticker already has an indicator-ready buffer depth.
+
+        Returns:
+            True once at least one ticker holds >= 14 rows (``OHLCVBuffer.get_candles``'
+            own floor), letting callers skip waiting a full session interval on a
+            cold start.
+        """
+        return any(self.buffer.get_candles(t) is not None for t in self.buffer.get_all_tickers())
+
     async def _session_loop(self, callback: Callable) -> None:
         """Periodically compiles buffered candlesticks and triggers downstream agent actions.
 
         Args:
             callback: Async callable receiving the ``session_states`` dict.
         """
+        # A fresh buffer sleeping a full session interval before its first
+        # compress would leave the live cache empty for that whole stretch for
+        # no reason; poll faster until there's actually something to compress
+        while self.running and not self._buffer_warm():
+            await asyncio.sleep(_WARMUP_POLL_INTERVAL)
+
         while self.running:
-            await asyncio.sleep(self.session_interval_seconds)
             if self._is_market_hours():
                 logger.info("_session_loop: triggering decision cycle")
                 session_states = self.compress_all()
@@ -263,6 +316,7 @@ class MFTDataPipeline:
                         type(exc).__name__,
                         exc,
                     )
+            await asyncio.sleep(self.session_interval_seconds)
 
     async def _fetch_one_ticker(self, ticker: str) -> None:
         """Downloads and bulk-inserts all available candles for a specific symbol.
@@ -446,3 +500,11 @@ class MFTDataPipeline:
             return False
         current = now_et.time().replace(second=0, microsecond=0)
         return _MARKET_OPEN <= current < _MARKET_CLOSE
+
+    def is_market_hours(self) -> bool:
+        """Public wrapper around ``_is_market_hours`` for callers outside this module.
+
+        Returns:
+            True during weekday US equity trading hours.
+        """
+        return self._is_market_hours()

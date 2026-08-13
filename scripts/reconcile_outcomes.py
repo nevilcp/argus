@@ -2,14 +2,17 @@
 scripts/reconcile_outcomes.py
 
 CLI entry point for argus/orchestration/reconciliation.py — reads every
-decision back out of the LangGraph checkpoint (argus_graph.db), reconciles
-whichever ones have cleared RECONCILIATION.horizon_days against live market
-data, and reports how many outcomes were stored to cultural memory.
+decision back out of the LangGraph checkpoint (argus_graph.db) or a
+decisions.jsonl log, reconciles whichever ones have cleared
+RECONCILIATION.horizon_days against live market data, and reports how many
+outcomes were stored to cultural memory.
 
     .venv/bin/python scripts/reconcile_outcomes.py [--db PATH] [--horizon-days N]
+    .venv/bin/python scripts/reconcile_outcomes.py --decisions-log PATH
 
 Meant to run periodically (e.g. a daily cron) against the live checkpoint
-database.
+database, or — for the unattended collector, which doesn't carry the full
+checkpoint DB around — against its decisions.jsonl log.
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ import logging
 from argus.memory.cultural import get_cultural_memory
 from argus.orchestration.reconciliation import (
     load_decisions_from_checkpoints,
+    load_decisions_from_jsonl,
     reconcile_decisions,
 )
 from argus.params import RECONCILIATION
@@ -35,6 +39,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", default="argus_graph.db", help="Path to the LangGraph checkpoint database")
     parser.add_argument(
+        "--decisions-log",
+        default=None,
+        help="Path to a decisions.jsonl log; if given, read from this instead of --db",
+    )
+    parser.add_argument(
         "--horizon-days",
         type=int,
         default=RECONCILIATION.horizon_days,
@@ -42,8 +51,13 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    decisions = load_decisions_from_checkpoints(args.db)
-    print(f"Loaded {len(decisions)} decision(s) from {args.db}")
+    if args.decisions_log:
+        decisions = load_decisions_from_jsonl(args.decisions_log)
+        source = args.decisions_log
+    else:
+        decisions = load_decisions_from_checkpoints(args.db)
+        source = args.db
+    print(f"Loaded {len(decisions)} decision(s) from {source}")
 
     stored = reconcile_decisions(
         decisions,

@@ -17,5 +17,5 @@ coding assistants working in this repo:
 
 ## Known limitations
 
-See [`limitations.md`](limitations.md) for the current, honestly-stated gaps
-in this system (also linked from the README).
+The README's "What to Know Before Trusting Output" section is the current,
+honestly-stated list of gaps in this system.

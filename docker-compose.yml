@@ -5,16 +5,28 @@ services:
       dockerfile: Dockerfile.api
     ports:
       - "8000:8000"
+    env_file:
+      - .env
     environment:
-      - GROQ_API_KEY=${GROQ_API_KEY}
-      - FRED_API_KEY=${FRED_API_KEY}
-      - NEWSAPI_KEY=${NEWSAPI_KEY}
+      # Secrets (GROQ_API_KEY, FRED_API_KEY, NEWSAPI_KEY) come through via
+      # env_file above; these two need compose-level default-value
+      # substitution, which env_file alone can't provide
+      - ARGUS_COLLECTOR_ENABLED=${ARGUS_COLLECTOR_ENABLED:-true}
+      - ARGUS_RECONCILE_ENABLED=${ARGUS_RECONCILE_ENABLED:-true}
     volumes:
-      - ./chroma_db:/app/chroma_db
-      - ./argus_graph.db:/app/argus_graph.db
+      - argus-data:/app/data
+      - chroma-db:/app/chroma_db
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
+      # FinBERT and the embedding model are baked into the image, but the
+      # macro agent's history fit and MFT pipeline warmup still take a
+      # while on first boot
+      start_period: 90s
+
+volumes:
+  argus-data:
+  chroma-db:

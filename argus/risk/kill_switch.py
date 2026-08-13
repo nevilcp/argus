@@ -207,6 +207,28 @@ class KillSwitch:
             current_vix=0.0,
         )
 
+    def _restore_halt_from_file(self, path: Path) -> None:
+        """Re-applies a previously persisted halt so a process restart can't silently clear it.
+
+        Args:
+            path: Path to a halt-event JSON file written by ``_persist_halt_event``.
+        """
+        try:
+            with open(path) as f:
+                dump = json.load(f)
+        except Exception as e:
+            self._logger.error(f"Failed to read halt event file {path}: {e}")
+            return
+
+        self._halted.set()
+        self._halt_reason = dump.get("reason") or f"Restored from {path.name}"
+        halt_time = dump.get("halt_time")
+        self._halt_time = datetime.fromisoformat(halt_time) if halt_time else datetime.now()
+        self._logger.warning(
+            f"Kill switch restored HALTED state from {path.name}: {self._halt_reason}. "
+            "Call POST /kill-switch/reset (and clear runs/argus_halt_*.json) to resume."
+        )
+
     @property
     def is_halted(self) -> bool:
         """Returns True if the drawdown circuit breaker has been triggered."""
@@ -238,12 +260,31 @@ class KillSwitch:
 _kill_switch: Optional[KillSwitch] = None
 
 
+def _find_latest_halt_file(runs_dir: str = "runs") -> Optional[Path]:
+    """Finds the most recently written halt-event dump, if any exist.
+
+    Args:
+        runs_dir: Directory ``_persist_halt_event`` writes halt dumps to.
+
+    Returns:
+        Path to the newest ``argus_halt_*.json`` file, or None if none exist.
+    """
+    directory = Path(runs_dir)
+    if not directory.is_dir():
+        return None
+    halt_files = sorted(directory.glob("argus_halt_*.json"))
+    return halt_files[-1] if halt_files else None
+
+
 def initialize_kill_switch(
     risk_tolerance: str, portfolio_value: float, check_interval: int = 60
 ) -> KillSwitch:
     """Initializes and starts the module-level KillSwitch singleton.
 
     Safe to call multiple times; returns the existing instance if already initialized.
+    An unattended process restarting after a halt should not silently resume trading,
+    so a leftover ``runs/argus_halt_*.json`` from a prior run re-applies the halt
+    immediately, per that file's own "manual intervention required" instruction.
 
     Args:
         risk_tolerance: Risk tier string ('CONSERVATIVE', 'MODERATE', 'AGGRESSIVE').
@@ -256,6 +297,9 @@ def initialize_kill_switch(
     global _kill_switch
     if _kill_switch is None:
         _kill_switch = KillSwitch(risk_tolerance, check_interval)
+        halt_file = _find_latest_halt_file()
+        if halt_file is not None:
+            _kill_switch._restore_halt_from_file(halt_file)
         _kill_switch.start(portfolio_value)
     return _kill_switch
 

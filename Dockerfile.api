@@ -1,22 +1,64 @@
+# syntax=docker/dockerfile:1
+
+# ─── Builder ────────────────────────────────────────────────────────────────
+# Compiles/installs everything (hmmlearn and scipy need gcc/g++ on some
+# platforms) into an isolated venv, and bakes in the ML models the cultural-
+# memory and sentiment nodes need so no request pays a cold download.
+FROM python:3.11-slim AS builder
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# README.md and LICENSE are read by pyproject.toml's readme/license metadata
+COPY pyproject.toml README.md LICENSE .
+COPY argus/ ./argus/
+COPY api/ ./api/
+COPY scripts/ ./scripts/
+
+# CPU-only wheel index — the default PyPI resolution pulls a much larger
+# CUDA-enabled torch build that this CPU-only deployment never uses
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir \
+        --extra-index-url https://download.pytorch.org/whl/cpu \
+        ".[models]"
+
+ENV HF_HOME=/opt/model-cache
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')" && \
+    python -c "from transformers import pipeline; pipeline(task='text-classification', model='ProsusAI/finbert', tokenizer='ProsusAI/finbert')" && \
+    chmod -R a+rX /opt/model-cache
+
+# ─── Runtime ────────────────────────────────────────────────────────────────
 FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies needed by some Python packages (e.g., hmmlearn, scipy)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    g++ \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --uid 1000 argus
 
-# Install Python dependencies first (better layer caching)
-COPY pyproject.toml .
-RUN pip install --no-cache-dir -e .
+COPY --from=builder /opt/venv /opt/venv
+COPY --from=builder /opt/model-cache /opt/model-cache
+# argus/, api/, and scripts/ all ship as installed packages (see
+# pyproject.toml's packages = ["argus", "api", "scripts"]) inside /opt/venv —
+# nothing else needs to be copied into this stage
 
-# Copy source
-COPY argus/ ./argus/
-COPY api/ ./api/
+ENV PATH="/opt/venv/bin:$PATH" \
+    HF_HOME=/opt/model-cache \
+    PYTHONUNBUFFERED=1
+
+RUN mkdir -p /app/data && chown -R argus:argus /app
+USER argus
 
 EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=90s \
+    CMD curl -f http://localhost:8000/health || exit 1
 
 CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

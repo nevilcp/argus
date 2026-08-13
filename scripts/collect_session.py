@@ -1,0 +1,91 @@
+# ruff: noqa: E402
+"""
+scripts/collect_session.py
+
+CLI entry point for argus/orchestration/collector.py — runs one unattended
+fetch-and-analyze cycle: sweep the MFT pipeline, invoke the graph over
+whichever tickers actually got session data, and append the resulting
+decisions to a JSONL log.
+
+    .venv/bin/python -m scripts.collect_session [--universe AAPL,MSFT,...]
+
+This is the same cycle api/main.py's background collector loop runs on a
+timer; this script is what the scheduled GitHub Actions workflow invokes
+once per cron tick. Exits 0 whether or not the graph actually ran — a market
+holiday or an off-hours cron tick is a normal outcome, not a failure.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import logging
+
+from dotenv import load_dotenv
+
+# .env must be loaded before any LangChain/Groq imports that read env vars
+load_dotenv()
+
+from argus.config import settings
+from argus.data.pipeline import MFTDataPipeline
+from argus.orchestration.collector import run_collection_cycle
+
+logger = logging.getLogger("argus.collect_session")
+
+
+def main() -> None:
+    """Parses CLI args, runs one collection cycle, and prints the outcome."""
+    logging.basicConfig(level=settings.ARGUS_LOG_LEVEL)
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--universe",
+        default=None,
+        help="Comma-separated tickers (default: ARGUS_UNIVERSE / Settings default)",
+    )
+    parser.add_argument("--total-wealth", type=float, default=settings.ARGUS_TOTAL_WEALTH)
+    parser.add_argument("--invest-pct", type=float, default=settings.ARGUS_INVEST_PCT)
+    parser.add_argument("--risk-tolerance", default=settings.ARGUS_RISK_TOLERANCE)
+    parser.add_argument(
+        "--buffer-db",
+        default=f"{settings.ARGUS_DATA_DIR}/ohlcv_buffer.db",
+        help="Persistent intraday candle buffer path",
+    )
+    parser.add_argument(
+        "--checkpoint-db",
+        default=f"{settings.ARGUS_DATA_DIR}/argus_graph.db",
+        help="LangGraph checkpoint database path",
+    )
+    parser.add_argument(
+        "--decisions-log",
+        default=f"{settings.ARGUS_DATA_DIR}/decisions.jsonl",
+        help="JSONL file each cycle's decisions are appended to",
+    )
+    args = parser.parse_args()
+
+    universe = [t.strip() for t in args.universe.split(",") if t.strip()] if args.universe else settings.ARGUS_UNIVERSE
+
+    pipeline = MFTDataPipeline(tickers=list(universe), db_path=args.buffer_db)
+    result = asyncio.run(
+        run_collection_cycle(
+            universe=universe,
+            total_wealth=args.total_wealth,
+            invest_pct=args.invest_pct,
+            risk_tolerance=args.risk_tolerance,
+            pipeline=pipeline,
+            checkpoint_db_path=args.checkpoint_db,
+            decisions_log_path=args.decisions_log,
+        )
+    )
+    pipeline.buffer.close()
+
+    print(f"ran={result.ran} reason={result.reason!r}")
+    if result.ran:
+        print(
+            f"tickers_with_session_data={result.tickers_with_session_data} "
+            f"decisions_logged={result.decisions_logged} macro_regime={result.macro_regime}"
+        )
+
+
+if __name__ == "__main__":
+    main()

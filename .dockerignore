@@ -1,0 +1,41 @@
+# Only pyproject.toml, argus/, api/, and scripts/ are ever COPYed into the
+# image (see Dockerfile.api) — everything else here just bloats the build
+# context and slows down `docker build`.
+
+.git/
+.github/
+.claude/
+.venv/
+venv/
+env/
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+
+# Local/generated data — never belongs in the image; persisted via named
+# volumes at runtime instead (see docker-compose.yml)
+data/
+chroma_db/
+runs/
+*.db
+*.sqlite
+*.sqlite3
+
+docs/
+langsmith/
+tests/
+
+.env
+.env.*
+!.env.example
+
+# README.md and LICENSE are read by pyproject.toml's build metadata
+# (readme/license fields) — kept in the build context deliberately
+*.md
+!README.md
+CONTRIBUTING.md
