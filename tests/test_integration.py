@@ -262,6 +262,10 @@ class TestEndToEnd:
         limit = BOOTSTRAP_LIMITS[model]["requests_per_minute"]
 
         usage = governor._get_usage(model)
+        # governor is a module-level singleton, so usage.current_minute may have been
+        # stamped by an earlier test; pin it to now rather than assume it matches, or
+        # a real minute rollover mid-suite spuriously resets the counter below
+        usage.current_minute = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
         usage.requests_this_minute = limit - 1
 
         # Simulates the minute rolling over during the sleep, so the retry loop's
