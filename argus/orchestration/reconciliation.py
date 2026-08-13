@@ -17,6 +17,8 @@ Responsibilities:
     cultural.store_trade_outcome calls
   - load_decisions_from_checkpoints: read ARGUSDecision objects back out of
     argus_graph.db
+  - load_decisions_from_jsonl: read ARGUSDecision objects back out of a
+    decisions.jsonl log (the unattended collector's lighter-weight alternative)
 
 Not responsible for:
   - Deciding what a "good" outcome is, or evaluation metrics (see PR 10 /
@@ -36,6 +38,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
@@ -282,3 +285,42 @@ def load_decisions_from_checkpoints(db_path: str = "argus_graph.db") -> list[ARG
         return decisions
     finally:
         conn.close()
+
+
+def load_decisions_from_jsonl(path: str) -> list[ARGUSDecision]:
+    """Reads decisions back out of a JSONL decision log, one ARGUSDecision per line.
+
+    The lighter-weight counterpart to load_decisions_from_checkpoints, for
+    deployments that don't carry the full LangGraph checkpoint database
+    around — the unattended collector (argus/orchestration/collector.py)
+    appends each decision here instead, so the state a scheduled run has to
+    persist stays small.
+
+    Args:
+        path: Path to a JSONL file of ARGUSDecision.model_dump_json() lines.
+
+    Returns:
+        Every ARGUSDecision found in the file. Empty list if the file
+        doesn't exist yet. A line that fails to parse is logged and skipped
+        rather than aborting the whole read.
+    """
+    file_path = Path(path)
+    if not file_path.exists():
+        return []
+
+    decisions: list[ARGUSDecision] = []
+    with open(file_path, encoding="utf-8") as f:
+        for line_no, raw_line in enumerate(f, start=1):
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                decisions.append(ARGUSDecision.model_validate_json(line))
+            except Exception as exc:
+                logger.warning(
+                    "load_decisions_from_jsonl: skipping malformed line %d in %s: %s",
+                    line_no,
+                    path,
+                    exc,
+                )
+    return decisions
