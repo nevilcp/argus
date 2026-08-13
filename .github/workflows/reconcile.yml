@@ -1,0 +1,76 @@
+name: Daily reconciliation
+
+# The other half of the decision -> outcome loop: resolves decisions past
+# their horizon against live prices and writes outcomes back to cultural
+# memory, so reliability weighting has real evidence to learn from. Runs
+# once daily, well after US market close.
+
+on:
+  schedule:
+    - cron: "30 22 * * 1-5" # 22:30 UTC — after the last hourly collector tick
+  workflow_dispatch:
+
+concurrency:
+  group: argus-collector # shares the argus-data branch with collector.yml; never run both at once
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  packages: read
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Restore prior state
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          ref: argus-data
+          path: state
+
+      - name: Seed working directories from prior state
+        run: |
+          mkdir -p data chroma_db
+          [ -d state/chroma_db ] && cp -r state/chroma_db/. ./chroma_db/ || echo "no prior chroma_db"
+          [ -f state/decisions.jsonl ] && cp state/decisions.jsonl data/decisions.jsonl || echo "no prior decisions.jsonl"
+          chmod -R a+rwX data chroma_db
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run reconciliation
+        run: |
+          docker run --rm \
+            -v "$PWD/data:/app/data" \
+            -v "$PWD/chroma_db:/app/chroma_db" \
+            "ghcr.io/${{ github.repository }}:latest" \
+            argus-reconcile --decisions-log data/decisions.jsonl
+
+      - name: Publish updated state
+        run: |
+          mkdir -p publish
+          cp -r chroma_db publish/chroma_db
+          [ -f data/decisions.jsonl ] && cp data/decisions.jsonl publish/decisions.jsonl
+          # Merge rather than overwrite — collector.yml writes to the same
+          # status.json on the same branch and its field must survive this
+          ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          if [ -f state/status.json ]; then
+            jq --arg t "$ts" '. + {last_reconcile: $t}' state/status.json > publish/status.json
+          else
+            printf '{"last_reconcile": "%s"}\n' "$ts" > publish/status.json
+          fi
+          rm -rf state
+          cd publish
+          git init -q -b argus-data
+          git config user.name "argus-collector"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Reconcile outcomes ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+          git push -q --force \
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" \
+            argus-data:argus-data
