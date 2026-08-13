@@ -32,6 +32,7 @@ api/main.py imports.
 import logging
 import sqlite3
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
@@ -476,6 +477,8 @@ def build_graph(
     builder.add_edge("log_decisions", END)
 
     try:
+        if checkpoint_db_path != ":memory:":
+            Path(checkpoint_db_path).parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(checkpoint_db_path, check_same_thread=False)
         checkpointer = SqliteSaver(conn, serde=build_checkpoint_serde())
     except Exception:

@@ -27,6 +27,7 @@ import logging
 import sqlite3
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
@@ -91,6 +92,8 @@ class OHLCVBuffer:
         self._db_path = db_path
         self._buffer_size = buffer_size
         self._lock = threading.Lock()
+        if db_path != ":memory:":
+            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute(_CREATE_OHLCV)

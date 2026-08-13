@@ -1,0 +1,89 @@
+name: Unattended collector
+
+# Runs the collection cycle (argus-collect, see scripts/collect_session.py)
+# against the pre-built image from image.yml. Most ticks outside actual
+# trading hours are a fast no-op — MFTDataPipeline's own market-hours check
+# is what decides whether a given tick does anything, not this schedule.
+#
+# GitHub's cron is best-effort: it can drift under load or skip a tick
+# outright, and scheduled workflows stop firing after 60 days with no
+# repository activity (a push or manual run resets that clock).
+
+on:
+  schedule:
+    # Every hour, 13:05-21:05 UTC covers 09:00-17:00 ET across both EST and
+    # EDT — wide enough that DST transitions don't need a second cron line
+    - cron: "5 13-21 * * 1-5"
+  workflow_dispatch:
+
+concurrency:
+  group: argus-collector
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  packages: read
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Restore prior state
+        uses: actions/checkout@v4
+        continue-on-error: true # first-ever run: the argus-data branch doesn't exist yet
+        with:
+          ref: argus-data
+          path: state
+
+      - name: Seed working directories from prior state
+        run: |
+          mkdir -p data chroma_db
+          [ -d state/chroma_db ] && cp -r state/chroma_db/. ./chroma_db/ || echo "no prior chroma_db"
+          [ -f state/decisions.jsonl ] && cp state/decisions.jsonl data/decisions.jsonl || echo "no prior decisions.jsonl"
+          # World-writable so the image's non-root `argus` user (uid 1000) can
+          # write here regardless of the runner's own uid
+          chmod -R a+rwX data chroma_db
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run collection cycle
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+        run: |
+          docker run --rm \
+            -v "$PWD/data:/app/data" \
+            -v "$PWD/chroma_db:/app/chroma_db" \
+            -e GROQ_API_KEY -e FRED_API_KEY -e NEWSAPI_KEY \
+            "ghcr.io/${{ github.repository }}:latest" \
+            argus-collect
+
+      - name: Publish updated state
+        run: |
+          mkdir -p publish
+          cp -r chroma_db publish/chroma_db
+          [ -f data/decisions.jsonl ] && cp data/decisions.jsonl publish/decisions.jsonl
+          # Merge rather than overwrite — reconcile.yml writes to the same
+          # status.json on the same branch and its field must survive this
+          ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          if [ -f state/status.json ]; then
+            jq --arg t "$ts" '. + {last_run: $t}' state/status.json > publish/status.json
+          else
+            printf '{"last_run": "%s"}\n' "$ts" > publish/status.json
+          fi
+          rm -rf state
+          cd publish
+          git init -q -b argus-data
+          git config user.name "argus-collector"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Update collected state ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+          git push -q --force \
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" \
+            argus-data:argus-data

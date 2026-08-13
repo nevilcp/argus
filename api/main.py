@@ -16,6 +16,9 @@ Responsibilities:
   - Expose health, memory, governor, and kill-switch management endpoints
   - Host the MFT pipeline as a background asyncio task and maintain a live
     session state cache consumed by /analyze
+  - Optionally run the unattended collector and daily reconciliation loops
+    (ARGUS_COLLECTOR_ENABLED / ARGUS_RECONCILE_ENABLED) so the system keeps
+    accumulating decisions and outcomes without a human calling /analyze
 
 Not responsible for:
   - Agent logic (see argus/agents/)
@@ -25,9 +28,12 @@ Not responsible for:
 
 import asyncio
 import logging
-from datetime import datetime
+from contextlib import asynccontextmanager, suppress
+from dataclasses import asdict
+from datetime import datetime, timedelta
 from typing import Literal, Optional
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
@@ -39,18 +45,200 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from argus.agents.macro import MacroStatisticalAgent
+from argus.config import settings
 from argus.data.pipeline import MFTDataPipeline
 from argus.memory.cultural import get_cultural_memory
+from argus.orchestration.collector import CollectionResult, run_collection_cycle
 from argus.orchestration.governor import governor
-from argus.orchestration.graph import graph
+from argus.orchestration.graph import build_graph
+from argus.orchestration.reconciliation import load_decisions_from_jsonl, reconcile_decisions
 from argus.orchestration.state import ARGUSState
+from argus.params import RECONCILIATION
 from argus.risk.kill_switch import get_kill_switch, initialize_kill_switch
+from argus.seams import LiveMarketDataProvider
 
 logger = logging.getLogger("argus.api")
 
-app = FastAPI(title="ARGUS API", version="1.0.0")
+_ET = ZoneInfo("America/New_York")
+
+# Entries older than _SESSION_STATE_TTL_SECONDS are treated as missing so a prior
+# session's stale intraday data is never injected silently
+_SESSION_STATE_TTL_SECONDS = 2100  # 35 min = default MFT_DECISION_INTERVAL_SECONDS + 5 min buffer
+_live_session_cache: dict[str, tuple[dict, datetime]] = {}
+
+# Initialized during lifespan startup; tickers are registered dynamically per
+# /analyze request in addition to the ARGUS_UNIVERSE seed
+_mft_pipeline: MFTDataPipeline | None = None
+_pipeline_task: asyncio.Task | None = None
+_collector_task: asyncio.Task | None = None
+_reconcile_task: asyncio.Task | None = None
+_last_collection_result: CollectionResult | None = None
+
+# Built once in lifespan startup, pointed at the same persistent checkpoint
+# path the collector loop uses, so /analyze and the unattended collector
+# share one decision history instead of two disjoint SQLite files
+_graph = None
+
+
+async def _mft_session_callback(session_states: dict) -> None:
+    """Receives compressed technical feature dicts from the MFT pipeline every 30 minutes.
+
+    Updates the module-level live cache so the next /analyze call picks up
+    fresh intraday indicators without re-fetching historical data. Each entry
+    stores a (state_dict, updated_at) tuple for TTL-based staleness detection.
+
+    Args:
+        session_states: Mapping of ticker → technical feature dict from MFTDataPipeline.
+    """
+    now = datetime.now()
+    for ticker, state in session_states.items():
+        _live_session_cache[ticker] = (state, now)
+    logger.info("[MFT] Live session cache updated: %d ticker(s)", len(_live_session_cache))
+
+
+def _log_task_exception(task: asyncio.Task, name: str) -> None:
+    """Logs a background task's exception instead of letting it vanish silently.
+
+    An `asyncio.create_task()` result with no held reference can be garbage
+    collected mid-flight, and any exception it raises is otherwise only
+    reported (noisily, to stderr) once the loop shuts down. Every background
+    task here is submitted with this as a done-callback.
+
+    Args:
+        task: The finished task.
+        name: Label used in the log line, e.g. "MFTDataPipeline".
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("[%s] background task crashed: %s", name, exc, exc_info=exc)
+
+
+async def _collector_loop(pipeline: MFTDataPipeline) -> None:
+    """Runs run_collection_cycle on a fixed interval for as long as the app is alive.
+
+    Args:
+        pipeline: The shared MFT pipeline instance, so this loop reuses the
+            same warm buffer the live /analyze cache draws from.
+    """
+    global _last_collection_result
+    while True:
+        try:
+            _last_collection_result = await run_collection_cycle(
+                universe=list(settings.ARGUS_UNIVERSE),
+                total_wealth=settings.ARGUS_TOTAL_WEALTH,
+                invest_pct=settings.ARGUS_INVEST_PCT,
+                risk_tolerance=settings.ARGUS_RISK_TOLERANCE,
+                pipeline=pipeline,
+                checkpoint_db_path=f"{settings.ARGUS_DATA_DIR}/argus_graph.db",
+                decisions_log_path=f"{settings.ARGUS_DATA_DIR}/decisions.jsonl",
+            )
+            logger.info("[Collector] cycle result: %s", _last_collection_result)
+        except Exception:
+            logger.exception("[Collector] cycle failed")
+        await asyncio.sleep(settings.ARGUS_COLLECTOR_INTERVAL_SECONDS)
+
+
+async def _reconcile_loop() -> None:
+    """Runs reconcile_decisions once a day at settings.ARGUS_RECONCILE_HOUR_ET."""
+    while True:
+        now_et = datetime.now(_ET)
+        target = now_et.replace(
+            hour=settings.ARGUS_RECONCILE_HOUR_ET, minute=0, second=0, microsecond=0
+        )
+        if target <= now_et:
+            target += timedelta(days=1)
+        await asyncio.sleep((target - now_et).total_seconds())
+
+        try:
+            decisions_log = f"{settings.ARGUS_DATA_DIR}/decisions.jsonl"
+            decisions = load_decisions_from_jsonl(decisions_log)
+            stored = reconcile_decisions(
+                decisions,
+                market_data=LiveMarketDataProvider(),
+                cultural=get_cultural_memory(),
+                horizon_days=RECONCILIATION.horizon_days,
+            )
+            logger.info("[Reconcile] stored %d/%d outcome(s)", stored, len(decisions))
+        except Exception:
+            logger.exception("[Reconcile] cycle failed")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Starts background tasks on startup and stops them cleanly on shutdown."""
+    global _mft_pipeline, _pipeline_task, _collector_task, _reconcile_task, _graph
+
+    _graph = build_graph(checkpoint_db_path=f"{settings.ARGUS_DATA_DIR}/argus_graph.db")
+
+    logger.info("[Startup] Fitting Macro Statistical Agent on historical data...")
+    macro_agent = MacroStatisticalAgent()
+    try:
+        macro_agent.fit_on_history()
+        logger.info("[Startup] Macro Agent fitted successfully.")
+    except Exception as e:
+        logger.warning(
+            "[Startup] Macro Agent fit failed (possibly due to missing API keys): %s", e
+        )
+
+    # Seeded from ARGUS_UNIVERSE so the pipeline starts collecting immediately
+    # rather than waiting for a first /analyze call to register any tickers
+    _mft_pipeline = MFTDataPipeline(tickers=list(settings.ARGUS_UNIVERSE))
+    _pipeline_task = asyncio.create_task(_mft_pipeline.start(on_session_ready=_mft_session_callback))
+    _pipeline_task.add_done_callback(lambda t: _log_task_exception(t, "MFTDataPipeline"))
+    logger.info(
+        "[Startup] MFT pipeline background task launched: %d ticker(s).",
+        len(settings.ARGUS_UNIVERSE),
+    )
+
+    if settings.ARGUS_COLLECTOR_ENABLED:
+        _collector_task = asyncio.create_task(_collector_loop(_mft_pipeline))
+        _collector_task.add_done_callback(lambda t: _log_task_exception(t, "CollectorLoop"))
+        logger.info(
+            "[Startup] Unattended collector loop launched (interval=%ds).",
+            settings.ARGUS_COLLECTOR_INTERVAL_SECONDS,
+        )
+
+    if settings.ARGUS_RECONCILE_ENABLED:
+        _reconcile_task = asyncio.create_task(_reconcile_loop())
+        _reconcile_task.add_done_callback(lambda t: _log_task_exception(t, "ReconcileLoop"))
+        logger.info(
+            "[Startup] Daily reconciliation loop launched (hour=%d ET).",
+            settings.ARGUS_RECONCILE_HOUR_ET,
+        )
+
+    # Placeholder base; /kill-switch/reset re-bases once the real session is known
+    initialize_kill_switch(
+        risk_tolerance=settings.ARGUS_RISK_TOLERANCE, portfolio_value=settings.ARGUS_TOTAL_WEALTH
+    )
+    logger.info("[Startup] Kill switch initialized.")
+
+    logger.info("[Startup] Governor initialized: %s", governor.get_usage_report())
+
+    yield
+
+    logger.info("[Shutdown] Stopping background tasks...")
+    if _mft_pipeline is not None:
+        await _mft_pipeline.stop()
+
+    for task in (_pipeline_task, _collector_task, _reconcile_task):
+        if task is not None:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+    if _mft_pipeline is not None:
+        _mft_pipeline.buffer.close()
+    logger.info("[Shutdown] Complete.")
+
+
+app = FastAPI(title="ARGUS API", version="1.0.0", lifespan=lifespan)
 app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
+    CORSMiddleware,
+    allow_origins=list(settings.ARGUS_CORS_ORIGINS),
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -76,58 +264,6 @@ class AnalysisResponse(BaseModel):
     timestamp: str
 
 
-# Entries older than _SESSION_STATE_TTL_SECONDS are treated as missing so a prior
-# session's stale intraday data is never injected silently
-_SESSION_STATE_TTL_SECONDS = 2100  # 35 min = one MFT_DECISION_INTERVAL_SECONDS + 5 min buffer
-_live_session_cache: dict[str, tuple[dict, datetime]] = {}
-
-# Initialized empty; tickers are registered dynamically per /analyze request
-_mft_pipeline: MFTDataPipeline | None = None
-
-
-async def _mft_session_callback(session_states: dict) -> None:
-    """Receives compressed technical feature dicts from the MFT pipeline every 30 minutes.
-
-    Updates the module-level live cache so the next /analyze call picks up
-    fresh intraday indicators without re-fetching historical data. Each entry
-    stores a (state_dict, updated_at) tuple for TTL-based staleness detection.
-
-    Args:
-        session_states: Mapping of ticker → technical feature dict from MFTDataPipeline.
-    """
-    now = datetime.now()
-    for ticker, state in session_states.items():
-        _live_session_cache[ticker] = (state, now)
-    logger.info("[MFT] Live session cache updated: %d ticker(s)", len(_live_session_cache))
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Pre-fits macro models and launches the MFT pipeline background task."""
-    global _mft_pipeline
-
-    logger.info("[Startup] Fitting Macro Statistical Agent on historical data...")
-    macro_agent = MacroStatisticalAgent()
-    try:
-        macro_agent.fit_on_history()
-        logger.info("[Startup] Macro Agent fitted successfully.")
-    except Exception as e:
-        logger.warning(
-            "[Startup] Macro Agent fit failed (possibly due to missing API keys): %s", e
-        )
-
-    # Empty ticker list at start; the fetch loop only tracks symbols requested later
-    _mft_pipeline = MFTDataPipeline(tickers=[])
-    asyncio.create_task(_mft_pipeline.start(on_session_ready=_mft_session_callback))
-    logger.info("[Startup] MFT pipeline background task launched.")
-
-    # Placeholder base; /kill-switch/reset re-bases once the real session is known
-    initialize_kill_switch(risk_tolerance="MODERATE", portfolio_value=100_000.0)
-    logger.info("[Startup] Kill switch initialized.")
-
-    logger.info("[Startup] Governor initialized: %s", governor.get_usage_report())
-
-
 @app.get("/health")
 async def health():
     """Validates connectivity to model backends, API quotas, and system diagnostics."""
@@ -147,6 +283,44 @@ async def health():
         },
         "can_make_calls": can_make_calls,
         "governor_report": governor.get_usage_report(),
+    }
+
+
+@app.get("/pipeline/status")
+async def pipeline_status():
+    """Reports the background MFT pipeline's live state without perturbing it.
+
+    Intended for watching the unattended collector — buffer depth, session
+    cache freshness, and the last automatic collection cycle's outcome — all
+    without triggering a real analysis request.
+
+    Raises:
+        HTTPException 503: If the pipeline hasn't started yet.
+    """
+    if _mft_pipeline is None:
+        raise HTTPException(503, "Pipeline not yet initialized.")
+
+    buffer_depth: dict[str, int] = {}
+    for ticker in _mft_pipeline.buffer.get_all_tickers():
+        df = _mft_pipeline.buffer.get_candles(ticker)
+        buffer_depth[ticker] = 0 if df is None else len(df)
+
+    session_cache_age_seconds = {
+        ticker: (datetime.now() - updated_at).total_seconds()
+        for ticker, (_, updated_at) in _live_session_cache.items()
+    }
+
+    return {
+        "tracked_tickers": list(_mft_pipeline.tickers),
+        "buffer_depth": buffer_depth,
+        "session_cache_age_seconds": session_cache_age_seconds,
+        "is_market_hours": _mft_pipeline.is_market_hours(),
+        "collector_enabled": settings.ARGUS_COLLECTOR_ENABLED,
+        "last_collection_result": (
+            None if _last_collection_result is None else asdict(_last_collection_result)
+        ),
+        "reconcile_enabled": settings.ARGUS_RECONCILE_ENABLED,
+        "reconcile_hour_et": settings.ARGUS_RECONCILE_HOUR_ET,
     }
 
 
@@ -184,7 +358,7 @@ async def analyze(req: AnalysisRequest):
         or (now - _live_session_cache[t][1]).total_seconds() > _SESSION_STATE_TTL_SECONDS
     ]
     if missing_from_cache:
-        if _mft_pipeline is None or not _mft_pipeline._is_market_hours():
+        if _mft_pipeline is None or not _mft_pipeline.is_market_hours():
             raise HTTPException(
                 503,
                 "US equity market is currently closed. MFT pipeline is idle. "
@@ -224,7 +398,7 @@ async def analyze(req: AnalysisRequest):
     config = {"configurable": {"thread_id": str(uuid4())}}
 
     try:
-        final_state = await asyncio.to_thread(graph.invoke, state, config)
+        final_state = await asyncio.to_thread(_graph.invoke, state, config)
     except Exception as e:
         logger.error("[API] Graph error: %s", e)
         raise HTTPException(500, f"Agent graph error: {str(e)}")
