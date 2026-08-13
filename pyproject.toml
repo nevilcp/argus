@@ -1,7 +1,18 @@
 [project]
 name = "argus"
 version = "2.0.0"
+description = "Multi-agent financial intelligence system orchestrating specialist LLMs and statistical models for quantitative equity research."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "nevilcp" }]
 requires-python = ">=3.11"
+classifiers = [
+    "Private :: Do Not Upload",
+    "License :: Other/Proprietary License",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Operating System :: OS Independent",
+]
 dependencies = [
     "langgraph>=0.2.0",
     "langgraph-checkpoint-sqlite>=2.0.0",
@@ -29,13 +40,22 @@ dependencies = [
     "requests>=2.32.0",
 ]
 
+[project.urls]
+Repository = "https://github.com/nevilcp/argus"
+
+[project.scripts]
+argus-collect = "scripts.collect_session:main"
+argus-reconcile = "scripts.reconcile_outcomes:main"
+argus-replay = "scripts.replay_backtest:main"
+argus-evaluate = "scripts.run_evaluation:main"
+
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["argus"]
+packages = ["argus", "api", "scripts"]
 
 [project.optional-dependencies]
 dev = [
@@ -60,7 +80,8 @@ test = [
 ]
 # FinBERT (sentiment.py) and the cultural-memory embedding function
 # (memory/cultural.py) both lazy-import from this extra on first actual use,
-# not on module import — see ADR 0007. Default install and CI never need it.
+# not on module import. CI and a bare local install don't need it; the
+# Docker image does (see Dockerfile.api) since /analyze needs both live.
 models = [
     "sentence-transformers>=2.7.0",
     "transformers>=4.46.0",
