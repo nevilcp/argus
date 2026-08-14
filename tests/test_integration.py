@@ -250,7 +250,6 @@ class TestEndToEnd:
             sector_rotation_signal=SectorSignal.GROWTH_FAVORED,
             agent_multipliers={"fundamental": 1.0, "technical": 1.0, "sentiment": 1.0},
             regime_confidence=0.8,
-            model_healthy=True,
             timestamp=datetime.now(),
         )
         macro_json = macro.model_dump_json()
