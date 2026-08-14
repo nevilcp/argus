@@ -94,12 +94,30 @@ def test_cache(monkeypatch: pytest.MonkeyPatch) -> None:
 
 # Synthetic per-regime cluster means, well separated so a small Gaussian HMM
 # fits three cleanly distinguishable states without needing real FRED/VIX data.
-_EXPANSION_POINT = {"fed_funds": 1.0, "cpi_yoy": 2.0, "t10y2y": 1.5, "unemployment": 3.5, "vix": 13.0}
-_CONTRACTION_POINT = {"fed_funds": 4.0, "cpi_yoy": 1.0, "t10y2y": -1.0, "unemployment": 7.0, "vix": 38.0}
-_TRANSITIONAL_POINT = {"fed_funds": 2.5, "cpi_yoy": 2.5, "t10y2y": 0.2, "unemployment": 5.0, "vix": 20.0}
+_EXPANSION_POINT = {
+    "d_fed_funds_6m": -0.5,
+    "d_unemp_12m": -0.5,
+    "cpi_yoy": 2.0,
+    "t10y2y": 1.5,
+    "vix_pctile": 15.0,
+}
+_CONTRACTION_POINT = {
+    "d_fed_funds_6m": -1.5,
+    "d_unemp_12m": 2.0,
+    "cpi_yoy": 1.0,
+    "t10y2y": -1.0,
+    "vix_pctile": 90.0,
+}
+_TRANSITIONAL_POINT = {
+    "d_fed_funds_6m": 0.25,
+    "d_unemp_12m": 0.25,
+    "cpi_yoy": 2.5,
+    "t10y2y": 0.2,
+    "vix_pctile": 50.0,
+}
 
 
-def _fit_synthetic_classifier(seed: int = 7) -> RegimeClassifier:
+def _fit_synthetic_classifier(seed: int = 3) -> RegimeClassifier:
     """Fits a RegimeClassifier on synthetic, well-separated 3-regime data.
 
     Blocks (not shuffled) so the HMM also learns a sensible transition structure,
@@ -117,7 +135,7 @@ def _fit_synthetic_classifier(seed: int = 7) -> RegimeClassifier:
     def block(point: dict) -> pd.DataFrame:
         return pd.DataFrame(
             {
-                col: point[col] + rng.normal(0, 0.05 if col != "vix" else 0.8, n_per_block)
+                col: point[col] + rng.normal(0, 0.05 if col != "vix_pctile" else 2.0, n_per_block)
                 for col in FEATURE_COLUMNS
             }
         )
