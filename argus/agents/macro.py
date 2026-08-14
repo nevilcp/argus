@@ -276,6 +276,12 @@ class RegimeClassifier:
             )
 
         self.hmm = best_hmm
+        # Apply now, not just on the load() round-trip: validation_failures()'s
+        # discrimination check calls predict() on this in-memory classifier before
+        # it is ever saved, and a raw EM startprob_ (a one-hot artifact of wherever
+        # the training sequence began) would dominate every single-observation
+        # scenario regardless of its features.
+        self.hmm.startprob_ = self._stationary_startprob(self.hmm.transmat_)
         self.scaler = scaler
         hidden_states = best_hmm.predict(scaled_features)
 
@@ -290,6 +296,20 @@ class RegimeClassifier:
         self._map_states(df, recession_series)
         self.is_fitted = True
         self.n_train_observations = len(df)
+
+    @staticmethod
+    def _stationary_startprob(transmat: np.ndarray) -> np.ndarray:
+        """Computes a Markov chain's stationary distribution from its transition matrix.
+
+        Args:
+            transmat: The HMM's n x n transition matrix.
+
+        Returns:
+            A probability vector over states (the left eigenvector for eigenvalue 1).
+        """
+        eigenvalues, eigenvectors = scipy.linalg.eig(transmat.T)
+        stationary = eigenvectors[:, np.argmin(np.abs(eigenvalues - 1.0))].real
+        return stationary / stationary.sum()
 
     def _log_bic_diagnostic(self, scaled_features: np.ndarray) -> None:
         """Logs BIC for k in {2..5} states as a diagnostic; does not affect the fitted model.
@@ -622,14 +642,10 @@ class RegimeClassifier:
             classifier.validation_metrics = metadata.get("validation_metrics", {})
 
             if classifier.is_fitted:
-                # Fitting one long sequence gives hmmlearn nothing to average over,
-                # so startprob_ collapses to a one-hot artifact of wherever the
-                # training sequence began — replace it with the transition matrix's
-                # stationary distribution (left eigenvector for eigenvalue 1) so
-                # every state, including CONTRACTION, is reachable from a cold start
-                eigenvalues, eigenvectors = scipy.linalg.eig(classifier.hmm.transmat_.T)
-                stationary = eigenvectors[:, np.argmin(np.abs(eigenvalues - 1.0))].real
-                classifier.hmm.startprob_ = stationary / stationary.sum()
+                # fit() already applies this, but re-derive it here too so an
+                # artifact saved before this fix still gets a reachable CONTRACTION
+                # state from a cold start
+                classifier.hmm.startprob_ = cls._stationary_startprob(classifier.hmm.transmat_)
 
             logger.info(
                 "RegimeClassifier.load: loaded artifact from %s (trained %s, %d observations)",
