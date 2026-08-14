@@ -114,6 +114,7 @@ def _macro(regime: Regime = Regime.EXPANSION) -> MacroContext:
         vix_level=18.0,
         macro_regime=regime,
         regime_confidence=0.7,
+        model_healthy=True,
         interest_rate_trend="STABLE",
         yield_curve_shape=YieldCurve.NORMAL,
         vix_regime=VixRegime.MEDIUM,
