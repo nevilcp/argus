@@ -3,6 +3,7 @@ Tests for the Macro-Economic Agent (argus/agents/macro.py).
 """
 
 import logging
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -10,8 +11,14 @@ import joblib
 import numpy as np
 import pandas as pd
 import pytest
+from hmmlearn.hmm import GaussianHMM
 
-from argus.agents.macro import FEATURE_COLUMNS, MacroStatisticalAgent, RegimeClassifier
+from argus.agents.macro import (
+    DISCRIMINATION_SCENARIOS,
+    FEATURE_COLUMNS,
+    MacroStatisticalAgent,
+    RegimeClassifier,
+)
 from argus.schemas.signals import Regime
 
 
@@ -117,25 +124,29 @@ _TRANSITIONAL_POINT = {
 }
 
 
-def _fit_synthetic_classifier(seed: int = 3) -> RegimeClassifier:
-    """Fits a RegimeClassifier on synthetic, well-separated 3-regime data.
+_N_PER_BLOCK = 60
 
-    Blocks (not shuffled) so the HMM also learns a sensible transition structure,
-    rather than i.i.d. noise around three means.
+
+def _synthetic_history(seed: int = 3) -> pd.DataFrame:
+    """Builds synthetic, well-separated 3-regime feature history, unfitted.
+
+    Blocks (not shuffled) so a fitted HMM also learns a sensible transition
+    structure, rather than i.i.d. noise around three means.
 
     Args:
         seed: RNG seed for the per-point Gaussian noise.
 
     Returns:
-        A fitted RegimeClassifier whose state_to_regime covers all three regimes.
+        DataFrame with FEATURE_COLUMNS, four blocks of _N_PER_BLOCK rows each
+        (expansion, contraction, transitional, expansion), daily-indexed from
+        2015-01-01.
     """
     rng = np.random.default_rng(seed)
-    n_per_block = 60
 
     def block(point: dict) -> pd.DataFrame:
         return pd.DataFrame(
             {
-                col: point[col] + rng.normal(0, 0.05 if col != "vix_pctile" else 2.0, n_per_block)
+                col: point[col] + rng.normal(0, 0.05 if col != "vix_pctile" else 2.0, _N_PER_BLOCK)
                 for col in FEATURE_COLUMNS
             }
         )
@@ -150,20 +161,40 @@ def _fit_synthetic_classifier(seed: int = 3) -> RegimeClassifier:
         ignore_index=True,
     )
     history.index = pd.date_range("2015-01-01", periods=len(history), freq="D")
+    return history
 
-    # random_state=2 (vs. RegimeClassifier's production default of 42) is picked because
-    # it reliably separates this synthetic data into 3 clean clusters; EM's local-optimum
-    # sensitivity means not every seed does on data this small.
-    classifier = RegimeClassifier(n_components=3, random_state=2)
-    classifier.fit(history)
 
-    # Fitting on one single long sequence (rather than several independent ones) gives
-    # hmmlearn nothing to average over for the initial-state distribution, so startprob_
-    # collapses to a near one-hot pointing at whichever state the training sequence's very
-    # first sample happened to land in — an artifact of where the sequence starts, not a
-    # real prior. Neutralizing it isolates the emission/transition dynamics windowed
-    # inference is actually about.
-    classifier.hmm.startprob_ = np.full(3, 1.0 / 3)
+def _fit_synthetic_classifier(seed: int = 3) -> RegimeClassifier:
+    """Fits a RegimeClassifier on synthetic, well-separated 3-regime data.
+
+    fit() itself tries multiple random restarts (see RegimeClassifier.fit), so
+    no particular constructor seed needs to be hand-picked for this data to
+    separate cleanly.
+
+    Args:
+        seed: RNG seed for the per-point Gaussian noise.
+
+    Returns:
+        A fitted RegimeClassifier whose state_to_regime covers all three regimes.
+    """
+    history = _synthetic_history(seed)
+
+    # Recession flag over the contraction block only, so _map_states' NBER-enrichment
+    # labelling (see RegimeClassifier._label_contraction_state) has something to key
+    # CONTRACTION on, the same way it would from a real USREC series.
+    recession_series = pd.Series(0.0, index=history.index)
+    recession_series.iloc[_N_PER_BLOCK : 2 * _N_PER_BLOCK] = 1.0
+
+    classifier = RegimeClassifier(n_components=3)
+    classifier.fit(history, recession_series=recession_series)
+
+    # save()/load() round-trip so the returned classifier carries load()'s stationary-
+    # startprob_ fix (see RegimeClassifier.load) instead of a test-only hand patch —
+    # hand-patching here would mask a regression in that fix from the rest of the suite.
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        artifact_path = Path(tmp_dir) / "synthetic.joblib"
+        classifier.save(artifact_path)
+        classifier = RegimeClassifier.load(artifact_path)
 
     assert classifier.is_fitted
     assert set(classifier.state_to_regime.values()) == {
@@ -279,6 +310,110 @@ def test_windowed_predict_resists_a_single_point_spike() -> None:
     window = pd.DataFrame([_EXPANSION_POINT] * 9 + [noisy_point])
     windowed_regime, _ = classifier.predict(window)
     assert windowed_regime == Regime.EXPANSION.value
+
+
+def test_window_length_invariance() -> None:
+    """The same constant window classifies identically at every length.
+
+    Direct regression test for the parity bug that made the shipped artifact's
+    regime a function of window-length parity rather than the macro data:
+    tail(89) and tail(90) on the same real window returned different regimes.
+    """
+    classifier = _fit_synthetic_classifier()
+
+    regimes = {classifier.predict(pd.DataFrame([_EXPANSION_POINT] * n))[0] for n in range(5, 15)}
+
+    assert regimes == {Regime.EXPANSION.value}
+
+
+def test_discrimination_crash_and_boom_windows_produce_different_labels() -> None:
+    """A crash-like window and a boom-like window must not collapse to the same label.
+
+    Regression test for the labelling bug where _map_states always assigned
+    CONTRACTION to *some* state regardless of whether a genuinely contractionary
+    state existed, which is what let a boom period read as CONTRACTION.
+    """
+    classifier = _fit_synthetic_classifier()
+
+    boom_regime, _ = classifier.predict(pd.DataFrame([_EXPANSION_POINT] * 10))
+    crash_regime, _ = classifier.predict(pd.DataFrame([_CONTRACTION_POINT] * 10))
+
+    assert boom_regime == Regime.EXPANSION.value
+    assert crash_regime == Regime.CONTRACTION.value
+
+
+def test_contraction_reachable_from_a_single_observation() -> None:
+    """CONTRACTION must be decodable from one observation with no window context.
+
+    Regression test for the pre-fix bug: fitting one long training sequence
+    leaves startprob_ a near one-hot pointing at whichever state the sequence
+    happened to start in, making some states — including CONTRACTION, since
+    training always starts on the expansion block — provably unreachable from a
+    cold start. RegimeClassifier.load replaces startprob_ with the transition
+    matrix's stationary distribution to fix this; _fit_synthetic_classifier
+    routes through save()/load() rather than hand-patching startprob_, so this
+    test exercises the real fix.
+    """
+    classifier = _fit_synthetic_classifier()
+
+    regime, _ = classifier.predict(dict(_CONTRACTION_POINT))
+    assert regime == Regime.CONTRACTION.value
+
+
+def test_fit_raises_when_all_restarts_are_degenerate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """fit() raises rather than silently accepting a degenerate model.
+
+    Regression test for the shipped-artifact bug: two of its three states were
+    the same distribution (|Δμ|max = 0.00097). Reproducing that exact EM
+    collapse needs the same non-stationary daily forward-filled data that
+    caused it; here GaussianHMM.fit is patched to always converge every state
+    to identical means regardless of seed, so the test exercises fit()'s own
+    degeneracy-rejection logic deterministically instead of hoping a
+    synthetic dataset happens to degenerate under EM.
+    """
+
+    def _collapse_to_one_state(self, X, lengths=None):
+        n_components = self.n_components
+        n_features = X.shape[1]
+        self.startprob_ = np.full(n_components, 1.0 / n_components)
+        self.transmat_ = np.full((n_components, n_components), 1.0 / n_components)
+        self.means_ = np.tile(X.mean(axis=0), (n_components, 1))
+        cov = np.cov(X, rowvar=False) + np.eye(n_features) * 1e-3
+        self.covars_ = np.tile(cov, (n_components, 1, 1))
+        return self
+
+    monkeypatch.setattr(GaussianHMM, "fit", _collapse_to_one_state)
+
+    classifier = RegimeClassifier(n_components=3)
+    with pytest.raises(ValueError, match="degenerate"):
+        classifier.fit(_synthetic_history())
+
+
+def test_validation_failures_flags_unfitted_classifier() -> None:
+    """An unfitted classifier fails validation with a specific, non-empty reason."""
+    classifier = RegimeClassifier()
+    assert classifier.validation_failures() == ["classifier is not fitted"]
+
+
+def test_validation_failures_flags_missing_contraction_enrichment() -> None:
+    """Without a recession_series, fit() can't clear the CONTRACTION-enrichment gate."""
+    classifier = RegimeClassifier(n_components=3)
+    classifier.fit(_synthetic_history())
+
+    failures = classifier.validation_failures()
+    assert any("CONTRACTION enrichment" in f for f in failures)
+
+
+def test_discrimination_scenarios_cover_all_feature_columns() -> None:
+    """Every canned scenario supplies all FEATURE_COLUMNS.
+
+    A scenario missing a key would have predict() silently substitute
+    _FEATURE_DEFAULTS for it, weakening validation_failures()'s discrimination
+    check without failing loudly.
+    """
+    for name, scenario in DISCRIMINATION_SCENARIOS.items():
+        assert set(scenario.keys()) == set(FEATURE_COLUMNS), name
+    assert len(DISCRIMINATION_SCENARIOS) >= 2
 
 
 class _WindowAssemblyFailureMarketData:
