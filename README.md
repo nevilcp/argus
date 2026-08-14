@@ -153,7 +153,7 @@ ARGUS sits at the intersection of quantitative finance, statistical modeling, an
 
 ### Concepts Behind Each Agent
 
-- **Macro regime (Gaussian HMM)** — a Hidden Markov Model fit on FRED macro indicators (CPI, Fed Funds, unemployment, 10Y-2Y yield curve) plus VIX, classifying the current environment into one of three latent regimes rather than a hand-coded rule. See [`argus/agents/macro.py`](argus/agents/macro.py).
+- **Macro regime (Gaussian HMM)** — a Hidden Markov Model fit on FRED macro indicators (CPI, Fed Funds, unemployment, 10Y-2Y yield curve) plus VIX, classifying the current environment into one of three latent regimes rather than a hand-coded rule. It classifies from a trailing ~90-day feature window rather than a single observation, so the transition matrix — not one noisy print — drives the call. The fitted model ships as a committed artifact (`argus-train-macro` retrains it; see [Training the Macro Classifier](#training-the-macro-classifier)); if the artifact is missing or fails to load, the agent degrades to a static VIX/yield-curve rule rather than failing. See [`argus/agents/macro.py`](argus/agents/macro.py).
 - **Technical indicators** — fetched as 1-minute intraday candles, resampled to 5-minute bars for indicator calculation, and compressed every 30 minutes. See [`argus/agents/technical.py`](argus/agents/technical.py) and [`argus/data/pipeline.py`](argus/data/pipeline.py).
   - *RSI* (Relative Strength Index): 0–100 momentum oscillator identifying overbought/oversold conditions.
   - *MACD*: trend-following momentum, read via the histogram (the gap between the MACD line and its signal line).
@@ -173,7 +173,7 @@ At small sample sizes — inherent to a system that has only recently started cl
 
 ### What to Know Before Trusting Output
 
-- **FRED macro data lags real time** by weeks to months; the regime classifier reacts slowly to genuine economic pivots.
+- **FRED macro data lags real time** by weeks to months; the regime classifier reacts slowly to genuine economic pivots. Windowed inference compounds this deliberately — trading further responsiveness for a call that isn't swung by one noisy print.
 - **ROA is used as a proxy for ROIC** — Yahoo Finance's `returnOnAssets` is mapped directly to the `roic` field. The two are mathematically distinct; read capital-efficiency conclusions from the fundamental signal with that substitution in mind.
 - **NewsAPI's free tier only returns the trailing 28 days** of headlines — sentiment signals go silently empty/neutral beyond that window.
 - **NewsAPI's free tier also caps requests at 100/day**, and delays article availability by roughly 24 hours. A 20-ticker sweep spends 20 of those 100 — a 5-run/day ceiling tighter than any Groq quota — and news-derived sentiment is never same-day by construction.
@@ -255,7 +255,7 @@ Required environment variables must be placed in a `.env` file at the project ro
 | `NEWSAPI_KEY` | Yes | Fetches recent headlines for FinBERT sentiment scoring. |
 | `LANGCHAIN_TRACING_V2` / `LANGCHAIN_API_KEY` / `LANGCHAIN_PROJECT` / `LANGCHAIN_ENDPOINT` | Optional | Enables LangSmith tracing. Read directly by `langchain-core`, not by `argus/config.py`. |
 
-Every secret field defaults to an empty string (see `argus/config.py`) — the process starts without them, but the feature that depends on a missing key degrades or is skipped rather than failing outright (e.g. macro regime fitting logs a warning and continues). Google Trends sentiment analysis needs no API key at all.
+Every secret field defaults to an empty string (see `argus/config.py`) — the process starts without them, but the feature that depends on a missing key degrades or is skipped rather than failing outright (e.g. a missing `FRED_API_KEY` means the macro classifier's rule-based fallback is used instead of live indicators). Google Trends sentiment analysis needs no API key at all.
 
 ### Unattended Operation
 
@@ -272,6 +272,7 @@ Every secret field defaults to an empty string (see `argus/config.py`) — the p
 | `ARGUS_RISK_TOLERANCE` | `MODERATE` | Risk tolerance used by unattended collection cycles. |
 | `ARGUS_CORS_ORIGINS` | `*` | Comma-separated allowed CORS origins for the FastAPI gateway. |
 | `ARGUS_LOG_LEVEL` | `INFO` | Root log level for `argus.*` loggers. |
+| `ARGUS_HMM_MODEL_PATH` | `argus/models/macro_hmm.joblib` | Path to the persisted macro `RegimeClassifier` artifact (see [Training the Macro Classifier](#training-the-macro-classifier)). |
 
 `docker-compose.yml` overrides `ARGUS_COLLECTOR_ENABLED`/`ARGUS_RECONCILE_ENABLED` to `true` unless you set them explicitly in `.env`.
 
@@ -282,7 +283,7 @@ Every secret field defaults to an empty string (see `argus/config.py`) — the p
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/health` | Model versions and current governor capacity. |
-| `GET` | `/pipeline/status` | Live MFT buffer depth, session-cache freshness, and the last unattended collection cycle's result. |
+| `GET` | `/pipeline/status` | Live MFT buffer depth, session-cache freshness, the last unattended collection cycle's result, and whether the macro HMM classifier is fitted or running the rule-based fallback. |
 | `POST` | `/analyze` | Runs the full graph over a ticker universe and returns an allocation. |
 | `GET` | `/memory/stats` | Summary stats from the ChromaDB cultural-memory vault. |
 | `GET` | `/governor/report` | Per-model request/token usage against rate limits. |
@@ -348,6 +349,17 @@ There is no `/backtest` API endpoint — Yahoo Finance's 5-minute intraday data 
 .venv/bin/python -m scripts.reconcile_outcomes
 .venv/bin/python -m scripts.reconcile_outcomes --decisions-log data/decisions.jsonl
 ```
+
+### Training the Macro Classifier
+
+The Gaussian HMM behind `macro_regime` classification loads a pre-fitted artifact (`argus/models/macro_hmm.joblib`, committed to the repo) rather than fitting on every process start — every entry point (API, unattended collector, replay) loads the same artifact, so training is a separate, manual step, not something that happens at boot. Retraining is manual — there is no scheduled workflow for it:
+
+```bash
+.venv/bin/python -m scripts.train_macro_hmm
+.venv/bin/python -m scripts.train_macro_hmm --start-date 2010-01-01 --output argus/models/macro_hmm.joblib
+```
+
+It requires `FRED_API_KEY` and network access (a direct `yf.download` call for VIX history, in addition to the FRED series), fits `RegimeClassifier`, and prints each hidden state's feature means alongside its assigned regime label — a human sanity check on the state-to-regime labeling heuristic (e.g. the highest-VIX state should read `CONTRACTION`) before you commit the retrained artifact. If the artifact is ever missing, corrupted, or was written by an incompatible `hmmlearn`/`scikit-learn` version, `MacroStatisticalAgent` logs an `ERROR` and falls back to a static VIX/yield-curve rule rather than failing — check `/pipeline/status`'s `macro_classifier_fitted` field to see which mode is active.
 
 ## Deployment
 

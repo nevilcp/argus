@@ -123,6 +123,10 @@ class Settings(BaseSettings):
         default=["*"], description="Allowed CORS origins for the FastAPI gateway"
     )
     ARGUS_LOG_LEVEL: str = Field(default="INFO", description="Root log level for argus.* loggers")
+    ARGUS_HMM_MODEL_PATH: str = Field(
+        default=str(BASE_DIR / "argus" / "models" / "macro_hmm.joblib"),
+        description="Path to the persisted RegimeClassifier artifact (scripts/train_macro_hmm.py output)",
+    )
 
     @field_validator("ARGUS_UNIVERSE", "ARGUS_CORS_ORIGINS", mode="before")
     @classmethod
