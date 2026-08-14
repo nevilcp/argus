@@ -125,6 +125,46 @@ def _run_fixture_graph() -> dict:
     return final_state
 
 
+class _NoneMacroMarketData(FixtureMarketDataProvider):
+    """Wraps the real fixture provider but forces a total FRED data outage.
+
+    Every other method (fred_series, ohlcv_daily, ...) is inherited unchanged,
+    so if a downstream node ran anyway it would get real fixture data rather
+    than crashing for an unrelated reason.
+    """
+
+    def macro_bundle(self) -> dict:
+        """Returns an all-None bundle, matching a total FRED outage."""
+        return {"vix": None, "fed_funds": None, "t10y2y": None}
+
+
+def test_macro_context_none_short_circuits_to_end():
+    """A None macro_context routes straight to END; no fan-out node runs."""
+    graph = build_graph(
+        market_data=_NoneMacroMarketData(),
+        fundamental_llm=_per_ticker_llm("fundamental.json"),
+        sentiment_llm=_per_ticker_llm("sentiment.json"),
+        portfolio_llm=_portfolio_llm(),
+    )
+    config = {"configurable": {"thread_id": str(uuid4())}}
+
+    with mock.patch("argus.orchestration.graph.get_cultural_memory") as mock_get_cultural_memory:
+        mock_get_cultural_memory.return_value = mock.Mock(
+            retrieve_wisdom=mock.Mock(return_value=[]),
+            retrieve_warnings=mock.Mock(return_value=[]),
+            get_agent_accuracy=mock.Mock(return_value=0.5),
+            store_decision_snapshot=mock.Mock(),
+        )
+        final_state = graph.invoke(_initial_state(), config)
+
+    assert final_state.get("macro_context") is None
+    assert final_state.get("technical_signals") == {}
+    assert final_state.get("fundamental_signals") == {}
+    assert final_state.get("sentiment_signals") == {}
+    assert final_state.get("risk_assessments") == {}
+    assert final_state.get("portfolio_allocation") is None
+
+
 def test_golden_dag_runs_offline_and_produces_a_valid_allocation():
     """The fixture-backed DAG runs end to end with zero network/LLM/torch dependencies."""
     final_state = _run_fixture_graph()

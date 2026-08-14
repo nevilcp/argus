@@ -79,6 +79,12 @@ _last_collection_result: CollectionResult | None = None
 # share one decision history instead of two disjoint SQLite files
 _graph = None
 
+# A throwaway MacroStatisticalAgent constructed solely to surface whether the
+# committed HMM artifact loaded, for /pipeline/status. Cheap: the constructor
+# only loads a joblib file, unlike the old fit_on_history() network fetch this
+# replaced (see the deleted startup block below).
+_macro_status_agent: MacroStatisticalAgent | None = None
+
 
 async def _mft_session_callback(session_states: dict) -> None:
     """Receives compressed technical feature dicts from the MFT pipeline every 30 minutes.
@@ -168,18 +174,16 @@ async def _reconcile_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Starts background tasks on startup and stops them cleanly on shutdown."""
-    global _mft_pipeline, _pipeline_task, _collector_task, _reconcile_task, _graph
+    global _mft_pipeline, _pipeline_task, _collector_task, _reconcile_task, _graph, _macro_status_agent
 
     _graph = build_graph(checkpoint_db_path=f"{settings.ARGUS_DATA_DIR}/argus_graph.db")
 
-    logger.info("[Startup] Fitting Macro Statistical Agent on historical data...")
-    macro_agent = MacroStatisticalAgent()
-    try:
-        macro_agent.fit_on_history()
-        logger.info("[Startup] Macro Agent fitted successfully.")
-    except Exception as e:
+    _macro_status_agent = MacroStatisticalAgent()
+    if _macro_status_agent.classifier.is_fitted:
+        logger.info("[Startup] Macro HMM artifact loaded: %s", settings.ARGUS_HMM_MODEL_PATH)
+    else:
         logger.warning(
-            "[Startup] Macro Agent fit failed (possibly due to missing API keys): %s", e
+            "[Startup] Macro HMM artifact not loaded; classifier will use the rule-based fallback."
         )
 
     # Seeded from ARGUS_UNIVERSE so the pipeline starts collecting immediately
@@ -321,6 +325,9 @@ async def pipeline_status():
         ),
         "reconcile_enabled": settings.ARGUS_RECONCILE_ENABLED,
         "reconcile_hour_et": settings.ARGUS_RECONCILE_HOUR_ET,
+        "macro_classifier_fitted": (
+            _macro_status_agent.classifier.is_fitted if _macro_status_agent else False
+        ),
     }
 
 

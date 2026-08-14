@@ -202,6 +202,18 @@ class RiskParams:
 
 
 @dataclass(frozen=True)
+class MacroParams:
+    """RegimeClassifier windowed-inference parameters (agents/macro.py)."""
+
+    inference_window_days: int = p(
+        90,
+        Provenance.ARBITRARY,
+        "long enough to give the HMM's transition matrix several observations "
+        "so one noisy print can't flip the regime; not backtested against alternatives",
+    )
+
+
+@dataclass(frozen=True)
 class ReconciliationParams:
     """Outcome-reconciliation horizon (orchestration/reconciliation.py)."""
 
@@ -237,6 +249,7 @@ TECHNICAL = TechnicalParams()
 AGGREGATOR = AggregatorParams()
 PORTFOLIO = PortfolioParams()
 RISK = RiskParams()
+MACRO = MacroParams()
 RECONCILIATION = ReconciliationParams()
 MEMORY = MemoryParams()
 
@@ -247,6 +260,7 @@ _ALL_GROUPS: dict[str, Any] = {
     "AGGREGATOR": AGGREGATOR,
     "PORTFOLIO": PORTFOLIO,
     "RISK": RISK,
+    "MACRO": MACRO,
     "RECONCILIATION": RECONCILIATION,
     "MEMORY": MEMORY,
 }
