@@ -161,7 +161,12 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
         if self.collection.count() == 0:
             return []
 
-        query = f"Macro regime {current_macro.macro_regime.value}, VIX {current_macro.vix_regime}, {current_technical_summary}"
+        regime_clause = (
+            f"Macro regime {current_macro.macro_regime.value}, "
+            if current_macro.macro_regime.value != "unknown"
+            else ""
+        )
+        query = f"{regime_clause}VIX {current_macro.vix_regime}, {current_technical_summary}"
 
         try:
             results = self.collection.query(
@@ -189,12 +194,17 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
 
         try:
             query = f"Failed trades in {current_macro.macro_regime.value} regime"
+            where_clause: dict[str, Any] = (
+                {"outcome": "FAILED"}
+                if current_macro.macro_regime.value == "unknown"
+                else {
+                    "$and": [{"outcome": "FAILED"}, {"regime": current_macro.macro_regime.value}]
+                }
+            )
             results = self.collection.query(
                 query_texts=[query],
                 n_results=min(n_results, self.collection.count()),
-                where={
-                    "$and": [{"outcome": "FAILED"}, {"regime": current_macro.macro_regime.value}]
-                },
+                where=where_clause,
             )
             return results["documents"][0] if results and results["documents"] else []
         except Exception as e:
