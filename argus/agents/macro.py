@@ -24,6 +24,7 @@ Dependencies:
 from __future__ import annotations
 
 import logging
+import warnings
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Tuple
@@ -35,6 +36,8 @@ import pandas as pd
 import scipy.linalg
 import sklearn
 from hmmlearn.hmm import GaussianHMM
+from scipy.spatial.distance import mahalanobis
+from sklearn.exceptions import ConvergenceWarning
 from sklearn.preprocessing import StandardScaler
 
 from argus.config import settings
@@ -59,6 +62,103 @@ _FEATURE_DEFAULTS = {
     "vix_pctile": 50.0,
 }
 
+# Canned scenarios for scripts/train_macro_hmm.py's discrimination gate (and
+# tested directly against it): a trained model that maps every one of these to
+# the same label cannot be a function of the macro data. Values are on
+# FEATURE_COLUMNS' scale, not raw indicator levels.
+DISCRIMINATION_SCENARIOS: dict[str, dict[str, float]] = {
+    "goldilocks_boom": {
+        "d_fed_funds_6m": -0.1,
+        "d_unemp_12m": -0.2,
+        "cpi_yoy": 2.0,
+        "t10y2y": 1.5,
+        "vix_pctile": 10.0,
+    },
+    "gfc_crash": {
+        "d_fed_funds_6m": -2.5,
+        "d_unemp_12m": 3.5,
+        "cpi_yoy": 0.5,
+        "t10y2y": -0.3,
+        "vix_pctile": 95.0,
+    },
+    "covid_shock": {
+        "d_fed_funds_6m": -1.5,
+        "d_unemp_12m": 8.0,
+        "cpi_yoy": 0.3,
+        "t10y2y": 0.5,
+        "vix_pctile": 99.0,
+    },
+    "2023_curve_inversion": {
+        "d_fed_funds_6m": 1.0,
+        "d_unemp_12m": -0.3,
+        "cpi_yoy": 4.0,
+        "t10y2y": -1.0,
+        "vix_pctile": 40.0,
+    },
+    "stagflation": {
+        "d_fed_funds_6m": 0.5,
+        "d_unemp_12m": 1.0,
+        "cpi_yoy": 9.0,
+        "t10y2y": -0.5,
+        "vix_pctile": 70.0,
+    },
+}
+
+
+def _dwell_times_months(hidden_states: np.ndarray, n_components: int) -> dict[int, float]:
+    """Computes each state's mean run length (in observations) from a Viterbi path.
+
+    Args:
+        hidden_states: Decoded state sequence, ordered oldest to newest.
+        n_components: Number of HMM states.
+
+    Returns:
+        Dict mapping state index to mean dwell time; 0.0 for a state with no runs.
+    """
+    runs: dict[int, list[int]] = {s: [] for s in range(n_components)}
+    run_state = int(hidden_states[0])
+    run_len = 1
+    for state in hidden_states[1:]:
+        state = int(state)
+        if state == run_state:
+            run_len += 1
+        else:
+            runs[run_state].append(run_len)
+            run_state = state
+            run_len = 1
+    runs[run_state].append(run_len)
+    return {s: (float(np.mean(lengths)) if lengths else 0.0) for s, lengths in runs.items()}
+
+
+def _min_pairwise_mahalanobis(hmm: GaussianHMM, occupancy: np.ndarray) -> float:
+    """Computes the minimum pairwise Mahalanobis distance between state means.
+
+    Uses the occupancy-weighted pooled covariance across states, so a state's
+    own (possibly ill-conditioned) covariance doesn't dominate the metric.
+
+    Args:
+        hmm: A fitted GaussianHMM with full covariances.
+        occupancy: Fraction of decoded observations assigned to each state.
+
+    Returns:
+        The smallest pairwise distance, or 0.0 for a single-state model.
+    """
+    n = hmm.n_components
+    if n < 2:
+        return 0.0
+    pooled_cov = np.average(hmm.covars_, axis=0, weights=occupancy)
+    try:
+        inv_cov = np.linalg.inv(pooled_cov)
+    except np.linalg.LinAlgError:
+        inv_cov = np.linalg.pinv(pooled_cov)
+
+    min_dist = np.inf
+    for i in range(n):
+        for j in range(i + 1, n):
+            dist = mahalanobis(hmm.means_[i], hmm.means_[j], inv_cov)
+            min_dist = min(min_dist, dist)
+    return float(min_dist)
+
 
 def _major_minor(version: str) -> str:
     """Truncates a dotted version string to its major.minor prefix."""
@@ -68,23 +168,22 @@ def _major_minor(version: str) -> str:
 class RegimeClassifier:
     """Gaussian Hidden Markov Model mapping macro features to hidden economic states.
 
-    Trained on a long FRED history (2010+), then applied to current macro observations
-    to infer the latent regime. State-to-regime mapping is determined heuristically from
-    per-state feature means after fitting.
+    Trained on a long FRED history (1990+), then applied to current macro observations
+    to infer the latent regime. CONTRACTION is labelled by NBER (USREC) recession
+    enrichment; EXPANSION and TRANSITIONAL are labelled heuristically from per-state
+    feature means. See fit() and _map_states().
     """
 
-    def __init__(self, n_components: int = 3, random_state: int = 42) -> None:
+    def __init__(self, n_components: int = 3) -> None:
         """Builds the underlying Gaussian HMM, untrained.
 
         Args:
             n_components: Number of latent regime states.
-            random_state: Seed for the HMM's random initialization.
         """
         self.hmm = GaussianHMM(
             n_components=n_components,
             covariance_type="full",
             n_iter=300,
-            random_state=random_state,
         )
         self.scaler = StandardScaler()
         self.is_fitted = False
@@ -95,61 +194,171 @@ class RegimeClassifier:
         # so scripts/train_macro_hmm.py can print the human check on _map_states'
         # labeling immediately after fitting.
         self.state_means: dict[int, dict[str, float]] = {}
+        # Populated by fit(): separation/occupancy/dwell/enrichment/recall evidence
+        # for this fit, persisted into the artifact's metadata by save() and
+        # checked by validation_failures().
+        self.validation_metrics: dict = {}
 
-    def fit(self, macro_history: pd.DataFrame) -> None:
+    def fit(
+        self, macro_history: pd.DataFrame, recession_series: Optional[pd.Series] = None
+    ) -> None:
         """Fits the scaling transformer and HMM classifier on historic feature timelines.
+
+        Tries MACRO.hmm_n_init random restarts (seeds 0..n_init-1), rejecting any
+        restart whose states are not well separated or that leaves a state
+        under-occupied, and keeps the highest-likelihood survivor. A single fixed
+        seed is not enough: on this data, 3 of 5 seeds collapse two states onto
+        the same distribution, and the shipped artifact's seed (42) was one of them.
 
         Args:
             macro_history: DataFrame containing at least FEATURE_COLUMNS. NaN rows
                 are dropped before fitting.
+            recession_series: Optional NBER USREC series (1.0 during a recession
+                month, else 0.0), indexed to overlap macro_history. Used by
+                _map_states to label the CONTRACTION state by recession
+                enrichment; if None, no state is labelled CONTRACTION.
+
+        Raises:
+            ValueError: If every restart is rejected as degenerate or under-occupied.
         """
         df = macro_history.dropna().copy()
         if df.empty:
             logger.warning("RegimeClassifier.fit: Empty DataFrame after dropping NaNs.")
             return
 
+        n_components = self.hmm.n_components
         features = df[FEATURE_COLUMNS].values
-        scaled_features = self.scaler.fit_transform(features)
+        scaler = StandardScaler()
+        scaled_features = scaler.fit_transform(features)
 
-        self.hmm.fit(scaled_features)
-        self._map_states(df)
+        self._log_bic_diagnostic(scaled_features)
+
+        best_hmm: Optional[GaussianHMM] = None
+        best_score = -np.inf
+        best_separation = 0.0
+        best_occupancy = np.array([])
+        rejections: list[str] = []
+
+        for seed in range(MACRO.hmm_n_init):
+            candidate = GaussianHMM(
+                n_components=n_components,
+                covariance_type="full",
+                n_iter=300,
+                random_state=seed,
+            )
+            with warnings.catch_warnings():
+                # Sub-1e-4 monotonicity wobble near the optimum is benign, not a failure
+                warnings.filterwarnings("ignore", category=ConvergenceWarning)
+                candidate.fit(scaled_features)
+
+            hidden_states = candidate.predict(scaled_features)
+            occupancy = np.bincount(hidden_states, minlength=n_components) / len(hidden_states)
+            if occupancy.min() < MACRO.hmm_min_state_occupancy:
+                rejections.append(f"seed={seed}: min occupancy {occupancy.min():.3f}")
+                continue
+
+            separation = _min_pairwise_mahalanobis(candidate, occupancy)
+            if separation < MACRO.hmm_min_state_separation:
+                rejections.append(f"seed={seed}: min separation {separation:.3f}")
+                continue
+
+            score = candidate.score(scaled_features)
+            if score > best_score:
+                best_score = score
+                best_hmm = candidate
+                best_separation = separation
+                best_occupancy = occupancy
+
+        if best_hmm is None:
+            raise ValueError(
+                f"RegimeClassifier.fit: all {MACRO.hmm_n_init} restarts were degenerate "
+                f"or under-occupied ({'; '.join(rejections)})"
+            )
+
+        self.hmm = best_hmm
+        self.scaler = scaler
+        hidden_states = best_hmm.predict(scaled_features)
+
+        self.validation_metrics = {
+            "min_state_separation": best_separation,
+            "state_occupancy": {int(s): float(o) for s, o in enumerate(best_occupancy)},
+            "dwell_times_months": _dwell_times_months(hidden_states, n_components),
+            "log_likelihood": float(best_score),
+            "n_restarts_rejected": len(rejections),
+        }
+
+        self._map_states(df, recession_series)
         self.is_fitted = True
         self.n_train_observations = len(df)
 
-    def _map_states(self, df: pd.DataFrame) -> None:
-        """Maps hidden states to human-readable regimes based on per-state feature means.
+    def _log_bic_diagnostic(self, scaled_features: np.ndarray) -> None:
+        """Logs BIC for k in {2..5} states as a diagnostic; does not affect the fitted model.
 
-        CONTRACTION = state with the highest average VIX percentile.
-        EXPANSION = from remaining states, the one with the largest 6-month rate
-            decline and a positive yield curve (t10y2y > 0).
+        n_components stays fixed at 3 (see the class docstring) — BIC decreases
+        monotonically through k=5 on this data, but k>3 forces an arbitrary
+        many-to-3 mapping onto the Regime enum for no validated gain. Logged so
+        that choice stays visible instead of assumed.
+
+        Args:
+            scaled_features: Scaler-transformed training features.
+        """
+        n_obs, n_features = scaled_features.shape
+        for k in range(2, 6):
+            try:
+                candidate = GaussianHMM(
+                    n_components=k, covariance_type="full", n_iter=300, random_state=0
+                )
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", category=ConvergenceWarning)
+                    candidate.fit(scaled_features)
+                log_likelihood = candidate.score(scaled_features)
+                n_params = (
+                    (k - 1) + k * (k - 1) + k * n_features + k * n_features * (n_features + 1) // 2
+                )
+                bic = -2 * log_likelihood + n_params * np.log(n_obs)
+                logger.info("RegimeClassifier.fit: BIC diagnostic k=%d -> %.1f", k, bic)
+            except Exception as exc:
+                logger.debug("RegimeClassifier.fit: BIC diagnostic failed for k=%d: %s", k, exc)
+
+    def _map_states(self, df: pd.DataFrame, recession_series: Optional[pd.Series] = None) -> None:
+        """Maps hidden states to human-readable regimes.
+
+        CONTRACTION = the state with the highest NBER (USREC) recession
+            frequency, provided it clears MACRO.contraction_enrichment_min
+            against the sample's base rate; otherwise no state is labelled
+            CONTRACTION. This replaces a VIX-percentile heuristic that always
+            assigned CONTRACTION to *some* state whether or not a
+            contractionary state actually existed — which is how the ZIRP era
+            got the label.
+        EXPANSION = of the remaining states, the one with the lowest average
+            d_unemp_12m (falling unemployment).
         TRANSITIONAL = all other states.
 
         Args:
             df: The same DataFrame used for fitting, used to label state sequences.
+            recession_series: Optional NBER USREC series; see fit()'s docstring.
         """
+        self.state_to_regime = {}
+
         features = df[FEATURE_COLUMNS].values
         scaled_features = self.scaler.transform(features)
         hidden_states = self.hmm.predict(scaled_features)
 
+        df = df.copy()
         df["state"] = hidden_states
         full_means = df.groupby("state")[FEATURE_COLUMNS].mean()
         self.state_means = {int(state): row.to_dict() for state, row in full_means.iterrows()}
 
-        means = df.groupby("state")[["vix_pctile", "d_fed_funds_6m", "t10y2y"]].mean()
+        contraction_state = self._label_contraction_state(df, recession_series)
 
-        contraction_state = int(means["vix_pctile"].idxmax())
-
-        remaining = means.drop(index=contraction_state, errors="ignore")
-        expansion_state = -1
-
+        remaining = df[df["state"] != contraction_state] if contraction_state is not None else df
+        expansion_state: Optional[int] = None
         if not remaining.empty:
-            pos_curve = remaining[remaining["t10y2y"] > 0]
-            if not pos_curve.empty:
-                expansion_state = int(pos_curve["d_fed_funds_6m"].idxmin())
-            else:
-                expansion_state = int(remaining["d_fed_funds_6m"].idxmin())
+            remaining_means = remaining.groupby("state")["d_unemp_12m"].mean()
+            if not remaining_means.empty:
+                expansion_state = int(remaining_means.idxmin())
 
-        for state in means.index:
+        for state in sorted(df["state"].unique()):
             state = int(state)
             if state == contraction_state:
                 self.state_to_regime[state] = Regime.CONTRACTION.value
@@ -159,6 +368,115 @@ class RegimeClassifier:
                 self.state_to_regime[state] = Regime.TRANSITIONAL.value
 
         logger.debug("HMM State Mapping: %s", self.state_to_regime)
+
+    def _label_contraction_state(
+        self, df_with_state: pd.DataFrame, recession_series: Optional[pd.Series]
+    ) -> Optional[int]:
+        """Picks the CONTRACTION state by NBER recession-frequency enrichment.
+
+        Args:
+            df_with_state: Training frame with a "state" column, from _map_states.
+            recession_series: NBER USREC series (1.0/0.0), or None if unavailable.
+
+        Returns:
+            The state index to label CONTRACTION, or None if no candidate clears
+            MACRO.contraction_enrichment_min. Either way, records enrichment and
+            recall into validation_metrics for validation_failures() and the
+            persisted artifact metadata.
+        """
+        if recession_series is None:
+            self.validation_metrics["contraction_enrichment"] = None
+            self.validation_metrics["contraction_recall"] = None
+            return None
+
+        aligned = recession_series.reindex(df_with_state.index).fillna(0.0)
+        base_rate = float(aligned.mean())
+        freq_by_state = aligned.groupby(df_with_state["state"]).mean()
+        self.validation_metrics["recession_frequency_by_state"] = {
+            int(s): float(f) for s, f in freq_by_state.items()
+        }
+
+        if base_rate <= 0 or freq_by_state.empty:
+            self.validation_metrics["contraction_enrichment"] = None
+            self.validation_metrics["contraction_recall"] = None
+            return None
+
+        candidate = int(freq_by_state.idxmax())
+        enrichment = float(freq_by_state.loc[candidate] / base_rate)
+        self.validation_metrics["contraction_enrichment"] = enrichment
+
+        if enrichment < MACRO.contraction_enrichment_min:
+            self.validation_metrics["contraction_recall"] = None
+            return None
+
+        recession_mask = aligned > 0
+        recall = (
+            float((df_with_state.loc[recession_mask, "state"] == candidate).mean())
+            if recession_mask.any()
+            else 0.0
+        )
+        self.validation_metrics["contraction_recall"] = recall
+        return candidate
+
+    def validation_failures(self) -> list[str]:
+        """Checks the fitted model against the training-gate thresholds in MACRO.
+
+        Meant for scripts/train_macro_hmm.py to hard-fail a training run before
+        persisting a broken artifact. fit() already rejects degenerate/
+        under-occupied restarts internally; this re-checks the winning fit plus
+        the checks fit() doesn't perform on its own (dwell time, CONTRACTION
+        enrichment, and a discrimination smoke test).
+
+        Returns:
+            Human-readable failure descriptions; empty if every check passes.
+        """
+        if not self.is_fitted:
+            return ["classifier is not fitted"]
+
+        failures: list[str] = []
+        m = self.validation_metrics
+
+        separation = m.get("min_state_separation", 0.0)
+        if separation < MACRO.hmm_min_state_separation:
+            failures.append(
+                f"min state separation {separation:.3f} below floor "
+                f"{MACRO.hmm_min_state_separation}"
+            )
+
+        occupancy = m.get("state_occupancy", {})
+        low_occupancy = {s: o for s, o in occupancy.items() if o < MACRO.hmm_min_state_occupancy}
+        if low_occupancy:
+            failures.append(
+                f"states below occupancy floor {MACRO.hmm_min_state_occupancy}: {low_occupancy}"
+            )
+
+        dwell = m.get("dwell_times_months", {})
+        bad_dwell = {
+            s: d
+            for s, d in dwell.items()
+            if not (MACRO.dwell_time_min_months <= d <= MACRO.dwell_time_max_months)
+        }
+        if bad_dwell:
+            failures.append(
+                f"states with dwell time outside [{MACRO.dwell_time_min_months}, "
+                f"{MACRO.dwell_time_max_months}] months: {bad_dwell}"
+            )
+
+        enrichment = m.get("contraction_enrichment")
+        if enrichment is None or enrichment < MACRO.contraction_enrichment_min:
+            failures.append(
+                f"CONTRACTION enrichment {enrichment} below floor "
+                f"{MACRO.contraction_enrichment_min}"
+            )
+
+        labels = {
+            self.predict(pd.DataFrame([scenario]))[0]
+            for scenario in DISCRIMINATION_SCENARIOS.values()
+        }
+        if len(labels) < 2:
+            failures.append(f"discrimination scenarios collapsed to a single label: {labels}")
+
+        return failures
 
     def predict(self, current: dict | pd.DataFrame) -> Tuple[str, float]:
         """Classifies the current economic regime and returns posterior probability confidence.
@@ -247,6 +565,7 @@ class RegimeClassifier:
                 "n_train_observations": self.n_train_observations,
                 "start_date": start_date,
                 "trained_at": datetime.now(timezone.utc).isoformat(),
+                "validation_metrics": self.validation_metrics,
             },
         }
         joblib.dump(payload, path)
@@ -300,6 +619,7 @@ class RegimeClassifier:
             classifier.state_to_regime = payload["state_to_regime"]
             classifier.is_fitted = payload["is_fitted"]
             classifier.n_train_observations = metadata.get("n_train_observations", 0)
+            classifier.validation_metrics = metadata.get("validation_metrics", {})
 
             if classifier.is_fitted:
                 # Fitting one long sequence gives hmmlearn nothing to average over,
@@ -366,7 +686,19 @@ class MacroStatisticalAgent:
         logger.debug("Fetching macro history from %s for HMM fitting...", start_date)
         try:
             df = build_macro_feature_frame(self.market_data, start=start_date)
-            self.classifier.fit(df)
+
+            recession_series = None
+            try:
+                usrec = self.market_data.fred_series("USREC", start=start_date)
+                recession_series = usrec.resample("ME").last()
+            except Exception as exc:
+                logger.warning(
+                    "fit_on_history: failed to fetch NBER USREC series (%s); "
+                    "CONTRACTION will not be labelled on this fit.",
+                    exc,
+                )
+
+            self.classifier.fit(df, recession_series=recession_series)
             logger.debug("HMM fitted on %d observations from %s.", len(df), start_date)
         except Exception as e:
             logger.error("Failed to fit HMM on history: %s", e)
