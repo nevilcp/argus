@@ -9,6 +9,7 @@ Responsibilities:
   - Expose regime multipliers used by specialist agents to dynamically weight convictions
 
 Not responsible for:
+  - Feature construction (see data/macro_features.py)
   - Raw data fetching beyond macro bundles (see data/fetchers.py)
   - Portfolio allocation (see agents/portfolio.py)
   - Risk constraint enforcement (see agents/risk.py)
@@ -23,7 +24,7 @@ Dependencies:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -31,13 +32,13 @@ import hmmlearn
 import joblib
 import numpy as np
 import pandas as pd
+import scipy.linalg
 import sklearn
-import yfinance as yf
 from hmmlearn.hmm import GaussianHMM
 from sklearn.preprocessing import StandardScaler
 
 from argus.config import settings
-from argus.data.fetchers import fetch_fred_series
+from argus.data.macro_features import build_macro_feature_frame
 from argus.params import MACRO
 from argus.schemas.signals import MacroContext, Regime, SectorSignal, VixRegime, YieldCurve
 from argus.seams import LiveMarketDataProvider, MarketDataProvider
@@ -46,10 +47,22 @@ logger = logging.getLogger("argus.macro")
 
 # Column order the fit/predict paths always pass to the scaler and HMM; persisted
 # in the artifact's metadata so a load-time mismatch is detectable rather than a
-# silent feature misalignment.
-FEATURE_COLUMNS = ["fed_funds", "cpi_yoy", "t10y2y", "unemployment", "vix"]
+# silent feature misalignment. All five are stationary (diffs, a percentile rank,
+# or a mean-reverting spread) — see data/macro_features.py for their derivation.
+FEATURE_COLUMNS = ["d_fed_funds_6m", "d_unemp_12m", "cpi_yoy", "t10y2y", "vix_pctile"]
 
-_FEATURE_DEFAULTS = {"fed_funds": 0.0, "cpi_yoy": 0.0, "t10y2y": 0.0, "unemployment": 0.0, "vix": 20.0}
+_FEATURE_DEFAULTS = {
+    "d_fed_funds_6m": 0.0,
+    "d_unemp_12m": 0.0,
+    "cpi_yoy": 0.0,
+    "t10y2y": 0.0,
+    "vix_pctile": 50.0,
+}
+
+
+def _major_minor(version: str) -> str:
+    """Truncates a dotted version string to its major.minor prefix."""
+    return ".".join(version.split(".")[:2])
 
 
 class RegimeClassifier:
@@ -87,8 +100,8 @@ class RegimeClassifier:
         """Fits the scaling transformer and HMM classifier on historic feature timelines.
 
         Args:
-            macro_history: DataFrame with columns [fed_funds, cpi_yoy, t10y2y, unemployment, vix].
-                NaN rows are dropped before fitting.
+            macro_history: DataFrame containing at least FEATURE_COLUMNS. NaN rows
+                are dropped before fitting.
         """
         df = macro_history.dropna().copy()
         if df.empty:
@@ -106,9 +119,9 @@ class RegimeClassifier:
     def _map_states(self, df: pd.DataFrame) -> None:
         """Maps hidden states to human-readable regimes based on per-state feature means.
 
-        CONTRACTION = state with the highest average VIX.
-        EXPANSION = from remaining states, the one with the lowest fed_funds rate
-            and a positive yield curve (t10y2y > 0).
+        CONTRACTION = state with the highest average VIX percentile.
+        EXPANSION = from remaining states, the one with the largest 6-month rate
+            decline and a positive yield curve (t10y2y > 0).
         TRANSITIONAL = all other states.
 
         Args:
@@ -122,9 +135,9 @@ class RegimeClassifier:
         full_means = df.groupby("state")[FEATURE_COLUMNS].mean()
         self.state_means = {int(state): row.to_dict() for state, row in full_means.iterrows()}
 
-        means = df.groupby("state")[["vix", "fed_funds", "t10y2y"]].mean()
+        means = df.groupby("state")[["vix_pctile", "d_fed_funds_6m", "t10y2y"]].mean()
 
-        contraction_state = int(means["vix"].idxmax())
+        contraction_state = int(means["vix_pctile"].idxmax())
 
         remaining = means.drop(index=contraction_state, errors="ignore")
         expansion_state = -1
@@ -132,9 +145,9 @@ class RegimeClassifier:
         if not remaining.empty:
             pos_curve = remaining[remaining["t10y2y"] > 0]
             if not pos_curve.empty:
-                expansion_state = int(pos_curve["fed_funds"].idxmin())
+                expansion_state = int(pos_curve["d_fed_funds_6m"].idxmin())
             else:
-                expansion_state = int(remaining["fed_funds"].idxmin())
+                expansion_state = int(remaining["d_fed_funds_6m"].idxmin())
 
         for state in means.index:
             state = int(state)
@@ -157,13 +170,15 @@ class RegimeClassifier:
         isolated point, which is what the posterior confidence is meant to reflect.
 
         Args:
-            current: Either a dict with keys fed_funds, cpi_yoy, t10y2y, unemployment,
-                vix, or a DataFrame with those same columns, one row per day, ordered
-                oldest to newest.
+            current: Either a dict with keys matching FEATURE_COLUMNS, or a DataFrame
+                with those same columns, one row per period, ordered oldest to newest.
 
         Returns:
             Tuple of (regime_string, confidence), where confidence is the max posterior
             probability at the window's final timestep (or the single observation).
+
+        Raises:
+            ValueError: If the feature array contains a NaN or infinite value.
         """
         if not self.is_fitted:
             v = current.iloc[-1].to_dict() if isinstance(current, pd.DataFrame) else current
@@ -173,6 +188,9 @@ class RegimeClassifier:
             arr = current[FEATURE_COLUMNS].values
         else:
             arr = np.array([[current.get(col, _FEATURE_DEFAULTS[col]) for col in FEATURE_COLUMNS]])
+
+        if not np.isfinite(arr).all():
+            raise ValueError("RegimeClassifier.predict: feature array contains NaN/inf")
 
         scaled_arr = self.scaler.transform(arr)
         posteriors = self.hmm.predict_proba(scaled_arr)
@@ -261,14 +279,18 @@ class RegimeClassifier:
                     f"feature column mismatch: artifact trained on "
                     f"{metadata.get('feature_columns')!r}, code expects {FEATURE_COLUMNS!r}"
                 )
-            if metadata.get("hmmlearn_version") != hmmlearn.__version__:
+            # Major.minor only: a patch-level `pip install -U scikit-learn` shouldn't
+            # silently drop production to the rule-based path
+            artifact_hmmlearn = metadata.get("hmmlearn_version", "")
+            if _major_minor(artifact_hmmlearn) != _major_minor(hmmlearn.__version__):
                 raise ValueError(
-                    f"hmmlearn version mismatch: artifact={metadata.get('hmmlearn_version')!r}, "
+                    f"hmmlearn version mismatch: artifact={artifact_hmmlearn!r}, "
                     f"installed={hmmlearn.__version__!r}"
                 )
-            if metadata.get("sklearn_version") != sklearn.__version__:
+            artifact_sklearn = metadata.get("sklearn_version", "")
+            if _major_minor(artifact_sklearn) != _major_minor(sklearn.__version__):
                 raise ValueError(
-                    f"scikit-learn version mismatch: artifact={metadata.get('sklearn_version')!r}, "
+                    f"scikit-learn version mismatch: artifact={artifact_sklearn!r}, "
                     f"installed={sklearn.__version__!r}"
                 )
 
@@ -278,6 +300,17 @@ class RegimeClassifier:
             classifier.state_to_regime = payload["state_to_regime"]
             classifier.is_fitted = payload["is_fitted"]
             classifier.n_train_observations = metadata.get("n_train_observations", 0)
+
+            if classifier.is_fitted:
+                # Fitting one long sequence gives hmmlearn nothing to average over,
+                # so startprob_ collapses to a one-hot artifact of wherever the
+                # training sequence began — replace it with the transition matrix's
+                # stationary distribution (left eigenvector for eigenvalue 1) so
+                # every state, including CONTRACTION, is reachable from a cold start
+                eigenvalues, eigenvectors = scipy.linalg.eig(classifier.hmm.transmat_.T)
+                stationary = eigenvectors[:, np.argmin(np.abs(eigenvalues - 1.0))].real
+                classifier.hmm.startprob_ = stationary / stationary.sum()
+
             logger.info(
                 "RegimeClassifier.load: loaded artifact from %s (trained %s, %d observations)",
                 path,
@@ -321,10 +354,10 @@ class MacroStatisticalAgent:
     def fit_on_history(self, start_date: str = "2010-01-01") -> None:
         """Fetches complete macroeconomic histories to fit the latent HMM classifier.
 
-        Not part of the injectable seam: this is an offline training utility,
-        not exercised by the live `analyze()` path graph.py invokes, and its
-        direct `yf.download` call for VIX history has no equivalent in
-        MarketDataProvider.
+        Offline training utility, not exercised by the live `analyze()` path
+        graph.py invokes, but now drawn through the same MarketDataProvider seam
+        and the same build_macro_feature_frame() analyze() uses — so fit and
+        predict can no longer silently drift apart.
 
         Args:
             start_date: ISO date string defining the beginning of the training window.
@@ -332,78 +365,11 @@ class MacroStatisticalAgent:
         """
         logger.debug("Fetching macro history from %s for HMM fitting...", start_date)
         try:
-            fed_funds = fetch_fred_series("FEDFUNDS", start=start_date)
-            cpi = fetch_fred_series("CPIAUCSL", start=start_date)
-            t10y2y = fetch_fred_series("T10Y2Y", start=start_date)
-            unrate = fetch_fred_series("UNRATE", start=start_date)
-
-            cpi_yoy = cpi.pct_change(12) * 100.0
-
-            vix_df = yf.download("^VIX", start=start_date, progress=False, threads=False)
-            if isinstance(vix_df.columns, pd.MultiIndex):
-                vix_df.columns = vix_df.columns.get_level_values(0)
-
-            # yfinance column naming varies between minor versions
-            vix_col = "Close" if "Close" in vix_df.columns else "close"
-            vix = vix_df[vix_col]
-
-            df = pd.DataFrame(
-                {
-                    "fed_funds": fed_funds,
-                    "cpi_yoy": cpi_yoy,
-                    "t10y2y": t10y2y,
-                    "unemployment": unrate,
-                    "vix": vix,
-                }
-            )
-
-            df = df.resample("D").ffill().dropna()
+            df = build_macro_feature_frame(self.market_data, start=start_date)
             self.classifier.fit(df)
             logger.debug("HMM fitted on %d observations from %s.", len(df), start_date)
         except Exception as e:
             logger.error("Failed to fit HMM on history: %s", e)
-
-    def _assemble_feature_window(self, window_days: int) -> pd.DataFrame:
-        """Builds a daily feature window for windowed HMM inference.
-
-        Draws on the same fred_series/ohlcv_daily calls analyze() already makes
-        elsewhere for trend calculations, so this costs no extra network round-trips
-        live (fetch_fred_series has a 6-hour in-process cache).
-
-        Args:
-            window_days: Number of most-recent calendar days to keep after
-                forward-filling monthly/weekly FRED series to daily resolution.
-
-        Returns:
-            DataFrame with FEATURE_COLUMNS, oldest to newest, at most window_days rows.
-
-        Raises:
-            Exception: Any fetch failure, or an empty result after resampling and
-                dropping NaNs — propagated so analyze() can fall back to
-                single-observation inference.
-        """
-        fed_funds = self.market_data.fred_series("FEDFUNDS")
-        cpi = self.market_data.fred_series("CPIAUCSL")
-        t10y2y = self.market_data.fred_series("T10Y2Y")
-        unrate = self.market_data.fred_series("UNRATE")
-        cpi_yoy = cpi.pct_change(12) * 100.0
-
-        vix_hist = self.market_data.ohlcv_daily("^VIX", period="2y")
-        vix = vix_hist["close"]
-
-        df = pd.DataFrame(
-            {
-                "fed_funds": fed_funds,
-                "cpi_yoy": cpi_yoy,
-                "t10y2y": t10y2y,
-                "unemployment": unrate,
-                "vix": vix,
-            }
-        )
-        df = df.resample("D").ffill().dropna()
-        if df.empty:
-            raise ValueError("feature window empty after resample/ffill/dropna")
-        return df.tail(window_days)
 
     def analyze(self) -> Optional[MacroContext]:
         """Compiles real-time economic indicators into a unified MacroContext.
@@ -426,18 +392,6 @@ class MacroStatisticalAgent:
 
         current = self.market_data.macro_bundle()
 
-        try:
-            window = self._assemble_feature_window(MACRO.inference_window_days)
-            regime_str, confidence = self.classifier.predict(window)
-        except Exception as exc:
-            logger.warning(
-                "analyze: feature window assembly failed (%s); "
-                "falling back to single-observation inference.",
-                exc,
-            )
-            regime_str, confidence = self.classifier.predict(current)
-        regime = Regime(regime_str)
-
         vix = current.get("vix")
         fed_funds_raw = current.get("fed_funds")
         t10y2y_raw = current.get("t10y2y")
@@ -454,6 +408,30 @@ class MacroStatisticalAgent:
         if vix is None:
             logger.warning("analyze: vix is None from FRED bundle; proceeding with regime classification only.")
             vix = 20.0
+
+        # window_final carries the monthly feature frame's last row so the regime-driving
+        # fields below reflect the same data the classifier actually scored, instead of a
+        # second, independently-fetched macro_bundle() that can disagree with it
+        window_final: pd.Series | None = None
+        try:
+            history_start = (
+                datetime.now() - timedelta(days=365 * MACRO.inference_history_years)
+            ).strftime("%Y-%m-%d")
+            frame = build_macro_feature_frame(self.market_data, start=history_start)
+            window = frame.tail(MACRO.inference_window_months)
+            if window.empty:
+                raise ValueError("feature window empty after build_macro_feature_frame")
+            regime_str, confidence = self.classifier.predict(window)
+            window_final = window.iloc[-1]
+        except Exception as exc:
+            logger.warning(
+                "analyze: feature window assembly failed (%s); "
+                "falling back to single-observation inference.",
+                exc,
+            )
+            regime_str, confidence = self.classifier.predict(current)
+        regime = Regime(regime_str)
+        model_healthy = self.classifier.is_fitted
 
         vix_percentile = 50.0
         try:
@@ -473,9 +451,12 @@ class MacroStatisticalAgent:
         else:
             vix_regime = VixRegime.EXTREME
 
-        fed_funds = fed_funds_raw if fed_funds_raw is not None else 0.0
-        if fed_funds_raw is None:
-            logger.warning("analyze: fed_funds is None from FRED bundle; defaulting to 0.0 for trend calc.")
+        if window_final is not None:
+            fed_funds = float(window_final["fed_funds"])
+        else:
+            fed_funds = fed_funds_raw if fed_funds_raw is not None else 0.0
+            if fed_funds_raw is None:
+                logger.warning("analyze: fed_funds is None from FRED bundle; defaulting to 0.0 for trend calc.")
 
         # Determine 6-month trailing interest rate trend against historical baseline
         interest_rate_trend = "STABLE"
@@ -490,9 +471,12 @@ class MacroStatisticalAgent:
         except Exception:
             pass
 
-        t10y2y = t10y2y_raw if t10y2y_raw is not None else 0.0
-        if t10y2y_raw is None:
-            logger.warning("analyze: t10y2y is None from FRED bundle; defaulting to 0.0 for yield curve.")
+        if window_final is not None:
+            t10y2y = float(window_final["t10y2y"])
+        else:
+            t10y2y = t10y2y_raw if t10y2y_raw is not None else 0.0
+            if t10y2y_raw is None:
+                logger.warning("analyze: t10y2y is None from FRED bundle; defaulting to 0.0 for yield curve.")
 
         if t10y2y < -0.1:
             yield_curve = YieldCurve.INVERTED
@@ -501,9 +485,11 @@ class MacroStatisticalAgent:
         else:
             yield_curve = YieldCurve.NORMAL
 
-        cpi_yoy = current.get("cpi_yoy")
-        if cpi_yoy is None:
-            cpi_yoy = 0.0
+        if window_final is not None:
+            cpi_yoy = float(window_final["cpi_yoy"])
+        else:
+            cpi_yoy_raw = current.get("cpi_yoy")
+            cpi_yoy = cpi_yoy_raw if cpi_yoy_raw is not None else 0.0
 
         # Determine 3-month trailing inflation trajectory
         inflation_traj = "STABLE"
@@ -538,12 +524,17 @@ class MacroStatisticalAgent:
             "sentiment": sent_mult,
         }
 
+        if window_final is not None:
+            unemployment = float(window_final["unemployment"])
+        else:
+            unemployment = (
+                current.get("unemployment", 0.0) if current.get("unemployment") is not None else 0.0
+            )
+
         ctx = MacroContext(
             fed_funds=fed_funds,
             cpi_yoy=cpi_yoy,
-            unemployment=current.get("unemployment", 0.0)
-            if current.get("unemployment") is not None
-            else 0.0,
+            unemployment=unemployment,
             t10y2y=t10y2y,
             consumer_sentiment=current.get("consumer_sentiment", 50.0)
             if current.get("consumer_sentiment") is not None
@@ -551,6 +542,7 @@ class MacroStatisticalAgent:
             vix_level=vix,
             macro_regime=regime,
             regime_confidence=confidence,
+            model_healthy=model_healthy,
             interest_rate_trend=interest_rate_trend,  # type: ignore
             yield_curve_shape=yield_curve,
             vix_regime=vix_regime,

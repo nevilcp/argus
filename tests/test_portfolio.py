@@ -50,6 +50,7 @@ def test_build_signal_table():
         vix_level=12.5,
         macro_regime=Regime.EXPANSION,
         regime_confidence=0.8,
+        model_healthy=True,
         interest_rate_trend="STABLE",
         yield_curve_shape="INVERTED",
         vix_regime="LOW",

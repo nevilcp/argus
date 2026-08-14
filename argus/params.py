@@ -35,7 +35,7 @@ from dataclasses import dataclass, field, fields
 from enum import Enum
 from typing import Any
 
-PARAMS_VERSION = 3
+PARAMS_VERSION = 4
 
 
 class Provenance(str, Enum):
@@ -203,13 +203,29 @@ class RiskParams:
 
 @dataclass(frozen=True)
 class MacroParams:
-    """RegimeClassifier windowed-inference parameters (agents/macro.py)."""
+    """RegimeClassifier windowed-inference parameters (agents/macro.py, data/macro_features.py)."""
 
-    inference_window_days: int = p(
-        90,
+    inference_window_months: int = p(
+        36,
         Provenance.ARBITRARY,
-        "long enough to give the HMM's transition matrix several observations "
-        "so one noisy print can't flip the regime; not backtested against alternatives",
+        "3 years of monthly observations; long enough to give the HMM's transition "
+        "matrix several observations so one noisy print can't flip the regime; "
+        "not backtested against alternatives",
+    )
+    inference_history_years: int = p(
+        10,
+        Provenance.ARBITRARY,
+        "FRED/VIX history fetched for windowed inference; must exceed the 5-year "
+        "VIX percentile warmup plus the inference window itself, with margin",
+    )
+    fed_funds_publication_lag_days: int = p(
+        32, Provenance.LITERATURE, "Federal Reserve H.15 release lag for FEDFUNDS"
+    )
+    unemployment_publication_lag_days: int = p(
+        35, Provenance.LITERATURE, "BLS Employment Situation release lag for UNRATE"
+    )
+    cpi_publication_lag_days: int = p(
+        45, Provenance.LITERATURE, "BLS CPI release lag for CPIAUCSL"
     )
 
 
