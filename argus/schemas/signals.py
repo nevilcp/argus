@@ -127,6 +127,13 @@ class MacroContext(BaseModel):
         le=1.0,
         description="HMM posterior probability for the detected regime",
     )
+    model_healthy: bool = Field(
+        ...,
+        description=(
+            "True when regime_confidence is a real HMM posterior; False when the "
+            "classifier fell back to the fixed-confidence rule-based heuristic"
+        ),
+    )
     interest_rate_trend: Literal["RISING", "FALLING", "STABLE"] = Field(
         ..., description="Direction of short-term interest rates"
     )
