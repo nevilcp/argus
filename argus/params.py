@@ -35,7 +35,7 @@ from dataclasses import dataclass, field, fields
 from enum import Enum
 from typing import Any
 
-PARAMS_VERSION = 4
+PARAMS_VERSION = 5
 
 
 class Provenance(str, Enum):
@@ -226,6 +226,49 @@ class MacroParams:
     )
     cpi_publication_lag_days: int = p(
         45, Provenance.LITERATURE, "BLS CPI release lag for CPIAUCSL"
+    )
+    hmm_n_init: int = p(
+        20,
+        Provenance.ARBITRARY,
+        "random restarts of the fit, keeping the highest-likelihood non-degenerate "
+        "one; 3 of 5 single-seed fits collapsed on the shipped data, so one seed "
+        "is not enough — 20 is a guess at 'enough', not backtested",
+    )
+    hmm_min_state_separation: float = p(
+        1.0,
+        Provenance.ARBITRARY,
+        "minimum pairwise Mahalanobis distance between state means (pooled "
+        "covariance) a restart must clear to be accepted; the shipped degenerate "
+        "model scored ~0.001, the validated target design scored 2.71 — 1.0 is a "
+        "floor with margin below the validated fit, not itself validated",
+    )
+    hmm_min_state_occupancy: float = p(
+        0.05,
+        Provenance.ARBITRARY,
+        "minimum fraction of training observations a state must claim to be "
+        "accepted, guarding against a restart that fits one state to a handful "
+        "of outlier months",
+    )
+    contraction_enrichment_min: float = p(
+        2.0,
+        Provenance.ARBITRARY,
+        "minimum ratio of a candidate CONTRACTION state's NBER (USREC) recession "
+        "frequency to the sample's overall recession base rate; the validated "
+        "target design achieved 3.2x — 2.0 is a floor below that, not itself "
+        "validated",
+    )
+    dwell_time_min_months: float = p(
+        3.0,
+        Provenance.ARBITRARY,
+        "minimum acceptable mean state dwell time in the training-gate check; "
+        "below this a state is switching faster than any real macro regime does",
+    )
+    dwell_time_max_months: float = p(
+        120.0,
+        Provenance.ARBITRARY,
+        "maximum acceptable mean state dwell time in the training-gate check; "
+        "above this a state is effectively never leaving, i.e. tracking a rate "
+        "era rather than a regime",
     )
 
 
