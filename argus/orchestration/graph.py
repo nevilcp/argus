@@ -163,7 +163,7 @@ def build_graph(
         if macro_ctx is None:
             logger.error(
                 "node_macro_analysis: MacroStatisticalAgent returned None (FRED data unavailable). "
-                "Downstream agents will be skipped."
+                "Routing to END — no downstream agents will run this session."
             )
             return {"macro_context": None}
         return {"macro_context": macro_ctx}
@@ -390,6 +390,31 @@ def build_graph(
             return {}
         return {"portfolio_allocation": alloc}
 
+    def route_after_macro(state: ARGUSState):
+        """Fans out to the four parallel analyst nodes, or short-circuits to END.
+
+        A None macro_context means the core FRED data bundle was entirely
+        unavailable (see MacroStatisticalAgent.analyze's docstring) — every
+        downstream node depends on macro_context, so there is nothing useful
+        left for this session to do.
+
+        Args:
+            state: ARGUSState with ``macro_context`` populated by node_macro_analysis.
+
+        Returns:
+            END if macro_context is None, otherwise a list of Send calls fanning
+            out to technical_analysis, fundamental_analysis, sentiment_analysis,
+            and retrieve_cultural_memory.
+        """
+        if state.get("macro_context") is None:
+            return END
+        return [
+            Send("technical_analysis", state),
+            Send("fundamental_analysis", state),
+            Send("sentiment_analysis", state),
+            Send("retrieve_cultural_memory", state),
+        ]
+
     def node_log_decisions(state: ARGUSState) -> dict:
         """Persists structural decision profiles to vector database collections.
 
@@ -452,15 +477,7 @@ def build_graph(
     builder.set_entry_point("fetch_price_history")
     builder.add_edge("fetch_price_history", "macro_analysis")
 
-    builder.add_conditional_edges(
-        "macro_analysis",
-        lambda s: [
-            Send("technical_analysis", s),
-            Send("fundamental_analysis", s),
-            Send("sentiment_analysis", s),
-            Send("retrieve_cultural_memory", s),
-        ],
-    )
+    builder.add_conditional_edges("macro_analysis", route_after_macro)
 
     builder.add_edge(
         [

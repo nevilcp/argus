@@ -22,9 +22,9 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      # FinBERT and the embedding model are baked into the image, but the
-      # macro agent's history fit and MFT pipeline warmup still take a
-      # while on first boot
+      # FinBERT and the embedding model are baked into the image; the macro
+      # agent now just loads a committed artifact (see argus/agents/macro.py),
+      # so this headroom is really for MFT pipeline warmup on first boot
       start_period: 90s
 
 volumes:
