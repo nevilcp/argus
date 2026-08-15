@@ -163,6 +163,16 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
                 }
             ],
         )
+
+        # The PENDING snapshot has now settled into a trade_{id} row; leaving it
+        # in place would double-count the decision (dragging down avg_return_pct
+        # via its zero return_pct) in summary_stats
+        snapshot_id = f"snapshot_{decision.decision_id}"
+        try:
+            self.collection.delete(ids=[snapshot_id])
+        except Exception as e:
+            logger.warning("[Memory] Failed to delete snapshot %s: %s", snapshot_id, e)
+
         logger.info("[Memory] Stored %s trade pattern. Total: %d", prefix, self.collection.count())
 
     def retrieve_wisdom(
@@ -359,7 +369,7 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
             logger.warning("[Memory] Failed to compute summary stats: %s", e)
             return {"total_stored": count}
 
-    def store_decision_snapshot(self, decision: "ARGUSDecision") -> None:
+    def store_decision_snapshot(self, decision: "ARGUSDecision") -> bool:
         """Persists a real-time decision profile before outcomes are finalized.
 
         Populates the vector store with decision-making context, enabling retrieval
@@ -367,6 +377,9 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
 
         Args:
             decision: In-flight ARGUSDecision captured at signal generation time.
+
+        Returns:
+            True if the snapshot was written, False if the write failed.
         """
         try:
             macro_regime = decision.macro.macro_regime.value if decision.macro else "unknown"
@@ -408,8 +421,10 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
                 decision.ticker,
                 decision.decision_id,
             )
+            return True
         except Exception as e:
             logger.warning("[Memory] Failed to snapshot decision for %s: %s", decision.ticker, e)
+            return False
 
 
 _cultural_memory: Optional[CulturalMemoryManager] = None

@@ -294,6 +294,7 @@ def test_golden_dag_runs_offline_and_produces_a_valid_allocation():
     assert final_state.get("sentiment_signals")
     assert final_state.get("risk_assessments")
     assert final_state.get("aggregated_signals")
+    assert all(agg.model_healthy is True for agg in final_state["aggregated_signals"].values())
 
     # The fixture LLM response proposes allocations for three VETO'd tickers;
     # code-level enforcement (PR 4, PA-1) zeroes them rather than trusting the
@@ -418,6 +419,13 @@ def test_cultural_memory_import_error_degrades_instead_of_crashing_the_run():
     assert final_state.get("cultural_memory") == {"wisdom": [], "warnings": []}
     assert final_state.get("portfolio_allocation") is not None
     assert len(final_state["portfolio_allocation"].portfolio) == len(UNIVERSE)
+
+    # SA-5: reliability fell back to the 0.5 prior because cultural memory was
+    # unavailable, not because no outcome history exists yet — model_healthy
+    # must say so rather than carrying full multiplier authority silently.
+    aggs = final_state.get("aggregated_signals") or {}
+    assert aggs
+    assert all(agg.model_healthy is False for agg in aggs.values())
 
 
 def test_golden_dag_output_is_stable_across_runs():
