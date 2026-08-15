@@ -73,6 +73,30 @@ def get_sector(ticker: str) -> str:
         return "Unknown"
 
 
+def compute_asset_returns(
+    positions: list[dict], price_history: dict[str, pd.Series], lookback: int = RISK.returns_lookback_days
+) -> pd.DataFrame:
+    """Calculates raw (unweighted) daily historical returns per asset over a lookback window.
+
+    Args:
+        positions: List of dicts with key ``ticker``.
+        price_history: Mapping of ticker → daily close price Series.
+        lookback: Number of trading days to include (default 252 = 1 year).
+
+    Returns:
+        DataFrame of raw daily returns per ticker, with NaN rows dropped.
+    """
+    returns_dict = {}
+    for pos in positions:
+        ticker = pos["ticker"]
+        if ticker in price_history:
+            series = price_history[ticker].tail(lookback + 1)
+            returns_dict[ticker] = series.pct_change().dropna()
+
+    df = pd.DataFrame(returns_dict).dropna()
+    return df
+
+
 def compute_portfolio_returns(
     positions: list[dict], price_history: dict[str, pd.Series], lookback: int = RISK.returns_lookback_days
 ) -> pd.DataFrame:
@@ -86,16 +110,9 @@ def compute_portfolio_returns(
     Returns:
         DataFrame of weighted daily returns per ticker, with NaN rows dropped.
     """
-    returns_dict = {}
-    for pos in positions:
-        ticker = pos["ticker"]
-        weight = pos["weight"]
-        if ticker in price_history:
-            series = price_history[ticker].tail(lookback + 1)
-            returns_dict[ticker] = series.pct_change().dropna() * weight
-
-    df = pd.DataFrame(returns_dict).dropna()
-    return df
+    asset_returns = compute_asset_returns(positions, price_history, lookback)
+    weights = pd.Series({pos["ticker"]: pos["weight"] for pos in positions})
+    return asset_returns.mul(weights)
 
 
 def historical_var(portfolio_returns: pd.Series, confidence: float = RISK.var_confidence) -> float:
@@ -344,7 +361,7 @@ class RiskStatisticalEngine:
                 cvar=0.0,
                 marginal_var=0.0,
                 portfolio_beta=0.0,
-                avg_correlation=0.0,
+                avg_correlation=None,
                 stop_loss=0.0,
                 api_calls_used=0,
                 timestamp=datetime.now(),
@@ -361,7 +378,9 @@ class RiskStatisticalEngine:
 
         optimal_weights: dict[str, float] = {}
         if len(proposed_positions) > 1:
-            returns_df = compute_portfolio_returns(proposed_positions, price_history)
+            # Raw per-asset returns: the objective applies w itself, so cov must not
+            # already be weighted or w^T*cov*w double-applies it
+            returns_df = compute_asset_returns(proposed_positions, price_history)
             if not returns_df.empty:
                 cov = returns_df.cov() * 252
                 tickers = list(returns_df.columns)

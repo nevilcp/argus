@@ -6,7 +6,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from argus.agents.risk import RiskStatisticalEngine
+from argus.agents.risk import (
+    RiskStatisticalEngine,
+    compute_asset_returns,
+    compute_portfolio_returns,
+)
 from argus.schemas.signals import RiskVerdict
 
 
@@ -49,6 +53,9 @@ def test_vix_blackout(risk_engine: RiskStatisticalEngine, price_history: dict) -
 
     assert result.verdict == RiskVerdict.VETO
     assert any("blackout" in r.lower() for r in result.veto_reasons)
+    # RE-9: a structural-violation short-circuit never computed correlation, so
+    # it must report None ("not measured"), not a fabricated 0.0
+    assert result.avg_correlation is None
 
 
 def test_overweight_position(risk_engine: RiskStatisticalEngine, price_history: dict) -> None:
@@ -106,6 +113,34 @@ def test_approve_healthy_portfolio(risk_engine: RiskStatisticalEngine, price_his
     assert result.verdict == RiskVerdict.APPROVE
     assert result.var_99 <= 0.03
     assert not result.veto_reasons
+
+
+def test_slsqp_covariance_uses_unweighted_returns(price_history: dict) -> None:
+    """The optimizer's w^T*cov*w term is built from raw returns, not pre-weighted ones.
+
+    Regression test for RE-2: cov used to come from compute_portfolio_returns,
+    whose series are already multiplied by weight, so w^T*cov*w applied the
+    weight a second time — variance came out ~1/weight^2 too small.
+    """
+    tickers = ["AAPL", "MSFT", "GOOGL", "META", "AMZN", "TSLA", "JPM", "BAC"]
+    weight = 0.125
+    positions = [{"ticker": t, "weight": weight} for t in tickers]
+    w = np.full(len(tickers), weight)
+
+    asset_returns = compute_asset_returns(positions, price_history)
+    cov = asset_returns.cov() * 252
+    fixed_variance = float(np.dot(w, np.dot(cov, w)))
+
+    # Var(sum_i w_i * r_i) is the ground truth this must match
+    weighted_returns = compute_portfolio_returns(positions, price_history)
+    true_portfolio_variance = float(weighted_returns.sum(axis=1).var() * 252)
+    assert fixed_variance == pytest.approx(true_portfolio_variance, rel=0.05)
+
+    # Reproduce the pre-fix computation (cov from already-weighted returns) to
+    # prove this test would have failed against the old code
+    buggy_cov = weighted_returns.cov() * 252
+    buggy_variance = float(np.dot(w, np.dot(buggy_cov, w)))
+    assert fixed_variance / buggy_variance == pytest.approx(1.0 / (weight**2), rel=0.05)
 
 
 def test_zero_api_calls(risk_engine: RiskStatisticalEngine, price_history: dict) -> None:
