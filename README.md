@@ -74,7 +74,7 @@ flowchart TD
             N4["node: sentiment_analysis<br/>SentimentAgent<br/>FinBERT + Llama-3.1-8b<br/>News · Google Trends"]
         end
 
-        N6["node: signal_aggregation<br/>HybridSignalAggregator<br/>Weighted conviction voting<br/>tech 0.35 · fund 0.35 · sent 0.30<br/>Macro multipliers applied if macro present<br/>Per-regime reliability persisted for later credit assignment<br/>Contraction regime override"]
+        N6["node: signal_aggregation<br/>HybridSignalAggregator<br/>Weighted conviction voting<br/>tech 0.35 · fund 0.35 · sent 0.30<br/>Conviction scaled to available vote mass, not votes cast<br/>Macro multipliers applied if macro present<br/>Per-regime reliability persisted for later credit assignment<br/>Contraction regime override"]
 
         subgraph PARALLEL2["Parallel Fan-Out"]
             direction LR
@@ -146,7 +146,7 @@ ARGUS sits at the intersection of quantitative finance, statistical modeling, an
 
 | Field | Meaning | How to read it |
 |---|---|---|
-| `conviction` (per position) | Categorical strength of the agents' agreement on a position's direction (e.g. `STRONG_BUY` → `STRONG_SELL`) | Strength of agreement, not a probability of profit or an expected return |
+| `conviction` (per position) | Categorical strength of the agents' agreement on a position's direction (e.g. `STRONG_BUY` → `STRONG_SELL`) | Strength of agreement, not a probability of profit or an expected return. Its underlying aggregated score is scaled against the full three-agent vote mass, so it falls when specialists disagree or are absent rather than saturating near its cap whenever the agents who did vote agree |
 | `allocation_pct` | Fraction of the *invested* portion of `total_wealth` assigned to this ticker | Multiply by `total_wealth * (1 - cash_reserve_pct)` for a dollar figure — it is not a fraction of total wealth directly |
 | `cash_reserve_pct` | Fraction of `total_wealth` held back from any position | Recomputed server-side from the risk engine's own figures rather than trusted verbatim from the LLM, so it always stays consistent with the position sizes actually returned |
 | `expected_sharpe` | Portfolio-level expected Sharpe ratio from the risk engine's covariance-based estimate | A model estimate under the current regime, not a guarantee; can be `null` if the risk engine couldn't compute one |
