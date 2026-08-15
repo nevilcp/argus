@@ -73,6 +73,30 @@ def get_sector(ticker: str) -> str:
         return "Unknown"
 
 
+def compute_asset_returns(
+    positions: list[dict], price_history: dict[str, pd.Series], lookback: int = RISK.returns_lookback_days
+) -> pd.DataFrame:
+    """Calculates raw (unweighted) daily historical returns per asset over a lookback window.
+
+    Args:
+        positions: List of dicts with key ``ticker``.
+        price_history: Mapping of ticker → daily close price Series.
+        lookback: Number of trading days to include (default 252 = 1 year).
+
+    Returns:
+        DataFrame of raw daily returns per ticker, with NaN rows dropped.
+    """
+    returns_dict = {}
+    for pos in positions:
+        ticker = pos["ticker"]
+        if ticker in price_history:
+            series = price_history[ticker].tail(lookback + 1)
+            returns_dict[ticker] = series.pct_change().dropna()
+
+    df = pd.DataFrame(returns_dict).dropna()
+    return df
+
+
 def compute_portfolio_returns(
     positions: list[dict], price_history: dict[str, pd.Series], lookback: int = RISK.returns_lookback_days
 ) -> pd.DataFrame:
@@ -86,16 +110,9 @@ def compute_portfolio_returns(
     Returns:
         DataFrame of weighted daily returns per ticker, with NaN rows dropped.
     """
-    returns_dict = {}
-    for pos in positions:
-        ticker = pos["ticker"]
-        weight = pos["weight"]
-        if ticker in price_history:
-            series = price_history[ticker].tail(lookback + 1)
-            returns_dict[ticker] = series.pct_change().dropna() * weight
-
-    df = pd.DataFrame(returns_dict).dropna()
-    return df
+    asset_returns = compute_asset_returns(positions, price_history, lookback)
+    weights = pd.Series({pos["ticker"]: pos["weight"] for pos in positions})
+    return asset_returns.mul(weights)
 
 
 def historical_var(portfolio_returns: pd.Series, confidence: float = RISK.var_confidence) -> float:
@@ -344,7 +361,7 @@ class RiskStatisticalEngine:
                 cvar=0.0,
                 marginal_var=0.0,
                 portfolio_beta=0.0,
-                avg_correlation=0.0,
+                avg_correlation=None,
                 stop_loss=0.0,
                 api_calls_used=0,
                 timestamp=datetime.now(),
@@ -360,8 +377,11 @@ class RiskStatisticalEngine:
         has_sector_violation = any(w > self.max_sector_pct for w in sector_weights.values())
 
         optimal_weights: dict[str, float] = {}
+        optimizer_converged: Optional[bool] = None
         if len(proposed_positions) > 1:
-            returns_df = compute_portfolio_returns(proposed_positions, price_history)
+            # Raw per-asset returns: the objective applies w itself, so cov must not
+            # already be weighted or w^T*cov*w double-applies it
+            returns_df = compute_asset_returns(proposed_positions, price_history)
             if not returns_df.empty:
                 cov = returns_df.cov() * 252
                 tickers = list(returns_df.columns)
@@ -398,9 +418,9 @@ class RiskStatisticalEngine:
                             "fun": lambda w, idx=idxs, c=cap: c - sum(w[i] for i in idx),
                         }
                     )
-                # Require aggregate equity deployment of at least 50%
+                # A long-only book cannot deploy more capital than it has
                 cons.append(
-                    {"type": "ineq", "fun": lambda w: np.sum(w) - RISK.slsqp_min_equity_deployment}
+                    {"type": "ineq", "fun": lambda w: RISK.slsqp_max_total_deployment - np.sum(w)}
                 )
 
                 res = minimize(
@@ -411,12 +431,15 @@ class RiskStatisticalEngine:
                     constraints=cons,
                     options={"ftol": RISK.slsqp_ftol, "maxiter": RISK.slsqp_maxiter},
                 )
+                optimizer_converged = bool(res.success)
                 if res.success:
                     optimal_weights = {tickers[i]: float(res.x[i]) for i in range(n)}
                     logger.debug(
                         "[Risk] SLSQP optimal weights: %s",
                         {t: f"{w:.3f}" for t, w in optimal_weights.items()},
                     )
+                else:
+                    logger.warning("[Risk] SLSQP solve did not converge: %s", res.message)
 
         returns = compute_portfolio_returns(proposed_positions, price_history)
         port_returns = returns.sum(axis=1) if not returns.empty else pd.Series(dtype=float)
@@ -451,6 +474,7 @@ class RiskStatisticalEngine:
                 proposed_weight=total_weight,
                 veto_reasons=stat_violations,
                 optimal_weights=optimal_weights,
+                optimizer_converged=optimizer_converged,
                 var_99=var99,
                 cvar=cvar,
                 marginal_var=0.0,
@@ -475,6 +499,7 @@ class RiskStatisticalEngine:
             proposed_weight=total_weight,
             veto_reasons=[],
             optimal_weights=optimal_weights,
+            optimizer_converged=optimizer_converged,
             var_99=var99,
             cvar=cvar,
             marginal_var=mvar_val,
