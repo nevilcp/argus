@@ -110,13 +110,14 @@ class TestEndToEnd:
             store_decision_snapshot=mock.Mock(),
         )
 
-        def fund_side_effect(ticker, backtest_mode=False, session_seed=None):
+        def fund_side_effect(ticker, backtest_mode=False, session_seed=None, errors=None):
             """Stand in for FundamentalAgent.analyze, matching its real signature.
 
             Args:
                 ticker: Ticker to build a signal for.
                 backtest_mode: Unused; accepted to match the real signature.
                 session_seed: Unused; accepted to match the real signature.
+                errors: Unused; accepted to match the real signature.
 
             Returns:
                 A fixed BULLISH FundamentalSignal for the given ticker.
