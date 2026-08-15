@@ -26,12 +26,18 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime
 from typing import Any, Optional
 
 from argus.params import MEMORY, RECONCILIATION
 from argus.schemas.signals import ARGUSDecision, MacroContext
 
 logger = logging.getLogger("argus.cultural_memory")
+
+
+def _where(conditions: list[dict[str, Any]]) -> dict[str, Any]:
+    """Combines metadata filter conditions into a single ChromaDB ``where`` clause."""
+    return conditions[0] if len(conditions) == 1 else {"$and": conditions}
 
 
 class CulturalMemoryManager:
@@ -51,7 +57,18 @@ class CulturalMemoryManager:
         import chromadb
         from chromadb.utils import embedding_functions
 
+        # Resolved to an absolute path so a caller launching from an unexpected
+        # working directory gets a loud warning instead of a silent, empty store
+        persist_dir = os.path.abspath(persist_dir)
+        is_fresh = not os.path.isdir(persist_dir)
         os.makedirs(persist_dir, exist_ok=True)
+        if is_fresh:
+            logger.warning(
+                "[Memory] %s did not exist; created a fresh, empty cultural memory "
+                "store there. If this is unexpected, check the process's working directory.",
+                persist_dir,
+            )
+
         self.client = chromadb.PersistentClient(
             path=persist_dir,
             settings=chromadb.config.Settings(anonymized_telemetry=False),
@@ -67,6 +84,7 @@ class CulturalMemoryManager:
             embedding_function=self.ef,  # type: ignore[arg-type]  # chromadb/sentence-transformers stub mismatch
             metadata={"hnsw:space": "cosine"},
         )
+        self.persist_dir = persist_dir
         logger.info("[Memory] Cultural Memory Manager initialized at %s", persist_dir)
 
     def store_trade_outcome(
@@ -77,10 +95,14 @@ class CulturalMemoryManager:
         exit_reason: str,
         primary_driver: str,
     ) -> None:
-        """Persists successful or failed trade outcomes to index trading history patterns.
+        """Persists trade outcomes to index trading history patterns.
 
-        Excludes flat or minor return trades (|return| ≤ 1%) to prevent signal dilution
-        from low-information outcomes in the similarity index.
+        Flat or minor return trades (|return| ≤ 1%) are stored as "FLAT" rather than
+        excluded: get_agent_accuracy's win rate is P(win | stored), so dropping flat
+        trades from storage would have conditioned that rate on |return| > 1% while
+        still reporting it as a plain win rate. FLAT documents don't match either
+        retrieve_wisdom's or retrieve_warnings' outcome filter, so they only affect
+        the accuracy denominator.
 
         Args:
             decision: Completed ARGUSDecision containing all agent signals.
@@ -98,10 +120,10 @@ class CulturalMemoryManager:
         elif actual_return_pct < -RECONCILIATION.min_abs_return_for_storage:
             prefix = "FAILED"
         else:
-            return
+            prefix = "FLAT"
 
         macro_regime = decision.macro.macro_regime.value if decision.macro else "unknown"
-        vix_regime = decision.macro.vix_regime if decision.macro else "unknown"
+        vix_regime = decision.macro.vix_regime.value if decision.macro else "unknown"
         tech_sig = decision.technical.signal.value if decision.technical else "N/A"
         tech_rsi = getattr(decision.technical, "rsi_14", 0.0) if decision.technical else 0.0
         tech_macd = (
@@ -144,14 +166,30 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
         logger.info("[Memory] Stored %s trade pattern. Total: %d", prefix, self.collection.count())
 
     def retrieve_wisdom(
-        self, current_macro: MacroContext, current_technical_summary: str, n_results: int = 5
+        self,
+        current_macro: MacroContext,
+        current_technical_summary: str,
+        n_results: int = 5,
+        as_of: Optional[datetime] = None,
     ) -> list[str]:
         """Queries the vector collection to retrieve successful historic patterns similar to the current posture.
 
+        Filters on the current regime, symmetrically with retrieve_warnings — both
+        land in the same portfolio prompt, so successes shouldn't be drawn from every
+        regime while failures are confined to this one. Rows stored with
+        regime="unknown" (from scripts/remediate_macro_regime_tags.py) never match,
+        since current_macro.macro_regime is always one of Regime's three live values —
+        remediated rows are deliberately not credited to today's regime.
+
         Args:
-            current_macro: MacroContext used to construct the similarity query.
+            current_macro: MacroContext used to construct the similarity query and
+                to scope the regime filter.
             current_technical_summary: Free-text description of current technical posture.
             n_results: Maximum number of similar patterns to return.
+            as_of: When given, excludes documents stored after this timestamp. Must
+                be naive, matching the naive datetime.now() this module stores
+                (see pyproject.toml's DTZ tracking comment). None (default) applies
+                no filtering.
 
         Returns:
             List of matching document strings from the SUCCESSFUL outcome filter.
@@ -159,30 +197,38 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
         if self.collection.count() == 0:
             return []
 
-        regime_clause = (
-            f"Macro regime {current_macro.macro_regime.value}, "
-            if current_macro.macro_regime.value != "unknown"
-            else ""
-        )
-        query = f"{regime_clause}VIX {current_macro.vix_regime}, {current_technical_summary}"
+        regime = current_macro.macro_regime.value
+        query = f"Macro regime {regime}, VIX {current_macro.vix_regime.value}, {current_technical_summary}"
+
+        conditions: list[dict[str, Any]] = [{"outcome": "SUCCESSFUL"}, {"regime": regime}]
+        if as_of is not None:
+            conditions.append({"timestamp": {"$lte": as_of.isoformat()}})
 
         try:
             results = self.collection.query(
                 query_texts=[query],
                 n_results=min(n_results, self.collection.count()),
-                where={"outcome": "SUCCESSFUL"},
+                where=_where(conditions),
             )
             return results["documents"][0] if results and results["documents"] else []
         except Exception as e:
             logger.warning("[Memory] Failed to retrieve wisdom: %s", e)
             return []
 
-    def retrieve_warnings(self, current_macro: MacroContext, n_results: int = 3) -> list[str]:
+    def retrieve_warnings(
+        self,
+        current_macro: MacroContext,
+        n_results: int = 3,
+        as_of: Optional[datetime] = None,
+    ) -> list[str]:
         """Retrieves failed historic patterns within the current macro regime to serve as warnings.
 
         Args:
             current_macro: MacroContext used to scope the regime filter.
             n_results: Maximum number of warning documents to return.
+            as_of: When given, excludes documents stored after this timestamp. Must
+                be naive, matching the naive datetime.now() this module stores.
+                None (default) applies no filtering.
 
         Returns:
             List of matching document strings from the FAILED outcome filter for the current regime.
@@ -190,37 +236,47 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
         if self.collection.count() == 0:
             return []
 
+        regime = current_macro.macro_regime.value
+        conditions: list[dict[str, Any]] = [{"outcome": "FAILED"}, {"regime": regime}]
+        if as_of is not None:
+            conditions.append({"timestamp": {"$lte": as_of.isoformat()}})
+
         try:
-            query = f"Failed trades in {current_macro.macro_regime.value} regime"
-            where_clause: dict[str, Any] = (
-                {"outcome": "FAILED"}
-                if current_macro.macro_regime.value == "unknown"
-                else {
-                    "$and": [{"outcome": "FAILED"}, {"regime": current_macro.macro_regime.value}]
-                }
-            )
+            query = f"Failed trades in {regime} regime"
             results = self.collection.query(
                 query_texts=[query],
                 n_results=min(n_results, self.collection.count()),
-                where=where_clause,
+                where=_where(conditions),
             )
             return results["documents"][0] if results and results["documents"] else []
         except Exception as e:
             logger.warning("[Memory] Failed to retrieve warnings: %s", e)
             return []
 
-    def get_agent_accuracy(self, agent_name: str, regime: Optional[str] = None) -> float:
+    def get_agent_accuracy(
+        self,
+        agent_name: str,
+        regime: Optional[str] = None,
+        as_of: Optional[datetime] = None,
+    ) -> float:
         """Computes shrunk statistical win rates for trades driven primarily by a specific specialist agent.
 
         Win rate is shrunk toward the 0.5 neutral prior by
         MEMORY.accuracy_shrinkage_k pseudo-observations (wins + k*0.5) / (n + k),
         so an agent with 3 observations isn't trusted like one with 300 — it
         converges to the raw win rate as n grows and collapses to 0.5 as
-        n -> 0. Feeds orchestration/aggregator.py's reliability weighting.
+        n -> 0. Feeds orchestration/aggregator.py's reliability weighting. n
+        includes FLAT outcomes (store_trade_outcome's |return| ≤ 1% bucket) as
+        non-wins, so this is a true win rate over all stored trades, not one
+        conditioned on |return| > 1%.
 
         Args:
             agent_name: Agent identifier string (e.g. 'technical', 'fundamental', 'sentiment').
             regime: Optional regime filter (e.g. 'EXPANSION'); queries all regimes if None.
+            as_of: When given, excludes trades stored after this timestamp. Must be
+                naive, matching the naive datetime.now() this module stores. None
+                (default) applies no filtering; replay's closed-loop evaluation
+                passes it to avoid reading future outcomes.
 
         Returns:
             Shrunk win rate as a float in [0, 1]. Returns 0.5 (neutral prior) when no data exists.
@@ -229,13 +285,13 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
             return 0.5
 
         try:
-            where_clause: dict[str, Any] = {"primary_driver": agent_name.lower()}
+            conditions: list[dict[str, Any]] = [{"primary_driver": agent_name.lower()}]
             if regime:
-                where_clause = {
-                    "$and": [{"primary_driver": agent_name.lower()}, {"regime": regime}]
-                }
+                conditions.append({"regime": regime})
+            if as_of is not None:
+                conditions.append({"timestamp": {"$lte": as_of.isoformat()}})
 
-            results = self.collection.get(where=where_clause)  # type: ignore[arg-type]
+            results = self.collection.get(where=_where(conditions))  # type: ignore[arg-type]
             metadatas = results.get("metadatas", [])
             if not metadatas:
                 return 0.5
@@ -366,7 +422,9 @@ def get_cultural_memory(persist_dir: str = "./chroma_db") -> CulturalMemoryManag
 
     Args:
         persist_dir: Filesystem directory backing the ChromaDB PersistentClient,
-            used only on the first call that constructs the manager.
+            used only on the first call that constructs the manager — a later
+            call with a different persist_dir cannot reconfigure the singleton
+            and is logged rather than silently ignored.
 
     Returns:
         The process-wide CulturalMemoryManager singleton.
@@ -374,4 +432,11 @@ def get_cultural_memory(persist_dir: str = "./chroma_db") -> CulturalMemoryManag
     global _cultural_memory
     if _cultural_memory is None:
         _cultural_memory = CulturalMemoryManager(persist_dir)
+    elif os.path.abspath(persist_dir) != _cultural_memory.persist_dir:
+        logger.warning(
+            "[Memory] get_cultural_memory(persist_dir=%r) ignored; the process-wide "
+            "singleton is already initialized at %s.",
+            persist_dir,
+            _cultural_memory.persist_dir,
+        )
     return _cultural_memory
