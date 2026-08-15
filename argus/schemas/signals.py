@@ -388,6 +388,14 @@ class AggregatedSignal(BaseModel):
             "by orchestration/reconciliation.py's leave-one-out credit assignment."
         ),
     )
+    agents_present: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Agent names that supplied a non-None signal into this aggregation. "
+            "Distinguishes an agent that was absent from one that voted zero — "
+            "weighted_votes alone cannot tell the two apart."
+        ),
+    )
 
 
 class PositionAllocation(BaseModel):

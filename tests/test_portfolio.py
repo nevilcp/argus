@@ -35,9 +35,10 @@ class MockSignal:
         conviction: Confidence score for the signal.
     """
 
-    def __init__(self, signal, conviction):
+    def __init__(self, signal, conviction, agents_present=None):
         self.signal = signal
         self.conviction = conviction
+        self.agents_present = agents_present if agents_present is not None else []
 
 def test_build_signal_table():
     """Vetoed positions are excluded from the table; others render with their approved weight."""
@@ -66,7 +67,7 @@ def test_build_signal_table():
             "fundamental": MockSignal(Signal.BULLISH, 0.8),
             "technical": MockSignal(Signal.NEUTRAL, 0.5),
             "sentiment": MockSignal(Signal.BULLISH, 0.7),
-            "aggregated": MockSignal(Signal.BULLISH, 0.85),
+            "aggregated": MockSignal(Signal.BULLISH, 0.85, agents_present=["fundamental", "technical", "sentiment"]),
             "risk": RiskAssessment(verdict=RiskVerdict.APPROVE, proposed_weight=0.15, approved_weight=0.15, var_99=0.02, stop_loss=150.0, portfolio_beta=1.1, api_calls_used=0, timestamp=datetime.now()),
         },
         "TSLA": {
@@ -89,3 +90,5 @@ def test_build_signal_table():
     assert "FUND=BEARISH(0.90)" in table
     assert "TECH=N/A" in table # MSFT missing tech signal
     assert "Cap=5.0%" in table # MSFT reduced weight
+    assert "Evidence=3/3" in table # AAPL has all three specialists present
+    assert "Evidence=0/3" in table # MSFT has no aggregated signal

@@ -138,3 +138,17 @@ def test_aggregated_conviction_never_exceeds_cap(
     )
     assert result.conviction <= AGGREGATOR.max_conviction + 1e-9
     assert 0.0 <= result.conviction
+
+
+def test_exact_tie_between_bull_and_bear_resolves_neutral():
+    """An exact bull/bear vote tie resolves NEUTRAL rather than defaulting BULLISH."""
+    aggregator = HybridSignalAggregator()
+    result = aggregator.aggregate(
+        technical=_technical(Signal.BULLISH, 0.8),
+        macro=_macro(Regime.EXPANSION, 1.0, 1.0, 1.0),
+        fundamental=_fundamental(Signal.BEARISH, 0.8),
+        sentiment=None,
+    )
+    assert result.signal == Signal.NEUTRAL
+    assert result.conviction == 0.0
+    assert result.agents_present == ["fundamental", "technical"]

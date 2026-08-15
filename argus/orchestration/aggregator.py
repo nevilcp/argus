@@ -98,6 +98,7 @@ class HybridSignalAggregator:
         bear_pool: float = 0.0
         neutral_pool: float = 0.0
         weighted_votes: dict[str, float] = {}
+        agents_present: list[str] = [name for name, signal in sources.items() if signal is not None]
 
         for name, signal in sources.items():
             if signal is None:
@@ -128,16 +129,18 @@ class HybridSignalAggregator:
                 signal=Signal.NEUTRAL,
                 conviction=0.0,
                 weighted_votes=weighted_votes,
+                agents_present=agents_present,
             )
 
         bull_pct = bull_pool / total
         bear_pct = bear_pool / total
         neutral_pct = neutral_pool / total
 
-        if bull_pct >= bear_pct and bull_pct >= neutral_pct:
+        # A directional call needs a strict majority; an exact tie resolves NEUTRAL
+        if bull_pct > bear_pct and bull_pct > neutral_pct:
             consensus = Signal.BULLISH
             conviction = bull_pct
-        elif bear_pct > bull_pct and bear_pct >= neutral_pct:
+        elif bear_pct > bull_pct and bear_pct > neutral_pct:
             consensus = Signal.BEARISH
             conviction = bear_pct
         else:
@@ -172,4 +175,5 @@ class HybridSignalAggregator:
             signal=consensus,
             conviction=conviction,
             weighted_votes=weighted_votes,
+            agents_present=agents_present,
         )

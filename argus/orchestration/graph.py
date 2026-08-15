@@ -260,10 +260,10 @@ def build_graph(
 
         for ticker in state["universe"]:
             tech = state.get("technical_signals", {}).get(ticker)
-            if not tech:
-                continue
             fund = state.get("fundamental_signals", {}).get(ticker)
             sent = state.get("sentiment_signals", {}).get(ticker)
+            if tech is None and fund is None and sent is None:
+                continue
             aggs[ticker] = aggregator.aggregate(tech, macro, fund, sent, reliability=reliability)
         return {"aggregated_signals": aggs}
 
