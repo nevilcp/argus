@@ -175,10 +175,44 @@ def test_golden_dag_runs_offline_and_produces_a_valid_allocation():
     assert final_state.get("sentiment_signals")
     assert final_state.get("risk_assessments")
     assert final_state.get("aggregated_signals")
+    assert final_state.get("errors") == []
 
     alloc = final_state.get("portfolio_allocation")
     assert alloc is not None
     assert len(alloc.portfolio) == len(UNIVERSE)
+
+
+def test_missing_indicator_is_reported_in_errors_not_silently_dropped():
+    """A ticker missing a required indicator is excluded from technical_signals
+
+    and named in state["errors"], rather than vanishing with no trace.
+    """
+    with open(FIXTURES_DIR / "market_data" / "session_states.json") as f:
+        session_states = json.load(f)
+    del session_states["NVDA"]["adx_14"]
+
+    state = _initial_state()
+    state["session_states"] = session_states
+
+    graph = build_graph(
+        market_data=FixtureMarketDataProvider(),
+        fundamental_llm=_per_ticker_llm("fundamental.json"),
+        sentiment_llm=_per_ticker_llm("sentiment.json"),
+        portfolio_llm=_portfolio_llm(),
+    )
+    config = {"configurable": {"thread_id": str(uuid4())}}
+
+    with mock.patch("argus.orchestration.graph.get_cultural_memory") as mock_get_cultural_memory:
+        mock_get_cultural_memory.return_value = mock.Mock(
+            retrieve_wisdom=mock.Mock(return_value=[]),
+            retrieve_warnings=mock.Mock(return_value=[]),
+            get_agent_accuracy=mock.Mock(return_value=0.5),
+            store_decision_snapshot=mock.Mock(),
+        )
+        final_state = graph.invoke(state, config)
+
+    assert "NVDA" not in final_state["technical_signals"]
+    assert any("NVDA" in e for e in final_state["errors"])
 
 
 def test_golden_dag_output_is_stable_across_runs():
