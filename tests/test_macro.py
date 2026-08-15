@@ -19,7 +19,7 @@ from argus.agents.macro import (
     MacroStatisticalAgent,
     RegimeClassifier,
 )
-from argus.schemas.signals import Regime
+from argus.schemas.signals import Regime, VixRegime
 
 
 class _StubMarketData:
@@ -82,6 +82,63 @@ def test_agent_multipliers_expansion(monkeypatch: pytest.MonkeyPatch) -> None:
     assert ctx.agent_multipliers["fundamental"] == 1.3
     # VIX percentile < 50 maps to a 0.9 sentiment multiplier
     assert ctx.agent_multipliers["sentiment"] == 0.9
+
+
+class _VixLevelStubMarketData:
+    """MarketDataProvider stub with a configurable VIX level and percentile history."""
+
+    def __init__(self, vix: float, historical_closes: list[float]) -> None:
+        self._vix = vix
+        self._closes = historical_closes
+
+    def macro_bundle(self) -> dict:
+        """Returns fixed macro indicators with the configured VIX level."""
+        return {
+            "vix": self._vix,
+            "fed_funds": 2.0,
+            "t10y2y": 1.5,
+            "cpi_yoy": 2.0,
+            "unemployment": 3.5,
+        }
+
+    def ohlcv_daily(self, ticker: str, period: str = "2y") -> pd.DataFrame:
+        """Returns the configured historical closes for the VIX percentile calc."""
+        return pd.DataFrame({"close": self._closes})
+
+    def fred_series(self, series_id: str, start: str = "2018-01-01") -> pd.Series:
+        """Returns a fixed series regardless of the FRED series ID or start date."""
+        return pd.Series([1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0])
+
+
+def test_vix_regime_buckets_from_level_not_percentile(monkeypatch: pytest.MonkeyPatch) -> None:
+    """vix_regime is bucketed from the absolute VIX level, not its trailing percentile.
+
+    Regression test for C3: a low VIX level sitting at a high trailing percentile
+    must still bucket LOW, and a high VIX level at a low trailing percentile must
+    still bucket HIGH.
+    """
+    # VIX 11, at its 85th trailing percentile (17 of 20 historical closes are lower)
+    low_vix_agent = MacroStatisticalAgent(
+        market_data=_VixLevelStubMarketData(11.0, [10.0] * 17 + [50.0] * 3)
+    )
+    monkeypatch.setattr(
+        low_vix_agent.classifier, "predict", lambda current_values: (Regime.EXPANSION.value, 0.9)
+    )
+    low_vix_ctx = low_vix_agent.analyze()
+    assert low_vix_ctx.vix_percentile == pytest.approx(85.0)
+    assert low_vix_ctx.vix_regime == VixRegime.LOW
+
+    # VIX 28, at its 25th trailing percentile (5 of 20 historical closes are lower).
+    # VixRegime buckets HIGH as 25 <= VIX < 35, so 28 lands HIGH despite the low percentile.
+    high_vix_agent = MacroStatisticalAgent(
+        market_data=_VixLevelStubMarketData(28.0, [10.0] * 5 + [60.0] * 15)
+    )
+    monkeypatch.setattr(
+        high_vix_agent.classifier, "predict", lambda current_values: (Regime.EXPANSION.value, 0.9)
+    )
+    high_vix_ctx = high_vix_agent.analyze()
+    assert high_vix_ctx.vix_percentile == pytest.approx(25.0)
+    assert high_vix_ctx.vix_regime == VixRegime.HIGH
 
 
 def test_cache(monkeypatch: pytest.MonkeyPatch) -> None:

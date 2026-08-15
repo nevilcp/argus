@@ -85,8 +85,8 @@ def build_signal_table(all_signals: dict[str, dict], macro: MacroContext) -> str
     lines = []
     lines.append(
         f"MACRO: {macro.macro_regime.value} | "
-        f"VIX {macro.vix_level:.2f} ({macro.vix_regime}) | "
-        f"{macro.sector_rotation_signal}"
+        f"VIX {macro.vix_level:.2f} ({macro.vix_regime.value}) | "
+        f"{macro.sector_rotation_signal.value}"
     )
     lines.append("")
 

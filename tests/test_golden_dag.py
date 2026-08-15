@@ -265,6 +265,30 @@ def test_missing_indicator_still_reaches_aggregation_with_evidence_surfaced():
     assert "Evidence=2/3" in captured_prompts[0]
 
 
+def test_cultural_memory_import_error_degrades_instead_of_crashing_the_run():
+    """A missing sentence-transformers/torch [models] extra must not abort the session.
+
+    Regression test for C1: get_cultural_memory() raising ImportError must degrade
+    retrieve_cultural_memory to an empty result and signal_aggregation's reliability
+    lookup to the 0.5 prior, rather than crashing the whole graph run.
+    """
+    graph = build_graph(
+        market_data=FixtureMarketDataProvider(),
+        fundamental_llm=_per_ticker_llm("fundamental.json"),
+        sentiment_llm=_per_ticker_llm("sentiment.json"),
+        portfolio_llm=_portfolio_llm(),
+    )
+    config = {"configurable": {"thread_id": str(uuid4())}}
+
+    with mock.patch("argus.orchestration.graph.get_cultural_memory") as mock_get_cultural_memory:
+        mock_get_cultural_memory.side_effect = ImportError("sentence-transformers not installed")
+        final_state = graph.invoke(_initial_state(), config)
+
+    assert final_state.get("cultural_memory") == {"wisdom": [], "warnings": []}
+    assert final_state.get("portfolio_allocation") is not None
+    assert len(final_state["portfolio_allocation"].portfolio) == len(UNIVERSE)
+
+
 def test_golden_dag_output_is_stable_across_runs():
     """Two independent invocations of the same fixture-backed graph are byte-identical."""
     first = _run_fixture_graph()

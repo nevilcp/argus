@@ -225,8 +225,16 @@ def build_graph(
         if not macro:
             return {"cultural_memory": {"wisdom": [], "warnings": []}}
 
-        wisdom = get_cultural_memory().retrieve_wisdom(macro, "mixed technicals")
-        warnings = get_cultural_memory().retrieve_warnings(macro)
+        try:
+            memory = get_cultural_memory()
+        except ImportError as exc:
+            # sentence-transformers/torch are an optional [models] extra; their
+            # absence degrades to the same empty result as no macro context
+            logger.warning("node_retrieve_cultural_memory: cultural memory unavailable: %s", exc)
+            return {"cultural_memory": {"wisdom": [], "warnings": []}}
+
+        wisdom = memory.retrieve_wisdom(macro, "mixed technicals")
+        warnings = memory.retrieve_warnings(macro)
 
         return {
             "cultural_memory": {
@@ -253,10 +261,17 @@ def build_graph(
         # Per-regime reliability doesn't depend on ticker, so compute it once per
         # session rather than once per ticker.
         regime = macro.macro_regime.value
-        reliability = {
-            name: get_cultural_memory().get_agent_accuracy(name, regime=regime)
-            for name in ("technical", "fundamental", "sentiment")
-        }
+        try:
+            memory = get_cultural_memory()
+            reliability = {
+                name: memory.get_agent_accuracy(name, regime=regime)
+                for name in ("technical", "fundamental", "sentiment")
+            }
+        except ImportError as exc:
+            # Same optional-dependency guard as node_retrieve_cultural_memory;
+            # degrade every agent to the 0.5 neutral prior rather than crash
+            logger.warning("node_signal_aggregation: cultural memory unavailable: %s", exc)
+            reliability = {name: 0.5 for name in ("technical", "fundamental", "sentiment")}
 
         for ticker in state["universe"]:
             tech = state.get("technical_signals", {}).get(ticker)

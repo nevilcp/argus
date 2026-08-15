@@ -790,11 +790,15 @@ class MacroStatisticalAgent:
         except Exception as exc:
             logger.warning("Failed to fetch VIX history for percentile: %s", exc)
 
-        if vix_percentile < 30:
+        # Bucketed from the absolute VIX level per VixRegime's own thresholds, not
+        # vix_percentile — a low-VIX regime can still sit at a high trailing
+        # percentile (e.g. VIX 11 at its 85th percentile), and EXTREME is the
+        # governor's kill-switch zone, which only the absolute level defines
+        if vix < 15:
             vix_regime = VixRegime.LOW
-        elif vix_percentile < 60:
+        elif vix < 25:
             vix_regime = VixRegime.MEDIUM
-        elif vix_percentile < 80:
+        elif vix < 35:
             vix_regime = VixRegime.HIGH
         else:
             vix_regime = VixRegime.EXTREME
