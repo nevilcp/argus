@@ -49,6 +49,7 @@ from argus.config import settings
 from argus.memory.cultural import get_cultural_memory
 from argus.orchestration.aggregator import HybridSignalAggregator
 from argus.orchestration.state import ARGUSState
+from argus.params import RISK
 from argus.schemas.signals import AggregatedSignal, ARGUSDecision, RiskAssessment, RiskVerdict, Signal
 from argus.seams import LiveMarketDataProvider, LLMClient, MarketDataProvider
 
@@ -102,6 +103,43 @@ def _summarize_technical_posture(aggregated_signals: dict[str, AggregatedSignal]
         f"{bullish} bullish, {bearish} bearish, {neutral} neutral across "
         f"{len(aggregated_signals)} tickers (avg conviction {avg_conviction:.2f})"
     )
+
+
+def _apply_portfolio_cap(single: RiskAssessment, cap: float) -> dict:
+    """Maps an SLSQP-derived per-ticker cap onto a single-ticker risk verdict.
+
+    Args:
+        single: The ticker's own (non-portfolio) risk assessment.
+        cap: SLSQP-optimal weight ceiling for this ticker.
+
+    Returns:
+        Partial RiskAssessment field updates: ``verdict``, ``approved_weight``,
+        ``veto_reasons``.
+    """
+    if cap < RISK.slsqp_zero_cap_epsilon:
+        # A cap this small is no room to allocate, not a REDUCE — REDUCE
+        # still counts as approved (portfolio.py:236) and the prompt would
+        # demand invest_pct deployment against a 0% cap
+        return {
+            "verdict": RiskVerdict.VETO,
+            "approved_weight": 0.0,
+            "veto_reasons": single.veto_reasons
+            + [
+                f"[Portfolio] SLSQP cap {cap:.2%} below the "
+                f"{RISK.slsqp_zero_cap_epsilon:.2%} allocation floor"
+            ],
+        }
+    # Downgrade verdict monotonically: never upgrade a VETO to REDUCE or APPROVE
+    verdict = (
+        single.verdict
+        if single.verdict == RiskVerdict.VETO
+        else (RiskVerdict.REDUCE if cap < single.approved_weight else single.verdict)
+    )
+    return {
+        "verdict": verdict,
+        "approved_weight": min(cap, single.approved_weight),
+        "veto_reasons": single.veto_reasons + [f"[Portfolio] SLSQP cap: {cap:.1%}"],
+    }
 
 
 def build_graph(
@@ -335,7 +373,7 @@ def build_graph(
                 and ``aggregated_signals`` populated.
 
         Returns:
-            Partial state update with ``risk_assessments``.
+            Partial state update with ``risk_assessments`` and ``errors``.
         """
         import pandas as pd
 
@@ -368,6 +406,13 @@ def build_graph(
         portfolio_vetoed = portfolio_result.verdict == RiskVerdict.VETO
         ticker_cap_map: dict[str, float] = portfolio_result.optimal_weights
 
+        errors: list[str] = []
+        if portfolio_result.optimizer_converged is False:
+            errors.append(
+                "risk_evaluation: SLSQP solve did not converge; portfolio-level caps "
+                "were not applied to any ticker"
+            )
+
         assessments = {}
 
         for ticker in universe:
@@ -384,15 +429,7 @@ def build_graph(
                 updates["avg_correlation"] = portfolio_result.avg_correlation
 
             if ticker in ticker_cap_map and not portfolio_vetoed:
-                cap = ticker_cap_map[ticker]
-                # Downgrade verdict monotonically: never upgrade a VETO to REDUCE or APPROVE
-                updates["verdict"] = (
-                    single.verdict
-                    if single.verdict == RiskVerdict.VETO
-                    else (RiskVerdict.REDUCE if cap < single.approved_weight else single.verdict)
-                )
-                updates["approved_weight"] = min(cap, single.approved_weight)
-                updates["veto_reasons"] = single.veto_reasons + [f"[Portfolio] SLSQP cap: {cap:.1%}"]
+                updates.update(_apply_portfolio_cap(single, ticker_cap_map[ticker]))
 
             # Portfolio-level veto overrides all individual verdicts to prevent partial allocation
             if portfolio_vetoed:
@@ -410,7 +447,7 @@ def build_graph(
                 else single
             )
 
-        return {"risk_assessments": assessments}
+        return {"risk_assessments": assessments, "errors": errors}
 
     def node_portfolio_allocation(state: ARGUSState) -> dict:
         """Determines capital allocations using specialist ratings, risk targets, and memory heuristics.
