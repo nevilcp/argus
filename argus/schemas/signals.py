@@ -188,7 +188,7 @@ class TechnicalSignal(BaseModel):
     ticker: str = Field(..., description="Equity ticker symbol, e.g. 'AAPL'")
 
     current_price: float = Field(..., ge=0.0, description="Latest closing price")
-    rsi_14: float = Field(..., description="14-period RSI value [0, 100]")
+    rsi_14: float = Field(..., ge=0.0, le=100.0, description="14-period RSI value [0, 100]")
     macd_histogram: float = Field(..., description="MACD histogram value")
     bb_percent_b: float = Field(..., description="Bollinger %B [0, 1] (>1 or <0 = breach)")
     atr_pct: float = Field(..., ge=0.0, description="ATR as % of price (volatility proxy)")

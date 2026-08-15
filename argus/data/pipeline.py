@@ -400,6 +400,9 @@ class MFTDataPipeline:
         Returns:
             Dict with keys: rsi_14, macd_histogram, bb_percent_b, atr_pct, adx_14,
             vwap_distance, volume_ratio, momentum_30m, momentum_1d, close, timestamp.
+            rsi_14, bb_percent_b, atr_pct, adx_14, vwap_distance, and volume_ratio
+            are None when pandas_ta cannot compute them; close and timestamp are
+            always populated.
         """
         import pandas_ta as ta  # Lazy import to avoid heavy C extension load on startup
 
@@ -407,7 +410,7 @@ class MFTDataPipeline:
 
         rsi_series = ta.rsi(ind_df["close"], length=14)
         rsi_14 = (
-            float(rsi_series.iloc[-1]) if rsi_series is not None and not rsi_series.empty else 50.0
+            float(rsi_series.iloc[-1]) if rsi_series is not None and not rsi_series.empty else None
         )
 
         macd_df = ta.macd(ind_df["close"], fast=12, slow=26, signal=9)
@@ -421,7 +424,7 @@ class MFTDataPipeline:
                 logger.warning("_compress_candles: MACD histogram column not found in %s", list(macd_df.columns))
 
         bb_df = ta.bbands(ind_df["close"], length=20, std=2)
-        bb_pct_b = 0.5
+        bb_pct_b = None
         if bb_df is not None and not bb_df.empty:
             # pandas_ta names the %B column with a 'BBP_' prefix, e.g. BBP_20_2.0
             pct_col = [c for c in bb_df.columns if c.upper().startswith("BBP_")]
@@ -435,17 +438,17 @@ class MFTDataPipeline:
         atr_pct = (
             (float(atr_series.iloc[-1]) / close_last)
             if (atr_series is not None and not atr_series.empty and close_last)
-            else 0.0
+            else None
         )
 
         adx_df = ta.adx(ind_df["high"], ind_df["low"], ind_df["close"], length=14)
-        adx_14 = 20.0
+        adx_14 = None
         if adx_df is not None and not adx_df.empty:
             adx_col = [c for c in adx_df.columns if c.upper().startswith("ADX_")]
             if adx_col:
                 adx_14 = float(adx_df[adx_col[0]].iloc[-1])
 
-        vwap_distance = 0.0
+        vwap_distance = None
         try:
             vwap_series = ta.vwap(ind_df["high"], ind_df["low"], ind_df["close"], ind_df["volume"])
             if vwap_series is not None and not vwap_series.empty:
@@ -453,7 +456,7 @@ class MFTDataPipeline:
                 if vwap_val and close_last:
                     vwap_distance = (close_last - vwap_val) / vwap_val
         except Exception:
-            # pandas_ta raises on zero-volume days; default to 0.0 (no VWAP deviation)
+            # pandas_ta raises on zero-volume days; leave unset rather than fabricate 0.0
             pass
 
         vol_series = ind_df["volume"]
@@ -462,7 +465,7 @@ class MFTDataPipeline:
             if len(vol_series) >= 20
             else float(vol_series.mean())
         )
-        volume_ratio = (float(vol_series.iloc[-1]) / vol_mean) if vol_mean else 1.0
+        volume_ratio = (float(vol_series.iloc[-1]) / vol_mean) if vol_mean else None
 
         close_s = df["close"]
         n = len(close_s)
@@ -476,13 +479,13 @@ class MFTDataPipeline:
         ) - 1.0
 
         return {
-            "rsi_14": round(rsi_14, 4),
+            "rsi_14": round(rsi_14, 4) if rsi_14 is not None else None,
             "macd_histogram": round(macd_hist, 6),
-            "bb_percent_b": round(bb_pct_b, 4),
-            "atr_pct": round(atr_pct, 6),
-            "adx_14": round(adx_14, 4),
-            "vwap_distance": round(vwap_distance, 6),
-            "volume_ratio": round(volume_ratio, 4),
+            "bb_percent_b": round(bb_pct_b, 4) if bb_pct_b is not None else None,
+            "atr_pct": round(atr_pct, 6) if atr_pct is not None else None,
+            "adx_14": round(adx_14, 4) if adx_14 is not None else None,
+            "vwap_distance": round(vwap_distance, 6) if vwap_distance is not None else None,
+            "volume_ratio": round(volume_ratio, 4) if volume_ratio is not None else None,
             "momentum_30m": round(momentum_30m, 6),
             "momentum_1d": round(momentum_1d, 6),
             "close": round(close_last, 4),
