@@ -10,6 +10,7 @@ Both api/main.py's background collector loop and scripts/collect_session.py
 call it, so the two deployment paths can't drift apart from each other.
 
 Responsibilities:
+  - Refuse to run while the process-local kill switch is halted
   - Run one MFT fetch-and-compress sweep via MFTDataPipeline.run_once()
   - Invoke the caller-supplied compiled LangGraph DAG over whatever tickers
     the sweep actually populated
@@ -31,6 +32,7 @@ from pathlib import Path
 
 from argus.data.pipeline import MFTDataPipeline
 from argus.orchestration.state import ARGUSState
+from argus.risk.kill_switch import get_kill_switch
 from argus.schemas.signals import ARGUSDecision
 
 logger = logging.getLogger("argus.collector")
@@ -86,6 +88,15 @@ async def run_collection_cycle(
 ) -> CollectionResult:
     """Runs one unattended fetch → analyze → log cycle for the given universe.
 
+    Refuses to run while this process's kill switch is halted — the
+    unattended collector is one of the two entry paths into the graph
+    (/analyze is the other, already gated in api/main.py), and a halted
+    system must stop feeding new decisions into decisions.jsonl just as it
+    stops serving /analyze. A process with no kill switch initialized
+    (get_kill_switch() returns None — e.g. scripts/collect_session.py's
+    standalone GitHub Actions runner) is ungated; that cross-process gap
+    is documented, not solved, here.
+
     Skips the graph entirely — rather than invoking it against a stale or
     empty buffer — when the MFT sweep produces no usable session data, which
     happens outside market hours or on a market holiday
@@ -111,6 +122,12 @@ async def run_collection_cycle(
     Returns:
         A CollectionResult summarizing what happened.
     """
+    ks = get_kill_switch()
+    if ks is not None and ks.is_halted:
+        reason = f"halted: {ks.status.reason}"
+        logger.warning("run_collection_cycle: skipping graph invocation — %s", reason)
+        return CollectionResult(ran=False, reason=reason)
+
     session_states = await pipeline.run_once()
 
     tickers_with_data = [t for t in universe if t in session_states]

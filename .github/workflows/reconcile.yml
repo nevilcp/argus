@@ -34,6 +34,7 @@ jobs:
           mkdir -p data chroma_db
           [ -d state/chroma_db ] && cp -r state/chroma_db/. ./chroma_db/ || echo "no prior chroma_db"
           [ -f state/decisions.jsonl ] && cp state/decisions.jsonl data/decisions.jsonl || echo "no prior decisions.jsonl"
+          [ -f state/paper_equity.json ] && cp state/paper_equity.json data/paper_equity.json || echo "no prior paper_equity.json"
           chmod -R a+rwX data chroma_db
 
       - name: Log in to GHCR
@@ -56,6 +57,7 @@ jobs:
           mkdir -p publish
           cp -r chroma_db publish/chroma_db
           [ -f data/decisions.jsonl ] && cp data/decisions.jsonl publish/decisions.jsonl
+          [ -f data/paper_equity.json ] && cp data/paper_equity.json publish/paper_equity.json
           # Merge rather than overwrite — collector.yml writes to the same
           # status.json on the same branch and its field must survive this
           ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

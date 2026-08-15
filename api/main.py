@@ -54,6 +54,7 @@ from argus.orchestration.graph import build_graph
 from argus.orchestration.reconciliation import load_decisions_from_jsonl, reconcile_decisions
 from argus.orchestration.state import ARGUSState
 from argus.params import RECONCILIATION
+from argus.risk import paper_book
 from argus.risk.kill_switch import get_kill_switch, initialize_kill_switch
 from argus.seams import LiveMarketDataProvider
 
@@ -163,13 +164,34 @@ async def _reconcile_loop() -> None:
         try:
             decisions_log = f"{settings.ARGUS_DATA_DIR}/decisions.jsonl"
             decisions = load_decisions_from_jsonl(decisions_log)
+            market_data = LiveMarketDataProvider()
             stored = reconcile_decisions(
                 decisions,
-                market_data=LiveMarketDataProvider(),
+                market_data=market_data,
                 cultural=get_cultural_memory(),
                 horizon_days=RECONCILIATION.horizon_days,
             )
             logger.info("[Reconcile] stored %d/%d outcome(s)", stored, len(decisions))
+
+            try:
+                book_path = f"{settings.ARGUS_DATA_DIR}/paper_equity.json"
+                book = paper_book.load(book_path)
+                for run_timestamp, run_return in paper_book.compute_run_returns(
+                    decisions, market_data, RECONCILIATION.horizon_days
+                ):
+                    book.apply_run(run_timestamp, run_return)
+                paper_book.save(book, book_path)
+
+                ks = get_kill_switch()
+                if ks is not None:
+                    ks.update_portfolio_value(book.equity)
+                logger.info(
+                    "[Reconcile] paper equity=$%.2f (drawdown=%.1f%%)",
+                    book.equity,
+                    book.drawdown_from_peak() * 100,
+                )
+            except Exception:
+                logger.exception("[Reconcile] paper-book update failed")
         except Exception:
             logger.exception("[Reconcile] cycle failed")
 
@@ -215,11 +237,22 @@ async def lifespan(app: FastAPI):
             settings.ARGUS_RECONCILE_HOUR_ET,
         )
 
-    # Placeholder base; /kill-switch/reset re-bases once the real session is known
+    # Seeded from the persisted paper equity curve (falls back to
+    # ARGUS_TOTAL_WEALTH if none exists yet) so a process restart doesn't
+    # silently forget an already-realized drawdown; /kill-switch/reset
+    # re-bases if a real session base is known instead
+    _book = paper_book.load(f"{settings.ARGUS_DATA_DIR}/paper_equity.json")
     initialize_kill_switch(
-        risk_tolerance=settings.ARGUS_RISK_TOLERANCE, portfolio_value=settings.ARGUS_TOTAL_WEALTH
+        risk_tolerance=settings.ARGUS_RISK_TOLERANCE, portfolio_value=_book.high_water_mark
     )
-    logger.info("[Startup] Kill switch initialized.")
+    _ks = get_kill_switch()
+    if _ks is not None:
+        _ks.update_portfolio_value(_book.equity)
+    logger.info(
+        "[Startup] Kill switch initialized (paper equity=$%.2f, peak=$%.2f).",
+        _book.equity,
+        _book.high_water_mark,
+    )
 
     logger.info("[Startup] Governor initialized: %s", governor.get_usage_report())
 
