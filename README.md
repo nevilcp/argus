@@ -4,7 +4,7 @@ Multi-agent financial intelligence system orchestrating specialist LLMs and stat
 
 ![CI](https://github.com/nevilcp/argus/actions/workflows/ci.yml/badge.svg)
 ![Python Version](https://img.shields.io/badge/python-%E2%89%A53.11-blue)
-![Tests](https://img.shields.io/badge/tests-160_passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-212_passing-brightgreen)
 ![License](https://img.shields.io/badge/license-Proprietary-red)
 
 > **RESEARCH PROJECT ONLY — NOT FINANCIAL ADVICE.** ARGUS is not registered with the SEC or any regulatory body. All outputs are for educational and research purposes only. Do not make investment decisions based on this system's output.
@@ -65,21 +65,24 @@ flowchart TD
         direction TB
 
         N0["node: fetch_price_history<br/>yfinance 1y daily · ThreadPool x5<br/>Populates price_history only<br/>(session_states passed through from API)"]
-        N1["node: macro_analysis<br/>MacroStatisticalAgent<br/>Gaussian HMM · 3-state regime<br/>FRED + VIX features"]
 
-        subgraph PARALLEL["Parallel Fan-Out  (Send API)"]
+        subgraph PARALLEL1["Parallel Fan-Out — macro runs alongside the specialists, not ahead of them"]
             direction LR
+            N1["node: macro_analysis<br/>MacroStatisticalAgent<br/>Gaussian HMM · 3-state regime<br/>FRED + VIX features"]
             N2["node: technical_analysis<br/>TechnicalStatisticalAgent<br/>Reads MFT session_states<br/>RSI · MACD · BB · ADX · VWAP · Momentum<br/>→ score ∈ [-1,+1]"]
             N3["node: fundamental_analysis<br/>FundamentalAgent<br/>Llama-3.3-70b-versatile<br/>7-day cache · yfinance.info"]
             N4["node: sentiment_analysis<br/>SentimentAgent<br/>FinBERT + Llama-3.1-8b<br/>News · Google Trends"]
-            N5["node: retrieve_cultural_memory<br/>ChromaDB vault<br/>Retrieve past wisdom and warnings<br/>scoped by macro regime"]
         end
 
-        N6["node: signal_aggregation<br/>HybridSignalAggregator<br/>Weighted conviction voting<br/>tech 0.35 · fund 0.35 · sent 0.30<br/>Macro multipliers applied<br/>Contraction regime override"]
+        N6["node: signal_aggregation<br/>HybridSignalAggregator<br/>Weighted conviction voting<br/>tech 0.35 · fund 0.35 · sent 0.30<br/>Macro multipliers applied if macro present<br/>Per-regime reliability persisted for later credit assignment<br/>Contraction regime override"]
 
-        N7["node: risk_evaluation<br/>RiskStatisticalEngine<br/>VaR · CVaR · Beta · SLSQP optimizer<br/>Portfolio covariance from daily price_history<br/>Half-Kelly sizing · VIX scaling"]
+        subgraph PARALLEL2["Parallel Fan-Out"]
+            direction LR
+            N5["node: retrieve_cultural_memory<br/>ChromaDB vault<br/>Runs after aggregation — queries on<br/>this session's own aggregated signals<br/>Retrieve past wisdom and warnings<br/>scoped by macro regime"]
+            N7["node: risk_evaluation<br/>RiskStatisticalEngine<br/>VaR · CVaR · Beta · SLSQP optimizer<br/>Portfolio covariance from daily price_history<br/>Half-Kelly sizing · VIX scaling"]
+        end
 
-        N8["node: portfolio_allocation<br/>PortfolioManagerAgent<br/>Llama-3.3-70b-versatile<br/>Half-Kelly sizing · Pydantic-validated output<br/>Cultural wisdom injected"]
+        N8["node: portfolio_allocation<br/>PortfolioManagerAgent<br/>Llama-3.3-70b-versatile<br/>Half-Kelly sizing · Pydantic-validated output<br/>Cultural wisdom injected<br/>Degrades gracefully if macro unavailable"]
 
         N9["node: log_decisions<br/>ARGUSDecision snapshots<br/>Persisted to ChromaDB cultural memory"]
 
@@ -88,11 +91,10 @@ flowchart TD
 
     %% ── Graph Edges ──────────────────────────────────────────────────────
     REG --> N0
-    N0 --> N1
-    N1 -->|"Send()"| N2 & N3 & N4 & N5
-    N2 & N3 & N4 & N5 --> N6
-    N6 --> N7
-    N7 --> N8
+    N0 --> N1 & N2 & N3 & N4
+    N1 & N2 & N3 & N4 --> N6
+    N6 --> N5 & N7
+    N5 & N7 --> N8
     N8 --> N9 --> DONE
 
     %% ── Data source wiring ───────────────────────────────────────────────
@@ -148,7 +150,7 @@ ARGUS sits at the intersection of quantitative finance, statistical modeling, an
 | `allocation_pct` | Fraction of the *invested* portion of `total_wealth` assigned to this ticker | Multiply by `total_wealth * (1 - cash_reserve_pct)` for a dollar figure — it is not a fraction of total wealth directly |
 | `cash_reserve_pct` | Fraction of `total_wealth` held back from any position | Recomputed server-side from the risk engine's own figures rather than trusted verbatim from the LLM, so it always stays consistent with the position sizes actually returned |
 | `expected_sharpe` | Portfolio-level expected Sharpe ratio from the risk engine's covariance-based estimate | A model estimate under the current regime, not a guarantee; can be `null` if the risk engine couldn't compute one |
-| `macro_regime` | The Gaussian HMM's current 3-state classification (e.g. `EXPANSION`, `CONTRACTION`) | Sets a multiplier applied to every position's conviction upstream — a `CONTRACTION` regime can override an otherwise-bullish signal |
+| `macro_regime` | The Gaussian HMM's current 3-state classification (e.g. `EXPANSION`, `CONTRACTION`) | Its multiplier is applied once, at signal-aggregation time, to each specialist's vote weight — never to a specialist's own analysis, which runs independently of macro classification. A `CONTRACTION` regime can still override an otherwise-bullish consensus after aggregation |
 | `vix_level` | The VIX close feeding the macro and risk engines this session | Above the configured blackout threshold (default 35), the safety layer blocks new positions before `/analyze` even runs — an elevated-but-sub-threshold value here signals wider risk-engine caution (VIX scaling), not a guarantee of safety |
 
 ### Concepts Behind Each Agent
@@ -182,6 +184,7 @@ At small sample sizes — inherent to a system that has only recently started cl
 - **Historical covariance breaks down during shocks** (correlations tend toward 1); VaR/CVaR estimates during genuine crises should be treated as understated.
 - **Long-only** — no shorting, options, or hedging; a bearish `macro_regime` can only reduce exposure, not profit from it.
 - **LLM outputs are non-deterministic** — the fundamental, sentiment, and portfolio-synthesis agents can return slightly different conviction scores and notes between runs on identical inputs.
+- **A macro data outage doesn't blank the session** — if FRED/VIX data is unavailable, `macro_regime` comes back `"unknown"` and `vix_level` `0.0`, but the three specialist agents, aggregation, and portfolio allocation still run on whatever evidence they do have, rather than the whole session being scrapped. The graph's internal state records the specific gap (`state["errors"]`), though `/analyze`'s response schema doesn't currently surface that list to the caller — a `macro_regime` of `"unknown"` is presently the only client-visible signal that this happened.
 
 ## Prerequisites
 
@@ -436,7 +439,7 @@ pytest tests/ --cov=argus --cov-report=term-missing
 ```
 
 - **Categories**: Tests cover Pydantic validation boundaries, mathematical boundaries (e.g., Half-Kelly position sizing constraints), caching TTL expiration logic, and thread-safe rate limit assertions.
-- **Approximate Run Time**: ~65 seconds for 160 tests across 22 files, entirely offline by design — no live API calls, network access, or API keys required.
+- **Approximate Run Time**: ~140 seconds for 212 tests across 23 files, entirely offline by design — no live API calls, network access, or API keys required.
 - **CI gate**: `.github/workflows/ci.yml` additionally runs `ruff check .` and `mypy argus/` (pinned `ruff==0.16.2`, `mypy==2.3.0`) before the test step.
 
 ## Contributing
