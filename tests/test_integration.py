@@ -22,7 +22,7 @@ from argus.agents.risk import RiskStatisticalEngine
 from argus.agents.technical import TechnicalStatisticalAgent
 from argus.data.pipeline import MFTDataPipeline
 from argus.orchestration.governor import BOOTSTRAP_LIMITS, governor
-from argus.orchestration.graph import graph
+from argus.orchestration.graph import build_graph
 from argus.orchestration.state import ARGUSState
 from argus.risk.kill_switch import KillSwitch
 from argus.schemas.signals import (
@@ -90,7 +90,7 @@ class TestEndToEnd:
     @mock.patch("argus.orchestration.graph.get_cultural_memory")
     @mock.patch("argus.agents.fundamental.FundamentalAgent.analyze")
     @mock.patch("argus.agents.sentiment.SentimentAgent.analyze")
-    async def test_full_graph_smoke(self, mock_sent, mock_fund, mock_cultural_memory):
+    async def test_full_graph_smoke(self, mock_sent, mock_fund, mock_cultural_memory, tmp_path):
         """Runs the complete LangGraph graph for AAPL, MSFT using mocked LLMs.
 
         Cultural memory is mocked out (not just left real) because its embedding
@@ -102,11 +102,13 @@ class TestEndToEnd:
             mock_sent: Patched SentimentAgent.analyze.
             mock_fund: Patched FundamentalAgent.analyze.
             mock_cultural_memory: Patched get_cultural_memory.
+            tmp_path: Pytest tempdir, so this run's checkpoint never lands in
+                the production argus_graph.db.
         """
         mock_cultural_memory.return_value = mock.Mock(
             retrieve_wisdom=mock.Mock(return_value=[]),
             retrieve_warnings=mock.Mock(return_value=[]),
-            get_agent_accuracy=mock.Mock(return_value=0.5),
+            get_agent_accuracy=mock.Mock(return_value=(0.5, 0)),
             store_decision_snapshot=mock.Mock(),
         )
 
@@ -189,6 +191,7 @@ class TestEndToEnd:
         )
 
         config = {"configurable": {"thread_id": str(uuid4())}}
+        graph = build_graph(checkpoint_db_path=str(tmp_path / "argus_graph_test.db"))
 
         try:
             final_state = await asyncio.to_thread(graph.invoke, state, config)

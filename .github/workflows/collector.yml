@@ -68,14 +68,19 @@ jobs:
         run: |
           mkdir -p publish
           cp -r chroma_db publish/chroma_db
-          [ -f data/decisions.jsonl ] && cp data/decisions.jsonl publish/decisions.jsonl
+          if [ -f data/decisions.jsonl ]; then
+            cp data/decisions.jsonl publish/decisions.jsonl
+          else
+            echo "::warning::decisions.jsonl absent after this cycle — nothing has ever been logged"
+          fi
           # Merge rather than overwrite — reconcile.yml writes to the same
           # status.json on the same branch and its field must survive this
           ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          reason="$(jq -r '.reason // "unknown"' data/collector_result.json 2>/dev/null || echo unknown)"
           if [ -f state/status.json ]; then
-            jq --arg t "$ts" '. + {last_run: $t}' state/status.json > publish/status.json
+            jq --arg t "$ts" --arg r "$reason" '. + {last_run: $t, last_reason: $r}' state/status.json > publish/status.json
           else
-            printf '{"last_run": "%s"}\n' "$ts" > publish/status.json
+            jq -n --arg t "$ts" --arg r "$reason" '{last_run: $t, last_reason: $r}' > publish/status.json
           fi
           rm -rf state
           cd publish

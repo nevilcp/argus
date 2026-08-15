@@ -50,6 +50,7 @@ class CollectionResult:
     tickers_with_session_data: list[str] = field(default_factory=list)
     decisions_logged: int = 0
     macro_regime: str | None = None
+    errors: list[str] = field(default_factory=list)
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
 
@@ -154,6 +155,7 @@ async def run_collection_cycle(
 
     decisions: list[ARGUSDecision] = final_state.get("decisions") or []
     logged = _append_decisions_jsonl(decisions, decisions_log_path)
+    errors = final_state.get("errors") or []
 
     macro_context = final_state.get("macro_context")
     macro_regime = macro_context.macro_regime.value if macro_context else None
@@ -167,4 +169,5 @@ async def run_collection_cycle(
         tickers_with_session_data=tickers_with_data,
         decisions_logged=logged,
         macro_regime=macro_regime,
+        errors=errors,
     )
