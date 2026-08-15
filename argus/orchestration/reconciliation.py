@@ -82,6 +82,15 @@ def credit_primary_driver(
     ablation) was the bigger contributor. This avoids exact Shapley over the
     2^3 - 1 coalitions.
 
+    Each ablated rerun replays `decision.aggregated.reliability` — the same
+    reliability dict the baseline aggregation used — rather than an
+    unweighted aggregate() call. Without it, every ablation would silently
+    use reliability_mult=1.0, so the baseline (computed with reliability)
+    and every ablated rerun (computed without it) could disagree on
+    direction before any agent is even removed, spuriously flipping credit
+    to argmax(baseline_votes) for every agent regardless of which one was
+    actually removed.
+
     Args:
         decision: Completed ARGUSDecision with technical/fundamental/sentiment
             signals and its `aggregated` result already populated.
@@ -118,6 +127,7 @@ def credit_primary_driver(
             decision.macro,
             ablated["fundamental"],  # type: ignore[arg-type]
             ablated["sentiment"],  # type: ignore[arg-type]
+            reliability=decision.aggregated.reliability,
         )
         flipped = result.signal != baseline_signal
         score = (flipped, baseline_votes.get(name, 0.0))

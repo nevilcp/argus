@@ -68,7 +68,7 @@ def half_kelly_weight(
     return float(np.clip(half_kelly, 0.0, max_position))
 
 
-def build_signal_table(all_signals: dict[str, dict], macro: MacroContext) -> str:
+def build_signal_table(all_signals: dict[str, dict], macro: Optional[MacroContext]) -> str:
     """Constructs a consolidated prompt table mapping approved specialist signal values.
 
     Only includes tickers with APPROVE or REDUCE risk verdicts. Signal values are
@@ -77,17 +77,23 @@ def build_signal_table(all_signals: dict[str, dict], macro: MacroContext) -> str
 
     Args:
         all_signals: Mapping of ticker → dict of signal objects keyed by agent name.
-        macro: Current macroeconomic context used for the table header.
+        macro: Current macroeconomic context used for the table header, or None
+            when MacroStatisticalAgent's data source was unavailable this session —
+            the specialist signals in all_signals don't depend on it (see
+            orchestration/graph.py's topology).
 
     Returns:
         Newline-delimited string suitable for direct insertion into an LLM prompt.
     """
     lines = []
-    lines.append(
-        f"MACRO: {macro.macro_regime.value} | "
-        f"VIX {macro.vix_level:.2f} ({macro.vix_regime.value}) | "
-        f"{macro.sector_rotation_signal.value}"
-    )
+    if macro is not None:
+        lines.append(
+            f"MACRO: {macro.macro_regime.value} | "
+            f"VIX {macro.vix_level:.2f} ({macro.vix_regime.value}) | "
+            f"{macro.sector_rotation_signal.value}"
+        )
+    else:
+        lines.append("MACRO: unavailable this session (data source failure) — allocate on specialist signals alone")
     lines.append("")
 
     for ticker, sigs in all_signals.items():
@@ -195,7 +201,7 @@ class PortfolioManagerAgent:
         self,
         user_profile: dict,
         all_signals: dict[str, dict],
-        macro: MacroContext,
+        macro: Optional[MacroContext],
         cultural_wisdom: Optional[list[str]] = None,
         cultural_warnings: Optional[list[str]] = None,
     ) -> Optional[PortfolioAllocation]:
@@ -210,7 +216,8 @@ class PortfolioManagerAgent:
         Args:
             user_profile: Dict with keys ``total_wealth``, ``invest_pct``, ``risk_tolerance``.
             all_signals: Mapping of ticker → dict of signal objects keyed by agent name.
-            macro: Current macroeconomic context.
+            macro: Current macroeconomic context, or None when it was unavailable
+                this session — allocation proceeds on the specialist signals alone.
             cultural_wisdom: Optional list of historical wisdom strings from cultural memory.
             cultural_warnings: Optional list of failed-trade pattern strings from
                 cultural memory, scoped to the current macro regime.

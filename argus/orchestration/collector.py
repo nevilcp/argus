@@ -125,6 +125,7 @@ async def run_collection_cycle(
         risk_tolerance=risk_tolerance,
         backtest_mode=False,
         session_seed=None,
+        as_of=None,
         price_history={},
         session_states=session_states,
         macro_context=None,

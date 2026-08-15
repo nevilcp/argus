@@ -388,6 +388,7 @@ async def analyze(req: AnalysisRequest):
         risk_tolerance=req.risk_tolerance,
         backtest_mode=False,
         session_seed=None,
+        as_of=None,
         price_history={},
         session_states=live_states,
         macro_context=None,

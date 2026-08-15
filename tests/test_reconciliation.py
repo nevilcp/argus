@@ -31,6 +31,7 @@ from argus.schemas.signals import (
     PositionAllocation,
     Regime,
     SectorSignal,
+    SentimentSignal,
     Signal,
     TechnicalSignal,
     VixRegime,
@@ -92,6 +93,34 @@ def _fundamental(signal: Signal, conviction: float, ticker: str = "TEST") -> Fun
         moat_score=5.0,
         reasoning="test",
         data_as_of_date=datetime.now().date(),
+        timestamp=datetime.now(),
+    )
+
+
+def _sentiment(signal: Signal, conviction: float, ticker: str = "TEST") -> SentimentSignal:
+    """Builds a SentimentSignal with fixed field values, varying only the given fields.
+
+    Args:
+        signal: Signal direction to assign.
+        conviction: Confidence score to assign.
+        ticker: Ticker symbol.
+
+    Returns:
+        A SentimentSignal fixture.
+    """
+    return SentimentSignal(
+        ticker=ticker,
+        finbert_net_score=0.0,
+        pct_positive=0.3,
+        pct_negative=0.3,
+        news_volume_7d=5,
+        social_volume_change_pct=0.0,
+        social_mention_surge=False,
+        upcoming_catalyst=False,
+        signal=signal,
+        conviction=conviction,
+        sentiment_decay_risk="LOW",
+        reasoning="test",
         timestamp=datetime.now(),
     )
 
@@ -250,6 +279,50 @@ def test_credit_primary_driver_is_symmetric_under_relabeling():
         aggregated=aggregated,
     )
     assert credit_primary_driver(decision) == "fundamental"
+
+
+def test_credit_primary_driver_replays_the_baseline_reliability_in_each_ablation():
+    """Ablation must reuse the exact reliability dict the baseline aggregation used.
+
+    Regression test for X3: without this, every ablated rerun silently falls
+    back to aggregate()'s unweighted reliability_mult=1.0 default, so the
+    baseline (computed WITH reliability) and each ablated rerun (computed
+    WITHOUT it) can disagree on consensus direction before any agent is even
+    removed — flipping credit to argmax(baseline_votes) regardless of which
+    agent was actually ablated.
+    """
+    technical = _technical(Signal.BULLISH, 0.9)
+    fundamental = _fundamental(Signal.BEARISH, 0.85)
+    sentiment = _sentiment(Signal.NEUTRAL, 0.3)
+    macro = _macro()
+    reliability = {"technical": 0.95, "fundamental": 0.20, "sentiment": 0.50}
+
+    real_aggregator = HybridSignalAggregator()
+    aggregated = real_aggregator.aggregate(
+        technical, macro, fundamental, sentiment, reliability=reliability
+    )
+
+    decision = ARGUSDecision(
+        ticker="TEST",
+        session_timestamp=datetime.now(),
+        technical=technical,
+        fundamental=fundamental,
+        sentiment=sentiment,
+        macro=macro,
+        aggregated=aggregated,
+    )
+
+    seen_reliability: list[object] = []
+
+    class _SpyAggregator(HybridSignalAggregator):
+        def aggregate(self, *args, **kwargs):
+            seen_reliability.append(kwargs.get("reliability"))
+            return super().aggregate(*args, **kwargs)
+
+    credit_primary_driver(decision, aggregator=_SpyAggregator())
+
+    assert seen_reliability
+    assert all(r == reliability for r in seen_reliability)
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +510,7 @@ def test_load_decisions_from_checkpoints_round_trips_a_real_graph_run(tmp_path):
         risk_tolerance="MODERATE",
         backtest_mode=False,
         session_seed=None,
+        as_of=None,
         price_history={},
         session_states=session_states,
         macro_context=None,
