@@ -195,10 +195,17 @@ def build_graph(
                 ``session_states`` pre-populated from the MFT live cache.
 
         Returns:
-            Partial state update with ``price_history`` only. ``session_states``
-            is passed through unchanged from the incoming state.
+            Partial state update with ``price_history``, which also carries the SPY
+            benchmark series alongside the universe. ``session_states`` is passed
+            through unchanged from the incoming state.
         """
-        history_dfs = market_data.multiple_daily(state["universe"], period="1y")
+        # SPY rides along with the universe fetch so risk.py's ols_portfolio_beta finds it
+        # already in price_history, instead of issuing its own uncached fetch on every one
+        # of the N+1 risk_engine.evaluate() calls node_risk_evaluation makes this session
+        fetch_tickers = list(state["universe"])
+        if "SPY" not in fetch_tickers:
+            fetch_tickers.append("SPY")
+        history_dfs = market_data.multiple_daily(fetch_tickers, period="1y")
         history_serializable = {}
 
         for ticker, df in history_dfs.items():
@@ -373,81 +380,116 @@ def build_graph(
                 and ``aggregated_signals`` populated.
 
         Returns:
-            Partial state update with ``risk_assessments`` and ``errors``.
+            Partial state update with ``risk_assessments`` and ``errors``. On an
+            unexpected failure, ``risk_assessments`` is empty and the failure is
+            named in ``errors`` rather than raised (RE-10) — nothing downstream
+            can safely allocate against a risk session that half-completed.
         """
         import pandas as pd
 
-        history_raw = state.get("price_history", {})
-        history = {
-            ticker: pd.Series(data["prices"], index=pd.to_datetime(data["dates"]))
-            for ticker, data in history_raw.items()
-        }
-        macro_ctx = state.get("macro_context")
-        vix = macro_ctx.vix_level if macro_ctx else 20.0
-        universe = state["universe"]
-
-        # Extract signed convictions: positive = BULLISH, negative = BEARISH, zero = NEUTRAL
-        convictions = {}
-        aggs = state.get("aggregated_signals", {})
-        if aggs:
-            for t, sig in aggs.items():
-                sign = (
-                    1.0
-                    if sig.signal == Signal.BULLISH
-                    else (-1.0 if sig.signal == Signal.BEARISH else 0.0)
-                )
-                convictions[t] = sig.conviction * sign
-
-        # Joint evaluation captures inter-asset covariance and global diversification limits
-        base_weight = min(0.15, 1.0 / len(universe)) if universe else 0.15
-        full_portfolio = [{"ticker": t, "weight": base_weight} for t in universe]
-        portfolio_result = risk_engine.evaluate(full_portfolio, history, vix, convictions=convictions)
-
-        portfolio_vetoed = portfolio_result.verdict == RiskVerdict.VETO
-        ticker_cap_map: dict[str, float] = portfolio_result.optimal_weights
-
         errors: list[str] = []
-        if portfolio_result.optimizer_converged is False:
-            errors.append(
-                "risk_evaluation: SLSQP solve did not converge; portfolio-level caps "
-                "were not applied to any ticker"
+
+        try:
+            history_raw = state.get("price_history", {})
+            history = {
+                ticker: pd.Series(data["prices"], index=pd.to_datetime(data["dates"]))
+                for ticker, data in history_raw.items()
+            }
+            macro_ctx = state.get("macro_context")
+            if macro_ctx is not None:
+                vix = macro_ctx.vix_level
+            else:
+                # A FRED outage only takes out the macro bundle; the VIX blackout gate
+                # needs just the index level, which yfinance can still serve directly
+                try:
+                    vix = market_data.vix()
+                except Exception as exc:
+                    logger.warning(
+                        "node_risk_evaluation: VIX fetch failed with no macro_context; "
+                        "falling back to vix=20.0: %s",
+                        exc,
+                    )
+                    errors.append(
+                        f"risk_evaluation: VIX fetch failed, used fallback vix=20.0 ({exc})"
+                    )
+                    vix = 20.0
+            universe = state["universe"]
+
+            # Extract signed convictions: positive = BULLISH, negative = BEARISH, zero = NEUTRAL
+            convictions = {}
+            aggs = state.get("aggregated_signals", {})
+            if aggs:
+                for t, sig in aggs.items():
+                    sign = (
+                        1.0
+                        if sig.signal == Signal.BULLISH
+                        else (-1.0 if sig.signal == Signal.BEARISH else 0.0)
+                    )
+                    convictions[t] = sig.conviction * sign
+
+            # Joint evaluation captures inter-asset covariance and global diversification limits
+            base_weight = min(0.15, 1.0 / len(universe)) if universe else 0.15
+            full_portfolio = [{"ticker": t, "weight": base_weight} for t in universe]
+            portfolio_result = risk_engine.evaluate(
+                full_portfolio, history, vix, convictions=convictions
             )
 
-        assessments = {}
+            portfolio_vetoed = portfolio_result.verdict == RiskVerdict.VETO
+            ticker_cap_map: dict[str, float] = portfolio_result.optimal_weights
 
-        for ticker in universe:
-            single = risk_engine.evaluate(
-                [{"ticker": ticker, "weight": settings.MAX_SINGLE_POSITION_PCT}], history, vix
+            if portfolio_result.optimizer_converged is False:
+                errors.append(
+                    "risk_evaluation: SLSQP solve did not converge; portfolio-level caps "
+                    "were not applied to any ticker"
+                )
+            # RE-4: below-floor diversification is informational on the assessment's own
+            # veto_reasons (risk.py), not a hard VETO — surface it here too so it's visible
+            # without inspecting every per-ticker assessment
+            errors.extend(
+                f"risk_evaluation: {r}"
+                for r in portfolio_result.veto_reasons
+                if r.startswith("Below diversification floor")
             )
 
-            updates: dict = {}
+            assessments = {}
 
-            # Propagate portfolio-level correlation stats for uniform telemetry, but only
-            # when the portfolio call actually measured them — a structural-violation
-            # short-circuit reports None, not a fabricated 0.0
-            if portfolio_result.avg_correlation is not None:
-                updates["avg_correlation"] = portfolio_result.avg_correlation
+            for ticker in universe:
+                single = risk_engine.evaluate(
+                    [{"ticker": ticker, "weight": settings.MAX_SINGLE_POSITION_PCT}], history, vix
+                )
 
-            if ticker in ticker_cap_map and not portfolio_vetoed:
-                updates.update(_apply_portfolio_cap(single, ticker_cap_map[ticker]))
+                updates: dict = {}
 
-            # Portfolio-level veto overrides all individual verdicts to prevent partial allocation
-            if portfolio_vetoed:
-                updates["verdict"] = RiskVerdict.VETO
-                updates["approved_weight"] = 0.0
-                updates["veto_reasons"] = single.veto_reasons + [
-                    f"[Portfolio] {r}" for r in portfolio_result.veto_reasons
-                ]
+                # Propagate portfolio-level correlation stats for uniform telemetry, but only
+                # when the portfolio call actually measured them — a structural-violation
+                # short-circuit reports None, not a fabricated 0.0
+                if portfolio_result.avg_correlation is not None:
+                    updates["avg_correlation"] = portfolio_result.avg_correlation
 
-            # A single model_validate reconstruction, not sequential model_copy calls —
-            # model_copy skips validators, so it was bypassing approved_le_proposed
-            assessments[ticker] = (
-                RiskAssessment.model_validate({**single.model_dump(), **updates})
-                if updates
-                else single
-            )
+                if ticker in ticker_cap_map and not portfolio_vetoed:
+                    updates.update(_apply_portfolio_cap(single, ticker_cap_map[ticker]))
 
-        return {"risk_assessments": assessments, "errors": errors}
+                # Portfolio-level veto overrides all individual verdicts to prevent partial allocation
+                if portfolio_vetoed:
+                    updates["verdict"] = RiskVerdict.VETO
+                    updates["approved_weight"] = 0.0
+                    updates["veto_reasons"] = single.veto_reasons + [
+                        f"[Portfolio] {r}" for r in portfolio_result.veto_reasons
+                    ]
+
+                # A single model_validate reconstruction, not sequential model_copy calls —
+                # model_copy skips validators, so it was bypassing approved_le_proposed
+                assessments[ticker] = (
+                    RiskAssessment.model_validate({**single.model_dump(), **updates})
+                    if updates
+                    else single
+                )
+
+            return {"risk_assessments": assessments, "errors": errors}
+        except Exception as exc:
+            logger.exception("node_risk_evaluation: unexpected failure")
+            errors.append(f"risk_evaluation: unexpected failure: {exc}")
+            return {"risk_assessments": {}, "errors": errors}
 
     def node_portfolio_allocation(state: ARGUSState) -> dict:
         """Determines capital allocations using specialist ratings, risk targets, and memory heuristics.

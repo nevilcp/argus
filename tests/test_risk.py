@@ -149,3 +149,45 @@ def test_zero_api_calls(risk_engine: RiskStatisticalEngine, price_history: dict)
     result = risk_engine.evaluate(positions, price_history, current_vix=40.0)
 
     assert result.api_calls_used == 0
+
+
+def test_small_universe_is_noted_not_vetoed(
+    risk_engine: RiskStatisticalEngine, price_history: dict
+) -> None:
+    """RE-4 regression: a 2-4 ticker universe is informational, not a hard VETO.
+
+    Before the fix, a book below the 5-position diversification floor was
+    structurally VETOed regardless of its actual risk profile, returning
+    all-cash with no reason a human could act on.
+    """
+    positions = [{"ticker": t, "weight": 0.1} for t in ["AAPL", "MSFT", "GOOGL"]]
+    result = risk_engine.evaluate(positions, price_history, current_vix=20.0)
+
+    assert result.verdict == RiskVerdict.APPROVE
+    assert any("Below diversification floor" in r for r in result.veto_reasons)
+
+
+def test_per_ticker_var_normalized_to_full_weight() -> None:
+    """RE-7 regression: a volatile single ticker at weight=0.15 must REDUCE, not APPROVE.
+
+    Before the fix, var99/cvar were computed from the weight-diluted return series
+    (0.15x), so the same var_limit was ~6.7x looser for a per-ticker call than for
+    the portfolio call — a stock volatile enough to clearly breach the limit at full
+    weight passed the per-ticker gate outright.
+    """
+    engine = RiskStatisticalEngine()
+    np.random.seed(3)
+    dates = pd.date_range(start="2023-01-01", periods=253, freq="B")
+    hist = {
+        "AAPL": pd.Series(
+            100 * np.exp(np.cumsum(np.random.normal(0.0, 0.05, len(dates)))), index=dates
+        ),
+        "SPY": pd.Series(
+            100 * np.exp(np.cumsum(np.random.normal(0.0, 0.01, len(dates)))), index=dates
+        ),
+    }
+
+    result = engine.evaluate([{"ticker": "AAPL", "weight": 0.15}], hist, current_vix=20.0)
+
+    assert result.verdict == RiskVerdict.REDUCE
+    assert result.var_99 > 0.03
