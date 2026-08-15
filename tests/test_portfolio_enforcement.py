@@ -5,6 +5,10 @@ Regression tests for PA-1: PortfolioManagerAgent.allocate() must enforce risk
 verdicts and caps in code, not merely display them in the prompt. Reproduces
 the audit's finding that an over-cap allocation, a VETO'd ticker, and a
 fabricated ticker all validated cleanly.
+
+Also covers PA-6: when all 3 retry attempts fail, allocate() must say which
+of its three stages (LLM call, JSON parse, schema validation) was failing,
+not a single generic message regardless of cause.
 """
 
 import json
@@ -98,3 +102,42 @@ def test_allocate_enforces_caps_vetoes_and_fabrications_in_code():
     assert any("zeroed VETOED allocation (risk verdict VETO)" in a for a in adjustments)
     assert any("dropped FABRICATED" in a for a in adjustments)
     assert len(adjustments) == 3
+
+
+def test_allocate_names_the_json_parse_stage_on_exhausted_retries(monkeypatch):
+    """A response that never parses as JSON is reported as a json_parse failure, not a generic one."""
+    monkeypatch.setattr("argus.agents.portfolio.time.sleep", lambda *_: None)
+    llm_client = FixtureLLMClient({"only": "not valid json"}, key_fn=lambda _prompt: "only")
+
+    agent = PortfolioManagerAgent(llm_client=llm_client)
+    adjustments: list[str] = []
+    alloc = agent.allocate(
+        user_profile={"total_wealth": 100_000.0, "invest_pct": 0.5, "risk_tolerance": "MODERATE"},
+        all_signals={"OVER_CAP": {"risk": _risk(RiskVerdict.APPROVE, approved_weight=0.10, proposed_weight=0.10)}},
+        macro=None,
+        adjustments=adjustments,
+    )
+
+    assert alloc is None
+    assert any("json_parse" in a for a in adjustments)
+
+
+def test_allocate_names_the_schema_validation_stage_on_exhausted_retries(monkeypatch):
+    """Valid JSON that fails PortfolioAllocation's schema is reported as schema_validation, not json_parse."""
+    monkeypatch.setattr("argus.agents.portfolio.time.sleep", lambda *_: None)
+    # Missing the required "portfolio" list entirely -> model_validate raises, json.loads does not
+    llm_client = FixtureLLMClient(
+        {"only": json.dumps({"cash_reserve_pct": "not_a_number"})}, key_fn=lambda _prompt: "only"
+    )
+
+    agent = PortfolioManagerAgent(llm_client=llm_client)
+    adjustments: list[str] = []
+    alloc = agent.allocate(
+        user_profile={"total_wealth": 100_000.0, "invest_pct": 0.5, "risk_tolerance": "MODERATE"},
+        all_signals={"OVER_CAP": {"risk": _risk(RiskVerdict.APPROVE, approved_weight=0.10, proposed_weight=0.10)}},
+        macro=None,
+        adjustments=adjustments,
+    )
+
+    assert alloc is None
+    assert any("schema_validation" in a for a in adjustments)

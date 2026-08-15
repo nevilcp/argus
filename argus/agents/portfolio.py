@@ -234,7 +234,11 @@ class PortfolioManagerAgent:
                 cultural memory, scoped to the current macro regime.
             adjustments: Optional list that receives one human-readable entry per
                 clamped, zeroed, or dropped position — the caller's record of
-                where the LLM's proposal disagreed with risk enforcement.
+                where the LLM's proposal disagreed with risk enforcement. Also
+                receives one entry naming which of the three retry-loop stages
+                (``llm_call``, ``json_parse``, ``response_enforcement``, or
+                ``schema_validation``) was failing when all 3 attempts were
+                exhausted, if that happens.
 
         Returns:
             A validated PortfolioAllocation, all-cash if no tickers are approved, or None
@@ -345,6 +349,7 @@ class PortfolioManagerAgent:
             '"cash_reserve_pct":0.0,"expected_sharpe":null,"rebalance_trigger":"MONTHLY"}'
         )
         for attempt in range(3):
+            stage = "llm_call"
             try:
                 raw = self.llm_client.complete(SYSTEM_PROMPT, prompt).strip()
                 if raw.startswith("```"):
@@ -357,8 +362,10 @@ class PortfolioManagerAgent:
                     if raw.startswith("json"):
                         raw = raw[4:].strip()
 
+                stage = "json_parse"
                 data = json.loads(raw)
 
+                stage = "response_enforcement"
                 # Enforce risk verdicts in code: the LLM's proposal is advisory input,
                 # not a binding allocation, so it cannot be trusted to respect caps it
                 # was merely shown in the prompt.
@@ -420,17 +427,21 @@ class PortfolioManagerAgent:
                 data["user_investable_capital"] = investable
                 data["timestamp"] = datetime.now().isoformat()
 
+                stage = "schema_validation"
                 allocation = PortfolioAllocation.model_validate(data)
                 self._session_count += 1
                 return allocation
 
             except Exception as e:
-                logger.warning("[Portfolio] Attempt %d failed: %s", attempt + 1, e)
+                logger.warning("[Portfolio] Attempt %d failed (%s): %s", attempt + 1, stage, e)
                 if attempt == 2:
-                    logger.error(
-                        "[Portfolio] All retry attempts exhausted. "
-                        "Returning None to allow graceful exit rather than a fabricated allocation."
+                    msg = (
+                        f"portfolio_allocation: PortfolioManagerAgent failed after 3 attempts "
+                        f"at {stage}: {e}"
                     )
+                    logger.error("[Portfolio] %s", msg)
+                    if adjustments is not None:
+                        adjustments.append(msg)
                     return None
                 time.sleep(2**attempt)
 

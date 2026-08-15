@@ -149,6 +149,54 @@ def _as_naive_timestamp(value: datetime | pd.Timestamp) -> pd.Timestamp:
     return ts.tz_localize(None) if ts.tzinfo is not None else ts
 
 
+def _needs_reconciliation(decision: ARGUSDecision) -> bool:
+    """Whether a decision took a position that could have a realized outcome."""
+    return (
+        decision.technical is not None
+        and decision.allocation is not None
+        and decision.allocation.allocation_pct > 0
+    )
+
+
+def _realized_return_from_prices(
+    decision: ARGUSDecision, prices: pd.Series, horizon_days: int
+) -> Optional[tuple[float, int, str]]:
+    """Pairs a decision's entry price with a later close drawn from an already-fetched series.
+
+    Args:
+        decision: Completed ARGUSDecision; caller has already confirmed
+            _needs_reconciliation(decision).
+        prices: Close-price Series for decision.ticker.
+        horizon_days: Calendar days after session_timestamp defining the
+            target exit date.
+
+    Returns:
+        (actual_return_pct, holding_days, exit_reason), or None when the
+        price series doesn't yet extend past the target exit date — horizon
+        not reached, deferred rather than fabricated.
+    """
+    assert decision.technical is not None, "caller must confirm _needs_reconciliation(decision)"
+    entry_price = decision.technical.current_price
+    entry_date = _as_naive_timestamp(decision.session_timestamp)
+    target_exit_date = entry_date + timedelta(days=horizon_days)
+
+    prices = prices.copy()
+    prices.index = pd.DatetimeIndex([_as_naive_timestamp(ts) for ts in prices.index])
+
+    on_or_after = prices[prices.index >= target_exit_date].sort_index()
+    if on_or_after.empty:
+        return None
+
+    exit_date = on_or_after.index[0]
+    exit_price = float(on_or_after.iloc[0])
+
+    actual_return_pct = (exit_price - entry_price) / entry_price
+    holding_days = (exit_date - entry_date).days
+    exit_reason = f"horizon reached ({horizon_days}d target, {holding_days}d actual)"
+
+    return actual_return_pct, holding_days, exit_reason
+
+
 def compute_realized_return(
     decision: ARGUSDecision, market_data: MarketDataProvider, horizon_days: int
 ) -> Optional[tuple[float, int, str]]:
@@ -172,34 +220,10 @@ def compute_realized_return(
         taken), or the price series doesn't yet extend past the target exit
         date — horizon not reached, deferred rather than fabricated.
     """
-    if (
-        decision.technical is None
-        or decision.allocation is None
-        or decision.allocation.allocation_pct <= 0
-    ):
+    if not _needs_reconciliation(decision):
         return None
-
-    entry_price = decision.technical.current_price
-    entry_date = _as_naive_timestamp(decision.session_timestamp)
-    target_exit_date = entry_date + timedelta(days=horizon_days)
-
     prices = market_data.ohlcv_daily(decision.ticker)["close"]
-    prices.index = pd.DatetimeIndex(
-        [_as_naive_timestamp(ts) for ts in prices.index]
-    )
-
-    on_or_after = prices[prices.index >= target_exit_date].sort_index()
-    if on_or_after.empty:
-        return None
-
-    exit_date = on_or_after.index[0]
-    exit_price = float(on_or_after.iloc[0])
-
-    actual_return_pct = (exit_price - entry_price) / entry_price
-    holding_days = (exit_date - entry_date).days
-    exit_reason = f"horizon reached ({horizon_days}d target, {holding_days}d actual)"
-
-    return actual_return_pct, holding_days, exit_reason
+    return _realized_return_from_prices(decision, prices, horizon_days)
 
 
 def reconcile_decision(
@@ -207,6 +231,8 @@ def reconcile_decision(
     market_data: MarketDataProvider,
     cultural: CulturalMemoryManager,
     horizon_days: int = RECONCILIATION.horizon_days,
+    *,
+    prices: Optional[pd.Series] = None,
 ) -> bool:
     """Reconciles a single decision: computes its outcome and stores it if the horizon has passed.
 
@@ -216,6 +242,10 @@ def reconcile_decision(
         cultural: CulturalMemoryManager to persist the outcome to.
         horizon_days: Calendar days after session_timestamp defining the
             target exit date.
+        prices: Pre-fetched close-price Series for decision.ticker. Passed by
+            reconcile_decisions() so decisions sharing a ticker issue one
+            market_data fetch between them instead of one each; fetched here
+            when omitted.
 
     Returns:
         True if an outcome was computed and handed to
@@ -224,7 +254,11 @@ def reconcile_decision(
         docstring). False if the decision had nothing to reconcile or its
         horizon hasn't passed yet.
     """
-    outcome = compute_realized_return(decision, market_data, horizon_days)
+    if not _needs_reconciliation(decision):
+        return False
+    if prices is None:
+        prices = market_data.ohlcv_daily(decision.ticker)["close"]
+    outcome = _realized_return_from_prices(decision, prices, horizon_days)
     if outcome is None:
         return False
 
@@ -255,7 +289,13 @@ def reconcile_decisions(
     cultural: CulturalMemoryManager,
     horizon_days: int = RECONCILIATION.horizon_days,
 ) -> int:
-    """Reconciles every decision whose horizon has passed.
+    """Reconciles every not-yet-reconciled decision whose horizon has passed.
+
+    Skips decisions cultural already has a stored outcome for (see
+    CulturalMemoryManager.already_reconciled) and fetches each ticker's price
+    history at most once regardless of how many decisions share it. This runs
+    on a daily schedule against a decision history that only grows — without
+    both, every past decision gets re-fetched and re-processed on every run.
 
     Args:
         decisions: Decisions to attempt reconciliation for, e.g. from
@@ -268,9 +308,30 @@ def reconcile_decisions(
     Returns:
         Count of decisions actually stored via cultural.store_trade_outcome.
     """
-    return sum(
-        reconcile_decision(d, market_data, cultural, horizon_days) for d in decisions
-    )
+    already_done = cultural.already_reconciled([d.decision_id for d in decisions])
+    candidates = [
+        d for d in decisions if d.decision_id not in already_done and _needs_reconciliation(d)
+    ]
+
+    prices_by_ticker: dict[str, Optional[pd.Series]] = {}
+    stored = 0
+    for decision in candidates:
+        if decision.ticker not in prices_by_ticker:
+            try:
+                prices_by_ticker[decision.ticker] = market_data.ohlcv_daily(decision.ticker)["close"]
+            except Exception as exc:
+                logger.warning(
+                    "[Reconcile] failed to fetch price history for %s: %s", decision.ticker, exc
+                )
+                prices_by_ticker[decision.ticker] = None
+
+        prices = prices_by_ticker[decision.ticker]
+        if prices is None:
+            continue
+        if reconcile_decision(decision, market_data, cultural, horizon_days, prices=prices):
+            stored += 1
+
+    return stored
 
 
 def load_decisions_from_checkpoints(db_path: str = "argus_graph.db") -> list[ARGUSDecision]:
