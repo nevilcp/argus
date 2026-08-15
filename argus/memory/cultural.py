@@ -110,9 +110,7 @@ class CulturalMemoryManager:
         fund_sig = decision.fundamental.signal.value if decision.fundamental else "N/A"
         fund_moat = decision.fundamental.moat_score if decision.fundamental else "N/A"
         sent_sig = decision.sentiment.signal.value if decision.sentiment else "N/A"
-        sent_finbert = (
-            getattr(decision.sentiment, "finbert_net_score", 0.0) if decision.sentiment else "N/A"
-        )
+        sent_finbert = decision.sentiment.finbert_net_score if decision.sentiment else None
         agg_conv = decision.aggregated.conviction if decision.aggregated else "N/A"
 
         document = f"""{prefix} PATTERN:
@@ -123,7 +121,7 @@ Technical signal: {tech_sig}
 Fundamental signal: {fund_sig}
   (Moat={fund_moat})
 Sentiment signal: {sent_sig}
-  (FinBERT={sent_finbert if isinstance(sent_finbert, str) else f"{sent_finbert:.2f}"})
+  (FinBERT={"N/A" if sent_finbert is None else f"{sent_finbert:.2f}"})
 Aggregated conviction: {agg_conv}
 Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_reason}"""
 
