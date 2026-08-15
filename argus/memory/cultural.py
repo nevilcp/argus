@@ -258,7 +258,7 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
         agent_name: str,
         regime: Optional[str] = None,
         as_of: Optional[datetime] = None,
-    ) -> float:
+    ) -> tuple[float, int]:
         """Computes shrunk statistical win rates for trades driven primarily by a specific specialist agent.
 
         Win rate is shrunk toward the 0.5 neutral prior by
@@ -279,10 +279,13 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
                 passes it to avoid reading future outcomes.
 
         Returns:
-            Shrunk win rate as a float in [0, 1]. Returns 0.5 (neutral prior) when no data exists.
+            (rate, n) — the shrunk win rate in [0, 1], and the raw sample count it
+            was computed from. n distinguishes "0.5 because no data exists" from
+            "0.5 because that's the measured rate"; callers that need to gate on
+            data actually existing (e.g. the Kelly anchor) should check n, not rate.
         """
         if self.collection.count() == 0:
-            return 0.5
+            return 0.5, 0
 
         try:
             conditions: list[dict[str, Any]] = [{"primary_driver": agent_name.lower()}]
@@ -294,15 +297,15 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
             results = self.collection.get(where=_where(conditions))  # type: ignore[arg-type]
             metadatas = results.get("metadatas", [])
             if not metadatas:
-                return 0.5
+                return 0.5, 0
 
             wins = sum(1 for m in metadatas if m.get("outcome") == "SUCCESSFUL")
             n = len(metadatas)
             k = MEMORY.accuracy_shrinkage_k
-            return (float(wins) + k * 0.5) / (n + k)
+            return (float(wins) + k * 0.5) / (n + k), n
         except Exception as e:
             logger.warning("[Memory] Failed to compute agent accuracy: %s", e)
-            return 0.5
+            return 0.5, 0
 
     def summary_stats(self) -> dict:
         """Compiles aggregate performance statistics and regime diagnostics from the memory database.
