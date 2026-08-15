@@ -11,8 +11,8 @@ call it, so the two deployment paths can't drift apart from each other.
 
 Responsibilities:
   - Run one MFT fetch-and-compress sweep via MFTDataPipeline.run_once()
-  - Invoke the LangGraph DAG (via build_graph(), not the module-level
-    singleton) over whatever tickers the sweep actually populated
+  - Invoke the caller-supplied compiled LangGraph DAG over whatever tickers
+    the sweep actually populated
   - Append every resulting ARGUSDecision to a JSONL decision log
 
 Not responsible for:
@@ -30,7 +30,6 @@ from datetime import datetime
 from pathlib import Path
 
 from argus.data.pipeline import MFTDataPipeline
-from argus.orchestration.graph import build_graph
 from argus.orchestration.state import ARGUSState
 from argus.schemas.signals import ARGUSDecision
 
@@ -82,7 +81,7 @@ async def run_collection_cycle(
     risk_tolerance: str,
     *,
     pipeline: MFTDataPipeline,
-    checkpoint_db_path: str = "argus_graph.db",
+    compiled_graph,
     decisions_log_path: str = "data/decisions.jsonl",
 ) -> CollectionResult:
     """Runs one unattended fetch → analyze → log cycle for the given universe.
@@ -101,10 +100,12 @@ async def run_collection_cycle(
             (rather than built here) so a long-lived caller — the API
             process's background loop — reuses its warm buffer across cycles
             instead of starting cold every time.
-        checkpoint_db_path: SQLite file build_graph() checkpoints to. Callers
-            that don't need durable checkpoints (the scheduled Actions
-            runner, which persists only decisions_log_path) should point
-            this at an ephemeral path.
+        compiled_graph: Already-built graph (build_graph()) to invoke. Passed
+            in for the same reason as ``pipeline``: a long-lived caller builds
+            the six agents (LLM clients, the macro HMM classifier load) once
+            rather than reconstructing them every cycle. Each ``.invoke()``
+            still opens its own checkpoint connection — see
+            graph.py's ``_CheckpointedGraph``.
         decisions_log_path: JSONL file each cycle's decisions are appended to.
 
     Returns:
@@ -120,7 +121,7 @@ async def run_collection_cycle(
 
     state: ARGUSState = ARGUSState(
         ticker=tickers_with_data[0],
-        universe=universe,
+        universe=tickers_with_data,
         total_wealth=total_wealth,
         invest_pct=invest_pct,
         risk_tolerance=risk_tolerance,
@@ -141,7 +142,6 @@ async def run_collection_cycle(
         errors=[],
     )
 
-    compiled_graph = build_graph(checkpoint_db_path=checkpoint_db_path)
     config = {"configurable": {"thread_id": f"collector-{datetime.now().strftime('%Y%m%d%H%M%S')}"}}
 
     logger.info(

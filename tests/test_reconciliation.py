@@ -479,6 +479,7 @@ def test_reconcile_decisions_counts_only_the_ones_actually_reconciled():
     )
     market_data = _ten_day_series(start, start_price=100.0)
     cultural = mock.create_autospec(CulturalMemoryManager, instance=True)
+    cultural.already_reconciled.return_value = set()
 
     count = reconcile_decisions(
         [reconcilable, not_reconcilable], market_data, cultural, horizon_days=5
@@ -486,6 +487,51 @@ def test_reconcile_decisions_counts_only_the_ones_actually_reconciled():
 
     assert count == 1
     assert cultural.store_trade_outcome.call_count == 1
+
+
+def test_reconcile_decisions_skips_decisions_already_reconciled():
+    """A decision cultural already has a stored outcome for is not touched again."""
+    start = datetime(2026, 1, 1)
+    decision = ARGUSDecision(
+        ticker="TEST",
+        session_timestamp=start,
+        technical=_technical(Signal.BULLISH, 0.8, price=100.0),
+        allocation=_allocation(),
+    )
+    market_data = _ten_day_series(start, start_price=100.0)
+    cultural = mock.create_autospec(CulturalMemoryManager, instance=True)
+    cultural.already_reconciled.return_value = {decision.decision_id}
+
+    count = reconcile_decisions([decision], market_data, cultural, horizon_days=5)
+
+    assert count == 0
+    cultural.store_trade_outcome.assert_not_called()
+
+
+def test_reconcile_decisions_fetches_each_ticker_price_history_once():
+    """Two decisions on the same ticker share a single ohlcv_daily fetch."""
+    start = datetime(2026, 1, 1)
+    first = ARGUSDecision(
+        ticker="TEST",
+        session_timestamp=start,
+        technical=_technical(Signal.BULLISH, 0.8, price=100.0),
+        allocation=_allocation(),
+    )
+    second = ARGUSDecision(
+        ticker="TEST",
+        session_timestamp=start,
+        technical=_technical(Signal.BULLISH, 0.8, price=101.0),
+        allocation=_allocation(),
+    )
+    market_data = _ten_day_series(start, start_price=100.0)
+    market_data.ohlcv_daily = mock.Mock(wraps=market_data.ohlcv_daily)
+    cultural = mock.create_autospec(CulturalMemoryManager, instance=True)
+    cultural.already_reconciled.return_value = set()
+
+    count = reconcile_decisions([first, second], market_data, cultural, horizon_days=5)
+
+    assert count == 2
+    market_data.ohlcv_daily.assert_called_once_with("TEST")
 
 
 # ---------------------------------------------------------------------------
