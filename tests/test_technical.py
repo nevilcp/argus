@@ -86,3 +86,25 @@ def test_zero_api_calls(agent: TechnicalStatisticalAgent) -> None:
     }
     result = agent.analyze("TEST", session_state)
     assert result.api_calls_used == 0
+
+
+def test_batch_analyze_reports_dropped_tickers_in_errors(agent: TechnicalStatisticalAgent) -> None:
+    """A ticker missing a required indicator is omitted from signals and named in errors."""
+    complete_state = {
+        "rsi_14": 50.0,
+        "macd_histogram": 0.0,
+        "bb_percent_b": 0.5,
+        "adx_14": 20.0,
+        "vwap_distance": 0.0,
+        "volume_ratio": 1.0,
+        "momentum_30m": 0.0,
+        "momentum_1d": 0.0,
+        "close": 100.0,
+    }
+    incomplete_state = {k: v for k, v in complete_state.items() if k != "adx_14"}
+
+    signals, errors = agent.batch_analyze({"GOOD": complete_state, "BAD": incomplete_state})
+
+    assert "GOOD" in signals
+    assert "BAD" not in signals
+    assert any("BAD" in e for e in errors)

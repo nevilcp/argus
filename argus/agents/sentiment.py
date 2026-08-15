@@ -361,12 +361,20 @@ class SentimentAgent:
         self.market_data = market_data or LiveMarketDataProvider()
         self.cache = SentimentDailyCache()
 
-    def analyze(self, ticker: str, company_name: Optional[str] = None) -> Optional[SentimentSignal]:
+    def analyze(
+        self,
+        ticker: str,
+        company_name: Optional[str] = None,
+        errors: Optional[list[str]] = None,
+    ) -> Optional[SentimentSignal]:
         """Generates a SentimentSignal for a single ticker using FinBERT + LLM synthesis.
 
         Args:
             ticker: Equity ticker symbol.
             company_name: Optional display name used in news queries (defaults to ticker).
+            errors: If given, a reason is appended here on every path that
+                returns None, so callers can surface the failure instead of
+                only logging it.
 
         Returns:
             A validated SentimentSignal, or None if all retry attempts fail.
@@ -439,17 +447,23 @@ class SentimentAgent:
             except (json.JSONDecodeError, ValidationError) as e:
                 logger.warning("[Sentiment] Attempt %d parse error: %s", attempt + 1, e)
                 if attempt == 2:
+                    if errors is not None:
+                        errors.append(
+                            f"sentiment_analysis[{ticker}]: parse error after 3 attempts: {e}"
+                        )
                     return None
                 time.sleep(2**attempt)
             except Exception as e:
                 logger.warning("[Sentiment] Attempt %d failed: %s", attempt + 1, e)
                 if attempt == 2:
+                    if errors is not None:
+                        errors.append(f"sentiment_analysis[{ticker}]: failed after 3 attempts: {e}")
                     return None
                 time.sleep(2**attempt)
 
         return None
 
-    def batch_analyze(self, tickers: list[str]) -> dict[str, SentimentSignal]:
+    def batch_analyze(self, tickers: list[str]) -> tuple[dict[str, SentimentSignal], list[str]]:
         """Generates SentimentSignals sequentially for a list of tickers.
 
         Against a live market-data provider, paces each ticker's scraper calls
@@ -465,15 +479,17 @@ class SentimentAgent:
             tickers: List of equity ticker symbols.
 
         Returns:
-            Mapping of ticker → SentimentSignal for each successfully analyzed ticker.
-            Failed tickers are omitted silently (already logged inside analyze).
+            Tuple of (signals, errors). ``signals`` maps ticker → SentimentSignal
+            for each successfully analyzed ticker. ``errors`` names each ticker
+            omitted and why.
         """
         pace = isinstance(self.market_data, LiveMarketDataProvider)
         results = {}
+        errors: list[str] = []
         for i, ticker in enumerate(tickers):
             if pace and i > 0:
                 time.sleep(_FANOUT_PACE_SECONDS_PER_TICKER)
-            res = self.analyze(ticker)
+            res = self.analyze(ticker, errors=errors)
             if res is not None:
                 results[ticker] = res
-        return results
+        return results, errors
