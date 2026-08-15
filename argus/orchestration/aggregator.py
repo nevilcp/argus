@@ -56,6 +56,7 @@ class HybridSignalAggregator:
         fundamental: Optional[FundamentalSignal],
         sentiment: Optional[SentimentSignal],
         reliability: Optional[dict[str, float]] = None,
+        reliability_n: Optional[dict[str, int]] = None,
     ) -> AggregatedSignal:
         """Aggregates specialist signals via conviction-weighted voting with macro multipliers.
 
@@ -73,6 +74,10 @@ class HybridSignalAggregator:
                 (or missing/omitted entirely) votes at its unscaled base
                 weight — agents that have been right in this regime count
                 for more, agents that haven't count for less.
+            reliability_n: Optional agent name -> raw sample count each reliability
+                rate was computed from (see cultural.get_agent_accuracy's n).
+                Carried onto the result untouched, for agents/portfolio.py's
+                Half-Kelly anchor to distinguish "no data" from "measured 0.5".
 
         Returns:
             AggregatedSignal with a consensus direction, conviction, and weighted vote breakdown.
@@ -106,6 +111,7 @@ class HybridSignalAggregator:
         weighted_votes: dict[str, float] = {}
         agents_present: list[str] = [name for name, signal in sources.items() if signal is not None]
         reliability_used: dict[str, float] = dict(reliability) if reliability else {}
+        reliability_n_used: dict[str, int] = dict(reliability_n) if reliability_n else {}
 
         for name, signal in sources.items():
             if signal is None:
@@ -133,6 +139,7 @@ class HybridSignalAggregator:
                 weighted_votes=weighted_votes,
                 agents_present=agents_present,
                 reliability=reliability_used,
+                reliability_n=reliability_n_used,
             )
 
         bull_pct = bull_pool / max_pool
@@ -180,4 +187,5 @@ class HybridSignalAggregator:
             weighted_votes=weighted_votes,
             agents_present=agents_present,
             reliability=reliability_used,
+            reliability_n=reliability_n_used,
         )

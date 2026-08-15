@@ -340,17 +340,21 @@ def build_graph(
             regime = macro.macro_regime.value
             try:
                 memory = get_cultural_memory()
-                reliability = {
-                    name: memory.get_agent_accuracy(name, regime=regime, as_of=as_of)[0]
+                accuracy = {
+                    name: memory.get_agent_accuracy(name, regime=regime, as_of=as_of)
                     for name in agent_names
                 }
+                reliability = {name: accuracy[name][0] for name in agent_names}
+                reliability_n = {name: accuracy[name][1] for name in agent_names}
             except ImportError as exc:
                 # Same optional-dependency guard as node_retrieve_cultural_memory;
                 # degrade every agent to the 0.5 neutral prior rather than crash
                 logger.warning("node_signal_aggregation: cultural memory unavailable: %s", exc)
                 reliability = {name: 0.5 for name in agent_names}
+                reliability_n = {name: 0 for name in agent_names}
         else:
             reliability = {name: 0.5 for name in agent_names}
+            reliability_n = {name: 0 for name in agent_names}
 
         for ticker in state["universe"]:
             tech = state.get("technical_signals", {}).get(ticker)
@@ -358,7 +362,9 @@ def build_graph(
             sent = state.get("sentiment_signals", {}).get(ticker)
             if tech is None and fund is None and sent is None:
                 continue
-            aggs[ticker] = aggregator.aggregate(tech, macro, fund, sent, reliability=reliability)
+            aggs[ticker] = aggregator.aggregate(
+                tech, macro, fund, sent, reliability=reliability, reliability_n=reliability_n
+            )
         return {"aggregated_signals": aggs}
 
     def node_risk_evaluation(state: ARGUSState) -> dict:

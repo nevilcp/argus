@@ -430,6 +430,17 @@ class AggregatedSignal(BaseModel):
             "instead of silently resetting every ablated rerun to the 1.0 unweighted default."
         ),
     )
+    reliability_n: dict[str, int] = Field(
+        default_factory=dict,
+        description=(
+            "Agent name → raw sample count each reliability rate was computed from "
+            "(see cultural.get_agent_accuracy's n). Session-level, identical across "
+            "every ticker's AggregatedSignal this run. Persisted so agents/portfolio.py's "
+            "Half-Kelly anchor can tell '0.5 because no outcome data exists yet' from "
+            "'0.5 because that is the measured win rate', without re-querying cultural "
+            "memory per ticker."
+        ),
+    )
 
 
 class PositionAllocation(BaseModel):
@@ -461,7 +472,8 @@ class PortfolioAllocation(BaseModel):
 
     session_id: str = Field(..., description="Unique identifier for this advisory session")
     user_investable_capital: float = Field(
-        ..., gt=0.0, description="Total capital available for investment (USD)"
+        ..., gt=0.0, description="Total wealth this allocation was computed against (USD) — "
+        "the capital base for allocation_pct and allocation_usd, not wealth pre-scaled by invest_pct"
     )
     portfolio: list[PositionAllocation] = Field(
         default_factory=list, description="List of recommended positions"
