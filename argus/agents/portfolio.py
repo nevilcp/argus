@@ -109,9 +109,10 @@ def build_signal_table(all_signals: dict[str, dict], macro: MacroContext) -> str
             stop = f"{stop:.2f}"
         else:
             stop = "N/A"
+        evidence = f"{len(agg.agents_present)}/3" if agg else "0/3"
 
         line = (
-            f"{ticker}: FUND={fsig} TECH={tsig} SENT={ssig} AGG={asig} "
+            f"{ticker}: FUND={fsig} TECH={tsig} SENT={ssig} AGG={asig} Evidence={evidence} "
             f"VaR={risk.var_99:.2%} Beta={risk.portfolio_beta:.2f} Stop={stop} Cap={risk.approved_weight:.1%}"
         )
         lines.append(line)
@@ -151,6 +152,9 @@ SYSTEM_PROMPT = (
     "  10. Before returning: verify cash_reserve_pct = 1.0 − sum(allocation_pct), "
     "      all allocation_pct values are decimals in [0.0, 0.15], "
     "      and every approved ticker is present.\n"
+    "  11. Evidence is agents_present/3 for that ticker's AGG signal. When Evidence is "
+    "      1/3, allocation_pct must not exceed half the ticker's Cap — thin evidence "
+    "      warrants a smaller position, not a skip.\n"
     "\n"
     "OUTPUT: Return ONLY a valid JSON object — no preamble, no markdown, no trailing text."
 )
@@ -260,6 +264,7 @@ class PortfolioManagerAgent:
             "<signal_table>\n"
             "Columns: FUND=fundamental_signal(conviction) TECH=technical_signal(conviction) "
             "SENT=sentiment_signal(conviction) AGG=aggregated_signal(conviction) "
+            "Evidence=agents_present/3 (specialists that actually voted into AGG) "
             "VaR=99%_VaR Beta=portfolio_beta Stop=ATR_stop_loss Cap=risk_engine_ceiling\n"
             f"{signal_table}\n"
             "</signal_table>\n"
@@ -275,7 +280,7 @@ class PortfolioManagerAgent:
             f"{warnings_text if warnings_text else 'None available.'}\n"
             "\n"
             "Step 1 — For each approved ticker: compare AGG signal against Half-Kelly anchor and Cap.\n"
-            "Step 2 — Assign allocation_pct respecting all 10 ALLOCATION RULES from the system prompt.\n"
+            "Step 2 — Assign allocation_pct respecting all 11 ALLOCATION RULES from the system prompt.\n"
             "Step 3 — Compute cash_reserve_pct = 1.0 − sum(allocation_pct). Do not set it independently.\n"
             "Step 4 — Verify: (1) all allocation_pct values are decimals in [0.0, Cap], "
             "(2) cash_reserve_pct + sum(allocation_pct) = 1.0, "

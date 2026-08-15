@@ -215,6 +215,56 @@ def test_missing_indicator_is_reported_in_errors_not_silently_dropped():
     assert any("NVDA" in e for e in final_state["errors"])
 
 
+def test_missing_indicator_still_reaches_aggregation_with_evidence_surfaced():
+    """A ticker missing one specialist still reaches aggregated_signals
+
+    with the gap named in agents_present, and the allocator's prompt shows
+    the reduced evidence rather than treating the ticker as fully evidenced.
+    """
+    with open(FIXTURES_DIR / "market_data" / "session_states.json") as f:
+        session_states = json.load(f)
+    del session_states["NVDA"]["adx_14"]
+
+    state = _initial_state()
+    state["session_states"] = session_states
+
+    with open(FIXTURES_DIR / "llm_responses" / "portfolio.json") as f:
+        portfolio_response = json.load(f)
+    captured_prompts = []
+
+    def _capture_key_fn(user_prompt: str) -> str:
+        captured_prompts.append(user_prompt)
+        return "only"
+
+    portfolio_llm = FixtureLLMClient(
+        {"only": json.dumps(portfolio_response)}, key_fn=_capture_key_fn
+    )
+
+    graph = build_graph(
+        market_data=FixtureMarketDataProvider(),
+        fundamental_llm=_per_ticker_llm("fundamental.json"),
+        sentiment_llm=_per_ticker_llm("sentiment.json"),
+        portfolio_llm=portfolio_llm,
+    )
+    config = {"configurable": {"thread_id": str(uuid4())}}
+
+    with mock.patch("argus.orchestration.graph.get_cultural_memory") as mock_get_cultural_memory:
+        mock_get_cultural_memory.return_value = mock.Mock(
+            retrieve_wisdom=mock.Mock(return_value=[]),
+            retrieve_warnings=mock.Mock(return_value=[]),
+            get_agent_accuracy=mock.Mock(return_value=0.5),
+            store_decision_snapshot=mock.Mock(),
+        )
+        final_state = graph.invoke(state, config)
+
+    agg = final_state["aggregated_signals"]["NVDA"]
+    assert agg.agents_present == ["fundamental", "sentiment"]
+
+    assert len(captured_prompts) == 1
+    assert "NVDA:" in captured_prompts[0]
+    assert "Evidence=2/3" in captured_prompts[0]
+
+
 def test_golden_dag_output_is_stable_across_runs():
     """Two independent invocations of the same fixture-backed graph are byte-identical."""
     first = _run_fixture_graph()
