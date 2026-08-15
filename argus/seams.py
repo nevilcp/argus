@@ -128,10 +128,11 @@ class LiveMarketDataProvider:
 class FixtureMarketDataProvider:
     """Serves pre-captured data from tests/fixtures/market_data/ instead of the network.
 
-    Fixtures are plain JSON keyed by ticker (see scripts/capture_fixtures.py).
-    A ticker missing from a fixture file raises KeyError rather than silently
-    returning empty/zero data — a test exercising a ticker with no fixture
-    should fail loudly, not pass on fabricated data.
+    Fixtures are plain JSON keyed by ticker, hand-captured under
+    tests/fixtures/market_data/. A ticker missing from a fixture file raises
+    KeyError rather than silently returning empty/zero data — a test
+    exercising a ticker with no fixture should fail loudly, not pass on
+    fabricated data.
     """
 
     def __init__(self, fixtures_dir: Path = FIXTURES_DIR / "market_data") -> None:
@@ -356,10 +357,10 @@ class FixtureLLMClient:
     """Returns pre-captured response text instead of calling Groq.
 
     `responses` maps an opaque key (agent's choosing — e.g. ticker) to the
-    exact raw response text the real model previously produced, captured by
-    scripts/capture_fixtures.py from a real langsmith trace. `complete` is
-    keyed by `key_fn(user_prompt)` so a fixture-backed agent test doesn't
-    need to guess call order.
+    exact raw response text the real model previously produced, hand-captured
+    under tests/fixtures/llm_responses/. `complete` is keyed by
+    `key_fn(user_prompt)` so a fixture-backed agent test doesn't need to
+    guess call order.
     """
 
     def __init__(self, responses: dict[str, str], key_fn: Optional[Any] = None) -> None:
