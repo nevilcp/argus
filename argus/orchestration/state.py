@@ -15,6 +15,7 @@ Not responsible for:
 from __future__ import annotations
 
 import operator
+from datetime import datetime
 from typing import Annotated, Any, Optional, TypedDict
 
 import pandas as pd
@@ -59,6 +60,13 @@ class ARGUSState(TypedDict):
     session_seed: Optional[int]
     """Integer date stamp used to deterministically seed anonymization in backtests."""
 
+    as_of: Optional[datetime]
+    """Point-in-time cutoff for cultural-memory reads: excludes trade outcomes and
+    decision documents stored after this timestamp (see memory.cultural's `as_of`
+    parameters). None (default) applies no filtering — the live production path.
+    Set by backtesting.replay.replay_session's closed_loop arm to the replayed
+    session's own capture date, so it can't read outcomes that hadn't happened yet."""
+
     # ── Node 1: fetch_price_history ───────────────────────────────────────────
     price_history: dict[str, pd.Series]
     """Mapping of ticker → daily close price Series, populated by fetch_price_history."""
@@ -68,7 +76,10 @@ class ARGUSState(TypedDict):
 
     # ── Node 2: macro_analysis ────────────────────────────────────────────────
     macro_context: Optional[MacroContext]
-    """Live MacroContext from MacroStatisticalAgent; used as multiplier source by specialist agents."""
+    """Live MacroContext from MacroStatisticalAgent. Runs in parallel with, not ahead
+    of, the three specialist agents below — none of them consumes it. Its
+    agent_multipliers are read once, by orchestration/aggregator.py, as a per-agent
+    vote-weight scalar at signal-aggregation time."""
 
     # ── Node 3: Parallel specialist agents ───────────────────────────────────
     technical_signals: dict[str, TechnicalSignal]
@@ -106,7 +117,8 @@ class ARGUSState(TypedDict):
 
     errors: Annotated[list[str], operator.add]
     """Accumulated error messages from all nodes, used for diagnostics and
-    alerting. Needs the operator.add reducer: technical_analysis,
-    fundamental_analysis, sentiment_analysis, and retrieve_cultural_memory
-    write this key concurrently in the macro_analysis fan-out, and LangGraph
-    raises InvalidUpdateError on concurrent writes to a key without one."""
+    alerting. Needs the operator.add reducer: macro_analysis,
+    technical_analysis, fundamental_analysis, and sentiment_analysis all run
+    in parallel off fetch_price_history and write this key concurrently, and
+    LangGraph raises InvalidUpdateError on concurrent writes to a key
+    without one."""

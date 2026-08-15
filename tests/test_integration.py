@@ -173,6 +173,7 @@ class TestEndToEnd:
             universe=["AAPL", "MSFT"],
             backtest_mode=False,
             session_seed=None,
+            as_of=None,
             session_states={},
             price_history={},
             technical_signals={},
