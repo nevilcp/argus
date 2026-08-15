@@ -285,8 +285,8 @@ class ReconciliationParams:
     min_abs_return_for_storage: float = p(
         0.01,
         Provenance.ARBITRARY,
-        "matches cultural.store_trade_outcome's existing |return| > 1% "
-        "storage filter; kept here so both live in one place",
+        "matches cultural.store_trade_outcome's SUCCESSFUL/FAILED/FLAT |return| "
+        "classification threshold; kept here so both live in one place",
     )
 
 

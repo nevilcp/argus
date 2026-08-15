@@ -84,7 +84,8 @@ def test_build_signal_table():
     assert "AAPL:" in table
     assert "MSFT:" in table
     assert "TSLA:" not in table
-    assert "MACRO: EXPANSION | VIX 12.50 (VixRegime.LOW) | SectorSignal.GROWTH_FAVORED" in table
+    # .value, not str(Enum) — py>=3.11 would otherwise leak the class name into the prompt
+    assert "MACRO: EXPANSION | VIX 12.50 (LOW) | GROWTH_FAVORED" in table
     assert "FUND=BULLISH(0.80)" in table
     assert "TECH=NEUTRAL(0.50)" in table
     assert "FUND=BEARISH(0.90)" in table

@@ -1,17 +1,25 @@
 """
 tests/test_cultural.py
 
-Unit tests for CulturalMemoryManager.get_agent_accuracy's shrinkage-toward-prior
-behavior. Builds the manager via object.__new__ plus a stub .collection rather
-than the real constructor, which pulls in chromadb + sentence-transformers
-(the optional [models] extra) just to exercise arithmetic over already-stored
-metadata.
+Unit tests for CulturalMemoryManager. Builds the manager via object.__new__ plus a
+stub .collection rather than the real constructor, which pulls in chromadb +
+sentence-transformers (the optional [models] extra) just to exercise arithmetic
+and query-shaping over already-stored metadata.
 """
 
+from datetime import datetime
 from unittest import mock
 
-from argus.memory.cultural import CulturalMemoryManager
-from argus.params import MEMORY
+from argus.memory.cultural import CulturalMemoryManager, get_cultural_memory
+from argus.params import MEMORY, RECONCILIATION
+from argus.schemas.signals import (
+    ARGUSDecision,
+    MacroContext,
+    Regime,
+    SectorSignal,
+    VixRegime,
+    YieldCurve,
+)
 
 
 def _manager_with_metadatas(metadatas: list[dict]) -> CulturalMemoryManager:
@@ -20,6 +28,36 @@ def _manager_with_metadatas(metadatas: list[dict]) -> CulturalMemoryManager:
     manager.collection.count.return_value = len(metadatas)
     manager.collection.get.return_value = {"metadatas": metadatas}
     return manager
+
+
+def _manager_with_query_collection() -> CulturalMemoryManager:
+    manager = object.__new__(CulturalMemoryManager)
+    manager.collection = mock.Mock()
+    manager.collection.count.return_value = 5
+    manager.collection.query.return_value = {"documents": [["doc"]]}
+    return manager
+
+
+def _macro(regime: Regime = Regime.EXPANSION, vix_regime: VixRegime = VixRegime.MEDIUM) -> MacroContext:
+    return MacroContext(
+        fed_funds=4.0,
+        cpi_yoy=3.0,
+        unemployment=4.0,
+        t10y2y=0.1,
+        consumer_sentiment=60.0,
+        vix_level=18.0,
+        macro_regime=regime,
+        regime_confidence=0.7,
+        model_healthy=True,
+        interest_rate_trend="STABLE",
+        yield_curve_shape=YieldCurve.NORMAL,
+        vix_regime=vix_regime,
+        vix_percentile=40.0,
+        inflation_trajectory="STABLE",
+        sector_rotation_signal=SectorSignal.GROWTH_FAVORED,
+        agent_multipliers={"fundamental": 1.0, "technical": 1.0, "sentiment": 1.0},
+        timestamp=datetime.now(),
+    )
 
 
 def test_zero_observations_returns_prior():
@@ -51,3 +89,143 @@ def test_large_sample_converges_to_the_raw_win_rate():
     manager = _manager_with_metadatas(metadatas)
 
     assert abs(manager.get_agent_accuracy("technical") - 0.9) < 0.01
+
+
+def test_flat_outcomes_count_as_non_wins_in_the_denominator():
+    """A FLAT-tagged trade lowers accuracy, not vanishes from the sample.
+
+    Regression test for C7: get_agent_accuracy's win rate must be P(win | stored),
+    not P(win | |return| > 1%) — a FLAT trade must inflate n without inflating wins.
+    """
+    metadatas = [
+        {"outcome": "SUCCESSFUL", "primary_driver": "technical"},
+        {"outcome": "FLAT", "primary_driver": "technical"},
+    ]
+    manager = _manager_with_metadatas(metadatas)
+
+    accuracy = manager.get_agent_accuracy("technical")
+    k = MEMORY.accuracy_shrinkage_k
+    expected = (1 + k * 0.5) / (2 + k)
+
+    assert accuracy == expected
+
+
+def test_get_agent_accuracy_as_of_filters_on_timestamp():
+    """as_of adds a timestamp upper bound to the metadata filter, alongside regime."""
+    manager = _manager_with_metadatas([{"outcome": "SUCCESSFUL", "primary_driver": "technical"}])
+    as_of = datetime(2026, 1, 1)
+
+    manager.get_agent_accuracy("technical", regime="EXPANSION", as_of=as_of)
+
+    where = manager.collection.get.call_args.kwargs["where"]
+    assert where == {
+        "$and": [
+            {"primary_driver": "technical"},
+            {"regime": "EXPANSION"},
+            {"timestamp": {"$lte": as_of.isoformat()}},
+        ]
+    }
+
+
+def test_store_trade_outcome_persists_flat_returns_instead_of_dropping_them():
+    """A |return| <= 1% trade is stored as FLAT, not silently discarded.
+
+    Regression test for C7.
+    """
+    manager = _manager_with_metadatas([])
+    decision = ARGUSDecision(ticker="AAPL", session_timestamp=datetime.now())
+
+    manager.store_trade_outcome(
+        decision,
+        actual_return_pct=RECONCILIATION.min_abs_return_for_storage / 2,
+        holding_days=3,
+        exit_reason="time_stop",
+        primary_driver="technical",
+    )
+
+    manager.collection.upsert.assert_called_once()
+    metadata = manager.collection.upsert.call_args.kwargs["metadatas"][0]
+    assert metadata["outcome"] == "FLAT"
+
+
+def test_store_trade_outcome_writes_vix_regime_value_not_enum_repr():
+    """The stored document text uses VixRegime's .value, not its str(Enum) repr.
+
+    Regression test for C6: Python >= 3.11 includes the class name in a
+    str-Enum's default __format__, so an f-string without .value would write
+    "VixRegime.HIGH" into the document instead of "HIGH".
+    """
+    manager = _manager_with_metadatas([])
+    decision = ARGUSDecision(
+        ticker="AAPL",
+        session_timestamp=datetime.now(),
+        macro=_macro(vix_regime=VixRegime.HIGH),
+    )
+
+    manager.store_trade_outcome(
+        decision,
+        actual_return_pct=0.05,
+        holding_days=3,
+        exit_reason="target_hit",
+        primary_driver="technical",
+    )
+
+    document = manager.collection.upsert.call_args.kwargs["documents"][0]
+    assert "VIX regime: HIGH" in document
+    assert "VixRegime" not in document
+
+
+def test_retrieve_wisdom_and_retrieve_warnings_apply_a_symmetric_regime_filter():
+    """retrieve_wisdom filters on regime exactly like retrieve_warnings does.
+
+    Regression test for C5: successes shouldn't be drawn from every regime while
+    failures are confined to the current one.
+    """
+    macro = _macro(regime=Regime.CONTRACTION)
+
+    wisdom_manager = _manager_with_query_collection()
+    wisdom_manager.retrieve_wisdom(macro, "mixed technicals")
+    wisdom_where = wisdom_manager.collection.query.call_args.kwargs["where"]
+    assert wisdom_where == {"$and": [{"outcome": "SUCCESSFUL"}, {"regime": "CONTRACTION"}]}
+
+    warnings_manager = _manager_with_query_collection()
+    warnings_manager.retrieve_warnings(macro)
+    warnings_where = warnings_manager.collection.query.call_args.kwargs["where"]
+    assert warnings_where == {"$and": [{"outcome": "FAILED"}, {"regime": "CONTRACTION"}]}
+
+
+def test_retrieve_wisdom_as_of_filters_on_timestamp():
+    """as_of adds a timestamp upper bound to retrieve_wisdom's where clause."""
+    manager = _manager_with_query_collection()
+    as_of = datetime(2026, 1, 1)
+
+    manager.retrieve_wisdom(_macro(regime=Regime.EXPANSION), "mixed technicals", as_of=as_of)
+
+    where = manager.collection.query.call_args.kwargs["where"]
+    assert where == {
+        "$and": [
+            {"outcome": "SUCCESSFUL"},
+            {"regime": "EXPANSION"},
+            {"timestamp": {"$lte": as_of.isoformat()}},
+        ]
+    }
+
+
+def test_get_cultural_memory_ignores_a_later_persist_dir_and_warns(
+    monkeypatch, caplog, tmp_path
+):
+    """A second get_cultural_memory() call with a different persist_dir cannot
+
+    reconfigure the already-constructed singleton, and now logs instead of
+    silently ignoring it. Regression test for C8.
+    """
+    import argus.memory.cultural as cultural_module
+
+    fake_manager = mock.Mock(persist_dir=str(tmp_path / "first"))
+    monkeypatch.setattr(cultural_module, "_cultural_memory", fake_manager)
+
+    with caplog.at_level("WARNING", logger="argus.cultural_memory"):
+        returned = get_cultural_memory(str(tmp_path / "second"))
+
+    assert returned is fake_manager
+    assert any("ignored" in r.message for r in caplog.records)
