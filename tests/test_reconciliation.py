@@ -529,7 +529,7 @@ def test_load_decisions_from_checkpoints_round_trips_a_real_graph_run(tmp_path):
         mock_get_cultural_memory.return_value = mock.Mock(
             retrieve_wisdom=mock.Mock(return_value=[]),
             retrieve_warnings=mock.Mock(return_value=[]),
-            get_agent_accuracy=mock.Mock(return_value=0.5),
+            get_agent_accuracy=mock.Mock(return_value=(0.5, 0)),
             store_decision_snapshot=mock.Mock(),
         )
         graph.invoke({**state}, {"configurable": {"thread_id": "test-thread"}})

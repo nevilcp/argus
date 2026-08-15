@@ -61,9 +61,9 @@ def _macro(regime: Regime = Regime.EXPANSION, vix_regime: VixRegime = VixRegime.
 
 
 def test_zero_observations_returns_prior():
-    """With no stored outcomes, accuracy falls back to the prior."""
+    """With no stored outcomes, accuracy falls back to the prior with n=0."""
     manager = _manager_with_metadatas([])
-    assert manager.get_agent_accuracy("technical") == 0.5
+    assert manager.get_agent_accuracy("technical") == (0.5, 0)
 
 
 def test_small_sample_shrinks_toward_prior_instead_of_reporting_the_raw_rate():
@@ -72,12 +72,13 @@ def test_small_sample_shrinks_toward_prior_instead_of_reporting_the_raw_rate():
     metadatas = [{"outcome": "SUCCESSFUL", "primary_driver": "technical"}] * 2
     manager = _manager_with_metadatas(metadatas)
 
-    accuracy = manager.get_agent_accuracy("technical")
+    accuracy, n = manager.get_agent_accuracy("technical")
     k = MEMORY.accuracy_shrinkage_k
     expected = (2 + k * 0.5) / (2 + k)
 
     assert accuracy == expected
     assert 0.5 < accuracy < 1.0
+    assert n == 2
 
 
 def test_large_sample_converges_to_the_raw_win_rate():
@@ -88,7 +89,9 @@ def test_large_sample_converges_to_the_raw_win_rate():
     )
     manager = _manager_with_metadatas(metadatas)
 
-    assert abs(manager.get_agent_accuracy("technical") - 0.9) < 0.01
+    accuracy, n = manager.get_agent_accuracy("technical")
+    assert abs(accuracy - 0.9) < 0.01
+    assert n == 1000
 
 
 def test_flat_outcomes_count_as_non_wins_in_the_denominator():
@@ -103,11 +106,12 @@ def test_flat_outcomes_count_as_non_wins_in_the_denominator():
     ]
     manager = _manager_with_metadatas(metadatas)
 
-    accuracy = manager.get_agent_accuracy("technical")
+    accuracy, n = manager.get_agent_accuracy("technical")
     k = MEMORY.accuracy_shrinkage_k
     expected = (1 + k * 0.5) / (2 + k)
 
     assert accuracy == expected
+    assert n == 2
 
 
 def test_get_agent_accuracy_as_of_filters_on_timestamp():

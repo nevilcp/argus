@@ -19,7 +19,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
+import json
 import logging
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -61,6 +64,12 @@ def main() -> None:
         default=f"{settings.ARGUS_DATA_DIR}/decisions.jsonl",
         help="JSONL file each cycle's decisions are appended to",
     )
+    parser.add_argument(
+        "--result-out",
+        default=f"{settings.ARGUS_DATA_DIR}/collector_result.json",
+        help="Where to write this cycle's CollectionResult as JSON, for the "
+        "scheduled workflow to fold into status.json",
+    )
     args = parser.parse_args()
 
     universe = [t.strip() for t in args.universe.split(",") if t.strip()] if args.universe else settings.ARGUS_UNIVERSE
@@ -78,6 +87,9 @@ def main() -> None:
         )
     )
     pipeline.buffer.close()
+
+    Path(args.result_out).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.result_out).write_text(json.dumps(dataclasses.asdict(result)))
 
     print(f"ran={result.ran} reason={result.reason!r}")
     if result.ran:

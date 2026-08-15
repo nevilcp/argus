@@ -266,6 +266,7 @@ class AnalysisResponse(BaseModel):
     vix_level: float
     governor_report: dict
     timestamp: str
+    errors: list[str] = []
 
 
 @app.get("/health")
@@ -428,6 +429,7 @@ async def analyze(req: AnalysisRequest):
         vix_level=vix_level,
         governor_report=governor.get_usage_report(),
         timestamp=datetime.now().isoformat(),
+        errors=final_state.get("errors") or [],
     )
 
 

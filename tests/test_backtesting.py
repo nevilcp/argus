@@ -57,7 +57,7 @@ def test_replay_session_closed_loop_scopes_cultural_memory_to_the_session_date()
     mock_memory = mock.Mock(
         retrieve_wisdom=mock.Mock(return_value=[]),
         retrieve_warnings=mock.Mock(return_value=[]),
-        get_agent_accuracy=mock.Mock(return_value=0.5),
+        get_agent_accuracy=mock.Mock(return_value=(0.5, 0)),
         store_decision_snapshot=mock.Mock(),
     )
     with mock.patch("argus.orchestration.graph.get_cultural_memory", return_value=mock_memory):
