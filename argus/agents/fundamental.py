@@ -54,6 +54,51 @@ _SECTOR_PE_MEDIANS: dict[str, float] = {
 }
 _DEFAULT_PE_MEDIAN = 20.0
 
+# Ratios fetched from market_data.fundamentals(ticker): measured data, never
+# LLM output. The LLM only ever supplies signal/conviction/moat_score/reasoning.
+_MEASURED_FUNDAMENTAL_FIELDS = (
+    "sector",
+    "industry",
+    "marketCap",
+    "pe_ttm",
+    "p_fcf",
+    "revenue_growth_yoy",
+    "operating_margin",
+    "net_margin",
+    "fcf_yield",
+    "debt_to_equity",
+    "current_ratio",
+    "roe",
+    "roic",
+)
+
+
+def _use_backtest_seed(backtest_mode: bool, session_seed: Optional[int]) -> bool:
+    """Decides whether a session should anonymize and derive as_of_date from session_seed.
+
+    Args:
+        backtest_mode: Whether the caller requested backtest anonymization.
+        session_seed: Session seed, if any. ``0`` is a legal seed — checked via
+            ``is not None``, not truthiness, since ``bool(0)`` is False.
+
+    Returns:
+        True if backtest anonymization/date-seeding should apply.
+    """
+    return backtest_mode and session_seed is not None
+
+
+def _session_seed_to_date(session_seed: int) -> date:
+    """Parses a session_seed integer date stamp into a calendar date.
+
+    Args:
+        session_seed: Integer date stamp (e.g. 20240115), as documented on
+            ``anonymize_ticker``.
+
+    Returns:
+        The corresponding calendar date.
+    """
+    return datetime.strptime(str(session_seed), "%Y%m%d").date()
+
 
 def anonymize_ticker(ticker: str, session_seed: int) -> str:
     """Generates a deterministic hash-based identifier to mask real tickers during backtesting.
@@ -195,44 +240,53 @@ class FundamentalCache:
 
     Fundamental data changes infrequently; caching avoids redundant LLM calls
     within a week-long window without meaningfully degrading signal quality.
+
+    Keyed on (ticker, session_seed) rather than ticker alone: two backtest
+    sessions replaying the same ticker on different simulated dates must not
+    serve each other's cached signal, and a live call (session_seed=None)
+    must not be conflated with either.
     """
 
     def __init__(self) -> None:
-        """Initializes an empty per-ticker cache."""
-        self._cache: dict[str, tuple[FundamentalSignal, datetime]] = {}
+        """Initializes an empty per-(ticker, session_seed) cache."""
+        self._cache: dict[tuple[str, Optional[int]], tuple[FundamentalSignal, datetime]] = {}
         self._ttl_days = 7
 
-    def get(self, ticker: str) -> Optional[FundamentalSignal]:
+    def get(self, ticker: str, session_seed: Optional[int] = None) -> Optional[FundamentalSignal]:
         """Returns a cached signal if it exists and has not exceeded the TTL.
 
         Args:
             ticker: Equity ticker symbol.
+            session_seed: Session scope the signal was cached under.
 
         Returns:
             Cached FundamentalSignal, or None if absent or expired.
         """
-        if ticker in self._cache:
-            signal, cached_at = self._cache[ticker]
+        key = (ticker, session_seed)
+        if key in self._cache:
+            signal, cached_at = self._cache[key]
             if (datetime.now() - cached_at).days < self._ttl_days:
                 return signal
         return None
 
-    def set(self, ticker: str, signal: FundamentalSignal) -> None:
+    def set(self, ticker: str, signal: FundamentalSignal, session_seed: Optional[int] = None) -> None:
         """Stores a fundamental signal coupled with the current timestamp.
 
         Args:
             ticker: Equity ticker symbol.
             signal: Validated FundamentalSignal to cache.
+            session_seed: Session scope to cache the signal under.
         """
-        self._cache[ticker] = (signal, datetime.now())
+        self._cache[(ticker, session_seed)] = (signal, datetime.now())
 
-    def is_stale(self, ticker: str) -> bool:
-        """Returns True if the ticker has no valid cached signal.
+    def is_stale(self, ticker: str, session_seed: Optional[int] = None) -> bool:
+        """Returns True if the (ticker, session_seed) has no valid cached signal.
 
         Args:
             ticker: Equity ticker symbol.
+            session_seed: Session scope to check.
         """
-        return self.get(ticker) is None
+        return self.get(ticker, session_seed) is None
 
 
 class FundamentalAgent:
@@ -295,8 +349,8 @@ class FundamentalAgent:
         Returns:
             A validated FundamentalSignal, or None if all attempts fail.
         """
-        if not self.cache.is_stale(ticker):
-            cached = self.cache.get(ticker)
+        if not self.cache.is_stale(ticker, session_seed):
+            cached = self.cache.get(ticker, session_seed)
             if cached:
                 logger.debug("FundamentalAgent.analyze: Cache hit for %s", ticker)
                 return cached
@@ -317,17 +371,30 @@ class FundamentalAgent:
                 errors.append(f"fundamental_analysis[{ticker}]: failed to fetch fundamentals: {e}")
             return None
 
+        as_of_date = date.today()
+        anon_id = None
+        if _use_backtest_seed(backtest_mode, session_seed):
+            assert session_seed is not None
+            as_of_date = _session_seed_to_date(session_seed)
+            anon_id = anonymize_ticker(ticker, session_seed)
+
         pit_data: dict[str, Any] = {
             "fundamentals": fundamentals,
-            "as_of_date": date.today().isoformat(),
+            "as_of_date": as_of_date.isoformat(),
         }
-
-        anon_id = anonymize_ticker(ticker, session_seed) if backtest_mode and session_seed else None
         prompt = build_compact_prompt(ticker, pit_data, anon_id)
 
+        last_error: Optional[str] = None
         for attempt in range(3):
             try:
-                raw = self.llm_client.complete(SYSTEM_PROMPT, prompt).strip()
+                user_prompt = prompt
+                if last_error is not None:
+                    user_prompt = (
+                        f"{prompt}\n\n"
+                        f"Your previous response was invalid: {last_error}\n"
+                        "Return a corrected JSON object satisfying the schema above."
+                    )
+                raw = self.llm_client.complete(SYSTEM_PROMPT, user_prompt).strip()
 
                 if raw.startswith("```"):
                     parts = raw.split("```")
@@ -346,20 +413,19 @@ class FundamentalAgent:
                 data["timestamp"] = datetime.now().isoformat()
                 data["api_calls_used"] = 1
 
+                # All measured ratios come from the fetched payload, never the LLM
+                # echo — the LLM only supplies signal/conviction/moat_score/reasoning.
                 f = pit_data.get("fundamentals", {})
-                data["sector"] = f.get("sector", "Unknown") or "Unknown"
-                data["industry"] = f.get("industry", "Unknown") or "Unknown"
-                data["marketCap"] = f.get("marketCap")
-                data["p_fcf"] = f.get("p_fcf")
-                data["net_margin"] = f.get("net_margin")
-                data["current_ratio"] = f.get("current_ratio")
-                data["roe"] = f.get("roe")
+                for key in _MEASURED_FUNDAMENTAL_FIELDS:
+                    data[key] = f.get(key)
+                data["sector"] = data["sector"] or "Unknown"
+                data["industry"] = data["industry"] or "Unknown"
 
                 if "reasoning" in data and isinstance(data["reasoning"], str):
                     data["reasoning"] = data["reasoning"][:400]
 
                 signal = FundamentalSignal.model_validate(data)
-                self.cache.set(ticker, signal)
+                self.cache.set(ticker, signal, session_seed)
                 logger.debug(
                     "[Fundamental] Analysis complete for %s -> %s", ticker, signal.signal.value
                 )
@@ -369,6 +435,7 @@ class FundamentalAgent:
                 logger.warning(
                     "[Fundamental] Attempt %d parse error for %s: %s", attempt + 1, ticker, e
                 )
+                last_error = str(e)
                 if attempt == 2:
                     if errors is not None:
                         errors.append(
