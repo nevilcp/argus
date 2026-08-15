@@ -188,11 +188,23 @@ def test_golden_dag_runs_offline_and_produces_a_valid_allocation():
     assert final_state.get("sentiment_signals")
     assert final_state.get("risk_assessments")
     assert final_state.get("aggregated_signals")
-    assert final_state.get("errors") == []
+
+    # The fixture LLM response proposes allocations for three VETO'd tickers;
+    # code-level enforcement (PR 4, PA-1) zeroes them rather than trusting the
+    # prompt, and records each correction here instead of leaving errors empty.
+    errors = final_state.get("errors")
+    assert errors is not None and len(errors) == 3
+    for ticker in ("MSFT", "JPM", "GOOGL"):
+        assert any(
+            f"zeroed {ticker} allocation (risk verdict VETO)" in e for e in errors
+        )
 
     alloc = final_state.get("portfolio_allocation")
     assert alloc is not None
     assert len(alloc.portfolio) == len(UNIVERSE)
+    for pos in alloc.portfolio:
+        if pos.ticker in ("MSFT", "JPM", "GOOGL"):
+            assert pos.allocation_pct == 0.0
 
 
 def test_missing_indicator_is_reported_in_errors_not_silently_dropped():
