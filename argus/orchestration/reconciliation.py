@@ -66,21 +66,26 @@ def credit_primary_driver(
     (did the consensus direction flip, how large was this agent's own
     baseline weighted vote) and the largest-scoring removal is credited.
 
-    A single scalar delta on the ablated call's final `conviction` doesn't
-    work here: aggregate()'s bull/bear/neutral pools are normalized to a
-    percentage of the total, so whenever ablation leaves exactly one voting
-    agent, that agent trivially owns 100% of its pool regardless of its own
-    magnitude — the final conviction saturates near AGGREGATOR.max_conviction
-    either way, and a delta against it can't tell two very differently-sized
-    lone agents apart. Direction-flip-first, magnitude-second avoids that:
-    an agent whose removal flips the consensus was clearly essential
-    (ranked above any non-flipping removal); among removals that don't flip
-    the outcome, the agent that contributed more raw vote (from the
-    already-computed baseline `weighted_votes` — pools are additive sums of
-    independent per-agent votes, so a removed agent's marginal effect on its
-    pool total is exactly its own vote, no need to re-derive it per
-    ablation) was the bigger contributor. This avoids exact Shapley over the
-    2^3 - 1 coalitions.
+    A single scalar delta on the ablated call's final `conviction` still
+    doesn't work here, though not for the reason it once did: aggregate()'s
+    pools are now normalized against the vote mass all three agents *could*
+    cast (see Design Decision A, issue #24), not the votes actually cast, so
+    a lone remaining agent no longer trivially saturates its ablated
+    conviction near AGGREGATOR.max_conviction — it scales with that agent's
+    own magnitude instead. But the ablated conviction is still the wrong
+    thing to diff: it's the consensus *direction* an ablation settles on
+    that determines whether the resulting trade changes, and an agent whose
+    removal flips that direction has a categorically larger effect than one
+    whose removal only moves the number. Direction-flip-first,
+    magnitude-second captures that ordering directly: an agent whose removal
+    flips the consensus was clearly essential (ranked above any
+    non-flipping removal); among removals that don't flip the outcome, the
+    agent that contributed more raw vote (from the already-computed
+    baseline `weighted_votes` — pools are additive sums of independent
+    per-agent votes, so a removed agent's marginal effect on its pool total
+    is exactly its own vote, no need to re-derive it per ablation) was the
+    bigger contributor. This avoids exact Shapley over the 2^3 - 1
+    coalitions.
 
     Each ablated rerun replays `decision.aggregated.reliability` — the same
     reliability dict the baseline aggregation used — rather than an

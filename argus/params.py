@@ -35,7 +35,7 @@ from dataclasses import dataclass, field, fields
 from enum import Enum
 from typing import Any
 
-PARAMS_VERSION = 5
+PARAMS_VERSION = 6
 
 
 class Provenance(str, Enum):
@@ -158,7 +158,12 @@ class AggregatorParams:
     weight_fundamental: float = p(0.35, Provenance.ARBITRARY, "no basis for relative agent weighting")
     weight_technical: float = p(0.35, Provenance.ARBITRARY, "no basis for relative agent weighting")
     weight_sentiment: float = p(0.30, Provenance.ARBITRARY, "no basis for relative agent weighting")
-    contraction_conviction_threshold: float = p(0.70, Provenance.ARBITRARY, "no basis for this specific threshold")
+    contraction_conviction_threshold: float = p(
+        0.45,
+        Provenance.ARBITRARY,
+        "restated post-issue-24-Decision-A against achievable conviction (~0.665 for a "
+        "two-agent unanimous call), not the pre-A 1.0 scale; no basis for this specific value",
+    )
     contraction_conviction_reduction: float = p(0.6, Provenance.ARBITRARY, "no basis for this specific multiplier")
     max_conviction: float = p(0.95, Provenance.ARBITRARY, "kept below 1.0 so no aggregate claims certainty")
 

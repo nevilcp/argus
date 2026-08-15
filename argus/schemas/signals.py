@@ -395,7 +395,7 @@ class AggregatedSignal(BaseModel):
 
     ticker: str = Field(..., description="Equity ticker symbol")
     signal: Signal = Field(..., description="Aggregated directional label")
-    conviction: float = Field(..., ge=0.0, le=1.0, description="Aggregated conviction score")
+    conviction: float = Field(..., ge=0.0, le=_CONVICTION_MAX, description="Aggregated conviction score")
     weighted_votes: dict[str, float] = Field(
         ...,
         description=(
