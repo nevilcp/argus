@@ -35,6 +35,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from chromadb.errors import ChromaError
+from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, StateGraph
@@ -78,6 +80,60 @@ def build_checkpoint_serde() -> JsonPlusSerializer:
             ("argus.schemas.signals", cls) for cls in _CHECKPOINT_MODEL_CLASSES
         ]
     )
+
+
+def _open_checkpointer(checkpoint_db_path: str) -> Optional[SqliteSaver]:
+    """Opens a fresh SqliteSaver connection, or None if the path can't be opened.
+
+    Args:
+        checkpoint_db_path: SQLite file to checkpoint to.
+
+    Returns:
+        A new SqliteSaver, or None on any I/O failure (a checkpointer-less
+        compile still runs the graph, just without resumability).
+    """
+    try:
+        if checkpoint_db_path != ":memory:":
+            Path(checkpoint_db_path).parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(checkpoint_db_path, check_same_thread=False)
+        return SqliteSaver(conn, serde=build_checkpoint_serde())
+    except Exception:
+        return None
+
+
+class _CheckpointedGraph:
+    """Compiles the DAG fresh, with its own SQLite connection, on every invoke().
+
+    StateGraph.compile() does no I/O beyond opening the checkpoint connection;
+    the expensive part — constructing the six agents (LLM clients, the macro
+    HMM classifier load from disk) — happens once in build_graph() and is
+    captured in the node closures this wraps. Concurrent callers (parallel
+    /analyze requests, the unattended collector loop) therefore each get their
+    own sqlite3.Connection instead of contending on one shared checkpointer.
+    """
+
+    def __init__(self, builder: StateGraph, checkpoint_db_path: str):
+        """Stores the built (but not compiled) graph and its checkpoint path."""
+        self._builder = builder
+        self._checkpoint_db_path = checkpoint_db_path
+
+    def invoke(self, state: ARGUSState, config: Optional[RunnableConfig] = None) -> dict:
+        """Compiles with a fresh checkpointer and invokes the graph once.
+
+        Args:
+            state: Initial ARGUSState for this session.
+            config: LangGraph run config, e.g. ``{"configurable": {"thread_id": ...}}``.
+
+        Returns:
+            The final ARGUSState dict produced by the run.
+        """
+        checkpointer = _open_checkpointer(self._checkpoint_db_path)
+        compiled = self._builder.compile(checkpointer=checkpointer)
+        try:
+            return compiled.invoke(state, config)
+        finally:
+            if checkpointer is not None:
+                checkpointer.conn.close()
 
 
 def _summarize_technical_posture(aggregated_signals: dict[str, AggregatedSignal]) -> str:
@@ -161,14 +217,16 @@ def build_graph(
             client.
         portfolio_llm: LLMClient for PortfolioManagerAgent. Defaults to a real
             Groq client.
-        checkpoint_db_path: SQLite file the compiled graph checkpoints
-            ARGUSState to after each run. Exposed (rather than hardcoded) so
-            tests — and argus/orchestration/reconciliation.py's own tests —
-            can point it at a temp file instead of the real
-            argus_graph.db production callers use.
+        checkpoint_db_path: SQLite file each invocation checkpoints ARGUSState
+            to. Exposed (rather than hardcoded) so tests — and
+            argus/orchestration/reconciliation.py's own tests — can point it
+            at a temp file instead of the real argus_graph.db production
+            callers use.
 
     Returns:
-        A compiled LangGraph graph, ready for .invoke()/.ainvoke().
+        A _CheckpointedGraph, ready for .invoke(). Recompiles with a fresh
+        checkpointer connection on every call rather than baking one
+        connection into a single compiled graph — see _CheckpointedGraph.
     """
     market_data = market_data or LiveMarketDataProvider()
 
@@ -303,9 +361,11 @@ def build_graph(
 
         try:
             memory = get_cultural_memory()
-        except ImportError as exc:
-            # sentence-transformers/torch are an optional [models] extra; their
-            # absence degrades to the same empty result as no macro context
+        except (ImportError, OSError, ChromaError) as exc:
+            # ImportError: sentence-transformers/torch are an optional [models]
+            # extra. OSError/ChromaError: persist_dir unwritable or an
+            # incompatible on-disk Chroma schema. All three degrade to the same
+            # empty result as no macro context, rather than crashing the node
             logger.warning("node_retrieve_cultural_memory: cultural memory unavailable: %s", exc)
             return {"cultural_memory": {"wisdom": [], "warnings": []}}
 
@@ -354,9 +414,9 @@ def build_graph(
                 }
                 reliability = {name: accuracy[name][0] for name in agent_names}
                 reliability_n = {name: accuracy[name][1] for name in agent_names}
-            except ImportError as exc:
-                # Same optional-dependency guard as node_retrieve_cultural_memory;
-                # degrade every agent to the 0.5 neutral prior rather than crash
+            except (ImportError, OSError, ChromaError) as exc:
+                # Same guard as node_retrieve_cultural_memory; degrade every
+                # agent to the 0.5 neutral prior rather than crash
                 logger.warning("node_signal_aggregation: cultural memory unavailable: %s", exc)
                 reliability = {name: 0.5 for name in agent_names}
                 reliability_n = {name: 0 for name in agent_names}
@@ -511,8 +571,13 @@ def build_graph(
         Returns:
             Partial state update with ``portfolio_allocation``.
         """
+        # Scoped to tickers with an aggregated signal, not the whole universe: a
+        # ticker every specialist failed on has nothing to allocate against, and
+        # an all-None entry would still pass build_signal_table's is-approved
+        # filter through to _is_risk_approved(None) -> False silently rather than
+        # never appearing in all_signals at all
         signals_dict = {}
-        for ticker in state["universe"]:
+        for ticker in state.get("aggregated_signals", {}):
             signals_dict[ticker] = {
                 "technical": state.get("technical_signals", {}).get(ticker),
                 "fundamental": state.get("fundamental_signals", {}).get(ticker),
@@ -543,12 +608,11 @@ def build_graph(
             profile, signals_dict, macro, wisdom, warnings, adjustments=errors
         )
         if alloc is None:
+            # allocate() has already appended the specific failing stage (LLM call,
+            # JSON parse, response enforcement, or schema validation) to errors
             logger.error(
-                "node_portfolio_allocation: PortfolioManagerAgent returned None (LLM API failure). "
+                "node_portfolio_allocation: PortfolioManagerAgent returned None. "
                 "Skipping portfolio_allocation to allow graceful exit."
-            )
-            errors.append(
-                "portfolio_allocation: PortfolioManagerAgent returned None (LLM API failure)"
             )
             return {"errors": errors}
         return {"portfolio_allocation": alloc, "errors": errors}
@@ -577,8 +641,8 @@ def build_graph(
 
         try:
             memory = get_cultural_memory()
-        except ImportError as exc:
-            # Same optional-dependency guard as node_retrieve_cultural_memory
+        except (ImportError, OSError, ChromaError) as exc:
+            # Same guard as node_retrieve_cultural_memory
             logger.warning("node_log_decisions: cultural memory unavailable: %s", exc)
             memory = None
 
@@ -654,12 +718,4 @@ def build_graph(
     builder.add_edge("portfolio_allocation", "log_decisions")
     builder.add_edge("log_decisions", END)
 
-    try:
-        if checkpoint_db_path != ":memory:":
-            Path(checkpoint_db_path).parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(checkpoint_db_path, check_same_thread=False)
-        checkpointer = SqliteSaver(conn, serde=build_checkpoint_serde())
-    except Exception:
-        checkpointer = None
-
-    return builder.compile(checkpointer=checkpointer)
+    return _CheckpointedGraph(builder, checkpoint_db_path)

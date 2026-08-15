@@ -200,6 +200,30 @@ def test_store_trade_outcome_deletes_the_settled_pending_snapshot():
     manager.collection.delete.assert_called_once_with(ids=[f"snapshot_{decision.decision_id}"])
 
 
+def test_already_reconciled_returns_ids_with_a_stored_trade_row():
+    """Only decision_ids with a trade_{id} row come back, stripped of the prefix.
+
+    Regression test for X-6: reconcile_decisions() calls this once per batch,
+    before touching market data, to skip decisions already reconciled on a
+    prior run.
+    """
+    manager = _manager_with_metadatas([])
+    manager.collection.get.return_value = {"ids": ["trade_abc", "trade_def"]}
+
+    result = manager.already_reconciled(["abc", "def", "ghi"])
+
+    manager.collection.get.assert_called_once_with(ids=["trade_abc", "trade_def", "trade_ghi"])
+    assert result == {"abc", "def"}
+
+
+def test_already_reconciled_empty_input_skips_the_query():
+    """An empty decision_ids list returns immediately without touching the collection."""
+    manager = _manager_with_metadatas([])
+
+    assert manager.already_reconciled([]) == set()
+    manager.collection.get.assert_not_called()
+
+
 def test_store_decision_snapshot_returns_true_on_success():
     """A successful upsert reports success so callers can count real writes."""
     manager = _manager_with_metadatas([])

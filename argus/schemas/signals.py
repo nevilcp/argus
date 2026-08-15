@@ -154,7 +154,7 @@ class MacroContext(BaseModel):
         ),
     )
     api_calls_used: int = Field(0, ge=0)
-    timestamp: datetime = Field(..., description="UTC timestamp of signal production")
+    timestamp: datetime = Field(..., description="Naive local timestamp of signal production")
 
     @field_validator("agent_multipliers", mode="before")
     @classmethod
@@ -213,7 +213,7 @@ class TechnicalSignal(BaseModel):
     )
 
     api_calls_used: int = Field(0, ge=0, description="External API calls consumed")
-    timestamp: datetime = Field(..., description="UTC timestamp of signal production")
+    timestamp: datetime = Field(..., description="Naive local timestamp of signal production")
 
     @field_validator("conviction", mode="before")
     @classmethod
@@ -256,7 +256,7 @@ class FundamentalSignal(BaseModel):
     )
 
     api_calls_used: int = Field(1, ge=0)
-    timestamp: datetime = Field(..., description="UTC timestamp of signal production")
+    timestamp: datetime = Field(..., description="Naive local timestamp of signal production")
 
     @field_validator("conviction", mode="before")
     @classmethod
@@ -313,7 +313,7 @@ class SentimentSignal(BaseModel):
         ..., max_length=400, description="LLM rationale for the signal (≤400 chars)"
     )
     api_calls_used: int = Field(1, ge=0)
-    timestamp: datetime = Field(..., description="UTC timestamp of signal production")
+    timestamp: datetime = Field(..., description="Naive local timestamp of signal production")
 
     @field_validator("conviction", mode="before")
     @classmethod
@@ -381,7 +381,7 @@ class RiskAssessment(BaseModel):
     )
 
     api_calls_used: int = Field(0, ge=0)
-    timestamp: datetime = Field(..., description="UTC timestamp of signal production")
+    timestamp: datetime = Field(..., description="Naive local timestamp of signal production")
 
     @model_validator(mode="after")
     def approved_le_proposed(self) -> "RiskAssessment":
@@ -501,7 +501,7 @@ class PortfolioAllocation(BaseModel):
         ..., description="Condition that will next trigger rebalancing, e.g. 'VIX > 35'"
     )
     api_calls_used: int = Field(1, ge=0)
-    timestamp: datetime = Field(..., description="UTC timestamp of signal production")
+    timestamp: datetime = Field(..., description="Naive local timestamp of signal production")
 
     @field_validator("portfolio")
     @classmethod
@@ -558,7 +558,7 @@ class ARGUSDecision(BaseModel):
         description="UUID v4 unique identifier for this decision record",
     )
     ticker: str = Field(..., description="Equity ticker symbol")
-    session_timestamp: datetime = Field(..., description="UTC timestamp of the decision cycle")
+    session_timestamp: datetime = Field(..., description="Naive local timestamp of the decision cycle")
 
     # All signal fields are optional; populated as each agent completes
     technical: TechnicalSignal | None = Field(None)

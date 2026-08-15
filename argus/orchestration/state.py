@@ -18,8 +18,6 @@ import operator
 from datetime import datetime
 from typing import Annotated, Any, Optional, TypedDict
 
-import pandas as pd
-
 from argus.schemas.signals import (
     AggregatedSignal,
     FundamentalSignal,
@@ -68,8 +66,10 @@ class ARGUSState(TypedDict):
     session's own capture date, so it can't read outcomes that hadn't happened yet."""
 
     # ── Node 1: fetch_price_history ───────────────────────────────────────────
-    price_history: dict[str, pd.Series]
-    """Mapping of ticker → daily close price Series, populated by fetch_price_history."""
+    price_history: dict[str, dict[str, list]]
+    """Mapping of ticker → {"dates": [...], "prices": [...]}, populated by
+    fetch_price_history. SPY rides along with the universe (see
+    graph.py:node_fetch_price_history) so it's present even when not requested."""
 
     session_states: dict[str, dict]
     """Mapping of ticker → compressed technical feature dict (rsi, macd, etc.)."""
