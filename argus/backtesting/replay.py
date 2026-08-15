@@ -37,6 +37,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -126,20 +127,17 @@ def replay_session(
             fixture-replay candidate — so reliability weighting is fixed at
             the 0.5 prior. When True, the real `get_cultural_memory()` is
             used, so `wisdom`/`warnings`/reliability weighting read
-            whatever outcome history actually exists in `chroma_db`. The
-            evaluation runs both so it can compare the two conditions.
+            whatever outcome history actually exists in `chroma_db`, scoped
+            via `as_of` to what existed as of this session's own capture
+            date — never outcomes from sessions replayed "later" in this
+            call. The evaluation runs both so it can compare the two
+            conditions.
 
     Returns:
         SessionResult with the session's universe and the graph's final state.
     """
     universe, session_states = _load_session_states(session_dir)
-
-    graph = build_graph(
-        market_data=FixtureMarketDataProvider(fixtures_dir=session_dir / "market_data"),
-        fundamental_llm=_per_ticker_llm(session_dir, "fundamental.json", universe),
-        sentiment_llm=_per_ticker_llm(session_dir, "sentiment.json", universe),
-        portfolio_llm=_portfolio_llm(session_dir),
-    )
+    session_date = datetime.fromisoformat(next(iter(session_states.values()))["timestamp"])
 
     state = ARGUSState(
         ticker=universe[0],
@@ -149,6 +147,7 @@ def replay_session(
         risk_tolerance=risk_tolerance,
         backtest_mode=False,
         session_seed=None,
+        as_of=session_date if closed_loop else None,
         price_history={},
         session_states=session_states,
         macro_context=None,
@@ -164,18 +163,31 @@ def replay_session(
     )
     config = {"configurable": {"thread_id": str(uuid4())}}
 
-    with contextlib.ExitStack() as stack:
-        if not closed_loop:
-            mock_get_cultural_memory = stack.enter_context(
-                mock.patch("argus.orchestration.graph.get_cultural_memory")
-            )
-            mock_get_cultural_memory.return_value = mock.Mock(
-                retrieve_wisdom=mock.Mock(return_value=[]),
-                retrieve_warnings=mock.Mock(return_value=[]),
-                get_agent_accuracy=mock.Mock(return_value=0.5),
-                store_decision_snapshot=mock.Mock(),
-            )
-        final_state = graph.invoke(state, config)
+    # A dedicated temp checkpoint db, never the production argus_graph.db: replay
+    # is a read-only simulation over fixtures, and writing into the store
+    # reconciliation.py's load_decisions_from_checkpoints() reads would make
+    # fabricated replay sessions indistinguishable from genuine live ones.
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        graph = build_graph(
+            market_data=FixtureMarketDataProvider(fixtures_dir=session_dir / "market_data"),
+            fundamental_llm=_per_ticker_llm(session_dir, "fundamental.json", universe),
+            sentiment_llm=_per_ticker_llm(session_dir, "sentiment.json", universe),
+            portfolio_llm=_portfolio_llm(session_dir),
+            checkpoint_db_path=str(Path(tmp_dir) / "replay_checkpoint.db"),
+        )
+
+        with contextlib.ExitStack() as stack:
+            if not closed_loop:
+                mock_get_cultural_memory = stack.enter_context(
+                    mock.patch("argus.orchestration.graph.get_cultural_memory")
+                )
+                mock_get_cultural_memory.return_value = mock.Mock(
+                    retrieve_wisdom=mock.Mock(return_value=[]),
+                    retrieve_warnings=mock.Mock(return_value=[]),
+                    get_agent_accuracy=mock.Mock(return_value=0.5),
+                    store_decision_snapshot=mock.Mock(),
+                )
+            final_state = graph.invoke(state, config)
 
     _rebase_decision_timestamps(final_state, session_states)
     return SessionResult(session_dir=session_dir, universe=universe, final_state=final_state)

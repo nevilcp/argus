@@ -3,7 +3,10 @@ Tests for argus/backtesting/replay.py, which replaces the deleted walk-forward e
 See argus/backtesting/replay.py's docstring for what a "session" is.
 """
 
+import json
+from datetime import datetime
 from pathlib import Path
+from unittest import mock
 
 from argus.backtesting.replay import replay_session, replay_sessions
 
@@ -27,3 +30,43 @@ def test_replay_sessions_preserves_order():
 
     assert [r.session_dir for r in results] == [FIXTURES_DIR, FIXTURES_DIR]
     assert all(r.final_state.get("portfolio_allocation") is not None for r in results)
+
+
+def test_replay_session_never_touches_the_production_checkpoint_db(tmp_path, monkeypatch):
+    """Regression test for X4: replay must checkpoint into a temp db, never argus_graph.db.
+
+    build_graph()'s checkpoint_db_path defaults to the production store; replay
+    previously omitted the argument, so replayed sessions (with their rebased,
+    fake-looking-genuine timestamps) landed in the same store
+    reconciliation.load_decisions_from_checkpoints() reads.
+    """
+    monkeypatch.chdir(tmp_path)
+
+    replay_session(FIXTURES_DIR)
+
+    assert not (tmp_path / "argus_graph.db").exists()
+
+
+def test_replay_session_closed_loop_scopes_cultural_memory_to_the_session_date():
+    """closed_loop=True must pass the fixture's own capture date as `as_of`.
+
+    Regression test for the PR 7 plan's closed-loop item: without it, replayed
+    sessions could read outcomes that, relative to the fixture's point in time,
+    haven't happened yet.
+    """
+    mock_memory = mock.Mock(
+        retrieve_wisdom=mock.Mock(return_value=[]),
+        retrieve_warnings=mock.Mock(return_value=[]),
+        get_agent_accuracy=mock.Mock(return_value=0.5),
+        store_decision_snapshot=mock.Mock(),
+    )
+    with mock.patch("argus.orchestration.graph.get_cultural_memory", return_value=mock_memory):
+        replay_session(FIXTURES_DIR, closed_loop=True)
+
+    with open(FIXTURES_DIR / "market_data" / "session_states.json") as f:
+        session_states = json.load(f)
+    expected_as_of = datetime.fromisoformat(next(iter(session_states.values()))["timestamp"])
+
+    assert mock_memory.retrieve_wisdom.call_args.kwargs["as_of"] == expected_as_of
+    assert mock_memory.retrieve_warnings.call_args.kwargs["as_of"] == expected_as_of
+    assert mock_memory.get_agent_accuracy.call_args.kwargs["as_of"] == expected_as_of

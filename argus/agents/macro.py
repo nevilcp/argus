@@ -6,7 +6,9 @@ Statistical macroeconomic regime analysis agent.
 Responsibilities:
   - Combine Federal Reserve (FRED) time series with the CBOE VIX using a Gaussian HMM
   - Classify hidden economic states (EXPANSION, CONTRACTION, TRANSITIONAL)
-  - Expose regime multipliers used by specialist agents to dynamically weight convictions
+  - Expose regime multipliers consumed once, by orchestration/aggregator.py, as a
+    per-agent vote-weight scalar during signal aggregation — never by the
+    specialist agents' own analysis, which runs independently of this agent
 
 Not responsible for:
   - Feature construction (see data/macro_features.py)

@@ -38,7 +38,6 @@ from typing import Optional
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, StateGraph
-from langgraph.types import Send
 
 from argus.agents.fundamental import FundamentalAgent
 from argus.agents.macro import MacroStatisticalAgent
@@ -49,7 +48,7 @@ from argus.agents.technical import TechnicalStatisticalAgent
 from argus.memory.cultural import get_cultural_memory
 from argus.orchestration.aggregator import HybridSignalAggregator
 from argus.orchestration.state import ARGUSState
-from argus.schemas.signals import AggregatedSignal, ARGUSDecision, RiskVerdict
+from argus.schemas.signals import AggregatedSignal, ARGUSDecision, RiskVerdict, Signal
 from argus.seams import LiveMarketDataProvider, LLMClient, MarketDataProvider
 
 logger = logging.getLogger("argus.graph")
@@ -76,6 +75,31 @@ def build_checkpoint_serde() -> JsonPlusSerializer:
         allowed_msgpack_modules=[
             ("argus.schemas.signals", cls) for cls in _CHECKPOINT_MODEL_CLASSES
         ]
+    )
+
+
+def _summarize_technical_posture(aggregated_signals: dict[str, AggregatedSignal]) -> str:
+    """Builds retrieve_wisdom's free-text technical-posture argument from this session's own signals.
+
+    Replaces a hardcoded "mixed technicals" placeholder that never reflected the
+    session it was queried for.
+
+    Args:
+        aggregated_signals: This session's ticker → AggregatedSignal mapping.
+
+    Returns:
+        A short directional-breakdown summary, or a fixed string when empty.
+    """
+    if not aggregated_signals:
+        return "no aggregated signals available"
+
+    bullish = sum(1 for s in aggregated_signals.values() if s.signal == Signal.BULLISH)
+    bearish = sum(1 for s in aggregated_signals.values() if s.signal == Signal.BEARISH)
+    neutral = len(aggregated_signals) - bullish - bearish
+    avg_conviction = sum(s.conviction for s in aggregated_signals.values()) / len(aggregated_signals)
+    return (
+        f"{bullish} bullish, {bearish} bearish, {neutral} neutral across "
+        f"{len(aggregated_signals)} tickers (avg conviction {avg_conviction:.2f})"
     )
 
 
@@ -163,7 +187,8 @@ def build_graph(
         if macro_ctx is None:
             logger.error(
                 "node_macro_analysis: MacroStatisticalAgent returned None (FRED data unavailable). "
-                "Routing to END — no downstream agents will run this session."
+                "The three specialist agents run independently and will still produce a "
+                "degraded, macro-agnostic allocation this session."
             )
             return {
                 "macro_context": None,
@@ -215,8 +240,13 @@ def build_graph(
     def node_retrieve_cultural_memory(state: ARGUSState) -> dict:
         """Retrieves semantic trading wisdom and historical trade patterns matching the current regime.
 
+        Runs after signal_aggregation (not beside the specialist fan-out) so it can
+        summarize this session's own aggregated_signals into the similarity query,
+        rather than a hardcoded placeholder.
+
         Args:
-            state: ARGUSState with ``macro_context`` to scope the semantic similarity query.
+            state: ARGUSState with ``macro_context`` to scope the semantic similarity
+                query and ``aggregated_signals`` to summarize into it.
 
         Returns:
             Partial state update with ``cultural_memory`` dict containing 'wisdom' and 'warnings' lists.
@@ -233,8 +263,10 @@ def build_graph(
             logger.warning("node_retrieve_cultural_memory: cultural memory unavailable: %s", exc)
             return {"cultural_memory": {"wisdom": [], "warnings": []}}
 
-        wisdom = memory.retrieve_wisdom(macro, "mixed technicals")
-        warnings = memory.retrieve_warnings(macro)
+        as_of = state.get("as_of")
+        technical_summary = _summarize_technical_posture(state.get("aggregated_signals", {}))
+        wisdom = memory.retrieve_wisdom(macro, technical_summary, as_of=as_of)
+        warnings = memory.retrieve_warnings(macro, as_of=as_of)
 
         return {
             "cultural_memory": {
@@ -246,32 +278,40 @@ def build_graph(
     def node_signal_aggregation(state: ARGUSState) -> dict:
         """Consolidates specialized analyst signals into weighted consensus indicators.
 
+        Runs whenever at least one specialist produced a signal, independent of
+        whether macro_context is populated — HybridSignalAggregator.aggregate()
+        already handles macro=None (no multiplier scaling), so a macro data outage
+        must not suppress aggregation of the specialists that did succeed.
+
         Args:
             state: ARGUSState with ``technical_signals``, ``fundamental_signals``,
-                ``sentiment_signals``, and ``macro_context`` populated.
+                and ``sentiment_signals`` populated; ``macro_context`` optional.
 
         Returns:
             Partial state update with ``aggregated_signals``.
         """
         aggs: dict[str, AggregatedSignal] = {}
-        macro = state["macro_context"]
-        if not macro:
-            return {"aggregated_signals": aggs}
+        macro = state.get("macro_context")
+        as_of = state.get("as_of")
+        agent_names = ("technical", "fundamental", "sentiment")
 
-        # Per-regime reliability doesn't depend on ticker, so compute it once per
-        # session rather than once per ticker.
-        regime = macro.macro_regime.value
-        try:
-            memory = get_cultural_memory()
-            reliability = {
-                name: memory.get_agent_accuracy(name, regime=regime)
-                for name in ("technical", "fundamental", "sentiment")
-            }
-        except ImportError as exc:
-            # Same optional-dependency guard as node_retrieve_cultural_memory;
-            # degrade every agent to the 0.5 neutral prior rather than crash
-            logger.warning("node_signal_aggregation: cultural memory unavailable: %s", exc)
-            reliability = {name: 0.5 for name in ("technical", "fundamental", "sentiment")}
+        if macro is not None:
+            # Per-regime reliability doesn't depend on ticker, so compute it once
+            # per session rather than once per ticker.
+            regime = macro.macro_regime.value
+            try:
+                memory = get_cultural_memory()
+                reliability = {
+                    name: memory.get_agent_accuracy(name, regime=regime, as_of=as_of)
+                    for name in agent_names
+                }
+            except ImportError as exc:
+                # Same optional-dependency guard as node_retrieve_cultural_memory;
+                # degrade every agent to the 0.5 neutral prior rather than crash
+                logger.warning("node_signal_aggregation: cultural memory unavailable: %s", exc)
+                reliability = {name: 0.5 for name in agent_names}
+        else:
+            reliability = {name: 0.5 for name in agent_names}
 
         for ticker in state["universe"]:
             tech = state.get("technical_signals", {}).get(ticker)
@@ -392,8 +432,12 @@ def build_graph(
         }
 
         macro = state.get("macro_context")
-        if not macro:
-            return {"errors": ["portfolio_allocation: skipped, no macro_context in state"]}
+        errors: list[str] = []
+        if macro is None:
+            errors.append(
+                "portfolio_allocation: macro_context unavailable this session; "
+                "allocating on specialist signals alone"
+            )
 
         mem = state.get("cultural_memory", {})
         wisdom = mem.get("wisdom", [])
@@ -405,37 +449,11 @@ def build_graph(
                 "node_portfolio_allocation: PortfolioManagerAgent returned None (LLM API failure). "
                 "Skipping portfolio_allocation to allow graceful exit."
             )
-            return {
-                "errors": [
-                    "portfolio_allocation: PortfolioManagerAgent returned None (LLM API failure)"
-                ]
-            }
-        return {"portfolio_allocation": alloc}
-
-    def route_after_macro(state: ARGUSState):
-        """Fans out to the four parallel analyst nodes, or short-circuits to END.
-
-        A None macro_context means the core FRED data bundle was entirely
-        unavailable (see MacroStatisticalAgent.analyze's docstring) — every
-        downstream node depends on macro_context, so there is nothing useful
-        left for this session to do.
-
-        Args:
-            state: ARGUSState with ``macro_context`` populated by node_macro_analysis.
-
-        Returns:
-            END if macro_context is None, otherwise a list of Send calls fanning
-            out to technical_analysis, fundamental_analysis, sentiment_analysis,
-            and retrieve_cultural_memory.
-        """
-        if state.get("macro_context") is None:
-            return END
-        return [
-            Send("technical_analysis", state),
-            Send("fundamental_analysis", state),
-            Send("sentiment_analysis", state),
-            Send("retrieve_cultural_memory", state),
-        ]
+            errors.append(
+                "portfolio_allocation: PortfolioManagerAgent returned None (LLM API failure)"
+            )
+            return {"errors": errors}
+        return {"portfolio_allocation": alloc, "errors": errors}
 
     def node_log_decisions(state: ARGUSState) -> dict:
         """Persists structural decision profiles to vector database collections.
@@ -497,21 +515,29 @@ def build_graph(
     builder.add_node("log_decisions", node_log_decisions)
 
     builder.set_entry_point("fetch_price_history")
-    builder.add_edge("fetch_price_history", "macro_analysis")
 
-    builder.add_conditional_edges("macro_analysis", route_after_macro)
+    # macro_analysis runs in parallel with the three specialists, not ahead of
+    # them: none of them consumes macro_context (see state.py's docstring), so
+    # gating them behind it needlessly serializes fundamental's ~20 sequential
+    # Groq round-trips behind the HMM window and drops a whole session's output
+    # whenever only the FRED bundle is unavailable.
+    builder.add_edge("fetch_price_history", "macro_analysis")
+    builder.add_edge("fetch_price_history", "technical_analysis")
+    builder.add_edge("fetch_price_history", "fundamental_analysis")
+    builder.add_edge("fetch_price_history", "sentiment_analysis")
 
     builder.add_edge(
-        [
-            "technical_analysis",
-            "fundamental_analysis",
-            "sentiment_analysis",
-            "retrieve_cultural_memory",
-        ],
+        ["macro_analysis", "technical_analysis", "fundamental_analysis", "sentiment_analysis"],
         "signal_aggregation",
     )
+
+    # retrieve_cultural_memory runs after signal_aggregation (not beside it) so it
+    # can summarize this session's own aggregated_signals into its similarity
+    # query; wisdom/warnings are consumed only by portfolio_allocation, so this
+    # is safe to run in parallel with risk_evaluation.
+    builder.add_edge("signal_aggregation", "retrieve_cultural_memory")
     builder.add_edge("signal_aggregation", "risk_evaluation")
-    builder.add_edge("risk_evaluation", "portfolio_allocation")
+    builder.add_edge(["retrieve_cultural_memory", "risk_evaluation"], "portfolio_allocation")
     builder.add_edge("portfolio_allocation", "log_decisions")
     builder.add_edge("log_decisions", END)
 
