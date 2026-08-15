@@ -330,16 +330,23 @@ class RiskStatisticalEngine:
                     f"{pos['ticker']} weight {pos['weight']:.1%} > limit {self.max_position_pct:.1%}"
                 )
 
+        # Below-floor diversification is informational (folded into veto_reasons below on
+        # whichever verdict is reached), not a `violations` entry — a 2-4 ticker universe is
+        # a normal small-book session, not a structural fault worth an all-cash VETO
+        diversification_note: Optional[str] = None
         if (
             len(proposed_positions) > 1
             and len(proposed_positions) < RISK.min_positions_diversification
             and total_weight > 0
         ):
-            violations.append(
-                f"Insufficient diversification: {len(proposed_positions)} positions (min {RISK.min_positions_diversification})"
+            diversification_note = (
+                f"Below diversification floor: {len(proposed_positions)} positions "
+                f"(min {RISK.min_positions_diversification})"
             )
 
         if len(proposed_positions) > RISK.max_positions:
+            # api/main.py's AnalyzeRequest.tickers caps max_length at the same 20, so this
+            # branch is currently unreachable through the API — kept for direct callers
             violations.append(
                 f"Over-diversification: {len(proposed_positions)} positions (max {RISK.max_positions})"
             )
@@ -355,7 +362,7 @@ class RiskStatisticalEngine:
                 verdict=RiskVerdict.VETO,
                 approved_weight=0.0,
                 proposed_weight=total_weight,
-                veto_reasons=violations,
+                veto_reasons=violations + ([diversification_note] if diversification_note else []),
                 optimal_weights={},
                 var_99=0.0,
                 cvar=0.0,
@@ -444,8 +451,13 @@ class RiskStatisticalEngine:
         returns = compute_portfolio_returns(proposed_positions, price_history)
         port_returns = returns.sum(axis=1) if not returns.empty else pd.Series(dtype=float)
 
-        var99 = historical_var(port_returns)
-        cvar = conditional_var(port_returns)
+        # Normalize to a full (weight=1.0) book before comparing to var_limit/cvar_limit, so
+        # the same threshold means the same thing for the portfolio call (sum(w)~1.0) and a
+        # single-ticker call (w=0.15) — unnormalized, the per-ticker call was diluted 1/0.15x
+        # and under-detected exactly the volatility the gate exists to catch
+        normalized_returns = port_returns / total_weight if total_weight > 0 else port_returns
+        var99 = historical_var(normalized_returns)
+        cvar = conditional_var(normalized_returns)
         beta = ols_portfolio_beta(proposed_positions, price_history, market_data=self.market_data)
         corr = avg_pairwise_correlation(returns)
 
@@ -472,7 +484,8 @@ class RiskStatisticalEngine:
                 verdict=RiskVerdict.REDUCE,
                 approved_weight=min(total_weight * RISK.reduce_weight_multiplier, total_weight),
                 proposed_weight=total_weight,
-                veto_reasons=stat_violations,
+                veto_reasons=stat_violations
+                + ([diversification_note] if diversification_note else []),
                 optimal_weights=optimal_weights,
                 optimizer_converged=optimizer_converged,
                 var_99=var99,
@@ -497,7 +510,7 @@ class RiskStatisticalEngine:
             verdict=RiskVerdict.APPROVE,
             approved_weight=total_weight,
             proposed_weight=total_weight,
-            veto_reasons=[],
+            veto_reasons=[diversification_note] if diversification_note else [],
             optimal_weights=optimal_weights,
             optimizer_converged=optimizer_converged,
             var_99=var99,
