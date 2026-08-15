@@ -6,10 +6,11 @@ Generative portfolio construction and allocation manager agent.
 Responsibilities:
   - Synthesize specialist analyst inputs into optimized portfolio allocations
   - Apply Half-Kelly position sizing bounded by risk engine ceilings
+  - Enforce risk-engine verdicts and caps on the LLM's proposal before validation
   - Produce per-position advisor notes for client-facing rationale
 
 Not responsible for:
-  - Risk enforcement or statistical limit checking (see agents/risk.py)
+  - Computing statistical risk limits — VaR, CVaR, correlation (see agents/risk.py)
   - Signal aggregation (see orchestration/aggregator.py)
   - Macro regime classification (see agents/macro.py)
 
@@ -24,14 +25,14 @@ import json
 import logging
 import time
 from datetime import datetime
-from typing import Optional
+from typing import Optional, TypeGuard
 from uuid import uuid4
 
 import numpy as np
 
 from argus.config import settings
 from argus.params import PORTFOLIO
-from argus.schemas.signals import MacroContext, PortfolioAllocation, RiskVerdict
+from argus.schemas.signals import MacroContext, PortfolioAllocation, RiskAssessment, RiskVerdict
 from argus.seams import GroqLLMClient, LLMClient
 
 logger = logging.getLogger("argus.portfolio")
@@ -68,6 +69,19 @@ def half_kelly_weight(
     return float(np.clip(half_kelly, 0.0, max_position))
 
 
+def _is_risk_approved(risk: Optional[RiskAssessment]) -> TypeGuard[RiskAssessment]:
+    """Whether a ticker's risk verdict permits an equity allocation.
+
+    Args:
+        risk: The ticker's RiskAssessment, or None if the risk node never evaluated it.
+
+    Returns:
+        True for APPROVE or REDUCE; False for VETO or a missing assessment. Shared
+        by the prompt table and post-LLM enforcement so the two cannot drift.
+    """
+    return risk is not None and risk.verdict in (RiskVerdict.APPROVE, RiskVerdict.REDUCE)
+
+
 def build_signal_table(all_signals: dict[str, dict], macro: Optional[MacroContext]) -> str:
     """Constructs a consolidated prompt table mapping approved specialist signal values.
 
@@ -98,7 +112,7 @@ def build_signal_table(all_signals: dict[str, dict], macro: Optional[MacroContex
 
     for ticker, sigs in all_signals.items():
         risk = sigs.get("risk")
-        if not risk or risk.verdict not in (RiskVerdict.APPROVE, RiskVerdict.REDUCE):
+        if not _is_risk_approved(risk):
             continue
 
         f = sigs.get("fundamental")
@@ -110,16 +124,12 @@ def build_signal_table(all_signals: dict[str, dict], macro: Optional[MacroContex
         tsig = f"{t.signal.value}({t.conviction:.2f})" if t else "N/A"
         ssig = f"{s.signal.value}({s.conviction:.2f})" if s else "N/A"
         asig = f"{agg.signal.value}({agg.conviction:.2f})" if agg else "N/A"
-        stop = risk.stop_loss
-        if isinstance(stop, float):
-            stop = f"{stop:.2f}"
-        else:
-            stop = "N/A"
+        stop_display = f"{risk.stop_loss:.2f}" if isinstance(risk.stop_loss, float) else "N/A"
         evidence = f"{len(agg.agents_present)}/3" if agg else "0/3"
 
         line = (
             f"{ticker}: FUND={fsig} TECH={tsig} SENT={ssig} AGG={asig} Evidence={evidence} "
-            f"VaR={risk.var_99:.2%} Beta={risk.portfolio_beta:.2f} Stop={stop} Cap={risk.approved_weight:.1%}"
+            f"VaR={risk.var_99:.2%} Beta={risk.portfolio_beta:.2f} Stop={stop_display} Cap={risk.approved_weight:.1%}"
         )
         lines.append(line)
 
@@ -204,6 +214,7 @@ class PortfolioManagerAgent:
         macro: Optional[MacroContext],
         cultural_wisdom: Optional[list[str]] = None,
         cultural_warnings: Optional[list[str]] = None,
+        adjustments: Optional[list[str]] = None,
     ) -> Optional[PortfolioAllocation]:
         """Aggregates all specialist agent verdicts to construct a consolidated PortfolioAllocation.
 
@@ -221,20 +232,20 @@ class PortfolioManagerAgent:
             cultural_wisdom: Optional list of historical wisdom strings from cultural memory.
             cultural_warnings: Optional list of failed-trade pattern strings from
                 cultural memory, scoped to the current macro regime.
+            adjustments: Optional list that receives one human-readable entry per
+                clamped, zeroed, or dropped position — the caller's record of
+                where the LLM's proposal disagreed with risk enforcement.
 
         Returns:
             A validated PortfolioAllocation, all-cash if no tickers are approved, or None
             if all 3 LLM retry attempts fail.
         """
-        investable = float(user_profile.get("total_wealth", 0.0)) * float(
+        total_wealth = user_profile.get("total_wealth")
+        investable = (float(total_wealth) if total_wealth is not None else 0.0) * float(
             user_profile.get("invest_pct", 1.0)
         )
 
-        approved_tickers = [
-            t
-            for t, s in all_signals.items()
-            if s.get("risk") and s["risk"].verdict in (RiskVerdict.APPROVE, RiskVerdict.REDUCE)
-        ]
+        approved_tickers = [t for t, s in all_signals.items() if _is_risk_approved(s.get("risk"))]
 
         if not approved_tickers:
             logger.debug("[Portfolio] No approved tickers. Reverting to all-cash.")
@@ -318,21 +329,61 @@ class PortfolioManagerAgent:
 
                 data = json.loads(raw)
 
-                # Convert percentage allocations to fiat quantities before schema validation
+                # Enforce risk verdicts in code: the LLM's proposal is advisory input,
+                # not a binding allocation, so it cannot be trusted to respect caps it
+                # was merely shown in the prompt.
+                enforced_portfolio = []
                 for pos in data.get("portfolio", []):
-                    pos["allocation_usd"] = round(investable * pos["allocation_pct"], 2)
                     ticker = pos["ticker"]
+                    if ticker not in all_signals:
+                        msg = (
+                            f"portfolio_allocation: dropped {ticker} "
+                            "(not in this session's signal universe)"
+                        )
+                        logger.warning(msg)
+                        if adjustments is not None:
+                            adjustments.append(msg)
+                        continue
+
+                    risk = all_signals[ticker].get("risk")
+                    proposed_pct = pos.get("allocation_pct", 0.0)
+                    if not _is_risk_approved(risk):
+                        if proposed_pct:
+                            verdict = risk.verdict.value if risk else "MISSING"
+                            msg = (
+                                f"portfolio_allocation: zeroed {ticker} allocation "
+                                f"(risk verdict {verdict})"
+                            )
+                            logger.warning(msg)
+                            if adjustments is not None:
+                                adjustments.append(msg)
+                        pos["allocation_pct"] = 0.0
+                    else:
+                        cap = risk.approved_weight
+                        if proposed_pct > cap + 1e-9:
+                            msg = (
+                                f"portfolio_allocation: clamped {ticker} allocation from "
+                                f"{proposed_pct:.4f} to risk cap {cap:.4f}"
+                            )
+                            logger.warning(msg)
+                            if adjustments is not None:
+                                adjustments.append(msg)
+                            pos["allocation_pct"] = cap
+
+                    pos["allocation_usd"] = round(investable * pos["allocation_pct"], 2)
                     if "thesis" in pos and isinstance(pos["thesis"], str):
                         pos["thesis"] = pos["thesis"][:PORTFOLIO.thesis_char_limit]
                     if "advisor_note" in pos and isinstance(pos["advisor_note"], str):
                         pos["advisor_note"] = pos["advisor_note"][:PORTFOLIO.advisor_note_char_limit]
-                    if ticker in all_signals and all_signals[ticker].get("risk"):
-                        engine_stop = all_signals[ticker]["risk"].stop_loss
-                        if engine_stop is not None:
-                            pos["stop_loss"] = float(engine_stop)
+                    if risk is not None and risk.stop_loss is not None:
+                        pos["stop_loss"] = float(risk.stop_loss)
+
+                    enforced_portfolio.append(pos)
+
+                data["portfolio"] = enforced_portfolio
 
                 # Force residual exact; LLM may set cash_reserve_pct independently, not as 1-equity
-                total_equity = sum(p["allocation_pct"] for p in data.get("portfolio", []))
+                total_equity = sum(p["allocation_pct"] for p in data["portfolio"])
                 data["cash_reserve_pct"] = round(max(0.0, 1.0 - total_equity), 6)
 
                 data["session_id"] = str(uuid4())
