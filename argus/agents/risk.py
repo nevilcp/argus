@@ -377,6 +377,7 @@ class RiskStatisticalEngine:
         has_sector_violation = any(w > self.max_sector_pct for w in sector_weights.values())
 
         optimal_weights: dict[str, float] = {}
+        optimizer_converged: Optional[bool] = None
         if len(proposed_positions) > 1:
             # Raw per-asset returns: the objective applies w itself, so cov must not
             # already be weighted or w^T*cov*w double-applies it
@@ -417,9 +418,9 @@ class RiskStatisticalEngine:
                             "fun": lambda w, idx=idxs, c=cap: c - sum(w[i] for i in idx),
                         }
                     )
-                # Require aggregate equity deployment of at least 50%
+                # A long-only book cannot deploy more capital than it has
                 cons.append(
-                    {"type": "ineq", "fun": lambda w: np.sum(w) - RISK.slsqp_min_equity_deployment}
+                    {"type": "ineq", "fun": lambda w: RISK.slsqp_max_total_deployment - np.sum(w)}
                 )
 
                 res = minimize(
@@ -430,12 +431,15 @@ class RiskStatisticalEngine:
                     constraints=cons,
                     options={"ftol": RISK.slsqp_ftol, "maxiter": RISK.slsqp_maxiter},
                 )
+                optimizer_converged = bool(res.success)
                 if res.success:
                     optimal_weights = {tickers[i]: float(res.x[i]) for i in range(n)}
                     logger.debug(
                         "[Risk] SLSQP optimal weights: %s",
                         {t: f"{w:.3f}" for t, w in optimal_weights.items()},
                     )
+                else:
+                    logger.warning("[Risk] SLSQP solve did not converge: %s", res.message)
 
         returns = compute_portfolio_returns(proposed_positions, price_history)
         port_returns = returns.sum(axis=1) if not returns.empty else pd.Series(dtype=float)
@@ -470,6 +474,7 @@ class RiskStatisticalEngine:
                 proposed_weight=total_weight,
                 veto_reasons=stat_violations,
                 optimal_weights=optimal_weights,
+                optimizer_converged=optimizer_converged,
                 var_99=var99,
                 cvar=cvar,
                 marginal_var=0.0,
@@ -494,6 +499,7 @@ class RiskStatisticalEngine:
             proposed_weight=total_weight,
             veto_reasons=[],
             optimal_weights=optimal_weights,
+            optimizer_converged=optimizer_converged,
             var_99=var99,
             cvar=cvar,
             marginal_var=mvar_val,

@@ -35,7 +35,7 @@ from dataclasses import dataclass, field, fields
 from enum import Enum
 from typing import Any
 
-PARAMS_VERSION = 6
+PARAMS_VERSION = 7
 
 
 class Provenance(str, Enum):
@@ -197,7 +197,8 @@ class RiskParams:
     min_positions_diversification: int = p(5, Provenance.ARBITRARY, "no basis for this specific minimum")
     max_positions: int = p(20, Provenance.ARBITRARY, "no basis for this specific maximum")
     slsqp_risk_aversion: float = p(1.0, Provenance.ARBITRARY, "equal weighting of conviction return vs variance; not tuned")
-    slsqp_min_equity_deployment: float = p(0.50, Provenance.ARBITRARY, "no basis for this specific floor")
+    slsqp_max_total_deployment: float = p(1.0, Provenance.CONVENTION, "a long-only book cannot exceed its capital")
+    slsqp_zero_cap_epsilon: float = p(1e-3, Provenance.ARBITRARY, "cap below this is treated as no room to allocate, not a real position")
     slsqp_ftol: float = p(1e-9, Provenance.CONVENTION, "typical SciPy SLSQP convergence tolerance")
     slsqp_maxiter: int = p(300, Provenance.CONVENTION, "typical SciPy SLSQP iteration cap")
     var_limit: float = p(0.03, Provenance.ARBITRARY, "no basis for this specific daily VaR ceiling")
