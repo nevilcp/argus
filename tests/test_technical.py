@@ -2,7 +2,11 @@
 Tests for the Technical Analysis Agent (argus/agents/technical.py).
 """
 
+import math
+
 import pytest
+from pydantic import ValidationError
+
 from argus.agents.technical import TechnicalStatisticalAgent
 from argus.schemas.signals import Signal
 
@@ -24,6 +28,7 @@ def test_bullish_signal(agent: TechnicalStatisticalAgent) -> None:
         "adx_14": 35.0,
         "vwap_distance": 0.008,
         "volume_ratio": 1.8,
+        "atr_pct": 0.02,
         "momentum_30m": 0.012,
         "momentum_1d": 0.025,
         "close": 100.0,
@@ -43,6 +48,7 @@ def test_bearish_signal(agent: TechnicalStatisticalAgent) -> None:
         "adx_14": 35.0,  # Trend strength
         "vwap_distance": -0.008,  # Opposite
         "volume_ratio": 1.8,  # High volume confirming the move
+        "atr_pct": 0.02,
         "momentum_30m": -0.012,  # Opposite
         "momentum_1d": -0.025,  # Opposite
         "close": 100.0,
@@ -62,6 +68,7 @@ def test_neutral_signal(agent: TechnicalStatisticalAgent) -> None:
         "adx_14": 15.0,  # Weak trend
         "vwap_distance": 0.0,
         "volume_ratio": 1.0,
+        "atr_pct": 0.01,
         "momentum_30m": 0.0,
         "momentum_1d": 0.0,
         "close": 100.0,
@@ -80,6 +87,7 @@ def test_zero_api_calls(agent: TechnicalStatisticalAgent) -> None:
         "adx_14": 20.0,
         "vwap_distance": 0.0,
         "volume_ratio": 1.0,
+        "atr_pct": 0.01,
         "momentum_30m": 0.0,
         "momentum_1d": 0.0,
         "close": 100.0,
@@ -97,6 +105,7 @@ def test_batch_analyze_reports_dropped_tickers_in_errors(agent: TechnicalStatist
         "adx_14": 20.0,
         "vwap_distance": 0.0,
         "volume_ratio": 1.0,
+        "atr_pct": 0.01,
         "momentum_30m": 0.0,
         "momentum_1d": 0.0,
         "close": 100.0,
@@ -108,3 +117,51 @@ def test_batch_analyze_reports_dropped_tickers_in_errors(agent: TechnicalStatist
     assert "GOOD" in signals
     assert "BAD" not in signals
     assert any("BAD" in e for e in errors)
+
+
+def _complete_state(**overrides: float) -> dict:
+    """Returns:
+        A fully-populated session state dict, overridden per-field by kwargs.
+    """
+    base = {
+        "rsi_14": 50.0,
+        "macd_histogram": 0.0,
+        "bb_percent_b": 0.5,
+        "adx_14": 20.0,
+        "vwap_distance": 0.0,
+        "volume_ratio": 1.0,
+        "atr_pct": 0.01,
+        "momentum_30m": 0.0,
+        "momentum_1d": 0.0,
+        "close": 100.0,
+    }
+    base.update(overrides)
+    return base
+
+
+@pytest.mark.parametrize("bad_rsi", [-50.0, 150.0, 1e9])
+def test_out_of_range_rsi_raises_instead_of_producing_a_signal(
+    agent: TechnicalStatisticalAgent, bad_rsi: float
+) -> None:
+    """An RSI outside [0, 100] fails TechnicalSignal validation rather than scoring."""
+    with pytest.raises(ValidationError):
+        agent.analyze("TEST", _complete_state(rsi_14=bad_rsi))
+
+
+@pytest.mark.parametrize("bad_value", [math.nan, math.inf, -math.inf])
+def test_non_finite_macd_histogram_is_rejected_at_the_missing_key_gate(
+    agent: TechnicalStatisticalAgent, bad_value: float
+) -> None:
+    """A NaN/inf MACD histogram is skipped, the same as a missing required key."""
+    result = agent.analyze("TEST", _complete_state(macd_histogram=bad_value))
+    assert result is None
+
+
+def test_absent_volume_ratio_skips_rather_than_applying_the_floor(
+    agent: TechnicalStatisticalAgent,
+) -> None:
+    """A missing volume_ratio drops the ticker instead of silently applying the 0.7 floor."""
+    state = _complete_state()
+    del state["volume_ratio"]
+    result = agent.analyze("TEST", state)
+    assert result is None
