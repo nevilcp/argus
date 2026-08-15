@@ -180,8 +180,15 @@ class FixtureMarketDataProvider:
         return list(self._load("news").get(ticker, []))
 
     def social_sentiment(self, ticker: str) -> dict:
-        """Returns cached social sentiment metrics from the social_sentiment fixture."""
-        return dict(self._load("social_sentiment").get(ticker, {}))
+        """Returns cached social sentiment metrics from the social_sentiment fixture.
+
+        A ticker absent from the fixture reports unavailability rather than an
+        empty dict, which would otherwise default to social_data_available=True.
+        """
+        fixture = self._load("social_sentiment").get(ticker)
+        if fixture is None:
+            return {"social_data_available": False}
+        return dict(fixture)
 
     def vix(self) -> float:
         """Returns the cached VIX level from the macro_bundle fixture."""
