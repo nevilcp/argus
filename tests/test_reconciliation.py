@@ -373,6 +373,32 @@ def test_compute_realized_return_none_without_technical_signal():
     assert compute_realized_return(decision, market_data, horizon_days=5) is None
 
 
+def test_compute_realized_return_none_with_zero_weight_allocation():
+    """A decision allocated 0% has no position to reconcile, matching no allocation at all.
+
+    Regression test for LD-1: filtering 0%-weight positions belongs at the
+    reconciliation boundary, not at graph.py's decision-building step (which
+    would break the audit trail of "we evaluated this ticker and chose not
+    to hold").
+    """
+    decision = ARGUSDecision(
+        ticker="TEST",
+        session_timestamp=datetime(2026, 1, 1),
+        technical=_technical(Signal.BULLISH, 0.8),
+        allocation=PositionAllocation(
+            ticker="TEST",
+            allocation_pct=0.0,
+            allocation_usd=0.0,
+            stop_loss=90.0,
+            thesis="no position taken",
+            composite_conviction=0.0,
+            time_horizon="30 days",
+        ),
+    )
+    market_data = _ten_day_series(datetime(2026, 1, 1))
+    assert compute_realized_return(decision, market_data, horizon_days=5) is None
+
+
 def test_compute_realized_return_none_when_horizon_not_yet_reached():
     """No return is computed until price data reaches the requested horizon."""
     start = datetime(2026, 1, 1)

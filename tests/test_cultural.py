@@ -179,6 +179,49 @@ def test_store_trade_outcome_writes_vix_regime_value_not_enum_repr():
     assert "VixRegime" not in document
 
 
+def test_store_trade_outcome_deletes_the_settled_pending_snapshot():
+    """Storing a trade outcome removes the snapshot_{id} row it settles.
+
+    Regression test for LD-5: leaving the PENDING snapshot in place after the
+    trade settles double-counts the decision in summary_stats via the
+    snapshot's zero return_pct.
+    """
+    manager = _manager_with_metadatas([])
+    decision = ARGUSDecision(ticker="AAPL", session_timestamp=datetime.now())
+
+    manager.store_trade_outcome(
+        decision,
+        actual_return_pct=0.05,
+        holding_days=3,
+        exit_reason="target_hit",
+        primary_driver="technical",
+    )
+
+    manager.collection.delete.assert_called_once_with(ids=[f"snapshot_{decision.decision_id}"])
+
+
+def test_store_decision_snapshot_returns_true_on_success():
+    """A successful upsert reports success so callers can count real writes."""
+    manager = _manager_with_metadatas([])
+    decision = ARGUSDecision(ticker="AAPL", session_timestamp=datetime.now())
+
+    assert manager.store_decision_snapshot(decision) is True
+
+
+def test_store_decision_snapshot_returns_false_on_failure():
+    """A failed upsert reports failure instead of silently swallowing it.
+
+    Regression test for LD-3: store_decision_snapshot previously returned None
+    unconditionally, so node_log_decisions logged every built decision as
+    "logged to cultural memory" even when the write itself failed.
+    """
+    manager = _manager_with_metadatas([])
+    manager.collection.upsert.side_effect = RuntimeError("chroma write failed")
+    decision = ARGUSDecision(ticker="AAPL", session_timestamp=datetime.now())
+
+    assert manager.store_decision_snapshot(decision) is False
+
+
 def test_retrieve_wisdom_and_retrieve_warnings_apply_a_symmetric_regime_filter():
     """retrieve_wisdom filters on regime exactly like retrieve_warnings does.
 

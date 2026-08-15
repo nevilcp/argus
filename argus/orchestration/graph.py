@@ -340,6 +340,7 @@ def build_graph(
         macro = state.get("macro_context")
         as_of = state.get("as_of")
         agent_names = ("technical", "fundamental", "sentiment")
+        model_healthy = True
 
         if macro is not None:
             # Per-regime reliability doesn't depend on ticker, so compute it once
@@ -359,6 +360,7 @@ def build_graph(
                 logger.warning("node_signal_aggregation: cultural memory unavailable: %s", exc)
                 reliability = {name: 0.5 for name in agent_names}
                 reliability_n = {name: 0 for name in agent_names}
+                model_healthy = False
         else:
             reliability = {name: 0.5 for name in agent_names}
             reliability_n = {name: 0 for name in agent_names}
@@ -369,8 +371,11 @@ def build_graph(
             sent = state.get("sentiment_signals", {}).get(ticker)
             if tech is None and fund is None and sent is None:
                 continue
-            aggs[ticker] = aggregator.aggregate(
+            agg = aggregator.aggregate(
                 tech, macro, fund, sent, reliability=reliability, reliability_n=reliability_n
+            )
+            aggs[ticker] = (
+                agg if model_healthy else agg.model_copy(update={"model_healthy": False})
             )
         return {"aggregated_signals": aggs}
 
@@ -555,7 +560,8 @@ def build_graph(
             state: ARGUSState with all fields populated from prior nodes.
 
         Returns:
-            Partial state update with ``decisions`` list of completed ARGUSDecision objects.
+            Partial state update with ``decisions`` list of completed ARGUSDecision
+            objects and ``errors`` naming any per-ticker construction failures.
         """
         allocation = state.get("portfolio_allocation")
         if not allocation:
@@ -563,9 +569,20 @@ def build_graph(
             return {"decisions": []}
 
         positions = {pos.ticker: pos for pos in allocation.portfolio}
-        now = datetime.now()
+        # A replayed session's as_of is the fixture's own capture date; falling back
+        # to wall-clock only applies to genuinely live sessions
+        now = state.get("as_of") or datetime.now()
         decisions: list[ARGUSDecision] = []
+        errors: list[str] = []
 
+        try:
+            memory = get_cultural_memory()
+        except ImportError as exc:
+            # Same optional-dependency guard as node_retrieve_cultural_memory
+            logger.warning("node_log_decisions: cultural memory unavailable: %s", exc)
+            memory = None
+
+        snapshots_stored = 0
         for ticker in state.get("universe", []):
             try:
                 decision = ARGUSDecision(
@@ -582,17 +599,20 @@ def build_graph(
                 decisions.append(decision)
 
                 # Snapshot stored pre-confirmation to enable pre-settlement similarity retrieval
-                get_cultural_memory().store_decision_snapshot(decision)
+                if memory is not None and memory.store_decision_snapshot(decision):
+                    snapshots_stored += 1
 
             except Exception as exc:
-                logger.warning("[log_decisions] Failed to build decision for %s: %s", ticker, exc)
+                msg = f"log_decisions: failed to build decision for {ticker}: {exc}"
+                logger.warning("[log_decisions] %s", msg)
+                errors.append(msg)
 
         logger.info(
             "[log_decisions] Logged %d/%d decisions to cultural memory.",
-            len(decisions),
+            snapshots_stored,
             len(state.get("universe", [])),
         )
-        return {"decisions": decisions}
+        return {"decisions": decisions, "errors": errors}
 
     builder = StateGraph(ARGUSState)
 
