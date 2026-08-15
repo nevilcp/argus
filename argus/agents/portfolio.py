@@ -32,7 +32,7 @@ import numpy as np
 
 from argus.config import settings
 from argus.params import PORTFOLIO
-from argus.schemas.signals import MacroContext, PortfolioAllocation, RiskAssessment, RiskVerdict
+from argus.schemas.signals import MacroContext, PortfolioAllocation, RiskAssessment, RiskVerdict, Signal
 from argus.seams import GroqLLMClient, LLMClient
 
 logger = logging.getLogger("argus.portfolio")
@@ -241,9 +241,10 @@ class PortfolioManagerAgent:
             if all 3 LLM retry attempts fail.
         """
         total_wealth = user_profile.get("total_wealth")
-        investable = (float(total_wealth) if total_wealth is not None else 0.0) * float(
-            user_profile.get("invest_pct", 1.0)
-        )
+        # Capital base is total wealth, not wealth pre-scaled by invest_pct — invest_pct
+        # is the equity deployment target (ALLOCATION RULE 3 below), applied once by the
+        # LLM against this base, not twice
+        investable = float(total_wealth) if total_wealth is not None else 0.0
 
         approved_tickers = [t for t, s in all_signals.items() if _is_risk_approved(s.get("risk"))]
 
@@ -251,23 +252,54 @@ class PortfolioManagerAgent:
             logger.debug("[Portfolio] No approved tickers. Reverting to all-cash.")
             return self._all_cash_allocation(investable)
 
-        # Compute Half-Kelly baselines to anchor the LLM's sizing distribution
-        kelly_suggestions = {}
+        # Compute Half-Kelly baselines to anchor the LLM's sizing distribution, using
+        # each ticker's would-be primary_driver's measured win rate (see
+        # reconciliation.credit_primary_driver's argmax(weighted_votes) heuristic) as
+        # the win probability Kelly actually wants. Direction-blind conviction is not
+        # a probability of profit (see README) — using it here was PA-2/PA-3's bug.
+        # reliability/reliability_n are session-level, identical on every ticker's
+        # AggregatedSignal, so any one of them tells us whether outcome data exists at
+        # all without re-querying cultural memory.
+        reliability_n: dict[str, int] = {}
         for ticker in approved_tickers:
             agg = all_signals[ticker].get("aggregated")
-            risk_signal = all_signals[ticker].get("risk")
-            max_pos = risk_signal.approved_weight if risk_signal else self.max_position_pct
-            if agg:
+            if agg and agg.reliability_n:
+                reliability_n = agg.reliability_n
+                break
+        have_accuracy_data = any(n > 0 for n in reliability_n.values())
+
+        kelly_suggestions = {}
+        if have_accuracy_data:
+            for ticker in approved_tickers:
+                agg = all_signals[ticker].get("aggregated")
+                risk_signal = all_signals[ticker].get("risk")
+                max_pos = risk_signal.approved_weight if risk_signal else self.max_position_pct
+                # Anchors are for NEUTRAL/BULLISH sizing only (matches the prompt text below)
+                if not agg or agg.signal == Signal.BEARISH or not agg.weighted_votes:
+                    continue
+                driver = max(agg.weighted_votes, key=agg.weighted_votes.get)
+                win_prob = agg.reliability.get(driver, 0.5)
                 kelly_suggestions[ticker] = half_kelly_weight(
-                    win_probability=agg.conviction, max_position=max_pos
+                    win_probability=win_prob, max_position=max_pos
                 )
 
         signal_table = build_signal_table(all_signals, macro)
         wisdom_text = "\n".join(f"- {w}" for w in (cultural_wisdom or [])[:3])
         warnings_text = "\n".join(f"- {w}" for w in (cultural_warnings or [])[:3])
-        kelly_text = "\n".join(
-            f"{t}: half-Kelly suggests {w:.1%}" for t, w in kelly_suggestions.items()
-        )
+        if kelly_suggestions:
+            kelly_text = "\n".join(
+                f"{t}: half-Kelly suggests {w:.1%}" for t, w in kelly_suggestions.items()
+            )
+            kelly_block = (
+                "HALF-KELLY ANCHORS (mathematical starting point for NEUTRAL/BULLISH sizing; "
+                "override only with explicit signal justification):\n"
+                f"{kelly_text}\n"
+            )
+        else:
+            kelly_block = (
+                "HALF-KELLY ANCHORS: omitted — no agent has recorded outcome history yet. "
+                "Size NEUTRAL/BULLISH positions from signal strength and Cap alone.\n"
+            )
 
         prompt = (
             f"<portfolio_context session=\"{self._session_count}\" as_of=\"intraday\">\n"
@@ -290,9 +322,7 @@ class PortfolioManagerAgent:
             f"{signal_table}\n"
             "</signal_table>\n"
             "\n"
-            "HALF-KELLY ANCHORS (mathematical starting point for NEUTRAL/BULLISH sizing; "
-            "override only with explicit signal justification):\n"
-            f"{kelly_text}\n"
+            f"{kelly_block}"
             "\n"
             "CULTURAL WISDOM (from prior sessions with similar macro regime):\n"
             f"{wisdom_text if wisdom_text else 'None available.'}\n"
