@@ -40,6 +40,8 @@ _REQUIRED_INDICATOR_KEYS: frozenset[str] = frozenset({
     "bb_percent_b",
     "adx_14",
     "vwap_distance",
+    "volume_ratio",
+    "atr_pct",
     "momentum_30m",
     "momentum_1d",
     "close",
@@ -208,17 +210,18 @@ class TechnicalStatisticalAgent:
     def analyze(self, ticker: str, session_state: dict) -> Optional[TechnicalSignal]:
         """Analyzes a single ticker's session state parameters to generate a TechnicalSignal.
 
-        Returns None if any required indicator key is absent or None in session_state,
-        preventing signal computation from fabricated defaults.
+        Returns None if any required indicator key is absent, None, or non-finite in
+        session_state, preventing signal computation from fabricated defaults.
 
         Args:
             ticker: Equity ticker symbol (e.g. 'AAPL').
             session_state: Dict of pre-computed technical indicator values. Required keys:
                 rsi_14, macd_histogram, bb_percent_b, adx_14, vwap_distance,
-                volume_ratio, momentum_30m, momentum_1d, close.
+                volume_ratio, atr_pct, momentum_30m, momentum_1d, close.
 
         Returns:
-            A validated TechnicalSignal, or None if required fields are missing.
+            A validated TechnicalSignal, or None if required fields are missing or
+            non-finite.
         """
         missing = [
             k for k in _REQUIRED_INDICATOR_KEYS
@@ -229,6 +232,17 @@ class TechnicalStatisticalAgent:
                 "analyze[%s]: missing required indicator fields %s — skipping to avoid fake signal",
                 ticker,
                 sorted(missing),
+            )
+            return None
+
+        required_values = np.array(
+            [float(session_state[k]) for k in _REQUIRED_INDICATOR_KEYS]
+        )
+        if not np.isfinite(required_values).all():
+            logger.warning(
+                "analyze[%s]: non-finite indicator value(s) in %s — skipping to avoid fake signal",
+                ticker,
+                sorted(_REQUIRED_INDICATOR_KEYS),
             )
             return None
 
