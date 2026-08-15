@@ -44,6 +44,33 @@ logger = logging.getLogger("argus.sentiment")
 # actual per-ticker duration diverges enough to reintroduce burst risk.
 _FANOUT_PACE_SECONDS_PER_TICKER = 2.5
 
+# Covers config.py's default ARGUS_UNIVERSE so fetch_news's "TICKER OR company_name"
+# query has a real second term — for short tickers like "V" it otherwise becomes
+# "V OR V", which barely narrows the search versus the ticker alone. Unmapped
+# tickers fall back to the ticker itself.
+_TICKER_COMPANY_NAMES: dict[str, str] = {
+    "AAPL": "Apple",
+    "MSFT": "Microsoft",
+    "NVDA": "Nvidia",
+    "GOOGL": "Alphabet",
+    "AMZN": "Amazon",
+    "META": "Meta Platforms",
+    "TSLA": "Tesla",
+    "JPM": "JPMorgan Chase",
+    "V": "Visa",
+    "UNH": "UnitedHealth Group",
+    "XOM": "Exxon Mobil",
+    "JNJ": "Johnson & Johnson",
+    "PG": "Procter & Gamble",
+    "MA": "Mastercard",
+    "HD": "Home Depot",
+    "MRK": "Merck",
+    "ABBV": "AbbVie",
+    "LLY": "Eli Lilly",
+    "AVGO": "Broadcom",
+    "CVX": "Chevron",
+}
+
 # Module-level singleton prevents repeated model initialization (~30s first load)
 _FINBERT_PIPELINE = None
 
@@ -72,26 +99,32 @@ def get_finbert():
     return _FINBERT_PIPELINE
 
 
-def score_headlines_with_finbert(headlines: list[str]) -> list[dict]:
-    """Classifies headlines using FinBERT and returns signed numeric scores.
+def score_headlines_with_finbert(articles: list[dict]) -> list[dict]:
+    """Classifies headline articles using FinBERT and returns signed numeric scores.
 
-    Processes up to 25 headlines to bound CPU blocking time on large fetches.
-    Positive labels map to +score, negative to -score, neutral to 0.0.
+    Processes up to 25 articles, in the order given, to bound CPU blocking time
+    on large fetches. Positive labels map to +score, negative to -score, neutral
+    to 0.0.
 
     Args:
-        headlines: List of raw news headline strings.
+        articles: List of article dicts with ``title`` and ``published_at`` keys
+            (as returned by ``MarketDataProvider.news``), in relevance order —
+            the caller decides ordering before truncation.
 
     Returns:
-        List of dicts with keys ``headline``, ``label``, ``raw_score``, ``numeric``.
-        Returns an empty list if headlines is empty.
+        List of dicts with keys ``headline``, ``published_at``, ``label``,
+        ``raw_score``, ``numeric``. Returns an empty list if articles is empty.
     """
-    if not headlines:
+    if not articles:
         return []
 
     finbert = get_finbert()
     results = []
     # Cap at 25 to limit CPU blocking duration on large fetches
-    for headline in headlines[:25]:
+    for article in articles[:25]:
+        headline = article.get("title", "")
+        if not headline:
+            continue
         try:
             out = finbert(headline[:512])[0]
             if out["label"] == "positive":
@@ -104,6 +137,7 @@ def score_headlines_with_finbert(headlines: list[str]) -> list[dict]:
             results.append(
                 {
                     "headline": headline[:100],
+                    "published_at": article.get("published_at", ""),
                     "label": out["label"],
                     "raw_score": out["score"],
                     "numeric": numeric,
@@ -118,11 +152,14 @@ def aggregate_finbert_scores(scored: list[dict], decay_rate: float = 0.95) -> di
     """Aggregates FinBERT headline scores using exponential recency decay.
 
     Exponential decay prioritizes recent context over stale news; articles
-    earlier in the list are weighted less than later ones. Confidence is
-    capped at 10 articles to normalize behavior on small datasets.
+    earlier in the list are weighted less than later ones. Callers must sort
+    ``scored`` chronologically (oldest first) before calling this — the
+    decay is positional, not date-aware. Confidence is capped at 10 articles
+    to normalize behavior on small datasets.
 
     Args:
-        scored: List of scored dicts from ``score_headlines_with_finbert``.
+        scored: List of scored dicts from ``score_headlines_with_finbert``,
+            sorted oldest to newest.
         decay_rate: Decay factor applied per position from oldest to newest.
 
     Returns:
@@ -216,11 +253,11 @@ def _check_earnings_calendar(ticker: str) -> bool:
             earnings_dates = cal.loc["Earnings Date"]
             if not earnings_dates.empty:
                 dt = pd.to_datetime(earnings_dates.iloc[0])
-                if (dt.tz_localize(None) - datetime.now()).days <= 14:
+                if 0 <= (dt.tz_localize(None) - datetime.now()).days <= 14:
                     return True
         elif isinstance(cal, dict) and "Earnings Date" in cal:
             dt = pd.to_datetime(cal["Earnings Date"][0])
-            if (dt.tz_localize(None) - datetime.now()).days <= 14:
+            if 0 <= (dt.tz_localize(None) - datetime.now()).days <= 14:
                 return True
     except Exception as e:
         logger.debug("[EarningsCalendar] %s check failed: %s", ticker, e)
@@ -238,6 +275,8 @@ _SENTIMENT_METRIC_LABELS: dict[str, str] = {
     "finbert_confidence": "[0.0 to 1.0]    confidence proxy based on article volume "
     "(caps at 1.0 when ≥10 articles)",
     "news_volume_7d": "[integer]        total news articles fetched in the last 7 days",
+    "news_scored_count": "[integer]        of those, how many were actually scored by FinBERT "
+    "(<=25) — the denominator behind pct_positive/pct_negative",
     "news_data_available": "[bool]           False means the news fetch failed or hit its daily "
     "quota — news_volume_7d is a placeholder 0, not a real zero",
     "social_mention_surge": "[bool]           True if social mention volume is unusually high",
@@ -384,13 +423,25 @@ class SentimentAgent:
             if cached:
                 return cached
 
-        news = self.market_data.news(ticker, company_name or ticker, days_back=7)
-        social = self.market_data.social_sentiment(ticker)
+        try:
+            news = self.market_data.news(ticker, company_name or ticker, days_back=7)
+        except Exception as e:
+            logger.warning("[Sentiment] %s news fetch raised: %s", ticker, e)
+            news = None
+        try:
+            social = self.market_data.social_sentiment(ticker)
+        except Exception as e:
+            logger.warning("[Sentiment] %s social fetch raised: %s", ticker, e)
+            social = {"social_data_available": False}
 
         news_available = news is not None
         news_list = news or []
-        headlines = [a.get("title", "") for a in news_list if a.get("title")]
-        scored = score_headlines_with_finbert(headlines)
+        # Keep news_list in its fetched (relevance) order for the [:25] truncation,
+        # then sort the scored subset chronologically so aggregate_finbert_scores's
+        # positional decay actually favors the newest articles
+        articles = [a for a in news_list if a.get("title")]
+        scored = score_headlines_with_finbert(articles)
+        scored.sort(key=lambda s: s["published_at"] or "")
         agg = aggregate_finbert_scores(scored)
 
         metrics = {
@@ -399,6 +450,7 @@ class SentimentAgent:
             "pct_negative": agg["pct_neg"],
             "finbert_confidence": agg["confidence"],
             "news_volume_7d": len(news_list),
+            "news_scored_count": len(scored),
             "news_data_available": news_available,
             "social_mention_surge": social.get("mention_surge", False),
             "social_volume_change_pct": social.get("volume_change_pct", 0.0),
@@ -427,12 +479,17 @@ class SentimentAgent:
 
                 signal = SentimentSignal(
                     ticker=ticker,
-                    finbert_net_score=metrics["net_finbert_score"],
+                    # A failed fetch's 0.0 is indistinguishable from a real neutral
+                    # read; persist None rather than fabricate a measured score
+                    finbert_net_score=metrics["net_finbert_score"] if news_available else None,
                     pct_positive=metrics["pct_positive"],
                     pct_negative=metrics["pct_negative"],
                     news_volume_7d=metrics["news_volume_7d"],
+                    news_scored_count=metrics["news_scored_count"],
+                    news_data_available=metrics["news_data_available"],
                     social_volume_change_pct=metrics["social_volume_change_pct"],
                     social_mention_surge=metrics["social_mention_surge"],
+                    social_data_available=metrics["social_data_available"],
                     upcoming_catalyst=metrics["upcoming_catalyst"],
                     signal=data["signal"],
                     conviction=float(data["conviction"]),
@@ -475,6 +532,9 @@ class SentimentAgent:
         cutting 429 risk on the scrapers. Fixture-backed providers skip pacing:
         there's no live burst to smooth, and it would only slow down tests.
 
+        Looks up each ticker's company name (see ``_TICKER_COMPANY_NAMES``) so the
+        news query isn't just the ticker duplicated against itself.
+
         Args:
             tickers: List of equity ticker symbols.
 
@@ -489,7 +549,15 @@ class SentimentAgent:
         for i, ticker in enumerate(tickers):
             if pace and i > 0:
                 time.sleep(_FANOUT_PACE_SECONDS_PER_TICKER)
-            res = self.analyze(ticker, errors=errors)
+            company_name = _TICKER_COMPANY_NAMES.get(ticker, ticker)
+            try:
+                res = self.analyze(ticker, company_name=company_name, errors=errors)
+            except Exception as exc:
+                logger.warning(
+                    "batch_analyze: %s failed — %s: %s", ticker, type(exc).__name__, exc
+                )
+                errors.append(f"sentiment_analysis[{ticker}]: {type(exc).__name__}: {exc}")
+                continue
             if res is not None:
                 results[ticker] = res
         return results, errors

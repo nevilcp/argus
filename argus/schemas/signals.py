@@ -23,7 +23,7 @@ import uuid
 import warnings
 from datetime import date, datetime
 from enum import Enum
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 from pydantic import (
     BaseModel,
@@ -270,8 +270,11 @@ class SentimentSignal(BaseModel):
 
     ticker: str = Field(..., description="Equity ticker symbol")
 
-    finbert_net_score: float = Field(
-        ..., ge=-1.0, le=1.0, description="FinBERT weighted net score [-1, +1]"
+    finbert_net_score: Optional[float] = Field(
+        None,
+        ge=-1.0,
+        le=1.0,
+        description="FinBERT weighted net score [-1, +1]; None if the news fetch failed",
     )
     pct_positive: float = Field(
         ..., ge=0.0, le=1.0, description="Fraction of articles scored positive"
@@ -282,9 +285,22 @@ class SentimentSignal(BaseModel):
     news_volume_7d: int = Field(
         ..., ge=0, description="Total news articles ingested (7-day window)"
     )
+    news_scored_count: int = Field(
+        0,
+        ge=0,
+        description="Articles actually scored by FinBERT (<=25, after per-headline "
+        "failures) — the denominator behind pct_positive/pct_negative. 0 for signals "
+        "persisted before this field existed.",
+    )
+    news_data_available: bool = Field(
+        True, description="False means the news fetch failed; news metrics are placeholders"
+    )
     social_volume_change_pct: float = Field(..., description="Change in social volume (%)")
     social_mention_surge: bool = Field(
         ..., description="True if social mentions > 2× 30-day average"
+    )
+    social_data_available: bool = Field(
+        True, description="False means the social fetch failed; social metrics are placeholders"
     )
     upcoming_catalyst: bool = Field(..., description="True if earnings / FDA / FOMC within 14 days")
 
