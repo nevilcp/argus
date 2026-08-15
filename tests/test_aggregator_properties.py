@@ -1,17 +1,22 @@
 """
 tests/test_aggregator_properties.py
 
-Property-based test on HybridSignalAggregator.aggregate() — a pure function
-of its four signal/macro inputs. The invariant under test: no matter how
-strongly technical/fundamental/sentiment agree, and no matter what macro
-multiplier scales their votes, the aggregated conviction never claims more
-certainty than argus.params.AGGREGATOR.max_conviction (0.95), kept below 1.0 so no
-aggregate claims certainty.
+Property-based tests on HybridSignalAggregator.aggregate() — a pure function
+of its four signal/macro inputs. Invariants under test:
+  - no matter how strongly technical/fundamental/sentiment agree, and no
+    matter what macro multiplier scales their votes, the aggregated
+    conviction never claims more certainty than
+    argus.params.AGGREGATOR.max_conviction (0.95), kept below 1.0 so no
+    aggregate claims certainty
+  - a lone voting agent's aggregated conviction is monotone in its own
+    conviction (Design Decision A, issue #24)
+  - a lone voting agent can never reach the cap, since the denominator is
+    the vote mass all three agents could cast, not just the one that voted
 """
 
 from datetime import datetime
 
-from hypothesis import given
+from hypothesis import assume, given
 from hypothesis import strategies as st
 
 from argus.orchestration.aggregator import HybridSignalAggregator
@@ -138,6 +143,57 @@ def test_aggregated_conviction_never_exceeds_cap(
     )
     assert result.conviction <= AGGREGATOR.max_conviction + 1e-9
     assert 0.0 <= result.conviction
+
+
+@given(
+    conv1=_convictions,
+    conv2=_convictions,
+    fund_mult=_multipliers,
+    tech_mult=_multipliers,
+    sent_mult=_multipliers,
+)
+def test_lone_agent_conviction_is_monotone_in_its_own_conviction(
+    conv1, conv2, fund_mult, tech_mult, sent_mult
+):
+    """A lone voting agent's aggregated conviction strictly increases with its own conviction.
+
+    Fixed to EXPANSION so the CONTRACTION override — which can zero out a
+    lone BULLISH agent's conviction independently of its magnitude — doesn't
+    interfere with the property under test.
+    """
+    assume(conv2 - conv1 > 1e-6)
+    aggregator = HybridSignalAggregator()
+    macro = _macro(Regime.EXPANSION, fund_mult, tech_mult, sent_mult)
+    lo = aggregator.aggregate(
+        technical=_technical(Signal.BULLISH, conv1), macro=macro, fundamental=None, sentiment=None
+    )
+    hi = aggregator.aggregate(
+        technical=_technical(Signal.BULLISH, conv2), macro=macro, fundamental=None, sentiment=None
+    )
+    assert hi.conviction > lo.conviction
+
+
+@given(
+    conv=_convictions,
+    fund_mult=_multipliers,
+    tech_mult=_multipliers,
+    sent_mult=_multipliers,
+    regime=_regimes,
+)
+def test_lone_agent_cannot_reach_the_cap(conv, fund_mult, tech_mult, sent_mult, regime):
+    """A single voting agent's conviction stays strictly below the aggregation cap.
+
+    The denominator is the vote mass all three agents could cast, so a lone
+    agent's share of it is always < 1 regardless of its own conviction.
+    """
+    aggregator = HybridSignalAggregator()
+    result = aggregator.aggregate(
+        technical=_technical(Signal.BULLISH, conv),
+        macro=_macro(regime, fund_mult, tech_mult, sent_mult),
+        fundamental=None,
+        sentiment=None,
+    )
+    assert result.conviction < AGGREGATOR.max_conviction
 
 
 def test_exact_tie_between_bull_and_bear_resolves_neutral():
