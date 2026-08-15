@@ -99,6 +99,7 @@ class HybridSignalAggregator:
         neutral_pool: float = 0.0
         weighted_votes: dict[str, float] = {}
         agents_present: list[str] = [name for name, signal in sources.items() if signal is not None]
+        reliability_used: dict[str, float] = dict(reliability) if reliability else {}
 
         for name, signal in sources.items():
             if signal is None:
@@ -130,6 +131,7 @@ class HybridSignalAggregator:
                 conviction=0.0,
                 weighted_votes=weighted_votes,
                 agents_present=agents_present,
+                reliability=reliability_used,
             )
 
         bull_pct = bull_pool / total
@@ -176,4 +178,5 @@ class HybridSignalAggregator:
             conviction=conviction,
             weighted_votes=weighted_votes,
             agents_present=agents_present,
+            reliability=reliability_used,
         )

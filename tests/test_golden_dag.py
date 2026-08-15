@@ -69,6 +69,7 @@ def _initial_state() -> ARGUSState:
         risk_tolerance="MODERATE",
         backtest_mode=False,
         session_seed=None,
+        as_of=None,
         price_history={},
         session_states=session_states,
         macro_context=None,
@@ -138,8 +139,14 @@ class _NoneMacroMarketData(FixtureMarketDataProvider):
         return {"vix": None, "fed_funds": None, "t10y2y": None}
 
 
-def test_macro_context_none_short_circuits_to_end():
-    """A None macro_context routes straight to END; no fan-out node runs."""
+def test_macro_context_none_still_produces_a_degraded_allocation():
+    """A None macro_context must not gate the three specialists or the allocator.
+
+    Regression test for X1: no specialist agent consumes MacroContext, so a FRED
+    outage must not zero out a session that needs no FRED data. The three
+    specialists, aggregation, risk evaluation, and portfolio allocation must all
+    still run, degraded rather than empty, with the gap named in errors.
+    """
     graph = build_graph(
         market_data=_NoneMacroMarketData(),
         fundamental_llm=_per_ticker_llm("fundamental.json"),
@@ -158,11 +165,17 @@ def test_macro_context_none_short_circuits_to_end():
         final_state = graph.invoke(_initial_state(), config)
 
     assert final_state.get("macro_context") is None
-    assert final_state.get("technical_signals") == {}
-    assert final_state.get("fundamental_signals") == {}
-    assert final_state.get("sentiment_signals") == {}
-    assert final_state.get("risk_assessments") == {}
-    assert final_state.get("portfolio_allocation") is None
+    assert final_state.get("technical_signals")
+    assert final_state.get("fundamental_signals")
+    assert final_state.get("sentiment_signals")
+    assert final_state.get("risk_assessments")
+    assert final_state.get("aggregated_signals")
+
+    alloc = final_state.get("portfolio_allocation")
+    assert alloc is not None
+    assert len(alloc.portfolio) == len(UNIVERSE)
+
+    assert any("macro_context unavailable" in e for e in final_state.get("errors", []))
 
 
 def test_golden_dag_runs_offline_and_produces_a_valid_allocation():
