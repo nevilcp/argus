@@ -131,7 +131,10 @@ def replay_session(
             via `as_of` to what existed as of this session's own capture
             date — never outcomes from sessions replayed "later" in this
             call. The evaluation runs both so it can compare the two
-            conditions.
+            conditions. Either way, `as_of` is also what node_log_decisions
+            stamps each decision's session_timestamp with, so a replayed
+            decision's date is always the fixture's capture date, never
+            replay wall-clock time.
 
     Returns:
         SessionResult with the session's universe and the graph's final state.
@@ -147,7 +150,7 @@ def replay_session(
         risk_tolerance=risk_tolerance,
         backtest_mode=False,
         session_seed=None,
-        as_of=session_date if closed_loop else None,
+        as_of=session_date,
         price_history={},
         session_states=session_states,
         macro_context=None,
@@ -189,27 +192,7 @@ def replay_session(
                 )
             final_state = graph.invoke(state, config)
 
-    _rebase_decision_timestamps(final_state, session_states)
     return SessionResult(session_dir=session_dir, universe=universe, final_state=final_state)
-
-
-def _rebase_decision_timestamps(final_state: dict[str, Any], session_states: dict[str, dict]) -> None:
-    """Overwrites each decision's session_timestamp with the fixture's captured point-in-time date.
-
-    node_log_decisions stamps session_timestamp with datetime.now() — correct
-    for a live session (the decision genuinely happens now), wrong for a
-    replayed one: the fixture's session_states were captured on a real past
-    date (its "timestamp" field), and PR 10's evaluation needs that date, not
-    replay wall-clock time, to look up a forward return. Every ticker in a
-    session shares one capture date, so any one of them is representative.
-    """
-    decisions = final_state.get("decisions") or []
-    if not decisions or not session_states:
-        return
-    session_date = datetime.fromisoformat(next(iter(session_states.values()))["timestamp"])
-    final_state["decisions"] = [
-        d.model_copy(update={"session_timestamp": session_date}) for d in decisions
-    ]
 
 
 def replay_sessions(session_dirs: list[Path], **kwargs: Any) -> list[SessionResult]:
