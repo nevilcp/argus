@@ -371,6 +371,14 @@ class RiskAssessment(BaseModel):
             "Populated for multi-asset portfolio-level calls; empty for single-ticker calls."
         ),
     )
+    optimizer_converged: bool | None = Field(
+        None,
+        description=(
+            "Whether the SLSQP solve reported success. None when the solver was never "
+            "invoked (single-asset call). False means optimal_weights is empty and no "
+            "portfolio-level cap was applied."
+        ),
+    )
 
     api_calls_used: int = Field(0, ge=0)
     timestamp: datetime = Field(..., description="UTC timestamp of signal production")
