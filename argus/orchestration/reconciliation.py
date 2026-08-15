@@ -168,11 +168,15 @@ def compute_realized_return(
     Returns:
         (actual_return_pct, holding_days, exit_reason), or None when there is
         nothing to reconcile: no technical signal (no entry price), no
-        allocation (no position was taken), or the price series doesn't yet
-        extend past the target exit date — horizon not reached, deferred
-        rather than fabricated.
+        allocation or a zero/negative-weight allocation (no position was
+        taken), or the price series doesn't yet extend past the target exit
+        date — horizon not reached, deferred rather than fabricated.
     """
-    if decision.technical is None or decision.allocation is None:
+    if (
+        decision.technical is None
+        or decision.allocation is None
+        or decision.allocation.allocation_pct <= 0
+    ):
         return None
 
     entry_price = decision.technical.current_price

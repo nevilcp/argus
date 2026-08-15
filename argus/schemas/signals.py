@@ -441,6 +441,16 @@ class AggregatedSignal(BaseModel):
             "memory per ticker."
         ),
     )
+    model_healthy: bool = Field(
+        True,
+        description=(
+            "False when reliability weighting fell back to the 0.5 neutral prior "
+            "because cultural memory was unavailable (e.g. an ImportError on its "
+            "optional [models] extra), rather than because no outcome history "
+            "exists yet. Distinguishes a broken dependency from a genuinely new "
+            "system — see reliability_n for the latter, which is 0 in both cases."
+        ),
+    )
 
 
 class PositionAllocation(BaseModel):
@@ -492,6 +502,23 @@ class PortfolioAllocation(BaseModel):
     )
     api_calls_used: int = Field(1, ge=0)
     timestamp: datetime = Field(..., description="UTC timestamp of signal production")
+
+    @field_validator("portfolio")
+    @classmethod
+    def tickers_are_unique(
+        cls, portfolio: list[PositionAllocation]
+    ) -> list[PositionAllocation]:
+        """Rejects a portfolio with a repeated ticker.
+
+        Every downstream consumer (node_log_decisions, risk cap enforcement)
+        keys positions by ticker; a duplicate would silently overwrite one
+        of the two allocations rather than raising.
+        """
+        seen = [pos.ticker for pos in portfolio]
+        duplicates = {t for t in seen if seen.count(t) > 1}
+        if duplicates:
+            raise ValueError(f"Duplicate ticker(s) in portfolio: {sorted(duplicates)}")
+        return portfolio
 
     @model_validator(mode="after")
     def total_allocation_sums_to_one(self) -> "PortfolioAllocation":

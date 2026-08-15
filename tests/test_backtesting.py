@@ -47,6 +47,27 @@ def test_replay_session_never_touches_the_production_checkpoint_db(tmp_path, mon
     assert not (tmp_path / "argus_graph.db").exists()
 
 
+def test_replay_session_stamps_decisions_with_the_fixture_capture_date():
+    """Every replayed decision's session_timestamp is the fixture's own capture date.
+
+    Regression test for LD-2: node_log_decisions previously stamped
+    datetime.now() regardless of as_of, so a closed_loop=True replay wrote
+    wall-clock dates straight into the real ./chroma_db via
+    store_decision_snapshot before any post-hoc rebase could run. as_of is
+    now always passed to the graph, and node_log_decisions uses it directly
+    (or falls back to wall-clock only when it is unset, as in a live session).
+    """
+    with open(FIXTURES_DIR / "market_data" / "session_states.json") as f:
+        session_states = json.load(f)
+    expected_date = datetime.fromisoformat(next(iter(session_states.values()))["timestamp"])
+
+    result = replay_session(FIXTURES_DIR, closed_loop=False)
+
+    decisions = result.final_state.get("decisions") or []
+    assert decisions
+    assert all(d.session_timestamp == expected_date for d in decisions)
+
+
 def test_replay_session_closed_loop_scopes_cultural_memory_to_the_session_date():
     """closed_loop=True must pass the fixture's own capture date as `as_of`.
 
