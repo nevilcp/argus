@@ -412,6 +412,16 @@ class AggregatedSignal(BaseModel):
             "weighted_votes alone cannot tell the two apart."
         ),
     )
+    reliability: dict[str, float] = Field(
+        default_factory=dict,
+        description=(
+            "Agent name → per-regime historical win rate used to scale that agent's "
+            "vote weight at aggregation time (see HybridSignalAggregator.aggregate's "
+            "reliability parameter). Persisted so orchestration/reconciliation.py's "
+            "leave-one-out ablation can replay the same weighting the baseline used, "
+            "instead of silently resetting every ablated rerun to the 1.0 unweighted default."
+        ),
+    )
 
 
 class PositionAllocation(BaseModel):
