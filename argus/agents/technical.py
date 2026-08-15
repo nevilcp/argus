@@ -342,7 +342,9 @@ class TechnicalStatisticalAgent:
             timestamp=datetime.now(),
         )
 
-    def batch_analyze(self, session_states: dict[str, dict]) -> dict[str, TechnicalSignal]:
+    def batch_analyze(
+        self, session_states: dict[str, dict]
+    ) -> tuple[dict[str, TechnicalSignal], list[str]]:
         """Evaluates technical indicators sequentially across a set of tickers.
 
         Tickers that return None from analyze() (missing required fields) or raise
@@ -352,15 +354,19 @@ class TechnicalStatisticalAgent:
             session_states: Mapping of ticker → session state dict.
 
         Returns:
-            Mapping of ticker → TechnicalSignal for each successfully analyzed ticker.
-            Tickers with missing data or errors are omitted and logged as warnings.
+            Tuple of (signals, errors). ``signals`` maps ticker → TechnicalSignal
+            for each successfully analyzed ticker. ``errors`` names each ticker
+            omitted for missing data or a raised exception.
         """
         results: dict[str, TechnicalSignal] = {}
+        errors: list[str] = []
         for ticker, state in session_states.items():
             try:
                 signal = self.analyze(ticker, state)
                 if signal is not None:
                     results[ticker] = signal
+                else:
+                    errors.append(f"technical_analysis[{ticker}]: missing required indicator fields")
             except Exception as exc:
                 logger.warning(
                     "batch_analyze: %s failed — %s: %s",
@@ -368,9 +374,10 @@ class TechnicalStatisticalAgent:
                     type(exc).__name__,
                     exc,
                 )
+                errors.append(f"technical_analysis[{ticker}]: {type(exc).__name__}: {exc}")
         logger.debug(
             "batch_analyze: %d/%d tickers produced valid signals",
             len(results),
             len(session_states),
         )
-        return results
+        return results, errors

@@ -165,7 +165,10 @@ def build_graph(
                 "node_macro_analysis: MacroStatisticalAgent returned None (FRED data unavailable). "
                 "Routing to END — no downstream agents will run this session."
             )
-            return {"macro_context": None}
+            return {
+                "macro_context": None,
+                "errors": ["macro_analysis: MacroStatisticalAgent returned None (FRED data unavailable)"],
+            }
         return {"macro_context": macro_ctx}
 
     def node_technical_analysis(state: ARGUSState) -> dict:
@@ -178,8 +181,8 @@ def build_graph(
             Partial state update with ``technical_signals``.
         """
         session_states = state.get("session_states", {})
-        signals = tech_agent.batch_analyze(session_states)
-        return {"technical_signals": signals}
+        signals, errors = tech_agent.batch_analyze(session_states)
+        return {"technical_signals": signals, "errors": errors}
 
     def node_fundamental_analysis(state: ARGUSState) -> dict:
         """Audits corporate health metrics and qualitative economic moat vectors.
@@ -190,12 +193,12 @@ def build_graph(
         Returns:
             Partial state update with ``fundamental_signals``.
         """
-        signals = fund_agent.batch_analyze(
+        signals, errors = fund_agent.batch_analyze(
             state["universe"],
             backtest_mode=state.get("backtest_mode", False),
             session_seed=state.get("session_seed"),
         )
-        return {"fundamental_signals": signals}
+        return {"fundamental_signals": signals, "errors": errors}
 
     def node_sentiment_analysis(state: ARGUSState) -> dict:
         """Scores news articles and social media sentiment signals.
@@ -206,8 +209,8 @@ def build_graph(
         Returns:
             Partial state update with ``sentiment_signals``.
         """
-        signals = sent_agent.batch_analyze(state["universe"])
-        return {"sentiment_signals": signals}
+        signals, errors = sent_agent.batch_analyze(state["universe"])
+        return {"sentiment_signals": signals, "errors": errors}
 
     def node_retrieve_cultural_memory(state: ARGUSState) -> dict:
         """Retrieves semantic trading wisdom and historical trade patterns matching the current regime.
@@ -375,7 +378,7 @@ def build_graph(
 
         macro = state.get("macro_context")
         if not macro:
-            return {}
+            return {"errors": ["portfolio_allocation: skipped, no macro_context in state"]}
 
         mem = state.get("cultural_memory", {})
         wisdom = mem.get("wisdom", [])
@@ -387,7 +390,11 @@ def build_graph(
                 "node_portfolio_allocation: PortfolioManagerAgent returned None (LLM API failure). "
                 "Skipping portfolio_allocation to allow graceful exit."
             )
-            return {}
+            return {
+                "errors": [
+                    "portfolio_allocation: PortfolioManagerAgent returned None (LLM API failure)"
+                ]
+            }
         return {"portfolio_allocation": alloc}
 
     def route_after_macro(state: ARGUSState):
