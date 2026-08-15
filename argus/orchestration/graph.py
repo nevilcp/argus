@@ -486,7 +486,9 @@ def build_graph(
         wisdom = mem.get("wisdom", [])
         warnings = mem.get("warnings", [])
 
-        alloc = portfolio_agent.allocate(profile, signals_dict, macro, wisdom, warnings)
+        alloc = portfolio_agent.allocate(
+            profile, signals_dict, macro, wisdom, warnings, adjustments=errors
+        )
         if alloc is None:
             logger.error(
                 "node_portfolio_allocation: PortfolioManagerAgent returned None (LLM API failure). "
