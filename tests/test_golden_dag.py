@@ -118,7 +118,7 @@ def _run_fixture_graph() -> dict:
         mock_get_cultural_memory.return_value = mock.Mock(
             retrieve_wisdom=mock.Mock(return_value=[]),
             retrieve_warnings=mock.Mock(return_value=[]),
-            get_agent_accuracy=mock.Mock(return_value=0.5),
+            get_agent_accuracy=mock.Mock(return_value=(0.5, 0)),
             store_decision_snapshot=mock.Mock(),
         )
         final_state = graph.invoke(_initial_state(), config)
@@ -159,7 +159,7 @@ def test_macro_context_none_still_produces_a_degraded_allocation():
         mock_get_cultural_memory.return_value = mock.Mock(
             retrieve_wisdom=mock.Mock(return_value=[]),
             retrieve_warnings=mock.Mock(return_value=[]),
-            get_agent_accuracy=mock.Mock(return_value=0.5),
+            get_agent_accuracy=mock.Mock(return_value=(0.5, 0)),
             store_decision_snapshot=mock.Mock(),
         )
         final_state = graph.invoke(_initial_state(), config)
@@ -231,7 +231,7 @@ def test_missing_indicator_is_reported_in_errors_not_silently_dropped():
         mock_get_cultural_memory.return_value = mock.Mock(
             retrieve_wisdom=mock.Mock(return_value=[]),
             retrieve_warnings=mock.Mock(return_value=[]),
-            get_agent_accuracy=mock.Mock(return_value=0.5),
+            get_agent_accuracy=mock.Mock(return_value=(0.5, 0)),
             store_decision_snapshot=mock.Mock(),
         )
         final_state = graph.invoke(state, config)
@@ -277,7 +277,7 @@ def test_missing_indicator_still_reaches_aggregation_with_evidence_surfaced():
         mock_get_cultural_memory.return_value = mock.Mock(
             retrieve_wisdom=mock.Mock(return_value=[]),
             retrieve_warnings=mock.Mock(return_value=[]),
-            get_agent_accuracy=mock.Mock(return_value=0.5),
+            get_agent_accuracy=mock.Mock(return_value=(0.5, 0)),
             store_decision_snapshot=mock.Mock(),
         )
         final_state = graph.invoke(state, config)

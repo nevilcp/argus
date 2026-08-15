@@ -25,8 +25,8 @@ Agent wiring is a build_graph() parameter, not a module-level singleton:
 every agent that touches the network or an LLM accepts a
 MarketDataProvider/LLMClient, defaulting to the real implementation, so a
 test can build a fixture-backed graph without patching this module's
-internals. `graph` below is the default, real-data instance — the one
-api/main.py imports.
+internals. Callers — api/main.py, orchestration/collector.py — call
+build_graph() themselves rather than importing a shared instance.
 """
 
 import logging
@@ -341,7 +341,7 @@ def build_graph(
             try:
                 memory = get_cultural_memory()
                 reliability = {
-                    name: memory.get_agent_accuracy(name, regime=regime, as_of=as_of)
+                    name: memory.get_agent_accuracy(name, regime=regime, as_of=as_of)[0]
                     for name in agent_names
                 }
             except ImportError as exc:
@@ -595,7 +595,3 @@ def build_graph(
         checkpointer = None
 
     return builder.compile(checkpointer=checkpointer)
-
-
-# Default, real-data graph — what api/main.py imports and invokes in production.
-graph = build_graph()
