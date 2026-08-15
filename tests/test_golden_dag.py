@@ -24,6 +24,9 @@ from pathlib import Path
 from unittest import mock
 from uuid import uuid4
 
+import numpy as np
+import pandas as pd
+
 from argus.orchestration.graph import build_graph
 from argus.orchestration.state import ARGUSState
 from argus.seams import FixtureLLMClient, FixtureMarketDataProvider
@@ -176,6 +179,109 @@ def test_macro_context_none_still_produces_a_degraded_allocation():
     assert len(alloc.portfolio) == len(UNIVERSE)
 
     assert any("macro_context unavailable" in e for e in final_state.get("errors", []))
+
+
+class _SpyCountingMarketData(FixtureMarketDataProvider):
+    """Wraps the fixture provider to count ``ohlcv_daily`` calls and fabricate a SPY series.
+
+    The shared price_history fixture predates RE-5 and has no "SPY" entry, and adding
+    one there would perturb every other golden_dag test's carefully-tuned VETO/REDUCE
+    expectations (real beta feeding risk.py's beta gate). Fabricating it only here keeps
+    this test's SPY data isolated from the rest of the fixture-backed suite.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.ohlcv_daily_calls: list[str] = []
+        dates = pd.date_range("2024-01-01", periods=252, freq="B")
+        prices = 400 + np.cumsum(np.random.default_rng(0).normal(0, 1, len(dates)))
+        self._spy_df = pd.DataFrame({"close": prices}, index=dates)
+
+    def ohlcv_daily(self, ticker: str, period: str = "2y"):
+        """Records the call and returns fabricated SPY data, else defers to the fixture."""
+        self.ohlcv_daily_calls.append(ticker)
+        if ticker == "SPY":
+            return self._spy_df
+        return super().ohlcv_daily(ticker, period=period)
+
+    def multiple_daily(self, tickers: list[str], period: str = "1y"):
+        """Same as the base multiple_daily, but routes SPY through ohlcv_daily for counting."""
+        result = super().multiple_daily([t for t in tickers if t != "SPY"], period=period)
+        if "SPY" in tickers:
+            result["SPY"] = self.ohlcv_daily("SPY", period=period)
+        return result
+
+
+def test_spy_fetched_once_per_graph_run_not_once_per_risk_call():
+    """RE-5 regression: SPY rides along with node_fetch_price_history's universe fetch.
+
+    Before the fix, node_fetch_price_history never carried SPY in price_history, so
+    risk.py's ols_portfolio_beta fell back to its own live fetch on every one of the
+    N+1 risk_engine.evaluate() calls a session makes (one portfolio-level plus one per
+    ticker) — 7 fetches for this 6-ticker universe instead of 1.
+    """
+    provider = _SpyCountingMarketData()
+    graph = build_graph(
+        market_data=provider,
+        fundamental_llm=_per_ticker_llm("fundamental.json"),
+        sentiment_llm=_per_ticker_llm("sentiment.json"),
+        portfolio_llm=_portfolio_llm(),
+    )
+    config = {"configurable": {"thread_id": str(uuid4())}}
+
+    with mock.patch("argus.orchestration.graph.get_cultural_memory") as mock_get_cultural_memory:
+        mock_get_cultural_memory.return_value = mock.Mock(
+            retrieve_wisdom=mock.Mock(return_value=[]),
+            retrieve_warnings=mock.Mock(return_value=[]),
+            get_agent_accuracy=mock.Mock(return_value=(0.5, 0)),
+            store_decision_snapshot=mock.Mock(),
+        )
+        graph.invoke(_initial_state(), config)
+
+    assert provider.ohlcv_daily_calls.count("SPY") == 1
+
+
+class _CountingVixMarketData(_NoneMacroMarketData):
+    """_NoneMacroMarketData with a vix() call counter, isolated from other tests."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.vix_calls = 0
+
+    def vix(self) -> float:
+        """Records the call, then defers to the inherited fixture-backed reading."""
+        self.vix_calls += 1
+        return super().vix()
+
+
+def test_macro_context_none_still_reaches_a_real_vix_reading():
+    """RE-6 regression: a FRED outage must not silently default the blackout gate to 20.0.
+
+    _NoneMacroMarketData forces macro_bundle() (hence macro_context) to None but leaves
+    vix() — read straight from yfinance in production, independent of FRED — intact, so
+    the risk engine's blackout gate should reach a real VIX reading via one explicit call
+    rather than defaulting.
+    """
+    provider = _CountingVixMarketData()
+    graph = build_graph(
+        market_data=provider,
+        fundamental_llm=_per_ticker_llm("fundamental.json"),
+        sentiment_llm=_per_ticker_llm("sentiment.json"),
+        portfolio_llm=_portfolio_llm(),
+    )
+    config = {"configurable": {"thread_id": str(uuid4())}}
+
+    with mock.patch("argus.orchestration.graph.get_cultural_memory") as mock_get_cultural_memory:
+        mock_get_cultural_memory.return_value = mock.Mock(
+            retrieve_wisdom=mock.Mock(return_value=[]),
+            retrieve_warnings=mock.Mock(return_value=[]),
+            get_agent_accuracy=mock.Mock(return_value=(0.5, 0)),
+            store_decision_snapshot=mock.Mock(),
+        )
+        final_state = graph.invoke(_initial_state(), config)
+
+    assert final_state.get("macro_context") is None
+    assert provider.vix_calls == 1
 
 
 def test_golden_dag_runs_offline_and_produces_a_valid_allocation():

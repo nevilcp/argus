@@ -200,7 +200,10 @@ class TestEndToEnd:
             assert len(alloc.portfolio) >= 1 or alloc.cash_reserve_pct == 1.0
 
             for pos in alloc.portfolio:
-                assert pos.stop_loss > 0.0
+                # RE-7: the per-ticker risk gate now REDUCEs (stop_loss=0.0) real
+                # positions it previously under-detected, so 0.0 is a legitimate
+                # outcome on live market data, not just an unpopulated field
+                assert pos.stop_loss >= 0.0
         except Exception as e:
             # The checkpointer can raise a dataframe serialization error unrelated to graph wiring
             if "msgpack" in str(e).lower() or "not msgpack serializable" in str(e).lower():
