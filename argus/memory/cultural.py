@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime
+from threading import Lock
 from typing import Any, Optional
 
 from argus.params import MEMORY, RECONCILIATION
@@ -86,6 +87,26 @@ class CulturalMemoryManager:
         )
         self.persist_dir = persist_dir
         logger.info("[Memory] Cultural Memory Manager initialized at %s", persist_dir)
+
+    def already_reconciled(self, decision_ids: list[str]) -> set[str]:
+        """Returns the subset of decision_ids that already have a stored trade outcome.
+
+        A single batched ``get`` rather than one existence check per decision,
+        so a caller reconciling a growing history of decisions (see
+        orchestration/reconciliation.py) can filter its work list down to
+        unreconciled decisions before touching market data at all.
+
+        Args:
+            decision_ids: Candidate ARGUSDecision.decision_id values.
+
+        Returns:
+            The subset already stored under a ``trade_{decision_id}`` row.
+        """
+        if not decision_ids:
+            return set()
+        ids = [f"trade_{decision_id}" for decision_id in decision_ids]
+        results = self.collection.get(ids=ids)
+        return {stored_id.removeprefix("trade_") for stored_id in results.get("ids") or []}
 
     def store_trade_outcome(
         self,
@@ -428,6 +449,7 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
 
 
 _cultural_memory: Optional[CulturalMemoryManager] = None
+_cultural_memory_lock = Lock()
 
 
 def get_cultural_memory(persist_dir: str = "./chroma_db") -> CulturalMemoryManager:
@@ -449,8 +471,11 @@ def get_cultural_memory(persist_dir: str = "./chroma_db") -> CulturalMemoryManag
     """
     global _cultural_memory
     if _cultural_memory is None:
-        _cultural_memory = CulturalMemoryManager(persist_dir)
-    elif os.path.abspath(persist_dir) != _cultural_memory.persist_dir:
+        with _cultural_memory_lock:
+            if _cultural_memory is None:
+                _cultural_memory = CulturalMemoryManager(persist_dir)
+                return _cultural_memory
+    if os.path.abspath(persist_dir) != _cultural_memory.persist_dir:
         logger.warning(
             "[Memory] get_cultural_memory(persist_dir=%r) ignored; the process-wide "
             "singleton is already initialized at %s.",

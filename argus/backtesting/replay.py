@@ -15,8 +15,8 @@ the system's "return None rather than fabricate defaults" rule.
 
 A "session" here is one fixture snapshot directory shaped like
 tests/fixtures/ (market_data/ + llm_responses/ subdirectories) — one real
-point-in-time capture of everything the graph needs, in the same format
-scripts/capture_fixtures.py produces. Point-in-time correctness is
+point-in-time capture of everything the graph needs, hand-captured in the
+same format. Point-in-time correctness is
 structural here, not runtime-enforced (contrast the deleted
 PointInTimeEnforcer): each session's FixtureMarketDataProvider is scoped to
 that session's own directory, so a later session's data cannot leak into an

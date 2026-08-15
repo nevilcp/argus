@@ -121,12 +121,15 @@ def _log_task_exception(task: asyncio.Task, name: str) -> None:
         logger.error("[%s] background task crashed: %s", name, exc, exc_info=exc)
 
 
-async def _collector_loop(pipeline: MFTDataPipeline) -> None:
+async def _collector_loop(pipeline: MFTDataPipeline, compiled_graph) -> None:
     """Runs run_collection_cycle on a fixed interval for as long as the app is alive.
 
     Args:
         pipeline: The shared MFT pipeline instance, so this loop reuses the
             same warm buffer the live /analyze cache draws from.
+        compiled_graph: The shared, already-built graph (module-level
+            ``_graph``) — the same instance /analyze invokes, so this loop
+            reopens no extra SqliteSaver connection on every cycle.
     """
     global _last_collection_result
     while True:
@@ -137,7 +140,7 @@ async def _collector_loop(pipeline: MFTDataPipeline) -> None:
                 invest_pct=settings.ARGUS_INVEST_PCT,
                 risk_tolerance=settings.ARGUS_RISK_TOLERANCE,
                 pipeline=pipeline,
-                checkpoint_db_path=f"{settings.ARGUS_DATA_DIR}/argus_graph.db",
+                compiled_graph=compiled_graph,
                 decisions_log_path=f"{settings.ARGUS_DATA_DIR}/decisions.jsonl",
             )
             logger.info("[Collector] cycle result: %s", _last_collection_result)
@@ -197,7 +200,7 @@ async def lifespan(app: FastAPI):
     )
 
     if settings.ARGUS_COLLECTOR_ENABLED:
-        _collector_task = asyncio.create_task(_collector_loop(_mft_pipeline))
+        _collector_task = asyncio.create_task(_collector_loop(_mft_pipeline, _graph))
         _collector_task.add_done_callback(lambda t: _log_task_exception(t, "CollectorLoop"))
         logger.info(
             "[Startup] Unattended collector loop launched (interval=%ds).",

@@ -32,6 +32,7 @@ load_dotenv()
 from argus.config import settings
 from argus.data.pipeline import MFTDataPipeline
 from argus.orchestration.collector import run_collection_cycle
+from argus.orchestration.graph import build_graph
 
 logger = logging.getLogger("argus.collect_session")
 
@@ -75,6 +76,7 @@ def main() -> None:
     universe = [t.strip() for t in args.universe.split(",") if t.strip()] if args.universe else settings.ARGUS_UNIVERSE
 
     pipeline = MFTDataPipeline(tickers=list(universe), db_path=args.buffer_db)
+    compiled_graph = build_graph(checkpoint_db_path=args.checkpoint_db)
     result = asyncio.run(
         run_collection_cycle(
             universe=universe,
@@ -82,7 +84,7 @@ def main() -> None:
             invest_pct=args.invest_pct,
             risk_tolerance=args.risk_tolerance,
             pipeline=pipeline,
-            checkpoint_db_path=args.checkpoint_db,
+            compiled_graph=compiled_graph,
             decisions_log_path=args.decisions_log,
         )
     )
