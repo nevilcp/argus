@@ -28,6 +28,7 @@ from argus.risk.kill_switch import KillSwitch
 from argus.schemas.signals import (
     FundamentalSignal,
     MacroContext,
+    PortfolioAllocation,
     Regime,
     RiskAssessment,
     SectorSignal,
@@ -87,21 +88,30 @@ class TestEndToEnd:
         assert r_sig.api_calls_used == 0
 
     @pytest.mark.asyncio
+    @mock.patch("argus.agents.portfolio.PortfolioManagerAgent.allocate")
     @mock.patch("argus.orchestration.graph.get_cultural_memory")
     @mock.patch("argus.agents.fundamental.FundamentalAgent.analyze")
     @mock.patch("argus.agents.sentiment.SentimentAgent.analyze")
-    async def test_full_graph_smoke(self, mock_sent, mock_fund, mock_cultural_memory, tmp_path):
+    async def test_full_graph_smoke(
+        self, mock_sent, mock_fund, mock_cultural_memory, mock_portfolio, tmp_path
+    ):
         """Runs the complete LangGraph graph for AAPL, MSFT using mocked LLMs.
 
         Cultural memory is mocked out (not just left real) because its embedding
         function needs the optional `[models]` extra (sentence-transformers) that
         default installs/CI don't have, and because this smoke test is about graph
-        wiring, not vector-DB behavior.
+        wiring, not vector-DB behavior. PortfolioManagerAgent.allocate is mocked
+        for the same reason FundamentalAgent/SentimentAgent are: GROQ_API_KEY is
+        intentionally unset in CI (see .github/workflows/ci.yml), and with RE-4's
+        fix this 2-ticker universe no longer VETOes every ticker, so allocate()
+        now actually reaches the LLM call instead of short-circuiting to
+        all-cash before ever touching the network.
 
         Args:
             mock_sent: Patched SentimentAgent.analyze.
             mock_fund: Patched FundamentalAgent.analyze.
             mock_cultural_memory: Patched get_cultural_memory.
+            mock_portfolio: Patched PortfolioManagerAgent.allocate.
             tmp_path: Pytest tempdir, so this run's checkpoint never lands in
                 the production argus_graph.db.
         """
@@ -166,6 +176,39 @@ class TestEndToEnd:
             )
 
         mock_sent.side_effect = sent_side_effect
+
+        def portfolio_side_effect(
+            user_profile,
+            all_signals,
+            macro,
+            cultural_wisdom=None,
+            cultural_warnings=None,
+            adjustments=None,
+        ):
+            """Stand in for PortfolioManagerAgent.allocate, matching its real signature.
+
+            Args:
+                user_profile: Dict with total_wealth/invest_pct/risk_tolerance.
+                all_signals: Mapping of ticker -> dict of signal objects; unused.
+                macro: Current macroeconomic context; unused.
+                cultural_wisdom: Unused; accepted to match the real signature.
+                cultural_warnings: Unused; accepted to match the real signature.
+                adjustments: Unused; accepted to match the real signature.
+
+            Returns:
+                A fixed all-cash PortfolioAllocation.
+            """
+            return PortfolioAllocation(
+                session_id=str(uuid4()),
+                user_investable_capital=float(user_profile.get("total_wealth") or 0.0),
+                portfolio=[],
+                cash_reserve_pct=1.0,
+                expected_sharpe=0.0,
+                rebalance_trigger="MONTHLY",
+                timestamp=datetime.now(),
+            )
+
+        mock_portfolio.side_effect = portfolio_side_effect
 
         state = ARGUSState(
             ticker="AAPL",
