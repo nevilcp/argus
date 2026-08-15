@@ -272,7 +272,11 @@ class FundamentalAgent:
         self.cache = FundamentalCache()
 
     def analyze(
-        self, ticker: str, backtest_mode: bool = False, session_seed: Optional[int] = None
+        self,
+        ticker: str,
+        backtest_mode: bool = False,
+        session_seed: Optional[int] = None,
+        errors: Optional[list[str]] = None,
     ) -> Optional[FundamentalSignal]:
         """Audits fundamentals for a single ticker and returns a validated Pydantic signal.
 
@@ -284,6 +288,9 @@ class FundamentalAgent:
             backtest_mode: When True, anonymizes the ticker to prevent LLM parametric recall.
             session_seed: Integer date seed for deterministic anonymization; required when
                 backtest_mode is True.
+            errors: If given, a reason is appended here on every path that
+                returns None, so callers can surface the failure instead of
+                only logging it.
 
         Returns:
             A validated FundamentalSignal, or None if all attempts fail.
@@ -298,12 +305,16 @@ class FundamentalAgent:
             logger.warning(
                 "[Fundamental] Low capacity for llama-3.3-70b-versatile, skipping %s", ticker
             )
+            if errors is not None:
+                errors.append(f"fundamental_analysis[{ticker}]: governor capacity too low, skipped")
             return None
 
         try:
             fundamentals = self.market_data.fundamentals(ticker)
         except Exception as e:
             logger.warning("[Fundamental] Failed to fetch fundamentals for %s: %s", ticker, e)
+            if errors is not None:
+                errors.append(f"fundamental_analysis[{ticker}]: failed to fetch fundamentals: {e}")
             return None
 
         pit_data: dict[str, Any] = {
@@ -359,6 +370,10 @@ class FundamentalAgent:
                     "[Fundamental] Attempt %d parse error for %s: %s", attempt + 1, ticker, e
                 )
                 if attempt == 2:
+                    if errors is not None:
+                        errors.append(
+                            f"fundamental_analysis[{ticker}]: parse error after 3 attempts: {e}"
+                        )
                     return None
                 time.sleep(2**attempt)
             except Exception as e:
@@ -366,6 +381,10 @@ class FundamentalAgent:
                     "[Fundamental] Attempt %d API error for %s: %s", attempt + 1, ticker, e
                 )
                 if attempt == 2:
+                    if errors is not None:
+                        errors.append(
+                            f"fundamental_analysis[{ticker}]: API error after 3 attempts: {e}"
+                        )
                     return None
                 time.sleep(2**attempt)
 
@@ -373,7 +392,7 @@ class FundamentalAgent:
 
     def batch_analyze(
         self, tickers: list[str], backtest_mode: bool = False, session_seed: Optional[int] = None
-    ) -> dict[str, FundamentalSignal]:
+    ) -> tuple[dict[str, FundamentalSignal], list[str]]:
         """Performs fundamental evaluations sequentially across a set of tickers.
 
         Args:
@@ -382,11 +401,14 @@ class FundamentalAgent:
             session_seed: Passed through to each ``analyze`` call for anonymization.
 
         Returns:
-            Mapping of ticker → FundamentalSignal for each successfully analyzed ticker.
+            Tuple of (signals, errors). ``signals`` maps ticker → FundamentalSignal
+            for each successfully analyzed ticker. ``errors`` names each ticker
+            omitted and why.
         """
         results = {}
+        errors: list[str] = []
         for ticker in tickers:
-            res = self.analyze(ticker, backtest_mode, session_seed)
+            res = self.analyze(ticker, backtest_mode, session_seed, errors=errors)
             if res is not None:
                 results[ticker] = res
-        return results
+        return results, errors
