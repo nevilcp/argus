@@ -45,10 +45,11 @@ from argus.agents.portfolio import PortfolioManagerAgent
 from argus.agents.risk import RiskStatisticalEngine
 from argus.agents.sentiment import SentimentAgent
 from argus.agents.technical import TechnicalStatisticalAgent
+from argus.config import settings
 from argus.memory.cultural import get_cultural_memory
 from argus.orchestration.aggregator import HybridSignalAggregator
 from argus.orchestration.state import ARGUSState
-from argus.schemas.signals import AggregatedSignal, ARGUSDecision, RiskVerdict, Signal
+from argus.schemas.signals import AggregatedSignal, ARGUSDecision, RiskAssessment, RiskVerdict, Signal
 from argus.seams import LiveMarketDataProvider, LLMClient, MarketDataProvider
 
 logger = logging.getLogger("argus.graph")
@@ -354,8 +355,8 @@ def build_graph(
             for t, sig in aggs.items():
                 sign = (
                     1.0
-                    if sig.signal.value == "BULLISH"
-                    else (-1.0 if sig.signal.value == "BEARISH" else 0.0)
+                    if sig.signal == Signal.BULLISH
+                    else (-1.0 if sig.signal == Signal.BEARISH else 0.0)
                 )
                 convictions[t] = sig.conviction * sign
 
@@ -370,39 +371,44 @@ def build_graph(
         assessments = {}
 
         for ticker in universe:
-            single = risk_engine.evaluate([{"ticker": ticker, "weight": 0.15}], history, vix)
+            single = risk_engine.evaluate(
+                [{"ticker": ticker, "weight": settings.MAX_SINGLE_POSITION_PCT}], history, vix
+            )
 
-            # Propagate portfolio-level correlation stats for uniform telemetry
-            single = single.model_copy(update={"avg_correlation": portfolio_result.avg_correlation})
+            updates: dict = {}
+
+            # Propagate portfolio-level correlation stats for uniform telemetry, but only
+            # when the portfolio call actually measured them — a structural-violation
+            # short-circuit reports None, not a fabricated 0.0
+            if portfolio_result.avg_correlation is not None:
+                updates["avg_correlation"] = portfolio_result.avg_correlation
 
             if ticker in ticker_cap_map and not portfolio_vetoed:
                 cap = ticker_cap_map[ticker]
                 # Downgrade verdict monotonically: never upgrade a VETO to REDUCE or APPROVE
-                new_verdict = (
+                updates["verdict"] = (
                     single.verdict
                     if single.verdict == RiskVerdict.VETO
                     else (RiskVerdict.REDUCE if cap < single.approved_weight else single.verdict)
                 )
-                single = single.model_copy(
-                    update={
-                        "verdict": new_verdict,
-                        "approved_weight": min(cap, single.approved_weight),
-                        "veto_reasons": single.veto_reasons + [f"[Portfolio] SLSQP cap: {cap:.1%}"],
-                    }
-                )
+                updates["approved_weight"] = min(cap, single.approved_weight)
+                updates["veto_reasons"] = single.veto_reasons + [f"[Portfolio] SLSQP cap: {cap:.1%}"]
 
             # Portfolio-level veto overrides all individual verdicts to prevent partial allocation
             if portfolio_vetoed:
-                single = single.model_copy(
-                    update={
-                        "verdict": RiskVerdict.VETO,
-                        "approved_weight": 0.0,
-                        "veto_reasons": single.veto_reasons
-                        + [f"[Portfolio] {r}" for r in portfolio_result.veto_reasons],
-                    }
-                )
+                updates["verdict"] = RiskVerdict.VETO
+                updates["approved_weight"] = 0.0
+                updates["veto_reasons"] = single.veto_reasons + [
+                    f"[Portfolio] {r}" for r in portfolio_result.veto_reasons
+                ]
 
-            assessments[ticker] = single
+            # A single model_validate reconstruction, not sequential model_copy calls —
+            # model_copy skips validators, so it was bypassing approved_le_proposed
+            assessments[ticker] = (
+                RiskAssessment.model_validate({**single.model_dump(), **updates})
+                if updates
+                else single
+            )
 
         return {"risk_assessments": assessments}
 
