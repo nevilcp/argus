@@ -120,5 +120,9 @@ def test_analyze_passes_freshness_gate_with_a_current_bar(client, monkeypatch):
 
     response = client.post("/analyze", json=_PAYLOAD)
 
+    # A 500 (rather than any of the 503 freshness variants) proves every gate
+    # above was cleared and the graph itself was reached; the exception text
+    # is redacted behind a correlation ref (API-7, see test_api_validation.py)
+    # so it isn't asserted here.
     assert response.status_code == 500
-    assert "sentinel: freshness gate cleared" in response.json()["detail"]
+    assert fake_graph.invoke.called
