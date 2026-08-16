@@ -47,7 +47,7 @@ from pydantic import BaseModel, Field
 
 from argus.agents.macro import MacroStatisticalAgent
 from argus.config import settings
-from argus.data.pipeline import MFTDataPipeline
+from argus.data.pipeline import MFTDataPipeline, max_bar_age_seconds, session_state_ttl_seconds
 from argus.memory.cultural import get_cultural_memory
 from argus.orchestration.collector import CollectionResult, run_collection_cycle
 from argus.orchestration.governor import REGISTERED_MODELS, RateLimitExceeded, UnregisteredModel, governor
@@ -63,9 +63,6 @@ logger = logging.getLogger("argus.api")
 
 _ET = ZoneInfo("America/New_York")
 
-# Entries older than _SESSION_STATE_TTL_SECONDS are treated as missing so a prior
-# session's stale intraday data is never injected silently
-_SESSION_STATE_TTL_SECONDS = 2100  # 35 min = default MFT_DECISION_INTERVAL_SECONDS + 5 min buffer
 _live_session_cache: dict[str, tuple[dict, datetime]] = {}
 
 # Initialized during lifespan startup; tickers are registered dynamically per
@@ -418,15 +415,22 @@ async def pipeline_status():
         df = _mft_pipeline.buffer.get_candles(ticker)
         buffer_depth[ticker] = 0 if df is None else len(df)
 
-    session_cache_age_seconds = {
-        ticker: (datetime.now() - updated_at).total_seconds()
+    now = datetime.now()
+    now_et = datetime.now(_ET)
+    cache_age_seconds = {
+        ticker: (now - updated_at).total_seconds()
         for ticker, (_, updated_at) in _live_session_cache.items()
+    }
+    bar_age_seconds = {
+        ticker: (now_et - datetime.fromisoformat(state["timestamp"])).total_seconds()
+        for ticker, (state, _) in _live_session_cache.items()
     }
 
     return {
         "tracked_tickers": list(_mft_pipeline.tickers),
         "buffer_depth": buffer_depth,
-        "session_cache_age_seconds": session_cache_age_seconds,
+        "cache_age_seconds": cache_age_seconds,
+        "bar_age_seconds": bar_age_seconds,
         "is_market_hours": _mft_pipeline.is_market_hours(),
         "collector_enabled": settings.ARGUS_COLLECTOR_ENABLED,
         "last_collection_result": (
@@ -463,8 +467,11 @@ async def analyze(req: AnalysisRequest):
             configured model (GOV-7) — retry after a short wait.
         HTTPException 503: If the kill switch is triggered, VIX is above the blackout
             threshold, the market is currently closed, the MFT cache has not yet
-            been populated for all requested tickers, or a configured model has no
-            rate-limit profile (a misconfiguration, not a transient condition).
+            been populated for all requested tickers, the cache hasn't been
+            refreshed recently (pipeline stalled), the cached bars are older
+            than expected (stale data survived a restart), or a configured
+            model has no rate-limit profile (a misconfiguration, not a
+            transient condition).
         HTTPException 500: If the LangGraph execution fails or produces no allocation.
     """
     ks = get_kill_switch()
@@ -483,24 +490,51 @@ async def analyze(req: AnalysisRequest):
     if _mft_pipeline is not None:
         _mft_pipeline.register_tickers(req.tickers)
 
-    # Daily bars would mismatch the resolution the technical agent expects
-    now = datetime.now()
-    missing_from_cache = [
-        t for t in req.tickers
-        if t not in _live_session_cache
-        or (now - _live_session_cache[t][1]).total_seconds() > _SESSION_STATE_TTL_SECONDS
-    ]
-    if missing_from_cache:
-        if _mft_pipeline is None or not _mft_pipeline.is_market_hours():
-            raise HTTPException(
-                503,
-                "US equity market is currently closed. MFT pipeline is idle. "
-                "Retry between 09:30 and 16:00 ET on a weekday.",
-            )
+    # Daily bars would mismatch the resolution the technical agent expects, so a
+    # closed market (checked first) means idle rather than a lower-resolution
+    # fallback. Checking it first also confines every age check below to a
+    # weekday 09:30-16:00 ET window, eliminating the weekend/holiday false positive.
+    if _mft_pipeline is None or not _mft_pipeline.is_market_hours():
         raise HTTPException(
             503,
-            f"MFT live cache not yet populated for: {missing_from_cache}. "
+            "US equity market is currently closed. MFT pipeline is idle. "
+            "Retry between 09:30 and 16:00 ET on a weekday.",
+        )
+
+    absent = [t for t in req.tickers if t not in _live_session_cache]
+    if absent:
+        raise HTTPException(
+            503,
+            f"MFT live cache not yet populated for: {absent}. "
             "The pipeline is warming up — retry after the next session cycle (~30 min after market open).",
+        )
+
+    now = datetime.now()
+    stalled = [
+        t for t in req.tickers
+        if (now - _live_session_cache[t][1]).total_seconds() > session_state_ttl_seconds()
+    ]
+    if stalled:
+        raise HTTPException(
+            503,
+            f"MFT pipeline appears stalled for: {stalled}. "
+            "The live cache hasn't been refreshed recently — check /pipeline/status.",
+        )
+
+    # Catches what a write-time TTL can't: a restart that republishes old candles
+    # under a fresh write timestamp (MFT-1)
+    now_et = datetime.now(_ET)
+    max_bar_age = max_bar_age_seconds(_mft_pipeline.interval_minutes)
+    stale = [
+        t for t in req.tickers
+        if (now_et - datetime.fromisoformat(_live_session_cache[t][0]["timestamp"])).total_seconds()
+        > max_bar_age
+    ]
+    if stale:
+        raise HTTPException(
+            503,
+            f"MFT cache data is stale for: {stale}. "
+            "The underlying candles are older than expected — check /pipeline/status.",
         )
 
     live_states = {t: _live_session_cache[t][0] for t in req.tickers}
