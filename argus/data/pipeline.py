@@ -26,10 +26,12 @@ import asyncio
 import contextlib
 import importlib.metadata  # noqa: F401 — pandas_ta.maps uses this without importing it
 import logging
+import math
 import re
 from collections.abc import Callable
 from datetime import datetime, time as dtime
 from pathlib import Path
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -39,6 +41,7 @@ from argus.config import settings
 from argus.data.cache import OHLCVBuffer
 from argus.data.fetchers import fetch_ohlcv_intraday
 from argus.params import SYSTEM
+from argus.schemas.signals import missing_session_state_keys
 
 logger = logging.getLogger("argus.pipeline")
 
@@ -95,8 +98,9 @@ def _bars_per_day(interval_minutes: int) -> int:
 def _derive_buffer_size(interval_minutes: int) -> int:
     """Sizes the rolling buffer to hold `_FETCH_PERIOD_DAYS` of candles at the given interval.
 
-    Matches fetch_ohlcv_intraday's fetch period so a single sweep's candles
-    always fit without evicting same-day history.
+    One extra day and one extra bar of slack beyond a bare `_FETCH_PERIOD_DAYS`
+    fit so a routine session doesn't evict day-1's open before momentum_1d's
+    lookback (see `_return_since`) can reach it.
 
     Args:
         interval_minutes: Native candle resolution in minutes.
@@ -104,7 +108,93 @@ def _derive_buffer_size(interval_minutes: int) -> int:
     Returns:
         Buffer row capacity per ticker.
     """
-    return _bars_per_day(interval_minutes) * _FETCH_PERIOD_DAYS
+    return (_bars_per_day(interval_minutes) + 1) * (_FETCH_PERIOD_DAYS + 1)
+
+
+# MACD(12, 26, 9)'s measured pandas-ta warmup floor for a non-NaN histogram:
+# slow(26) + signal(9) - 1. Pinned as a literal rather than derived from the
+# call site so a pandas-ta upgrade that shifts this fails a test loudly
+# instead of silently changing what counts as "ready".
+_MACD_WARMUP_BARS = 34
+
+
+def _required_indicator_bars() -> int:
+    """Returns the minimum resampled-bar count for a non-NaN MACD histogram."""
+    return _MACD_WARMUP_BARS
+
+
+def _required_raw_bars(interval_minutes: int) -> int:
+    """Cheap pre-filter: minimum raw bars before a ticker is worth resampling.
+
+    Not authoritative — gaps make raw-bar count a lower bound on the
+    resampled count, not an equality, so `_compress_candles` re-checks the
+    resampled length itself before publishing.
+
+    Args:
+        interval_minutes: Native candle resolution in minutes.
+
+    Returns:
+        The larger of the indicator-resample floor and one full trading
+        day's worth of bars (momentum_1d's lookback).
+    """
+    indicator_floor = _required_indicator_bars() * math.ceil(
+        _INDICATOR_RESAMPLE_MINUTES / interval_minutes
+    )
+    momentum_floor = _bars_per_day(interval_minutes) + 1
+    return max(indicator_floor, momentum_floor)
+
+
+def _finite_or_none(value: Optional[float]) -> Optional[float]:
+    """Returns `value` unless it's None, NaN, or infinite.
+
+    Args:
+        value: A computed indicator value, or None.
+
+    Returns:
+        `value` unchanged, or None if it isn't a finite number.
+    """
+    if value is None or not math.isfinite(value):
+        return None
+    return value
+
+
+def _return_since(
+    close_s: pd.Series, delta: pd.Timedelta, *, same_session: bool
+) -> Optional[float]:
+    """Looks up a return from the closest bar at least `delta` before the last one.
+
+    Locating by elapsed time rather than a fixed bar count keeps the lookup
+    correct under any candle interval and immune to buffer gaps or eviction,
+    where a bar-count clamp is not.
+
+    Args:
+        close_s: Ascending-index close price series, ET-aware.
+        delta: Minimum lookback duration from the last bar's timestamp.
+        same_session: True requires the located bar share the last bar's ET
+            session date (momentum_30m); False requires it precede that date
+            (momentum_1d).
+
+    Returns:
+        `(last_close / located_close) - 1.0`, or None if no bar satisfies
+        the session constraint or the located close is zero.
+    """
+    last_ts = close_s.index[-1]
+    target_ts = last_ts - delta
+    pos = close_s.index.searchsorted(target_ts, side="right") - 1
+    if pos < 0:
+        return None
+
+    located_date = close_s.index[pos].date()
+    last_date = last_ts.date()
+    if same_session and located_date != last_date:
+        return None
+    if not same_session and located_date >= last_date:
+        return None
+
+    located_close = float(close_s.iloc[pos])
+    if located_close == 0:
+        return None
+    return (float(close_s.iloc[-1]) / located_close) - 1.0
 
 
 def session_state_ttl_seconds() -> int:
@@ -274,8 +364,8 @@ class MFTDataPipeline:
         compresses whatever the buffer already holds.
 
         Returns:
-            Mapping of ticker → technical feature dict. Tickers with fewer
-            than 14 buffered bars are omitted (see ``OHLCVBuffer.get_candles``).
+            Mapping of ticker → technical feature dict. Tickers that don't
+            clear ``compress_all``'s readiness floor are omitted.
         """
         if self._is_market_hours():
             await self._sweep_once()
@@ -439,16 +529,38 @@ class MFTDataPipeline:
     def compress_all(self) -> dict[str, dict]:
         """Compresses cached candle metrics across all universe symbols into a feature dictionary.
 
+        A ticker is only published once it clears both readiness checks:
+        enough raw bars to be worth resampling (`_required_raw_bars`), and —
+        the authoritative gate — enough resampled bars for a real MACD
+        histogram, plus every required key present and finite
+        (`missing_session_state_keys`). This is what makes "present in this
+        dict" mean the same thing as "usable" to a caller that never learns
+        what an indicator is.
+
         Returns:
             Mapping of ticker → technical feature dict (rsi_14, macd_histogram, etc.).
-            Failed tickers are omitted and logged as warnings.
+            Tickers below the readiness floor, or that failed compression,
+            are omitted and logged.
         """
         states: dict[str, dict] = {}
+        required_raw = _required_raw_bars(self.interval_minutes)
         for ticker in self.buffer.get_all_tickers():
             try:
                 df = self.buffer.get_candles(ticker)
-                if df is not None:
-                    states[ticker] = self._compress_candles(df)
+                if df is None or len(df) < required_raw:
+                    continue
+                state = self._compress_candles(df)
+                if state is None:
+                    continue
+                missing = missing_session_state_keys(state)
+                if missing:
+                    logger.warning(
+                        "compress_all: %s missing/non-finite required keys %s — omitting",
+                        ticker,
+                        missing,
+                    )
+                    continue
+                states[ticker] = state
             except Exception as exc:
                 logger.warning(
                     "compress_all: %s compression failed — %s: %s",
@@ -459,7 +571,7 @@ class MFTDataPipeline:
         logger.info("compress_all: %d tickers compressed", len(states))
         return states
 
-    def _compress_candles(self, df: pd.DataFrame) -> dict:
+    def _compress_candles(self, df: pd.DataFrame) -> Optional[dict]:
         """Calculates technical indicators on a DataFrame using pandas-ta.
 
         Args:
@@ -467,13 +579,17 @@ class MFTDataPipeline:
                 datetime index.
 
         Returns:
-            Dict with keys: rsi_14, macd_histogram, bb_percent_b, atr_pct, adx_14,
-            vwap_distance, volume_ratio, momentum_30m, momentum_1d, close, timestamp.
-            rsi_14, bb_percent_b, atr_pct, adx_14, vwap_distance, and volume_ratio
-            are None when pandas_ta cannot compute them; close and timestamp are
-            always populated.
+            None if the resampled frame doesn't clear `_required_indicator_bars()`
+            — too little data for a trustworthy MACD histogram. Otherwise a dict
+            with keys: rsi_14, macd_histogram, bb_percent_b, atr_pct, adx_14,
+            vwap_distance, volume_ratio, momentum_30m, momentum_1d, close,
+            timestamp. Every field but close/timestamp is None when pandas_ta
+            can't compute it or the result isn't finite — never a fabricated
+            default.
         """
         ind_df = _resample_ohlcv(df, self.interval_minutes, _INDICATOR_RESAMPLE_MINUTES)
+        if len(ind_df) < _required_indicator_bars():
+            return None
 
         rsi_series = ta.rsi(ind_df["close"], length=14)
         rsi_14 = (
@@ -481,12 +597,12 @@ class MFTDataPipeline:
         )
 
         macd_df = ta.macd(ind_df["close"], fast=12, slow=26, signal=9)
-        macd_hist = 0.0
+        macd_hist = None
         if macd_df is not None and not macd_df.empty:
             # pandas_ta names the histogram column with an 'h' suffix, e.g. MACDh_12_26_9
             hist_col = [c for c in macd_df.columns if c.upper().startswith("MACDH_")]
             if hist_col:
-                macd_hist = float(macd_df[hist_col[0]].iloc[-1])
+                macd_hist = _finite_or_none(float(macd_df[hist_col[0]].iloc[-1]))
             else:
                 logger.warning("_compress_candles: MACD histogram column not found in %s", list(macd_df.columns))
 
@@ -502,11 +618,9 @@ class MFTDataPipeline:
 
         atr_series = ta.atr(ind_df["high"], ind_df["low"], ind_df["close"], length=14)
         close_last = float(df["close"].iloc[-1])
-        atr_pct = (
-            (float(atr_series.iloc[-1]) / close_last)
-            if (atr_series is not None and not atr_series.empty and close_last)
-            else None
-        )
+        atr_pct = None
+        if atr_series is not None and not atr_series.empty and close_last:
+            atr_pct = _finite_or_none(float(atr_series.iloc[-1]) / close_last)
 
         adx_df = ta.adx(ind_df["high"], ind_df["low"], ind_df["close"], length=14)
         adx_14 = None
@@ -519,9 +633,9 @@ class MFTDataPipeline:
         try:
             vwap_series = ta.vwap(ind_df["high"], ind_df["low"], ind_df["close"], ind_df["volume"])
             if vwap_series is not None and not vwap_series.empty:
-                vwap_val = float(vwap_series.iloc[-1])
+                vwap_val = _finite_or_none(float(vwap_series.iloc[-1]))
                 if vwap_val and close_last:
-                    vwap_distance = (close_last - vwap_val) / vwap_val
+                    vwap_distance = _finite_or_none((close_last - vwap_val) / vwap_val)
         except Exception:
             # pandas_ta raises on zero-volume days; leave unset rather than fabricate 0.0
             pass
@@ -532,29 +646,24 @@ class MFTDataPipeline:
             if len(vol_series) >= 20
             else float(vol_series.mean())
         )
-        volume_ratio = (float(vol_series.iloc[-1]) / vol_mean) if vol_mean else None
+        volume_ratio = (
+            _finite_or_none(float(vol_series.iloc[-1]) / vol_mean) if vol_mean else None
+        )
 
         close_s = df["close"]
-        n = len(close_s)
-        momentum_30m_bars = max(1, 30 // self.interval_minutes)
-        momentum_1d_bars = _bars_per_day(self.interval_minutes)
-        momentum_30m = (
-            float(close_s.iloc[-1]) / float(close_s.iloc[max(-momentum_30m_bars, -n)])
-        ) - 1.0
-        momentum_1d = (
-            float(close_s.iloc[-1]) / float(close_s.iloc[max(-momentum_1d_bars, -n)])
-        ) - 1.0
+        momentum_30m = _return_since(close_s, pd.Timedelta(minutes=30), same_session=True)
+        momentum_1d = _return_since(close_s, pd.Timedelta(days=1), same_session=False)
 
         return {
             "rsi_14": round(rsi_14, 4) if rsi_14 is not None else None,
-            "macd_histogram": round(macd_hist, 6),
+            "macd_histogram": round(macd_hist, 6) if macd_hist is not None else None,
             "bb_percent_b": round(bb_pct_b, 4) if bb_pct_b is not None else None,
             "atr_pct": round(atr_pct, 6) if atr_pct is not None else None,
             "adx_14": round(adx_14, 4) if adx_14 is not None else None,
             "vwap_distance": round(vwap_distance, 6) if vwap_distance is not None else None,
             "volume_ratio": round(volume_ratio, 4) if volume_ratio is not None else None,
-            "momentum_30m": round(momentum_30m, 6),
-            "momentum_1d": round(momentum_1d, 6),
+            "momentum_30m": round(momentum_30m, 6) if momentum_30m is not None else None,
+            "momentum_1d": round(momentum_1d, 6) if momentum_1d is not None else None,
             "close": round(close_last, 4),
             "timestamp": df.index[-1].isoformat(),
         }

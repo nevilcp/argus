@@ -28,24 +28,19 @@ import numpy as np
 
 from argus.config import settings
 from argus.params import TECHNICAL
-from argus.schemas.signals import Signal, TechnicalSignal
+from argus.schemas.signals import (
+    SESSION_STATE_REQUIRED_KEYS,
+    Signal,
+    TechnicalSignal,
+    missing_session_state_keys,
+)
 
 logger = logging.getLogger("argus.technical")
 
-# Minimum indicator keys required for a trustworthy signal. analyze() returns
-# None (instead of computing from fabricated defaults) when any key is absent.
-_REQUIRED_INDICATOR_KEYS: frozenset[str] = frozenset({
-    "rsi_14",
-    "macd_histogram",
-    "bb_percent_b",
-    "adx_14",
-    "vwap_distance",
-    "volume_ratio",
-    "atr_pct",
-    "momentum_30m",
-    "momentum_1d",
-    "close",
-})
+# Module alias — the contract itself lives in schemas/signals.py, shared with
+# data/pipeline.py's readiness gate. Kept so existing references here (and in
+# tests) don't need to import from schemas directly.
+_REQUIRED_INDICATOR_KEYS = SESSION_STATE_REQUIRED_KEYS
 
 
 def _score_rsi(s: dict) -> float:
@@ -223,26 +218,13 @@ class TechnicalStatisticalAgent:
             A validated TechnicalSignal, or None if required fields are missing or
             non-finite.
         """
-        missing = [
-            k for k in _REQUIRED_INDICATOR_KEYS
-            if session_state.get(k) is None
-        ]
+        missing = missing_session_state_keys(session_state)
         if missing:
             logger.warning(
-                "analyze[%s]: missing required indicator fields %s — skipping to avoid fake signal",
+                "analyze[%s]: missing or non-finite required indicator fields %s — "
+                "skipping to avoid fake signal",
                 ticker,
-                sorted(missing),
-            )
-            return None
-
-        required_values = np.array(
-            [float(session_state[k]) for k in _REQUIRED_INDICATOR_KEYS]
-        )
-        if not np.isfinite(required_values).all():
-            logger.warning(
-                "analyze[%s]: non-finite indicator value(s) in %s — skipping to avoid fake signal",
-                ticker,
-                sorted(_REQUIRED_INDICATOR_KEYS),
+                missing,
             )
             return None
 
