@@ -148,6 +148,45 @@ async def _collector_loop(pipeline: MFTDataPipeline, compiled_graph) -> None:
         await asyncio.sleep(settings.ARGUS_COLLECTOR_INTERVAL_SECONDS)
 
 
+def _reconcile_once() -> None:
+    """Runs one reconciliation pass: outcome backfill, paper-book update, kill-switch sync.
+
+    Synchronous by design — `_reconcile_loop` runs this via `asyncio.to_thread`
+    since it performs per-ticker yfinance fetches directly, which would
+    otherwise block the event loop for the whole app for the duration of a run.
+    """
+    decisions_log = f"{settings.ARGUS_DATA_DIR}/decisions.jsonl"
+    decisions = load_decisions_from_jsonl(decisions_log)
+    market_data = LiveMarketDataProvider()
+    stored = reconcile_decisions(
+        decisions,
+        market_data=market_data,
+        cultural=get_cultural_memory(),
+        horizon_days=RECONCILIATION.horizon_days,
+    )
+    logger.info("[Reconcile] stored %d/%d outcome(s)", stored, len(decisions))
+
+    try:
+        book_path = f"{settings.ARGUS_DATA_DIR}/paper_equity.json"
+        book = paper_book.load(book_path)
+        for run_timestamp, run_return in paper_book.compute_run_returns(
+            decisions, market_data, RECONCILIATION.horizon_days
+        ):
+            book.apply_run(run_timestamp, run_return)
+        paper_book.save(book, book_path)
+
+        ks = get_kill_switch()
+        if ks is not None:
+            ks.update_portfolio_value(book.equity)
+        logger.info(
+            "[Reconcile] paper equity=$%.2f (drawdown=%.1f%%)",
+            book.equity,
+            book.drawdown_from_peak() * 100,
+        )
+    except Exception:
+        logger.exception("[Reconcile] paper-book update failed")
+
+
 async def _reconcile_loop() -> None:
     """Runs reconcile_decisions once a day at settings.ARGUS_RECONCILE_HOUR_ET."""
     while True:
@@ -160,36 +199,7 @@ async def _reconcile_loop() -> None:
         await asyncio.sleep((target - now_et).total_seconds())
 
         try:
-            decisions_log = f"{settings.ARGUS_DATA_DIR}/decisions.jsonl"
-            decisions = load_decisions_from_jsonl(decisions_log)
-            market_data = LiveMarketDataProvider()
-            stored = reconcile_decisions(
-                decisions,
-                market_data=market_data,
-                cultural=get_cultural_memory(),
-                horizon_days=RECONCILIATION.horizon_days,
-            )
-            logger.info("[Reconcile] stored %d/%d outcome(s)", stored, len(decisions))
-
-            try:
-                book_path = f"{settings.ARGUS_DATA_DIR}/paper_equity.json"
-                book = paper_book.load(book_path)
-                for run_timestamp, run_return in paper_book.compute_run_returns(
-                    decisions, market_data, RECONCILIATION.horizon_days
-                ):
-                    book.apply_run(run_timestamp, run_return)
-                paper_book.save(book, book_path)
-
-                ks = get_kill_switch()
-                if ks is not None:
-                    ks.update_portfolio_value(book.equity)
-                logger.info(
-                    "[Reconcile] paper equity=$%.2f (drawdown=%.1f%%)",
-                    book.equity,
-                    book.drawdown_from_peak() * 100,
-                )
-            except Exception:
-                logger.exception("[Reconcile] paper-book update failed")
+            await asyncio.to_thread(_reconcile_once)
         except Exception:
             logger.exception("[Reconcile] cycle failed")
 
@@ -410,10 +420,7 @@ async def pipeline_status():
     if _mft_pipeline is None:
         raise HTTPException(503, "Pipeline not yet initialized.")
 
-    buffer_depth: dict[str, int] = {}
-    for ticker in _mft_pipeline.buffer.get_all_tickers():
-        df = _mft_pipeline.buffer.get_candles(ticker)
-        buffer_depth[ticker] = 0 if df is None else len(df)
+    buffer_depth = await asyncio.to_thread(_mft_pipeline.buffer.row_counts)
 
     now = datetime.now()
     now_et = datetime.now(_ET)

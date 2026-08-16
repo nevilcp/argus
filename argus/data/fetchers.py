@@ -33,6 +33,7 @@ import time
 import functools
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from threading import Lock
 from typing import Any, Callable, Optional, TypeVar
 
@@ -311,7 +312,26 @@ _MULTI_DAILY_MAX_WORKERS = 5
 
 # Daily bars change once per trading day; caching them turns every run after
 # the first of the day into 0 requests for this node instead of one per ticker.
-_DAILY_BAR_CACHE = DailyBarCache()
+# Constructed lazily (not at import time) so it lands under whatever
+# settings.ARGUS_DATA_DIR is current when first used, not whatever it was at
+# import time — docker-compose mounts only data/ and chroma_db/, so the old
+# cwd-relative default silently landed on the ephemeral container layer and
+# was destroyed on every restart.
+_DAILY_BAR_CACHE: Optional[DailyBarCache] = None
+
+
+def _daily_bar_cache() -> DailyBarCache:
+    """Returns the module-level DailyBarCache, constructing it under ARGUS_DATA_DIR on first use.
+
+    Returns:
+        The shared DailyBarCache instance.
+    """
+    global _DAILY_BAR_CACHE
+    if _DAILY_BAR_CACHE is None:
+        data_dir = Path(settings.ARGUS_DATA_DIR)
+        data_dir.mkdir(parents=True, exist_ok=True)
+        _DAILY_BAR_CACHE = DailyBarCache(db_path=str(data_dir / "daily_bars_cache.db"))
+    return _DAILY_BAR_CACHE
 
 
 def fetch_multiple_daily(tickers: list[str], period: str = "1y") -> dict[str, pd.DataFrame]:
@@ -328,11 +348,12 @@ def fetch_multiple_daily(tickers: list[str], period: str = "1y") -> dict[str, pd
     Returns:
         Mapping of ticker → DataFrame. Failed tickers are omitted with a warning.
     """
+    cache = _daily_bar_cache()
     results: dict[str, pd.DataFrame] = {}
     to_fetch: list[str] = []
 
     for ticker in tickers:
-        cached = _DAILY_BAR_CACHE.get(ticker)
+        cached = cache.get(ticker)
         if cached is not None:
             results[ticker] = cached
         else:
@@ -348,7 +369,7 @@ def fetch_multiple_daily(tickers: list[str], period: str = "1y") -> dict[str, pd
                 try:
                     df = future.result()
                     results[ticker] = df
-                    _DAILY_BAR_CACHE.put(ticker, df)
+                    cache.put(ticker, df)
                 except Exception as exc:
                     logger.warning(
                         "fetch_multiple_daily: failed for %s — %s: %s",
