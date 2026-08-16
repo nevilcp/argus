@@ -40,7 +40,7 @@ from dotenv import load_dotenv
 # .env must be loaded before any LangChain/Groq imports that read env vars
 load_dotenv()
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -268,6 +268,10 @@ async def lifespan(app: FastAPI):
             with suppress(asyncio.CancelledError):
                 await task
 
+    _ks = get_kill_switch()
+    if _ks is not None:
+        await asyncio.to_thread(_ks.stop, 5.0)
+
     if _mft_pipeline is not None:
         _mft_pipeline.buffer.close()
     logger.info("[Shutdown] Complete.")
@@ -280,6 +284,26 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+async def require_api_key(x_api_key: Optional[str] = Header(default=None)) -> None:
+    """Gates mutating endpoints (/analyze, /kill-switch/reset) behind a shared secret.
+
+    A blank ARGUS_API_KEY (the default) disables the check entirely, so local
+    development and any deployment that hasn't set one keep working unchanged
+    — this is a minimum bar for a publicly reachable deployment, not a
+    substitute for running behind a real auth layer.
+
+    Args:
+        x_api_key: Value of the X-API-Key request header, if present.
+
+    Raises:
+        HTTPException 401: If ARGUS_API_KEY is set and the header doesn't match.
+    """
+    if not settings.ARGUS_API_KEY:
+        return
+    if x_api_key != settings.ARGUS_API_KEY:
+        raise HTTPException(401, "Missing or invalid X-API-Key header.")
 
 
 class AnalysisRequest(BaseModel):
@@ -368,7 +392,7 @@ async def pipeline_status():
     }
 
 
-@app.post("/analyze", response_model=AnalysisResponse)
+@app.post("/analyze", response_model=AnalysisResponse, dependencies=[Depends(require_api_key)])
 async def analyze(req: AnalysisRequest):
     """Executes a real-time portfolio analysis pipeline across a target ticker universe.
 
@@ -376,10 +400,17 @@ async def analyze(req: AnalysisRequest):
     populated for all requested tickers, then runs LangGraph arbitrated orchestration
     and returns target allocation distributions.
 
+    The kill switch's drawdown gate is process-global, fixed at startup from
+    settings.ARGUS_RISK_TOLERANCE (see argus/risk/kill_switch.py's class
+    docstring) — a request's own risk_tolerance does not change which
+    threshold guards it. A mismatch is logged, not rejected: this endpoint
+    still serves the request under the configured threshold (KS-6).
+
     Args:
         req: AnalysisRequest with tickers, total_wealth, invest_pct, and risk_tolerance.
 
     Raises:
+        HTTPException 401: If ARGUS_API_KEY is set and the X-API-Key header doesn't match.
         HTTPException 503: If the kill switch is triggered, VIX is above the blackout
             threshold, the market is currently closed, or the MFT cache has not yet
             been populated for all requested tickers.
@@ -390,6 +421,13 @@ async def analyze(req: AnalysisRequest):
         raise HTTPException(503, "System halted. Kill switch triggered. Manual reset required.")
     if ks and not ks.new_positions_allowed:
         raise HTTPException(503, "New positions blocked. VIX above threshold.")
+    if ks and req.risk_tolerance != ks.risk_tolerance:
+        logger.warning(
+            "[API] Request risk_tolerance=%s differs from the kill switch's configured "
+            "risk_tolerance=%s; the configured threshold still governs this request.",
+            req.risk_tolerance,
+            ks.risk_tolerance,
+        )
 
     if _mft_pipeline is not None:
         _mft_pipeline.register_tickers(req.tickers)
@@ -481,17 +519,22 @@ async def get_governor_report():
     return governor.get_usage_report()
 
 
-@app.post("/kill-switch/reset")
-async def reset_kill_switch(new_inception_value: float):
+@app.post("/kill-switch/reset", dependencies=[Depends(require_api_key)])
+async def reset_kill_switch(new_inception_value: float = Query(gt=1000)):
     """Resets the safety monitoring daemon to a new inception capital base.
 
+    Also deletes any persisted halt-dump files (see KillSwitch.reset), so a
+    subsequent restart can't silently re-apply a halt this call just resolved.
+
     Args:
-        new_inception_value: New portfolio value to use as the drawdown base (USD).
+        new_inception_value: New portfolio value to use as the drawdown base
+            (USD); must exceed 1000, matching AnalysisRequest.total_wealth's floor.
 
     Returns:
         Dict with ``status`` key on success.
 
     Raises:
+        HTTPException 401: If ARGUS_API_KEY is set and the X-API-Key header doesn't match.
         HTTPException 404: If the kill switch has not been initialized.
     """
     ks = get_kill_switch()
@@ -499,3 +542,29 @@ async def reset_kill_switch(new_inception_value: float):
         ks.reset(new_inception_value)
         return {"status": "Reset successful"}
     raise HTTPException(404, "Kill switch not initialized")
+
+
+@app.get("/kill-switch/status")
+async def kill_switch_status():
+    """Reports the kill switch's current gate state, so an operator can see why the
+    system halted without reading logs.
+
+    Returns:
+        Dict mirroring KillSwitchStatus's fields, plus the configured risk_tolerance.
+
+    Raises:
+        HTTPException 404: If the kill switch has not been initialized.
+    """
+    ks = get_kill_switch()
+    if ks is None:
+        raise HTTPException(404, "Kill switch not initialized")
+    status = ks.status
+    return {
+        "halted": status.halted,
+        "new_positions_blocked": status.new_positions_blocked,
+        "reason": status.reason,
+        "triggered_at": status.triggered_at.isoformat() if status.triggered_at else None,
+        "realized_drawdown": status.realized_drawdown,
+        "current_vix": status.current_vix,
+        "risk_tolerance": ks.risk_tolerance,
+    }
