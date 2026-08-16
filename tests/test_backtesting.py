@@ -7,8 +7,9 @@ import json
 from datetime import datetime
 from pathlib import Path
 from unittest import mock
+from zoneinfo import ZoneInfo
 
-from argus.backtesting.replay import replay_session, replay_sessions
+from argus.backtesting.replay import _normalize_as_of, replay_session, replay_sessions
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
@@ -91,3 +92,23 @@ def test_replay_session_closed_loop_scopes_cultural_memory_to_the_session_date()
     assert mock_memory.retrieve_wisdom.call_args.kwargs["as_of"] == expected_as_of
     assert mock_memory.retrieve_warnings.call_args.kwargs["as_of"] == expected_as_of
     assert mock_memory.get_agent_accuracy.call_args.kwargs["as_of"] == expected_as_of
+
+
+def test_normalize_as_of_strips_tzinfo_from_an_aware_timestamp():
+    """An aware fixture timestamp (as a canonical-timestamp buffer would now produce) is
+    converted to ET wall-clock and returned naive, so it can't mix with a naive
+    datetime.now() fallback in node_log_decisions and break compute_run_returns' sort.
+    """
+    aware_utc = datetime(2024, 1, 2, 14, 30, tzinfo=ZoneInfo("UTC"))
+
+    result = _normalize_as_of(aware_utc)
+
+    assert result.tzinfo is None
+    assert result == datetime(2024, 1, 2, 9, 30)
+
+
+def test_normalize_as_of_passes_a_naive_timestamp_through_unchanged():
+    """A naive timestamp (today's fixture format) is returned exactly as given."""
+    naive = datetime(2024, 1, 2, 9, 30)
+
+    assert _normalize_as_of(naive) is naive

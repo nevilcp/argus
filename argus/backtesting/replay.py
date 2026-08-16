@@ -44,12 +44,35 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from argus.orchestration.graph import build_graph
 from argus.orchestration.state import ARGUSState
 from argus.seams import FixtureLLMClient, FixtureMarketDataProvider
 
 logger = logging.getLogger("argus.backtesting.replay")
+
+_ET = ZoneInfo("America/New_York")
+
+
+def _normalize_as_of(ts: datetime) -> datetime:
+    """Strips an aware timestamp's tzinfo after converting it to ET wall-clock.
+
+    Naive input passes through unchanged, since every naive timestamp
+    reaching this codebase is already treated as local ET. Guards
+    node_log_decisions' session_timestamp against mixing naive and aware
+    values across runs, which raises when paper_book.compute_run_returns
+    later sorts by run.
+
+    Args:
+        ts: Parsed session-capture timestamp, aware or naive.
+
+    Returns:
+        Naive ET datetime.
+    """
+    if ts.tzinfo is None:
+        return ts
+    return ts.astimezone(_ET).replace(tzinfo=None)
 
 
 @dataclass
@@ -140,7 +163,9 @@ def replay_session(
         SessionResult with the session's universe and the graph's final state.
     """
     universe, session_states = _load_session_states(session_dir)
-    session_date = datetime.fromisoformat(next(iter(session_states.values()))["timestamp"])
+    session_date = _normalize_as_of(
+        datetime.fromisoformat(next(iter(session_states.values()))["timestamp"])
+    )
 
     state = ARGUSState(
         ticker=universe[0],
