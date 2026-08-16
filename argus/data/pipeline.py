@@ -107,6 +107,37 @@ def _derive_buffer_size(interval_minutes: int) -> int:
     return _bars_per_day(interval_minutes) * _FETCH_PERIOD_DAYS
 
 
+def session_state_ttl_seconds() -> int:
+    """Derives how old a live-cache entry's write time may be before api/main.py treats it as missing.
+
+    Owned here rather than in api/main.py because the budget is built from
+    `_FETCH_INTERVAL`, which this module owns; api/ is deliberately outside
+    `mypy argus/`'s scope.
+
+    Returns:
+        Budget in seconds: the decision cadence plus one fetch sweep plus a
+        fixed jitter margin.
+    """
+    return settings.MFT_DECISION_INTERVAL_SECONDS + _FETCH_INTERVAL + SYSTEM.freshness_margin_seconds
+
+
+def max_bar_age_seconds(interval_minutes: int) -> int:
+    """Derives how old a session state's own bar timestamp may be before it counts as stale.
+
+    Distinct from `session_state_ttl_seconds`: that budget catches a cache
+    entry that stopped being refreshed, this one catches a fresh write that
+    republishes an old bar (e.g. a restart replaying the persistent buffer).
+
+    Args:
+        interval_minutes: Native candle resolution in minutes.
+
+    Returns:
+        Budget in seconds: one fetch sweep plus two candle intervals plus a
+        fixed jitter margin.
+    """
+    return _FETCH_INTERVAL + 2 * interval_minutes * 60 + SYSTEM.freshness_margin_seconds
+
+
 def _resample_ohlcv(df: pd.DataFrame, interval_minutes: int, target_minutes: int) -> pd.DataFrame:
     """Resamples raw OHLCV candles to a coarser resolution.
 
