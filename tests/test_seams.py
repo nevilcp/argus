@@ -200,3 +200,51 @@ def test_groq_llm_client_exhausts_retries_and_raises():
     from argus.seams import _MAX_COMPLETE_ATTEMPTS
 
     assert client._llm.invoke.call_count == _MAX_COMPLETE_ATTEMPTS
+
+
+def test_groq_llm_client_releases_reservation_on_terminal_error():
+    """A terminal error releases the pre-flight reservation instead of leaking it (GOV-1)."""
+    client = _client_with_mocked_llm()
+    request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+    response = httpx.Response(401, request=request)
+    client._llm.invoke.side_effect = groq.AuthenticationError(
+        "bad key", response=response, body=None
+    )
+
+    with mock.patch("argus.seams.time.sleep"), mock.patch(
+        "argus.seams.governor.release_reservation"
+    ) as mock_release:
+        with pytest.raises(groq.AuthenticationError):
+            client.complete("system", "user")
+
+    mock_release.assert_called_once()
+    assert mock_release.call_args.args[0] == client._model
+
+
+def test_groq_llm_client_releases_reservation_after_exhausting_retries():
+    """Retries-exhausted also releases the reservation instead of leaking it (GOV-1)."""
+    client = _client_with_mocked_llm()
+    request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+    client._llm.invoke.side_effect = groq.APIConnectionError(request=request)
+
+    with mock.patch("argus.seams.time.sleep"), mock.patch(
+        "argus.seams.governor.release_reservation"
+    ) as mock_release:
+        with pytest.raises(groq.APIConnectionError):
+            client.complete("system", "user")
+
+    mock_release.assert_called_once()
+
+
+def test_groq_llm_client_success_does_not_release_reservation():
+    """A successful call records usage but never releases the reservation it actually spent."""
+    client = _client_with_mocked_llm()
+    client._llm.invoke.return_value = _fake_success_response()
+
+    with mock.patch("argus.seams.governor.release_reservation") as mock_release, mock.patch(
+        "argus.seams.governor.record_usage"
+    ) as mock_record:
+        client.complete("system", "user")
+
+    mock_release.assert_not_called()
+    mock_record.assert_called_once()

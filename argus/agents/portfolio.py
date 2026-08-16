@@ -31,6 +31,7 @@ from uuid import uuid4
 import numpy as np
 
 from argus.config import settings
+from argus.orchestration.governor import RateLimitExceeded, UnregisteredModel
 from argus.params import PORTFOLIO
 from argus.schemas.signals import MacroContext, PortfolioAllocation, RiskAssessment, RiskVerdict, Signal
 from argus.seams import GroqLLMClient, LLMClient
@@ -198,7 +199,7 @@ class PortfolioManagerAgent:
                     "PortfolioManagerAgent: GROQ_API_KEY is not set — LLM calls will fail at invocation time."
                 )
             llm_client = GroqLLMClient(
-                model="llama-3.3-70b-versatile",
+                model=settings.ARGUS_PORTFOLIO_MODEL,
                 temperature=PORTFOLIO.llm_temperature,
                 max_tokens=PORTFOLIO.llm_max_tokens,
                 api_key=api_key,
@@ -243,6 +244,13 @@ class PortfolioManagerAgent:
         Returns:
             A validated PortfolioAllocation, all-cash if no tickers are approved, or None
             if all 3 LLM retry attempts fail.
+
+        Raises:
+            RateLimitExceeded: If the governor's rate budget is exhausted for this
+                model. Unlike fundamental/sentiment, there is no per-ticker fallback
+                to degrade to, so this propagates to the caller rather than being
+                swallowed into ``adjustments``.
+            UnregisteredModel: If the configured model has no rate-limit profile.
         """
         total_wealth = user_profile.get("total_wealth")
         # Capital base is total wealth, not wealth pre-scaled by invest_pct — invest_pct
@@ -432,6 +440,14 @@ class PortfolioManagerAgent:
                 self._session_count += 1
                 return allocation
 
+            except (RateLimitExceeded, UnregisteredModel):
+                # There is no per-ticker fallback here the way fundamental/sentiment
+                # have one — a single allocate() call either produces the whole
+                # portfolio or nothing does. Retrying would just re-run into the
+                # governor's already-exhausted wait, so propagate immediately and
+                # let the caller (node_portfolio_allocation -> the API layer)
+                # surface it as a 429/503 instead of a generic 500.
+                raise
             except Exception as e:
                 logger.warning("[Portfolio] Attempt %d failed (%s): %s", attempt + 1, stage, e)
                 if attempt == 2:

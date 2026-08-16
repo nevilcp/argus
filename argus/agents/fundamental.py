@@ -31,7 +31,7 @@ from typing import Any, Optional
 from pydantic import ValidationError
 
 from argus.config import settings
-from argus.orchestration.governor import governor
+from argus.orchestration.governor import RateLimitExceeded, UnregisteredModel, governor
 from argus.schemas.signals import FundamentalSignal
 from argus.seams import GroqLLMClient, LiveMarketDataProvider, LLMClient, MarketDataProvider
 
@@ -316,7 +316,7 @@ class FundamentalAgent:
                     "FundamentalAgent: GROQ_API_KEY is not set — LLM calls will fail at invocation time."
                 )
             llm_client = GroqLLMClient(
-                model="llama-3.3-70b-versatile",
+                model=settings.ARGUS_FUNDAMENTAL_MODEL,
                 temperature=0.1,
                 max_tokens=600,
                 api_key=api_key,
@@ -355,9 +355,9 @@ class FundamentalAgent:
                 logger.debug("FundamentalAgent.analyze: Cache hit for %s", ticker)
                 return cached
 
-        if governor.get_remaining_capacity("llama-3.3-70b-versatile") < 20:
+        if governor.get_remaining_capacity(settings.ARGUS_FUNDAMENTAL_MODEL) < 20:
             logger.warning(
-                "[Fundamental] Low capacity for llama-3.3-70b-versatile, skipping %s", ticker
+                "[Fundamental] Low capacity for %s, skipping %s", settings.ARGUS_FUNDAMENTAL_MODEL, ticker
             )
             if errors is not None:
                 errors.append(f"fundamental_analysis[{ticker}]: governor capacity too low, skipped")
@@ -443,6 +443,15 @@ class FundamentalAgent:
                         )
                     return None
                 time.sleep(2**attempt)
+            except (RateLimitExceeded, UnregisteredModel) as e:
+                # The governor already exhausted its own bounded wait before raising
+                # either of these — retrying here would just re-run into the same
+                # wall, not recover from it. Degrade this ticker immediately instead
+                # of burning three more rounds of governor waits.
+                logger.warning("[Fundamental] Governor rejected call for %s: %s", ticker, e)
+                if errors is not None:
+                    errors.append(f"fundamental_analysis[{ticker}]: rate limited: {e}")
+                return None
             except Exception as e:
                 logger.error(
                     "[Fundamental] Attempt %d API error for %s: %s", attempt + 1, ticker, e
