@@ -17,12 +17,13 @@ Not responsible for:
 
 Dependencies:
   - asyncio
-  - pandas_ta (lazy import; loaded only at indicator compute time)
+  - pandas_ta
 """
 
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata  # noqa: F401 — pandas_ta.maps uses this without importing it
 import logging
 import re
 from collections.abc import Callable
@@ -31,6 +32,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import pandas_ta as ta
 
 from argus.config import settings
 from argus.data.cache import OHLCVBuffer
@@ -390,9 +392,6 @@ class MFTDataPipeline:
     def _compress_candles(self, df: pd.DataFrame) -> dict:
         """Calculates technical indicators on a DataFrame using pandas-ta.
 
-        Delayed import of pandas_ta avoids loading the heavy C extension on startup,
-        which is particularly important in serverless and cold-start environments.
-
         Args:
             df: Raw OHLCV DataFrame at `self.interval` resolution, float columns,
                 datetime index.
@@ -404,8 +403,6 @@ class MFTDataPipeline:
             are None when pandas_ta cannot compute them; close and timestamp are
             always populated.
         """
-        import pandas_ta as ta  # Lazy import to avoid heavy C extension load on startup
-
         ind_df = _resample_ohlcv(df, self.interval_minutes, _INDICATOR_RESAMPLE_MINUTES)
 
         rsi_series = ta.rsi(ind_df["close"], length=14)
