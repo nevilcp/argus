@@ -6,5 +6,9 @@ for the core sub-packages (agents, data, orchestration, memory, risk,
 backtesting, schemas).
 """
 
-__version__ = "1.0.0"
+from importlib.metadata import version
+
+# pyproject.toml is the single source of truth for the version — a literal
+# here would drift from it (DEP-6)
+__version__ = version("argus")
 __author__ = "ARGUS Team"

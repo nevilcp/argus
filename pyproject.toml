@@ -27,9 +27,15 @@ dependencies = [
     "pandas-ta-openbb>=0.4.24",
     "numpy>=1.26.0",
     "scipy>=1.14.0",
-    "scikit-learn>=1.8.0",
-    "hmmlearn>=0.3.3",
-    "joblib>=1.4.0",
+    # Pinned exactly, not floored: argus/models/macro_hmm.joblib carries an
+    # exact major.minor compatibility contract (see RegimeClassifier.load in
+    # argus/agents/macro.py) — a floor lets pip resolve a newer minor that the
+    # artifact then silently fails to load, degrading to the rule-based
+    # fallback with no error (DEP-3). Bumping any of these three requires
+    # retraining and recommitting the artifact in the same change.
+    "scikit-learn==1.8.0",
+    "hmmlearn==0.3.3",
+    "joblib==1.5.3",
     "yfinance>=1.3.0",
     "fredapi>=0.5.2",
     "chromadb>=1.5.9",

@@ -53,7 +53,7 @@ ENV PATH="/opt/venv/bin:$PATH" \
     HF_HOME=/opt/model-cache \
     PYTHONUNBUFFERED=1
 
-RUN mkdir -p /app/data && chown -R argus:argus /app
+RUN mkdir -p /app/data /app/chroma_db /app/runs && chown -R argus:argus /app
 USER argus
 
 EXPOSE 8000

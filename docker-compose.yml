@@ -9,13 +9,18 @@ services:
       - .env
     environment:
       # Secrets (GROQ_API_KEY, FRED_API_KEY, NEWSAPI_KEY) come through via
-      # env_file above; these two need compose-level default-value
-      # substitution, which env_file alone can't provide
+      # env_file above; ARGUS_COLLECTOR_ENABLED/ARGUS_RECONCILE_ENABLED need
+      # compose-level default-value substitution, which env_file alone can't
+      # provide. ARGUS_CHROMA_DIR/ARGUS_RUNS_DIR point at their own named
+      # volumes below rather than nesting under ARGUS_DATA_DIR.
       - ARGUS_COLLECTOR_ENABLED=${ARGUS_COLLECTOR_ENABLED:-true}
       - ARGUS_RECONCILE_ENABLED=${ARGUS_RECONCILE_ENABLED:-true}
+      - ARGUS_CHROMA_DIR=/app/chroma_db
+      - ARGUS_RUNS_DIR=/app/runs
     volumes:
       - argus-data:/app/data
       - chroma-db:/app/chroma_db
+      - runs:/app/runs
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -30,3 +35,4 @@ services:
 volumes:
   argus-data:
   chroma-db:
+  runs:
