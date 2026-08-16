@@ -6,6 +6,7 @@ Shared pytest fixtures.
 Responsibilities:
   - Provide an opt-in network guard a test can request to prove it never
     falls through to a real socket call
+  - Isolate every test from the production candle buffer
 
 Not responsible for:
   - Test data (see tests/fixtures/)
@@ -20,6 +21,24 @@ import socket
 from collections.abc import Iterator
 
 import pytest
+
+from argus.config import settings
+
+
+@pytest.fixture(autouse=True)
+def _isolated_data_dir(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Points ARGUS_DATA_DIR at a per-test tmp_path so no test can reach the production buffer.
+
+    Any call site that builds ``MFTDataPipeline`` (or otherwise resolves a
+    path from ``settings.ARGUS_DATA_DIR``) without an explicit override lands
+    here instead of ``data/ohlcv_buffer.db``, which a local `pytest` run
+    would otherwise insert into and prune.
+
+    Args:
+        tmp_path: Pytest's per-test temporary directory.
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
+    monkeypatch.setattr(settings, "ARGUS_DATA_DIR", str(tmp_path))
 
 
 @pytest.fixture
