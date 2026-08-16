@@ -40,7 +40,7 @@ flowchart TD
     %% ── MFT Data Pipeline ────────────────────────────────────────────────
     subgraph PIPELINE["⚙️ MFT Data Pipeline (Background asyncio task)"]
         direction TB
-        FL["_fetch_loop\nEvery ~5 min (derived from universe size) · bulk 1m candles\n2-day history on first fetch"]
+        FL["_fetch_loop\nEvery 5 min (sweep duration subtracted from the wait) · bulk 1m candles\n2-day history on first fetch"]
         BUF["OHLCVBuffer\nPersistent SQLite (data/) · 1,173-bar rolling (1m × 2d + slack)\nINSERT OR REPLACE — safe for bulk re-insert"]
         SL["_session_loop\nEvery 30 min → compress_all\nResamples to 5m · RSI · MACD · BB · ATR · ADX · VWAP · Momentum"]
         CACHE["_live_session_cache\nIn-memory dict · ticker → feature dict\nUpdated via on_session_ready callback"]

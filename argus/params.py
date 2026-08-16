@@ -35,7 +35,7 @@ from dataclasses import dataclass, field, fields
 from enum import Enum
 from typing import Any
 
-PARAMS_VERSION = 9
+PARAMS_VERSION = 10
 
 
 class Provenance(str, Enum):
@@ -100,6 +100,14 @@ class SystemParams:
         Provenance.ARBITRARY,
         "buffer against fetch/session timing jitter added to the MFT cache-write "
         "and bar-age budgets in data/pipeline.py; not evaluated against alternatives",
+    )
+    min_inter_request_seconds: float = p(
+        0.5,
+        Provenance.ARBITRARY,
+        "minimum pause between consecutive per-ticker yfinance requests within a "
+        "sweep, to avoid rate limiting; a fixed floor rather than a fill-the-interval "
+        "spread, since pacing exists for rate limiting, not to occupy the cadence "
+        "budget — not evaluated against alternatives",
     )
 
 
