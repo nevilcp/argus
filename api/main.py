@@ -28,6 +28,7 @@ Not responsible for:
 
 import asyncio
 import logging
+import sys
 from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict
 from datetime import datetime, timedelta
@@ -49,7 +50,7 @@ from argus.config import settings
 from argus.data.pipeline import MFTDataPipeline
 from argus.memory.cultural import get_cultural_memory
 from argus.orchestration.collector import CollectionResult, run_collection_cycle
-from argus.orchestration.governor import governor
+from argus.orchestration.governor import REGISTERED_MODELS, RateLimitExceeded, UnregisteredModel, governor
 from argus.orchestration.graph import build_graph
 from argus.orchestration.reconciliation import load_decisions_from_jsonl, reconcile_decisions
 from argus.orchestration.state import ARGUSState
@@ -196,10 +197,57 @@ async def _reconcile_loop() -> None:
             logger.exception("[Reconcile] cycle failed")
 
 
+def _assert_single_worker() -> None:
+    """Fails fast if launched with more than one uvicorn worker.
+
+    The rate governor and kill switch are in-process singletons (see
+    argus/orchestration/governor.py). A second worker process would run its
+    own ignorant copy of both, silently doubling real Groq usage against the
+    same account and gating risk independently rather than jointly — the
+    Actions collector (scripts/reconcile_outcomes.py) is already a second,
+    independent governor against that same key, and this assertion exists so
+    a deployment doesn't add a third by accident. See Dockerfile.api's CMD.
+
+    Raises:
+        RuntimeError: If ``--workers`` appears in argv with a value other than "1".
+    """
+    argv = sys.argv
+    if "--workers" in argv:
+        idx = argv.index("--workers")
+        if idx + 1 < len(argv) and argv[idx + 1] != "1":
+            raise RuntimeError(
+                f"ARGUS must run with --workers 1 (in-process governor/kill-switch "
+                f"singletons); got --workers {argv[idx + 1]}"
+            )
+
+
+def _assert_registered_models() -> None:
+    """Fails fast if a configured agent model has no rate-limit profile (GOV-11).
+
+    Converts what would otherwise be a first-call UnregisteredModel deep inside
+    a request into a boot-time failure, so a typo'd or unsupported
+    ARGUS_*_MODEL setting is caught before the process ever serves traffic.
+
+    Raises:
+        UnregisteredModel: If any of ARGUS_FUNDAMENTAL_MODEL, ARGUS_SENTIMENT_MODEL,
+            or ARGUS_PORTFOLIO_MODEL is absent from REGISTERED_MODELS.
+    """
+    for model in (
+        settings.ARGUS_FUNDAMENTAL_MODEL,
+        settings.ARGUS_SENTIMENT_MODEL,
+        settings.ARGUS_PORTFOLIO_MODEL,
+    ):
+        if model not in REGISTERED_MODELS:
+            raise UnregisteredModel(f"{model!r} is configured but has no registered rate-limit profile")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Starts background tasks on startup and stops them cleanly on shutdown."""
     global _mft_pipeline, _pipeline_task, _collector_task, _reconcile_task, _graph, _macro_status_agent
+
+    _assert_single_worker()
+    _assert_registered_models()
 
     _graph = build_graph(checkpoint_db_path=f"{settings.ARGUS_DATA_DIR}/argus_graph.db")
 
@@ -333,7 +381,7 @@ class AnalysisResponse(BaseModel):
 async def health():
     """Validates connectivity to model backends, API quotas, and system diagnostics."""
     try:
-        llama_cap = governor.get_remaining_capacity("llama-3.3-70b-versatile")
+        llama_cap = governor.get_remaining_capacity(settings.ARGUS_PORTFOLIO_MODEL)
         can_make_calls = llama_cap > 0
     except Exception:
         can_make_calls = False
@@ -341,9 +389,9 @@ async def health():
     return {
         "status": "ok",
         "model_versions": {
-            "synthesis": "llama-3.3-70b-versatile",
-            "sentiment": "llama-3.1-8b-instant",
-            "fundamental": "llama-3.3-70b-versatile",
+            "synthesis": settings.ARGUS_PORTFOLIO_MODEL,
+            "sentiment": settings.ARGUS_SENTIMENT_MODEL,
+            "fundamental": settings.ARGUS_FUNDAMENTAL_MODEL,
             "finbert": "ProsusAI/finbert",
         },
         "can_make_calls": can_make_calls,
@@ -411,9 +459,12 @@ async def analyze(req: AnalysisRequest):
 
     Raises:
         HTTPException 401: If ARGUS_API_KEY is set and the X-API-Key header doesn't match.
+        HTTPException 429: If the governor's rate budget is exhausted for a
+            configured model (GOV-7) — retry after a short wait.
         HTTPException 503: If the kill switch is triggered, VIX is above the blackout
-            threshold, the market is currently closed, or the MFT cache has not yet
-            been populated for all requested tickers.
+            threshold, the market is currently closed, the MFT cache has not yet
+            been populated for all requested tickers, or a configured model has no
+            rate-limit profile (a misconfiguration, not a transient condition).
         HTTPException 500: If the LangGraph execution fails or produces no allocation.
     """
     ks = get_kill_switch()
@@ -482,6 +533,12 @@ async def analyze(req: AnalysisRequest):
 
     try:
         final_state = await asyncio.to_thread(_graph.invoke, state, config)
+    except RateLimitExceeded as e:
+        logger.warning("[API] Governor rate limit exhausted: %s", e)
+        raise HTTPException(429, f"Rate limit exhausted: {e}")
+    except UnregisteredModel as e:
+        logger.error("[API] Model configuration error: %s", e)
+        raise HTTPException(503, f"Model configuration error: {e}")
     except Exception as e:
         logger.error("[API] Graph error: %s", e)
         raise HTTPException(500, f"Agent graph error: {str(e)}")

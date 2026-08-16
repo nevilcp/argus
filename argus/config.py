@@ -131,6 +131,25 @@ class Settings(BaseSettings):
         ),
     )
     ARGUS_LOG_LEVEL: str = Field(default="INFO", description="Root log level for argus.* loggers")
+
+    # Conservative free-tier bootstrap floor for the rate governor (see
+    # argus/orchestration/governor.py), applied uniformly to every registered
+    # model until Groq's own response headers correct it per-model for the
+    # account's actual tier.
+    ARGUS_GROQ_RPM: int = Field(
+        default=30, gt=0, description="Bootstrap requests-per-minute floor before headers are observed"
+    )
+    ARGUS_GROQ_TPM: int = Field(
+        default=6_000, gt=0, description="Bootstrap tokens-per-minute floor before headers are observed"
+    )
+
+    # Model IDs for the three LLM-backed agents. Must each be a member of
+    # argus.orchestration.governor.REGISTERED_MODELS — asserted at API startup
+    # so a typo or unsupported model fails at boot rather than at first call.
+    ARGUS_FUNDAMENTAL_MODEL: str = Field(default="llama-3.3-70b-versatile")
+    ARGUS_SENTIMENT_MODEL: str = Field(default="llama-3.1-8b-instant")
+    ARGUS_PORTFOLIO_MODEL: str = Field(default="llama-3.3-70b-versatile")
+
     ARGUS_HMM_MODEL_PATH: str = Field(
         default=str(BASE_DIR / "argus" / "models" / "macro_hmm.joblib"),
         description="Path to the persisted RegimeClassifier artifact (scripts/train_macro_hmm.py output)",
