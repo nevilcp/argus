@@ -5,7 +5,10 @@ CLI entry point for argus/orchestration/reconciliation.py — reads every
 decision back out of the LangGraph checkpoint (argus_graph.db) or a
 decisions.jsonl log, reconciles whichever ones have cleared
 RECONCILIATION.horizon_days against live market data, and reports how many
-outcomes were stored to cultural memory.
+outcomes were stored to cultural memory. Also applies matured runs onto the
+persisted paper equity curve (argus/risk/paper_book.py) so the scheduled
+GitHub Actions runner — which has no long-lived KillSwitch daemon to feed —
+still keeps that curve current for whichever process reads it next.
 
     .venv/bin/python scripts/reconcile_outcomes.py [--db PATH] [--horizon-days N]
     .venv/bin/python scripts/reconcile_outcomes.py --decisions-log PATH
@@ -20,6 +23,7 @@ from __future__ import annotations
 import argparse
 import logging
 
+from argus.config import settings
 from argus.memory.cultural import get_cultural_memory
 from argus.orchestration.reconciliation import (
     load_decisions_from_checkpoints,
@@ -27,6 +31,7 @@ from argus.orchestration.reconciliation import (
     reconcile_decisions,
 )
 from argus.params import RECONCILIATION
+from argus.risk import paper_book
 from argus.seams import LiveMarketDataProvider
 
 logger = logging.getLogger("argus.reconcile_outcomes")
@@ -59,13 +64,26 @@ def main() -> None:
         source = args.db
     print(f"Loaded {len(decisions)} decision(s) from {source}")
 
+    market_data = LiveMarketDataProvider()
     stored = reconcile_decisions(
         decisions,
-        market_data=LiveMarketDataProvider(),
+        market_data=market_data,
         cultural=get_cultural_memory(),
         horizon_days=args.horizon_days,
     )
     print(f"Reconciled {stored}/{len(decisions)} decision(s) (horizon={args.horizon_days}d)")
+
+    book_path = f"{settings.ARGUS_DATA_DIR}/paper_equity.json"
+    book = paper_book.load(book_path)
+    for run_timestamp, run_return in paper_book.compute_run_returns(
+        decisions, market_data, args.horizon_days
+    ):
+        book.apply_run(run_timestamp, run_return)
+    paper_book.save(book, book_path)
+    print(
+        f"Paper equity: ${book.equity:,.2f} "
+        f"(drawdown={book.drawdown_from_peak():.1%} from peak ${book.high_water_mark:,.2f})"
+    )
 
 
 if __name__ == "__main__":
