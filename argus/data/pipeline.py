@@ -562,6 +562,11 @@ class MFTDataPipeline:
         dict" mean the same thing as "usable" to a caller that never learns
         what an indicator is.
 
+        Only iterates tickers still in `self.tickers` (API-10) — the buffer
+        can otherwise hold rows for a ticker fetched once by a past `/analyze`
+        request and never tracked again. Also prunes the buffer of any such
+        untracked rows (API-9's underlying leak), at this method's cadence.
+
         Returns:
             Mapping of ticker → technical feature dict (rsi_14, macd_histogram, etc.).
             Tickers below the readiness floor, or that failed compression,
@@ -569,7 +574,8 @@ class MFTDataPipeline:
         """
         states: dict[str, dict] = {}
         required_raw = _required_raw_bars(self.interval_minutes)
-        for ticker in self.buffer.get_all_tickers():
+        tracked = set(self.tickers)
+        for ticker in tracked & set(self.buffer.get_all_tickers()):
             try:
                 df = self.buffer.get_candles(ticker)
                 if df is None or len(df) < required_raw:
@@ -593,6 +599,7 @@ class MFTDataPipeline:
                     type(exc).__name__,
                     exc,
                 )
+        self.buffer.prune_untracked(tracked)
         logger.info("compress_all: %d tickers compressed", len(states))
         return states
 
