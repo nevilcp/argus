@@ -169,6 +169,72 @@ def test_interval_change_purges_stale_rows(tmp_path):
     assert new._conn.execute("SELECT COUNT(*) FROM ohlcv").fetchone()[0] == 0
 
 
+class _CommitCountingConnection:
+    """Forwards every call to a real sqlite3.Connection except commit(), which it also counts.
+
+    sqlite3.Connection is an immutable C type — neither its class nor its
+    instances accept a patched `commit` attribute — so counting calls to it
+    requires wrapping the connection rather than monkeypatching it directly.
+    """
+
+    def __init__(self, real: sqlite3.Connection) -> None:
+        self._real = real
+        self.commits = 0
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def commit(self) -> None:
+        self.commits += 1
+        self._real.commit()
+
+
+def test_insert_candles_bulk_uses_a_single_commit():
+    """Bulk-inserting N candles commits once, not once per row."""
+    buffer = OHLCVBuffer(db_path=":memory:", buffer_size=50, interval="1m")
+    proxy = _CommitCountingConnection(buffer._conn)
+    buffer._conn = proxy
+
+    candles = [{"timestamp": f"2024-01-02T09:{i:02d}:00", "close": float(i)} for i in range(20)]
+    buffer.insert_candles("AAPL", candles)
+
+    assert proxy.commits == 1
+    df = buffer.get_candles("AAPL")
+    assert len(df) == 20
+    assert df["close"].iloc[-1] == 19.0
+
+
+def test_insert_candles_is_a_noop_for_an_empty_list():
+    """Bulk-inserting an empty batch touches nothing."""
+    buffer = OHLCVBuffer(db_path=":memory:", buffer_size=20, interval="1m")
+    buffer.insert_candles("AAPL", [])
+    assert buffer.get_all_tickers() == []
+
+
+def test_insert_candle_delegates_to_insert_candles(monkeypatch):
+    """The single-candle path is a thin wrapper over the bulk path."""
+    buffer = OHLCVBuffer(db_path=":memory:", buffer_size=20, interval="1m")
+    received = []
+    monkeypatch.setattr(
+        buffer, "insert_candles", lambda ticker, candles: received.append((ticker, candles))
+    )
+
+    buffer.insert_candle("AAPL", {"timestamp": "2024-01-02T09:30:00", "close": 1.0})
+
+    assert received == [("AAPL", [{"timestamp": "2024-01-02T09:30:00", "close": 1.0}])]
+
+
+def test_row_counts_returns_per_ticker_counts_without_the_get_candles_floor():
+    """row_counts() reports real per-ticker counts, including below get_candles' own 14-row floor."""
+    buffer = OHLCVBuffer(db_path=":memory:", buffer_size=50, interval="1m")
+    for i in range(5):
+        buffer.insert_candle("AAPL", {"timestamp": f"2024-01-02T09:{i:02d}:00", "close": float(i)})
+    for i in range(20):
+        buffer.insert_candle("MSFT", {"timestamp": f"2024-01-02T09:{i:02d}:00", "close": float(i)})
+
+    assert buffer.row_counts() == {"AAPL": 5, "MSFT": 20}
+
+
 def test_interval_change_logs_the_discarded_count(tmp_path, caplog):
     """The interval-change purge logs how many stale rows it discarded, at WARNING."""
     db_path = str(tmp_path / "buffer.db")
