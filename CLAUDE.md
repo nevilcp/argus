@@ -1,12 +1,21 @@
-# Comment conventions
+# ARGUS working agreements
 
-## Module docstrings
+## Workflow
+
+### Before writing code
+
+Enable the `/andrej-karpathy-skills:karpathy-guidelines` skill before writing
+any code — new files, edits, or refactors alike.
+
+## Comment conventions
+
+### Module docstrings
 
 Every `.py` file opens with a docstring: path line, one-line purpose, then
 `Responsibilities:` and `Not responsible for:` bullet lists. See
 `argus/orchestration/governor.py` for the canonical shape.
 
-## Function & class docstrings
+### Function & class docstrings
 
 Google style. One-line summary, then `Args:` / `Returns:` / `Raises:` where
 applicable. Required on every public (non-underscore) `def` and `class`.
@@ -16,7 +25,7 @@ make the behavior obvious.
 Test functions follow the same rule: a one-line docstring stating the
 property under test, not a restatement of the test's name.
 
-## Inline `#` comments
+### Inline `#` comments
 
 Why-only, and sparse. A comment earns its place only where the code would
 otherwise read as arbitrary or wrong — a non-obvious constraint, a unit
@@ -32,14 +41,17 @@ Condense multi-line blocks to the load-bearing sentence:
 
 rather than restating the surrounding logic across several lines.
 
-## References
+### References
 
 Code-local only. Pointing at a sibling module is fine (`see
 argus/data/fetchers.py`). Don't cite ADRs or narrate incident history from
 source comments — that belongs in `docs/adr/` and PR descriptions, which can
 carry it without going stale independently of the code around them.
 
-## Commit messages
+## Commit & PR messages
+
+Two concise sentences at most. Write them the way a human would — plain,
+direct, no scaffolded summaries or bullet dumps.
 
 No AI references — no "Co-Authored-By: Claude", no mention of Claude,
-Anthropic, or AI assistance anywhere in the commit message.
+Anthropic, or AI assistance anywhere in the message.
