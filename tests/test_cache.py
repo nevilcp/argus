@@ -235,6 +235,40 @@ def test_row_counts_returns_per_ticker_counts_without_the_get_candles_floor():
     assert buffer.row_counts() == {"AAPL": 5, "MSFT": 20}
 
 
+def test_prune_untracked_deletes_rows_outside_the_given_set():
+    """prune_untracked removes every row for a ticker not in the tracked set (API-9/API-10)."""
+    buffer = OHLCVBuffer(db_path=":memory:", buffer_size=50, interval="1m")
+    buffer.insert_candle("AAPL", {"timestamp": "2024-01-02T09:30:00", "close": 1.0})
+    buffer.insert_candle("ORPHAN", {"timestamp": "2024-01-02T09:30:00", "close": 1.0})
+
+    deleted = buffer.prune_untracked({"AAPL"})
+
+    assert deleted == 1
+    assert buffer.get_all_tickers() == ["AAPL"]
+
+
+def test_prune_untracked_is_case_insensitive():
+    """A lowercase tracked-set entry still matches the upper-cased stored ticker."""
+    buffer = OHLCVBuffer(db_path=":memory:", buffer_size=50, interval="1m")
+    buffer.insert_candle("AAPL", {"timestamp": "2024-01-02T09:30:00", "close": 1.0})
+
+    deleted = buffer.prune_untracked({"aapl"})
+
+    assert deleted == 0
+    assert buffer.get_all_tickers() == ["AAPL"]
+
+
+def test_prune_untracked_skips_an_empty_tracked_set():
+    """An empty tracked set is treated as 'unknown universe' rather than wiping the buffer."""
+    buffer = OHLCVBuffer(db_path=":memory:", buffer_size=50, interval="1m")
+    buffer.insert_candle("AAPL", {"timestamp": "2024-01-02T09:30:00", "close": 1.0})
+
+    deleted = buffer.prune_untracked(set())
+
+    assert deleted == 0
+    assert buffer.get_all_tickers() == ["AAPL"]
+
+
 def test_interval_change_logs_the_discarded_count(tmp_path, caplog):
     """The interval-change purge logs how many stale rows it discarded, at WARNING."""
     db_path = str(tmp_path / "buffer.db")

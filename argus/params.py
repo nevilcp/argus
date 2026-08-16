@@ -35,7 +35,7 @@ from dataclasses import dataclass, field, fields
 from enum import Enum
 from typing import Any
 
-PARAMS_VERSION = 11
+PARAMS_VERSION = 12
 
 
 class Provenance(str, Enum):
@@ -115,6 +115,12 @@ class SystemParams:
         "ceiling on MFTDataPipeline.tickers enforced in register_tickers; stops "
         "unbounded universe growth from repeated /analyze requests (API-1) — not "
         "evaluated against alternatives",
+    )
+    analyze_retry_after_seconds: int = p(
+        5,
+        Provenance.ARBITRARY,
+        "Retry-After header value on /analyze's 429 when a run is already in "
+        "progress; a guess at a graph run's typical duration, not measured",
     )
 
 
