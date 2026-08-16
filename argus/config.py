@@ -10,9 +10,11 @@ thresholds.
 Responsibilities:
   - Expose a single typed Settings instance used across all modules
   - Validate API key and numeric threshold types on startup
+  - Load .env into os.environ once, before Settings is constructed, so every
+    entry point (api/main.py, the scripts/ CLIs) sees the same values without
+    each calling python-dotenv itself
 
 Not responsible for:
-  - Injecting .env into os.environ (handled by python-dotenv in api/main.py)
   - Key rotation or secret management
 """
 
@@ -21,6 +23,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Annotated, Dict, List, Literal, Optional
 
+from dotenv import load_dotenv
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
@@ -28,6 +31,14 @@ from argus.params import SYSTEM
 from argus.params import TECHNICAL_INDICATOR_WEIGHTS as _TECHNICAL_WEIGHTS
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Must run before Settings() reads the environment, and before any
+# LangChain/Groq import elsewhere that reads env vars at import time — this
+# module is imported early enough (nearly everything imports argus.config)
+# that this ordering holds without every entry point repeating the call.
+# Searches from the working directory, not BASE_DIR: an installed (non-editable)
+# package's BASE_DIR resolves inside site-packages, which never holds a .env.
+load_dotenv()
 
 
 def _split_csv(value: object) -> object:
@@ -57,8 +68,13 @@ class Settings(BaseSettings):
     degrades gracefully when optional keys (e.g. FRED_API_KEY, NEWSAPI_KEY) are absent.
     """
 
+    # Relative to the working directory, not BASE_DIR — an installed
+    # (non-editable) package's BASE_DIR resolves inside site-packages, which
+    # never holds a .env (DEP-7). load_dotenv() above already populates
+    # os.environ from the same location, so this is mostly a fallback for
+    # keys present in .env but not yet exported to the environment.
     model_config = SettingsConfigDict(
-        env_file=str(BASE_DIR / ".env"),
+        env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -97,6 +113,16 @@ class Settings(BaseSettings):
     # ─── Unattended operation ────────────────────────────────────────────────
     ARGUS_DATA_DIR: str = Field(
         default="data", description="Directory for the persistent intraday buffer and logs"
+    )
+    # None means "derive as <ARGUS_DATA_DIR>/chroma_db" / "<ARGUS_DATA_DIR>/runs"
+    # (see memory/cultural.py's get_cultural_memory and risk/kill_switch.py) —
+    # set explicitly only to point at a directory outside ARGUS_DATA_DIR, e.g.
+    # a dedicated named volume as docker-compose.yml does
+    ARGUS_CHROMA_DIR: Optional[str] = Field(
+        default=None, description="Directory backing the ChromaDB cultural-memory store"
+    )
+    ARGUS_RUNS_DIR: Optional[str] = Field(
+        default=None, description="Directory for kill-switch halt-event dumps"
     )
     ARGUS_COLLECTOR_ENABLED: bool = Field(
         default=False, description="Run the graph automatically on a schedule during market hours"

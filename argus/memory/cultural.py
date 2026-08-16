@@ -30,6 +30,7 @@ from datetime import datetime
 from threading import Lock
 from typing import Any, Optional
 
+from argus.config import settings
 from argus.params import MEMORY, RECONCILIATION
 from argus.schemas.signals import ARGUSDecision, MacroContext
 
@@ -452,7 +453,7 @@ _cultural_memory: Optional[CulturalMemoryManager] = None
 _cultural_memory_lock = Lock()
 
 
-def get_cultural_memory(persist_dir: str = "./chroma_db") -> CulturalMemoryManager:
+def get_cultural_memory(persist_dir: Optional[str] = None) -> CulturalMemoryManager:
     """Returns the process-wide CulturalMemoryManager, constructing it on first call.
 
     Lazy on purpose: construction pulls in sentence-transformers (and its
@@ -464,11 +465,16 @@ def get_cultural_memory(persist_dir: str = "./chroma_db") -> CulturalMemoryManag
         persist_dir: Filesystem directory backing the ChromaDB PersistentClient,
             used only on the first call that constructs the manager — a later
             call with a different persist_dir cannot reconfigure the singleton
-            and is logged rather than silently ignored.
+            and is logged rather than silently ignored. None resolves to
+            settings.ARGUS_CHROMA_DIR, or <ARGUS_DATA_DIR>/chroma_db if that's
+            also unset.
 
     Returns:
         The process-wide CulturalMemoryManager singleton.
     """
+    if persist_dir is None:
+        persist_dir = settings.ARGUS_CHROMA_DIR or f"{settings.ARGUS_DATA_DIR}/chroma_db"
+
     global _cultural_memory
     if _cultural_memory is None:
         with _cultural_memory_lock:
