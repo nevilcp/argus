@@ -35,7 +35,7 @@ from dataclasses import dataclass, field, fields
 from enum import Enum
 from typing import Any
 
-PARAMS_VERSION = 8
+PARAMS_VERSION = 9
 
 
 class Provenance(str, Enum):
@@ -94,6 +94,12 @@ class SystemParams:
     )
     lookback_days: int = p(
         252, Provenance.LITERATURE, "252 = standard US trading days per year"
+    )
+    freshness_margin_seconds: int = p(
+        60,
+        Provenance.ARBITRARY,
+        "buffer against fetch/session timing jitter added to the MFT cache-write "
+        "and bar-age budgets in data/pipeline.py; not evaluated against alternatives",
     )
 
 

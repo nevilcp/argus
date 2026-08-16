@@ -22,7 +22,10 @@ from argus.data.pipeline import (
     _derive_buffer_size,
     _parse_interval_minutes,
     _resample_ohlcv,
+    max_bar_age_seconds,
+    session_state_ttl_seconds,
 )
+from argus.params import SYSTEM
 from tests.helpers.candles import dst_straddling_candles, et_intraday_candles
 
 
@@ -185,6 +188,22 @@ def test_momentum_windows_scale_with_interval():
     result_5m = pipeline_5m._compress_candles(df_5m)
     assert result_5m["momentum_30m"] == pytest.approx(expected_momentum(closes_5m, 6, 100), abs=1e-6)
     assert result_5m["momentum_1d"] == pytest.approx(expected_momentum(closes_5m, 78, 100), abs=1e-6)
+
+
+def test_session_state_ttl_seconds_tracks_decision_interval(monkeypatch):
+    """The write-age TTL is derived from the configured decision interval, not hardcoded."""
+    monkeypatch.setattr(settings, "MFT_DECISION_INTERVAL_SECONDS", 1800)
+    assert session_state_ttl_seconds() == 1800 + _FETCH_INTERVAL + SYSTEM.freshness_margin_seconds
+
+    monkeypatch.setattr(settings, "MFT_DECISION_INTERVAL_SECONDS", 900)
+    assert session_state_ttl_seconds() == 900 + _FETCH_INTERVAL + SYSTEM.freshness_margin_seconds
+
+
+def test_max_bar_age_seconds_scales_with_interval():
+    """The bar-age budget grows with the candle interval, matching the issue's 480s-at-1m figure."""
+    assert max_bar_age_seconds(1) == _FETCH_INTERVAL + 2 * 1 * 60 + SYSTEM.freshness_margin_seconds
+    assert max_bar_age_seconds(1) == 480
+    assert max_bar_age_seconds(5) > max_bar_age_seconds(1)
 
 
 def test_inter_request_sleep_derives_spacing_from_universe_size():
