@@ -19,6 +19,7 @@ Dependencies:
 from __future__ import annotations
 
 import logging
+import math
 import uuid
 import warnings
 from datetime import date, datetime
@@ -83,6 +84,44 @@ class SectorSignal(str, Enum):
     GROWTH_FAVORED = "GROWTH_FAVORED"  # risk-on, lower rates
     VALUE_FAVORED = "VALUE_FAVORED"    # rising rates, reflation
     DEFENSIVE = "DEFENSIVE"            # high VIX / contraction regime
+
+
+SESSION_STATE_REQUIRED_KEYS: frozenset[str] = frozenset({
+    "rsi_14",
+    "macd_histogram",
+    "bb_percent_b",
+    "adx_14",
+    "vwap_distance",
+    "volume_ratio",
+    "atr_pct",
+    "momentum_30m",
+    "momentum_1d",
+    "close",
+})
+
+
+def missing_session_state_keys(state: dict) -> list[str]:
+    """Finds required session-state keys that are absent, None, or non-finite.
+
+    The contract a compressed technical feature dict must satisfy before a
+    consumer can trust it: data/pipeline.py's compress_all() uses this to
+    decide what "ready" means, and agents/technical.py's analyze() uses it
+    to decide what "usable" means, so both share one definition instead of
+    each re-deriving it.
+
+    Args:
+        state: A compressed technical feature dict.
+
+    Returns:
+        Sorted list of missing/invalid key names; empty if the state is
+        complete.
+    """
+    missing = [k for k in SESSION_STATE_REQUIRED_KEYS if state.get(k) is None]
+    if missing:
+        return sorted(missing)
+    return sorted(
+        k for k in SESSION_STATE_REQUIRED_KEYS if not math.isfinite(float(state[k]))
+    )
 
 
 _CONVICTION_MAX = 0.95
@@ -590,6 +629,8 @@ __all__ = [
     "VixRegime",
     "YieldCurve",
     "SectorSignal",
+    "SESSION_STATE_REQUIRED_KEYS",
+    "missing_session_state_keys",
     "MacroContext",
     "TechnicalSignal",
     "FundamentalSignal",
