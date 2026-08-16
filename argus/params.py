@@ -35,7 +35,7 @@ from dataclasses import dataclass, field, fields
 from enum import Enum
 from typing import Any
 
-PARAMS_VERSION = 7
+PARAMS_VERSION = 8
 
 
 class Provenance(str, Enum):
@@ -92,11 +92,32 @@ class SystemParams:
     vix_blackout_threshold: float = p(
         35.0, Provenance.CONVENTION, "VIX > 35 is commonly treated as a high-fear regime"
     )
-    max_drawdown_halt: float = p(
-        0.15, Provenance.ARBITRARY, "no external basis; picked as a loose backstop"
-    )
     lookback_days: int = p(
         252, Provenance.LITERATURE, "252 = standard US trading days per year"
+    )
+
+
+@dataclass(frozen=True)
+class KillSwitchParams:
+    """Drawdown circuit-breaker tiers and halt-dump retention (argus/risk/kill_switch.py).
+
+    The three tiers previously lived as a hardcoded dict in kill_switch.py
+    alongside an unrelated, unused SystemParams.max_drawdown_halt = 0.15 that
+    silently contradicted the AGGRESSIVE tier's 0.18 — this group is now the
+    single source of truth for all three.
+    """
+
+    conservative_drawdown_halt: float = p(
+        0.08, Provenance.ARBITRARY, "no external basis; picked as a loose backstop"
+    )
+    moderate_drawdown_halt: float = p(
+        0.12, Provenance.ARBITRARY, "no external basis; picked as a loose backstop"
+    )
+    aggressive_drawdown_halt: float = p(
+        0.18, Provenance.ARBITRARY, "no external basis; picked as a loose backstop"
+    )
+    max_halt_dumps_retained: int = p(
+        20, Provenance.ARBITRARY, "no basis for this specific retention count"
     )
 
 
@@ -309,6 +330,7 @@ class MemoryParams:
 
 
 SYSTEM = SystemParams()
+KILL_SWITCH = KillSwitchParams()
 TECHNICAL_INDICATOR_WEIGHTS = TechnicalIndicatorWeights()
 TECHNICAL = TechnicalParams()
 AGGREGATOR = AggregatorParams()
@@ -320,6 +342,7 @@ MEMORY = MemoryParams()
 
 _ALL_GROUPS: dict[str, Any] = {
     "SYSTEM": SYSTEM,
+    "KILL_SWITCH": KILL_SWITCH,
     "TECHNICAL_INDICATOR_WEIGHTS": TECHNICAL_INDICATOR_WEIGHTS,
     "TECHNICAL": TECHNICAL,
     "AGGREGATOR": AGGREGATOR,

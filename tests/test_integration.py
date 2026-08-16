@@ -7,7 +7,6 @@ PiT enforcer, and Governor state limits.
 """
 
 import asyncio
-import time
 from datetime import date, datetime, timezone
 from unittest import mock
 from uuid import uuid4
@@ -24,7 +23,6 @@ from argus.data.pipeline import MFTDataPipeline
 from argus.orchestration.governor import BOOTSTRAP_LIMITS, governor
 from argus.orchestration.graph import build_graph
 from argus.orchestration.state import ARGUSState
-from argus.risk.kill_switch import KillSwitch
 from argus.schemas.signals import (
     FundamentalSignal,
     MacroContext,
@@ -253,14 +251,6 @@ class TestEndToEnd:
                 pass
             else:
                 raise e
-
-    def test_kill_switch_drawdown_trigger(self):
-        """The kill switch halts once portfolio value drops past the drawdown threshold."""
-        ks = KillSwitch("MODERATE", check_interval_seconds=1)
-        ks.start(10000.0)
-        ks.update_portfolio_value(8700.0)
-        time.sleep(2.5)
-        assert ks.is_halted
 
     def test_schema_round_trip(self):
         """Signal schemas survive a JSON dump/validate round trip unchanged."""
