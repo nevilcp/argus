@@ -23,6 +23,7 @@ Dependencies:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.metadata  # noqa: F401 — pandas_ta.maps uses this without importing it
 import logging
 import re
@@ -165,8 +166,9 @@ class MFTDataPipeline:
             data_dir = Path(settings.ARGUS_DATA_DIR)
             data_dir.mkdir(parents=True, exist_ok=True)
             db_path = str(data_dir / "ohlcv_buffer.db")
-        self.buffer = OHLCVBuffer(db_path=db_path, buffer_size=buffer_size)
+        self.buffer = OHLCVBuffer(db_path=db_path, buffer_size=buffer_size, interval=self.interval)
         self.running = False
+        self._stop_event = asyncio.Event()
         logger.info(
             "MFTDataPipeline initialised: %d tickers, interval=%s, buffer_size=%d, buffer=%s",
             len(tickers),
@@ -184,10 +186,28 @@ class MFTDataPipeline:
         """
         self.running = True
         logger.info("MFTDataPipeline.start: launching fetch and session loops")
-        await asyncio.gather(
-            self._fetch_loop(),
-            self._session_loop(on_session_ready),
-        )
+        tasks = [
+            asyncio.create_task(self._fetch_loop()),
+            asyncio.create_task(self._session_loop(on_session_ready)),
+        ]
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            # Either task ending (return or raise) must not orphan the other —
+            # cancel and await both so a dead fetch loop can't leave the session
+            # loop sweeping into a closed buffer, or vice versa
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _wait_or_stop(self, timeout: float) -> None:
+        """Sleeps up to `timeout` seconds, waking immediately if `stop()` is called.
+
+        Args:
+            timeout: Max seconds to wait.
+        """
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(self._stop_event.wait(), timeout=timeout)
 
     def register_tickers(self, tickers: list[str]) -> None:
         """Adds new tickers to the live tracking universe without restarting the pipeline.
@@ -211,6 +231,7 @@ class MFTDataPipeline:
     async def stop(self) -> None:
         """Signals active loops to stop execution."""
         self.running = False
+        self._stop_event.set()
         logger.info("MFTDataPipeline.stop: shutdown requested")
 
     async def run_once(self) -> dict[str, dict]:
@@ -250,12 +271,17 @@ class MFTDataPipeline:
     async def _fetch_loop(self) -> None:
         """Periodically downloads the latest intraday candlesticks for the tracking universe."""
         while self.running:
-            if self._is_market_hours():
-                await self._sweep_once()
-            else:
-                logger.debug("_fetch_loop: outside market hours — idle")
+            try:
+                if self._is_market_hours():
+                    await self._sweep_once()
+                else:
+                    logger.debug("_fetch_loop: outside market hours — idle")
+            except Exception as exc:
+                logger.error(
+                    "_fetch_loop: sweep failed — %s: %s", type(exc).__name__, exc
+                )
 
-            await asyncio.sleep(_FETCH_INTERVAL)
+            await self._wait_or_stop(_FETCH_INTERVAL)
 
     def _inter_request_sleep(self, n_tickers: int) -> float:
         """Derives the per-ticker sleep so a sweep finishes within `_FETCH_INTERVAL`.
@@ -292,7 +318,15 @@ class MFTDataPipeline:
             own floor), letting callers skip waiting a full session interval on a
             cold start.
         """
-        return any(self.buffer.get_candles(t) is not None for t in self.buffer.get_all_tickers())
+        for ticker in self.buffer.get_all_tickers():
+            try:
+                if self.buffer.get_candles(ticker) is not None:
+                    return True
+            except Exception as exc:
+                logger.warning(
+                    "_buffer_warm: %s check failed — %s: %s", ticker, type(exc).__name__, exc
+                )
+        return False
 
     async def _session_loop(self, callback: Callable) -> None:
         """Periodically compiles buffered candlesticks and triggers downstream agent actions.
@@ -304,21 +338,26 @@ class MFTDataPipeline:
         # compress would leave the live cache empty for that whole stretch for
         # no reason; poll faster until there's actually something to compress
         while self.running and not self._buffer_warm():
-            await asyncio.sleep(_WARMUP_POLL_INTERVAL)
+            await self._wait_or_stop(_WARMUP_POLL_INTERVAL)
 
         while self.running:
-            if self._is_market_hours():
-                logger.info("_session_loop: triggering decision cycle")
-                session_states = self.compress_all()
-                try:
-                    await callback(session_states)
-                except Exception as exc:
-                    logger.error(
-                        "_session_loop: callback raised %s: %s",
-                        type(exc).__name__,
-                        exc,
-                    )
-            await asyncio.sleep(self.session_interval_seconds)
+            try:
+                if self._is_market_hours():
+                    logger.info("_session_loop: triggering decision cycle")
+                    session_states = self.compress_all()
+                    try:
+                        await callback(session_states)
+                    except Exception as exc:
+                        logger.error(
+                            "_session_loop: callback raised %s: %s",
+                            type(exc).__name__,
+                            exc,
+                        )
+            except Exception as exc:
+                logger.error(
+                    "_session_loop: iteration failed — %s: %s", type(exc).__name__, exc
+                )
+            await self._wait_or_stop(self.session_interval_seconds)
 
     async def _fetch_one_ticker(self, ticker: str) -> None:
         """Downloads and bulk-inserts all available candles for a specific symbol.
@@ -375,17 +414,17 @@ class MFTDataPipeline:
         """
         states: dict[str, dict] = {}
         for ticker in self.buffer.get_all_tickers():
-            df = self.buffer.get_candles(ticker)
-            if df is not None:
-                try:
+            try:
+                df = self.buffer.get_candles(ticker)
+                if df is not None:
                     states[ticker] = self._compress_candles(df)
-                except Exception as exc:
-                    logger.warning(
-                        "compress_all: %s compression failed — %s: %s",
-                        ticker,
-                        type(exc).__name__,
-                        exc,
-                    )
+            except Exception as exc:
+                logger.warning(
+                    "compress_all: %s compression failed — %s: %s",
+                    ticker,
+                    type(exc).__name__,
+                    exc,
+                )
         logger.info("compress_all: %d tickers compressed", len(states))
         return states
 
