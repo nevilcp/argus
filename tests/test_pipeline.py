@@ -2,6 +2,7 @@
 Tests for the MFT Data Pipeline.
 """
 
+import asyncio
 import importlib
 import logging
 import sys
@@ -75,7 +76,7 @@ def test_compress_candles():
 
 def test_ohlcv_buffer_insertion():
     """Inserting a candle at an existing timestamp overwrites it rather than appending."""
-    buffer = OHLCVBuffer(db_path=":memory:", buffer_size=20)
+    buffer = OHLCVBuffer(db_path=":memory:", buffer_size=20, interval="1m")
 
     # 15 candles clears the buffer's 14-candle minimum before it returns data
     for i in range(15):
@@ -247,3 +248,94 @@ def test_dst_straddling_candles_are_monotonic_in_utc_despite_repeated_wall_clock
     assert df.index.tz_convert("UTC").is_monotonic_increasing
     # The repeated 01:xx ET wall-clock hour is exactly the reproduced hazard
     assert (df.index.hour == 1).all()
+
+
+def _seed_buffer(pipeline: MFTDataPipeline, ticker: str, n: int = 20) -> None:
+    """Inserts `n` warm candles for `ticker` directly into a pipeline's buffer.
+
+    Closes are shifted off zero: with n < the 30-bar momentum lookback,
+    momentum_1d's index lands on the earliest bar, and et_intraday_candles'
+    raw closes start at 0 — a zero denominator _compress_candles would raise on.
+    """
+    df = et_intraday_candles(n)
+    df[["open", "high", "low", "close"]] += 100
+    for idx, row in df.iterrows():
+        pipeline.buffer.insert_candle(ticker, {"timestamp": idx, **row.to_dict()})
+
+
+def test_compress_all_skips_a_ticker_whose_get_candles_raises(monkeypatch):
+    """compress_all catches a get_candles failure for one ticker and still returns the rest."""
+    pipeline = MFTDataPipeline([], interval="1m")
+    _seed_buffer(pipeline, "GOOD")
+
+    real_get_candles = pipeline.buffer.get_candles
+
+    def flaky_get_candles(ticker):
+        if ticker == "BAD":
+            raise RuntimeError("boom")
+        return real_get_candles(ticker)
+
+    monkeypatch.setattr(pipeline.buffer, "get_all_tickers", lambda: ["BAD", "GOOD"])
+    monkeypatch.setattr(pipeline.buffer, "get_candles", flaky_get_candles)
+
+    states = pipeline.compress_all()
+
+    assert "GOOD" in states
+    assert "BAD" not in states
+
+
+def test_buffer_warm_skips_a_ticker_whose_get_candles_raises(monkeypatch):
+    """_buffer_warm doesn't let one ticker's get_candles failure hide a genuinely warm ticker."""
+    pipeline = MFTDataPipeline([], interval="1m")
+    _seed_buffer(pipeline, "GOOD")
+
+    real_get_candles = pipeline.buffer.get_candles
+
+    def flaky_get_candles(ticker):
+        if ticker == "BAD":
+            raise RuntimeError("boom")
+        return real_get_candles(ticker)
+
+    monkeypatch.setattr(pipeline.buffer, "get_all_tickers", lambda: ["BAD", "GOOD"])
+    monkeypatch.setattr(pipeline.buffer, "get_candles", flaky_get_candles)
+
+    assert pipeline._buffer_warm() is True
+
+
+@pytest.mark.asyncio
+async def test_start_cancels_the_sibling_loop_when_one_dies(monkeypatch):
+    """If one loop raises out of start()'s gather, the other is cancelled rather than orphaned."""
+    pipeline = MFTDataPipeline([], interval="1m")
+    session_loop_cancelled = asyncio.Event()
+
+    async def dying_fetch_loop():
+        raise RuntimeError("simulated crash")
+
+    async def long_session_loop(callback):
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            session_loop_cancelled.set()
+            raise
+
+    monkeypatch.setattr(pipeline, "_fetch_loop", dying_fetch_loop)
+    monkeypatch.setattr(pipeline, "_session_loop", long_session_loop)
+
+    with pytest.raises(RuntimeError):
+        await pipeline.start(on_session_ready=lambda states: None)
+
+    assert session_loop_cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_stop_ends_both_loops_promptly():
+    """stop() wakes both loops immediately rather than waiting out their full interval."""
+    pipeline = MFTDataPipeline([], interval="1m")
+    task = asyncio.create_task(pipeline.start(on_session_ready=lambda states: None))
+    await asyncio.sleep(0.05)
+
+    await pipeline.stop()
+
+    # Without the stop_event-based wait, this would block for up to
+    # _WARMUP_POLL_INTERVAL/_FETCH_INTERVAL seconds instead of returning almost immediately
+    await asyncio.wait_for(task, timeout=2.0)
