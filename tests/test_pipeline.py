@@ -5,11 +5,14 @@ Tests for the MFT Data Pipeline.
 import asyncio
 import importlib
 import logging
+import math
 import sys
 from pathlib import Path
 
 import pandas as pd
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 import argus.data.pipeline as pipeline_module
 from argus.config import settings
@@ -20,8 +23,12 @@ from argus.data.pipeline import (
     MFTDataPipeline,
     _bars_per_day,
     _derive_buffer_size,
+    _finite_or_none,
     _parse_interval_minutes,
+    _required_indicator_bars,
+    _required_raw_bars,
     _resample_ohlcv,
+    _return_since,
     max_bar_age_seconds,
     session_state_ttl_seconds,
 )
@@ -75,6 +82,8 @@ def test_compress_candles():
     assert result["close"] == 399.0
     # A monotonically rising close series saturates RSI at 100
     assert result["rsi_14"] == 100.0
+    # 400 1m bars resample to ~80 5m bars, well clear of the 34-bar MACD warmup floor
+    assert result["macd_histogram"] is not None
 
 
 def test_ohlcv_buffer_insertion():
@@ -111,20 +120,20 @@ def test_parse_interval_minutes_rejects_unsupported_shape():
 
 
 def test_derive_buffer_size_matches_fetch_period():
-    """Buffer size holds a full fetch period's candles at the given interval."""
+    """Buffer size holds a full fetch period's candles at the given interval, plus a day and a bar of slack."""
     assert _bars_per_day(1) == 390
     assert _bars_per_day(5) == 78
-    assert _derive_buffer_size(1) == 780
-    assert _derive_buffer_size(5) == 156
+    assert _derive_buffer_size(1) == 1173
+    assert _derive_buffer_size(5) == 237
 
 
 def test_pipeline_derives_buffer_size_from_interval():
     """MFTDataPipeline sizes its buffer from the candle interval when CANDLE_BUFFER_SIZE isn't overridden."""
     pipeline_1m = MFTDataPipeline([], interval="1m")
-    assert pipeline_1m.buffer._buffer_size == 780
+    assert pipeline_1m.buffer._buffer_size == 1173
 
     pipeline_5m = MFTDataPipeline([], interval="5m")
-    assert pipeline_5m.buffer._buffer_size == 156
+    assert pipeline_5m.buffer._buffer_size == 237
 
 
 def test_resample_ohlcv_aggregates_correctly():
@@ -161,22 +170,18 @@ def test_resample_ohlcv_is_a_noop_when_target_not_coarser():
 
 
 def test_momentum_windows_scale_with_interval():
-    """momentum_30m/momentum_1d convert minutes to bars using the pipeline's own interval, at 1m and 5m."""
-
-    def expected_momentum(closes: list[int], bars: int, n: int) -> float:
-        idx = max(-bars, -n)
-        return (closes[-1] / closes[idx]) - 1.0
-
+    """momentum_30m locates the bar exactly 30 minutes back at both 1m and 5m resolution."""
     dates_1m = pd.date_range("2024-01-01 09:30", periods=400, freq="1min")
     closes_1m = list(range(400))
     df_1m = pd.DataFrame({
         "open": closes_1m, "high": [c + 1 for c in closes_1m], "low": closes_1m,
         "close": closes_1m, "volume": [1000] * 400,
     }, index=dates_1m)
-    pipeline_1m = MFTDataPipeline([], interval="1m")
-    result_1m = pipeline_1m._compress_candles(df_1m)
-    assert result_1m["momentum_30m"] == pytest.approx(expected_momentum(closes_1m, 30, 400), abs=1e-6)
-    assert result_1m["momentum_1d"] == pytest.approx(expected_momentum(closes_1m, 390, 400), abs=1e-6)
+    result_1m = MFTDataPipeline([], interval="1m")._compress_candles(df_1m)
+    # Last bar is 09:30 + 399min = 16:09; 30 minutes back lands exactly on bar 369
+    assert result_1m["momentum_30m"] == pytest.approx((399 / 369) - 1.0, abs=1e-6)
+    # Every bar falls on 2024-01-01, so momentum_1d has no strictly-earlier session to reach
+    assert result_1m["momentum_1d"] is None
 
     dates_5m = pd.date_range("2024-01-01 09:30", periods=100, freq="5min")
     closes_5m = list(range(100))
@@ -184,10 +189,99 @@ def test_momentum_windows_scale_with_interval():
         "open": closes_5m, "high": [c + 1 for c in closes_5m], "low": closes_5m,
         "close": closes_5m, "volume": [1000] * 100,
     }, index=dates_5m)
-    pipeline_5m = MFTDataPipeline([], interval="5m")
-    result_5m = pipeline_5m._compress_candles(df_5m)
-    assert result_5m["momentum_30m"] == pytest.approx(expected_momentum(closes_5m, 6, 100), abs=1e-6)
-    assert result_5m["momentum_1d"] == pytest.approx(expected_momentum(closes_5m, 78, 100), abs=1e-6)
+    result_5m = MFTDataPipeline([], interval="5m")._compress_candles(df_5m)
+    # Last bar is 09:30 + 99*5min = 17:45; 30 minutes back lands exactly on bar 93
+    assert result_5m["momentum_30m"] == pytest.approx((99 / 93) - 1.0, abs=1e-6)
+    assert result_5m["momentum_1d"] is None
+
+
+def test_finite_or_none():
+    """Passes a finite value through unchanged; collapses None/NaN/inf to None."""
+    assert _finite_or_none(1.5) == 1.5
+    assert _finite_or_none(None) is None
+    assert _finite_or_none(float("nan")) is None
+    assert _finite_or_none(float("inf")) is None
+    assert _finite_or_none(float("-inf")) is None
+
+
+def test_required_indicator_bars_is_pinned_to_macd_warmup():
+    """The resampled-bar readiness floor is pinned to MACD(12,26,9)'s measured warmup."""
+    assert _required_indicator_bars() == 34
+
+
+def test_required_raw_bars_matches_the_issue_table():
+    """Raw-bar pre-filter: the larger of the indicator-resample floor and one day's momentum lookback."""
+    assert _required_raw_bars(1) == 391
+    assert _required_raw_bars(5) == 79
+    assert _required_raw_bars(15) == 34
+
+
+def test_compress_candles_readiness_cliff_at_macd_warmup_floor():
+    """33 resampled bars publish nothing; 34 publishes a real (non-None) MACD histogram."""
+    pipeline = MFTDataPipeline([], interval="5m")
+
+    dates_33 = pd.date_range("2024-01-01 09:30", periods=33, freq="5min")
+    df_33 = pd.DataFrame({
+        "open": range(33), "high": [c + 1 for c in range(33)], "low": range(33),
+        "close": range(33), "volume": [1000] * 33,
+    }, index=dates_33)
+    assert pipeline._compress_candles(df_33) is None
+
+    dates_34 = pd.date_range("2024-01-01 09:30", periods=34, freq="5min")
+    df_34 = pd.DataFrame({
+        "open": range(34), "high": [c + 1 for c in range(34)], "low": range(34),
+        "close": range(34), "volume": [1000] * 34,
+    }, index=dates_34)
+    result_34 = pipeline._compress_candles(df_34)
+    assert result_34 is not None
+    assert result_34["macd_histogram"] is not None
+
+
+def test_compress_candles_never_emits_nan():
+    """Every float field in a compressed dict is a real number or None, never NaN."""
+    pipeline = MFTDataPipeline([], interval="1m")
+    dates = pd.date_range("2024-01-01 09:30", periods=400, freq="1min")
+    df = pd.DataFrame({
+        "open": range(400), "high": [c + 1 for c in range(400)], "low": range(400),
+        "close": range(400), "volume": [1000] * 400,
+    }, index=dates)
+    result = pipeline._compress_candles(df)
+    assert result is not None
+    for value in result.values():
+        if isinstance(value, float):
+            assert not math.isnan(value)
+
+
+def test_return_since_momentum_1d_none_without_a_prior_session():
+    """momentum_1d's lookup returns None when the series holds only one calendar day."""
+    close_s = et_intraday_candles(50)["close"]
+    assert _return_since(close_s, pd.Timedelta(days=1), same_session=False) is None
+
+
+def test_return_since_momentum_30m_does_not_reach_into_the_prior_session():
+    """At 09:34 with only 5 bars printed today, the 30-minute lookup doesn't fall back to yesterday's close."""
+    day1 = et_intraday_candles(390, start="2024-01-02 09:30")
+    day2 = et_intraday_candles(5, start="2024-01-03 09:30")
+    combined_close = pd.concat([day1["close"], day2["close"]])
+    assert _return_since(combined_close, pd.Timedelta(minutes=30), same_session=True) is None
+
+
+@given(drop=st.integers(min_value=0, max_value=10))
+def test_momentum_1d_is_stable_under_dropping_up_to_10_oldest_bars(drop: int):
+    """Locating momentum_1d by time is unaffected by pruning the buffer's oldest rows.
+
+    Args:
+        drop: Number of oldest bars removed from the series before re-checking.
+    """
+    day1 = et_intraday_candles(390, start="2024-01-02 09:30")
+    day2 = et_intraday_candles(50, start="2024-01-03 09:30")
+    close_s = pd.concat([day1["close"], day2["close"]])
+
+    baseline = _return_since(close_s, pd.Timedelta(days=1), same_session=False)
+    trimmed = _return_since(close_s.iloc[drop:], pd.Timedelta(days=1), same_session=False)
+
+    assert baseline is not None
+    assert trimmed == baseline
 
 
 def test_session_state_ttl_seconds_tracks_decision_interval(monkeypatch):
@@ -282,10 +376,27 @@ def _seed_buffer(pipeline: MFTDataPipeline, ticker: str, n: int = 20) -> None:
         pipeline.buffer.insert_candle(ticker, {"timestamp": idx, **row.to_dict()})
 
 
+def _seed_two_session_buffer(
+    pipeline: MFTDataPipeline, ticker: str, day1_bars: int = 390, day2_bars: int = 50
+) -> None:
+    """Inserts two calendar days of warm 1m candles for `ticker`.
+
+    Clears both the raw-bar readiness pre-filter and momentum_1d's
+    cross-session lookback (see argus/data/pipeline.py's `_return_since`),
+    unlike `_seed_buffer`'s single-day fixture.
+    """
+    day1 = et_intraday_candles(day1_bars, start="2024-01-02 09:30")
+    day2 = et_intraday_candles(day2_bars, start="2024-01-03 09:30")
+    combined = pd.concat([day1, day2])
+    combined[["open", "high", "low", "close"]] += 100
+    for idx, row in combined.iterrows():
+        pipeline.buffer.insert_candle(ticker, {"timestamp": idx, **row.to_dict()})
+
+
 def test_compress_all_skips_a_ticker_whose_get_candles_raises(monkeypatch):
     """compress_all catches a get_candles failure for one ticker and still returns the rest."""
     pipeline = MFTDataPipeline([], interval="1m")
-    _seed_buffer(pipeline, "GOOD")
+    _seed_two_session_buffer(pipeline, "GOOD")
 
     real_get_candles = pipeline.buffer.get_candles
 
@@ -301,6 +412,18 @@ def test_compress_all_skips_a_ticker_whose_get_candles_raises(monkeypatch):
 
     assert "GOOD" in states
     assert "BAD" not in states
+
+
+def test_compress_all_skips_a_ticker_below_the_readiness_floor():
+    """compress_all omits a ticker whose buffered bars don't clear the resampled MACD warmup floor."""
+    pipeline = MFTDataPipeline([], interval="1m")
+    # 20 raw bars clear OHLCVBuffer's own 14-row floor but fall far short of
+    # _required_raw_bars(1) == 391
+    _seed_buffer(pipeline, "COLD", n=20)
+
+    states = pipeline.compress_all()
+
+    assert "COLD" not in states
 
 
 def test_buffer_warm_skips_a_ticker_whose_get_candles_raises(monkeypatch):
