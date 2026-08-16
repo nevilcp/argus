@@ -1,4 +1,5 @@
 [project]
+# diag: comment-only touch, no dependency change
 name = "argus"
 version = "2.0.0"
 description = "Multi-agent financial intelligence system orchestrating specialist LLMs and statistical models for quantitative equity research."
