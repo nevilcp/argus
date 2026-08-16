@@ -2,11 +2,16 @@
 Tests for the MFT Data Pipeline.
 """
 
+import importlib
 import logging
+import sys
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
+import argus.data.pipeline as pipeline_module
+from argus.config import settings
 from argus.data.cache import OHLCVBuffer
 from argus.data.pipeline import (
     _FETCH_INTERVAL,
@@ -17,6 +22,7 @@ from argus.data.pipeline import (
     _parse_interval_minutes,
     _resample_ohlcv,
 )
+from tests.helpers.candles import dst_straddling_candles, et_intraday_candles
 
 
 def test_register_tickers():
@@ -205,3 +211,39 @@ def test_inter_request_sleep_floors_at_zero_and_warns_when_universe_outgrows_cad
 
     assert result == 0.0
     assert any("won't fit" in record.message for record in caplog.records)
+
+
+def test_default_db_path_uses_isolated_data_dir(tmp_path):
+    """A pipeline built without an explicit db_path never reaches the production buffer."""
+    pipeline = MFTDataPipeline(["AAPL"])
+    assert Path(pipeline.buffer._db_path).parent == tmp_path
+    assert Path(pipeline.buffer._db_path).parent == Path(settings.ARGUS_DATA_DIR)
+
+
+def test_pandas_ta_import_failure_is_a_boot_failure(monkeypatch):
+    """A broken pandas_ta install fails at module import time, not silently inside compress_all."""
+    monkeypatch.setitem(sys.modules, "pandas_ta", None)
+    try:
+        with pytest.raises(ImportError):
+            importlib.reload(pipeline_module)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(pipeline_module)
+
+
+def test_et_intraday_candles_are_tz_aware_and_monotonic():
+    """The shared candle builder produces a tz-aware, monotonically increasing ET frame."""
+    df = et_intraday_candles(20)
+    assert len(df) == 20
+    assert str(df.index.tz) == "America/New_York"
+    assert df.index.is_monotonic_increasing
+    assert df["close"].iloc[-1] == 19.0
+
+
+def test_dst_straddling_candles_are_monotonic_in_utc_despite_repeated_wall_clock():
+    """The DST fixture's local hour repeats but its underlying UTC instants strictly increase."""
+    df = dst_straddling_candles(n_per_side=6)
+    assert len(df) == 12
+    assert df.index.tz_convert("UTC").is_monotonic_increasing
+    # The repeated 01:xx ET wall-clock hour is exactly the reproduced hazard
+    assert (df.index.hour == 1).all()
