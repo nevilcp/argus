@@ -61,4 +61,10 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=90s \
     CMD curl -f http://localhost:8000/health || exit 1
 
+# --workers 1 is load-bearing, not a default left untouched: the rate governor
+# and kill switch (argus/orchestration/governor.py, argus/risk/kill_switch.py)
+# are in-process singletons, so a second worker would run its own ignorant
+# copy of both, silently doubling real Groq usage against the same account.
+# api/main.py's lifespan asserts this invariant at startup and fails fast if
+# it's ever raised.
 CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

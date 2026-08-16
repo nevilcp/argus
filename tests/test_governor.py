@@ -14,9 +14,17 @@ from argus.orchestration.governor import (
     RateLimitExceeded,
     RateLimitGovernor,
     UnregisteredModel,
+    _CHAT_TEMPLATE_OVERHEAD_TOKENS,
+    _WORD_TO_TOKEN_RATIO,
     _parse_reset_duration,
     estimate_tokens,
 )
+
+
+def _tokens_this_window(usage) -> int:
+    """Sums the rolling token window's entries — the window-based replacement for
+    the old tokens_this_minute scalar."""
+    return sum(tok for _, tok in usage.tokens_window)
 
 
 @pytest.fixture
@@ -61,29 +69,34 @@ def _rate_limit_headers(
     }
 
 
-@patch("argus.orchestration.governor.time.sleep")
-def test_governor_minute_limit(mock_sleep, governor):
-    """Exceeding the per-minute request limit sleeps, then admits the call after re-checking."""
+def test_governor_admits_after_window_rolls_over(monkeypatch, governor):
+    """Exceeding the rolling window's request budget sleeps, then admits once entries age out.
+
+    Regression coverage for GOV-4: a fixed-minute bucket could admit 2x budget
+    across a boundary straddle; the rolling window instead tracks each
+    admission's own timestamp; the request is only clear to retry once
+    _WINDOW_SECONDS has actually elapsed since the oldest entry.
+    """
     model = list(REGISTERED_MODELS)[0]
     limits = BOOTSTRAP_LIMITS[model]
-
     req_limit = limits["requests_per_minute"]
+
+    fake_now = [1_000.0]
+    monkeypatch.setattr("argus.orchestration.governor.time.monotonic", lambda: fake_now[0])
 
     for _ in range(req_limit):
         governor.wait_if_needed(model, 100)
 
-    assert mock_sleep.call_count == 0
+    sleep_calls = []
 
-    # The mocked sleep doesn't advance real time, so simulate the minute rolling
-    # over — the re-check loop (the point of the lock-release fix) then finds
-    # room on its second pass instead of spinning through every retry attempt.
-    def _advance_minute(_seconds):
-        governor._get_usage(model).current_minute = "1970-01-01T00:00"
+    def _fake_sleep(seconds):
+        sleep_calls.append(seconds)
+        fake_now[0] += 61  # advance past the window so the oldest admission ages out
 
-    mock_sleep.side_effect = _advance_minute
+    monkeypatch.setattr("argus.orchestration.governor.time.sleep", _fake_sleep)
 
     governor.wait_if_needed(model, 100)
-    assert mock_sleep.call_count == 1
+    assert len(sleep_calls) == 1
 
 
 @patch("argus.orchestration.governor.time.sleep")
@@ -99,8 +112,8 @@ def test_governor_wait_gives_up_after_max_attempts(mock_sleep, governor):
 
     assert mock_sleep.call_count == governor._MAX_WAIT_ATTEMPTS
     usage = governor._get_usage(model)
-    assert usage.requests_this_minute == 0
-    assert usage.tokens_this_minute == 0
+    assert len(usage.requests_window) == 0
+    assert _tokens_this_window(usage) == 0
 
 
 def test_governor_does_not_block_other_models_while_sleeping(governor):
@@ -115,7 +128,8 @@ def test_governor_does_not_block_other_models_while_sleeping(governor):
     throttled_model, other_model = models[0], models[1]
 
     usage = governor._get_usage(throttled_model)
-    usage.requests_this_minute = BOOTSTRAP_LIMITS[throttled_model]["requests_per_minute"]
+    now = time.monotonic()
+    usage.requests_window.extend([now] * BOOTSTRAP_LIMITS[throttled_model]["requests_per_minute"])
 
     sleeping = threading.Event()
     # `time` is a single shared module: patching governor's time.sleep patches
@@ -189,6 +203,7 @@ def test_governor_report(governor):
         ("88ms", 0.088),
         ("1h2m3s", 3600 + 2 * 60 + 3),
         ("0s", 0.0),
+        ("60", 60.0),
     ],
 )
 def test_parse_reset_duration(value, expected_seconds):
@@ -209,7 +224,7 @@ def test_estimate_tokens_combines_prompts_and_max_tokens():
     max_tokens = 100
 
     estimated = estimate_tokens(system_prompt, user_prompt, max_tokens)
-    assert estimated == int(5 * 1.3) + 100
+    assert estimated == int(5 * _WORD_TO_TOKEN_RATIO) + _CHAT_TEMPLATE_OVERHEAD_TOKENS + 100
 
 
 def test_observe_headers_overrides_bootstrap(governor):
@@ -266,14 +281,14 @@ def test_observed_daily_exhaustion_raises_immediately(governor):
 
 
 def test_record_usage_applies_delta_to_bootstrap_counters(governor):
-    """record_usage corrects the local today/this-minute counters toward the actual token count."""
+    """record_usage corrects the local today/window counters toward the actual token count."""
     model = list(REGISTERED_MODELS)[0]
     governor.wait_if_needed(model, 100)
 
     governor.record_usage(model, estimated_tokens=100, prompt_tokens=40, completion_tokens=10)
 
     usage = governor._get_usage(model)
-    assert usage.tokens_this_minute == 50
+    assert _tokens_this_window(usage) == 50
     assert usage.tokens_today == 50
 
 
@@ -285,7 +300,7 @@ def test_record_usage_never_lets_counters_go_negative(governor):
     governor.record_usage(model, estimated_tokens=100, prompt_tokens=0, completion_tokens=0)
 
     usage = governor._get_usage(model)
-    assert usage.tokens_this_minute == 0
+    assert _tokens_this_window(usage) == 0
     assert usage.tokens_today == 0
 
 
@@ -308,5 +323,93 @@ def test_record_usage_does_not_touch_header_derived_remaining(governor):
     governor.record_usage(model, estimated_tokens=1_000, prompt_tokens=1, completion_tokens=1)
 
     assert governor._get_usage(model).remaining_tokens == 5_000
+
+
+def test_release_reservation_restores_bootstrap_budget(governor):
+    """A released reservation gives back the exact request+token budget wait_if_needed granted."""
+    model = list(REGISTERED_MODELS)[0]
+    initial_capacity = governor.get_remaining_capacity(model)
+
+    governor.wait_if_needed(model, 500)
+    assert governor.get_remaining_capacity(model) == initial_capacity - 1
+
+    governor.release_reservation(model, 500)
+
+    usage = governor._get_usage(model)
+    assert governor.get_remaining_capacity(model) == initial_capacity
+    assert _tokens_this_window(usage) == 0
+    assert usage.requests_today == 0
+    assert usage.tokens_today == 0
+
+
+def test_release_reservation_restores_header_observed_remaining(governor):
+    """Releasing after headers are observed gives back the header-derived remaining too, capped at the limit."""
+    model = list(REGISTERED_MODELS)[0]
+    governor.observe_headers(model, _rate_limit_headers(limit_tokens=1_000, remaining_tokens=1_000))
+
+    governor.wait_if_needed(model, 400)
+    usage = governor._get_usage(model)
+    assert usage.remaining_tokens == 600
+    assert usage.remaining_requests == 14_398
+
+    governor.release_reservation(model, 400)
+    assert usage.remaining_tokens == 1_000
+    assert usage.remaining_requests == 14_399
+
+
+def test_release_reservation_unregistered_model_raises(governor):
+    """Releasing for an unregistered model raises rather than fabricating a profile."""
+    with pytest.raises(UnregisteredModel):
+        governor.release_reservation("some-typo-d-model-id", 100)
+
+
+def test_observe_headers_updates_token_axis_without_request_axis(governor):
+    """A response carrying only token-axis headers still updates that axis (GOV-6)."""
+    model = list(REGISTERED_MODELS)[0]
+    headers = {
+        "x-ratelimit-limit-tokens": "50000",
+        "x-ratelimit-remaining-tokens": "40000",
+        "x-ratelimit-reset-tokens": "10s",
+    }
+    governor.observe_headers(model, headers)
+
+    usage = governor._get_usage(model)
+    assert usage.limits_observed is True
+    assert usage.limit_tokens == 50000
+    assert usage.remaining_tokens == 40000
+    assert usage.limit_requests is None
+    assert usage.remaining_requests is None
+
+
+def test_observe_headers_updates_request_axis_without_token_axis(governor):
+    """A response carrying only request-axis headers still updates that axis (GOV-6)."""
+    model = list(REGISTERED_MODELS)[0]
+    headers = {
+        "x-ratelimit-limit-requests": "14400",
+        "x-ratelimit-remaining-requests": "14000",
+        "x-ratelimit-reset-requests": "12h",
+    }
+    governor.observe_headers(model, headers)
+
+    usage = governor._get_usage(model)
+    assert usage.limits_observed is True
+    assert usage.limit_requests == 14400
+    assert usage.remaining_requests == 14000
+    assert usage.limit_tokens is None
+    assert usage.remaining_tokens is None
+
+
+def test_observe_headers_malformed_reset_still_applies_limit_and_remaining(governor):
+    """An unparseable reset duration doesn't block the limit/remaining ints, which parse independently (GOV-9)."""
+    model = list(REGISTERED_MODELS)[0]
+    headers = _rate_limit_headers(reset_tokens="not-a-duration")
+
+    governor.observe_headers(model, headers)
+
+    usage = governor._get_usage(model)
+    assert usage.limits_observed is True
+    assert usage.limit_tokens == 300_000
+    assert usage.remaining_tokens == 299_500
+    assert usage.reset_tokens_at is None
 
 

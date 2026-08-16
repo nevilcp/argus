@@ -306,7 +306,10 @@ class GroqLLMClient:
 
         Waits for governor capacity, then retries transient failures with
         back-off, honoring Retry-After on 429s. Terminal errors (bad key, bad
-        request) propagate immediately without retrying.
+        request) propagate immediately without retrying. Any failure that
+        escapes this method — terminal or retries-exhausted — releases the
+        governor's pre-flight reservation first, since no tokens were ever
+        actually spent (see RateLimitGovernor.release_reservation).
 
         Returns:
             The response text, flattened from a content-block list if needed.
@@ -318,6 +321,25 @@ class GroqLLMClient:
         estimated_tokens = estimate_tokens(system_prompt, user_prompt, self._max_tokens)
         governor.wait_if_needed(self._model, estimated_tokens)
 
+        try:
+            return self._complete_with_retries(system_prompt, user_prompt, estimated_tokens)
+        except Exception:
+            governor.release_reservation(self._model, estimated_tokens)
+            raise
+
+    def _complete_with_retries(
+        self, system_prompt: str, user_prompt: str, estimated_tokens: int
+    ) -> str:
+        """Runs the invoke/retry loop assuming the governor has already granted capacity.
+
+        Args:
+            system_prompt: The system message text.
+            user_prompt: The user message text.
+            estimated_tokens: The pre-flight estimate already reserved with the governor.
+
+        Returns:
+            The response text, flattened from a content-block list if needed.
+        """
         for attempt in range(_MAX_COMPLETE_ATTEMPTS):
             try:
                 response = self._llm.invoke(

@@ -7,7 +7,8 @@ PiT enforcer, and Governor state limits.
 """
 
 import asyncio
-from datetime import date, datetime, timezone
+import time
+from datetime import date, datetime
 from unittest import mock
 from uuid import uuid4
 
@@ -299,41 +300,41 @@ class TestEndToEnd:
         assert macro.macro_regime == macro2.macro_regime
 
     def test_governor_prevents_over_limit(self):
-        """The shared governor sleeps once a model's per-minute request count reaches its limit."""
+        """The shared governor sleeps once a model's rolling-window request count reaches its limit."""
         model = "llama-3.3-70b-versatile"
         limit = BOOTSTRAP_LIMITS[model]["requests_per_minute"]
 
         usage = governor._get_usage(model)
-        # governor is a module-level singleton, so usage.current_minute may have been
-        # stamped by an earlier test; pin it to now rather than assume it matches, or
-        # a real minute rollover mid-suite spuriously resets the counter below
-        usage.current_minute = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
-        usage.requests_this_minute = limit - 1
+        # governor is a module-level singleton, so its rolling window may carry
+        # entries from an earlier test; seed a clean window rather than assume
+        # one, so a real window rollover mid-suite can't spuriously affect this
+        usage.requests_window.clear()
+        usage.requests_window.extend([time.monotonic()] * (limit - 1))
 
-        # Simulates the minute rolling over during the sleep, so the retry loop's
+        # Simulates the window rolling over during the sleep, so the retry loop's
         # re-check finds room on its second pass rather than exhausting every
         # attempt against a mock that never advances real time.
-        def _advance_minute(_seconds):
-            usage.current_minute = "1970-01-01T00:00"
+        def _advance_window(_seconds):
+            usage.requests_window.clear()
 
         # Reaching exactly the limit still succeeds without sleeping
         try:
             with mock.patch(
-                "argus.orchestration.governor.time.sleep", side_effect=_advance_minute
+                "argus.orchestration.governor.time.sleep", side_effect=_advance_window
             ) as mock_sleep:
                 governor.wait_if_needed(model)
-                assert usage.requests_this_minute == limit
+                assert len(usage.requests_window) == limit
                 assert mock_sleep.call_count == 0
 
-                # Exceeding it sleeps out the remainder of the current minute
+                # Exceeding it sleeps out the remainder of the rolling window
                 governor.wait_if_needed(model)
                 assert mock_sleep.call_count == 1
         finally:
             # governor is a module-level singleton shared across tests; the
-            # _advance_minute side effect above stamped a sentinel `current_minute`
-            # onto its ModelUsage, which must not leak into later tests
-            usage.requests_this_minute = 0
-            usage.current_minute = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
+            # _advance_window side effect above cleared its rolling windows,
+            # which must not leak a stale state into later tests
+            usage.requests_window.clear()
+            usage.tokens_window.clear()
 
     def test_half_kelly_formula(self):
         """half_kelly_weight() computes half the Kelly-optimal position size."""
