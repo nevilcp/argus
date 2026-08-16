@@ -1,4 +1,3 @@
-# ruff: noqa: E402
 """
 scripts/collect_session.py
 
@@ -23,11 +22,6 @@ import dataclasses
 import json
 import logging
 from pathlib import Path
-
-from dotenv import load_dotenv
-
-# .env must be loaded before any LangChain/Groq imports that read env vars
-load_dotenv()
 
 from argus.config import settings
 from argus.data.pipeline import MFTDataPipeline
