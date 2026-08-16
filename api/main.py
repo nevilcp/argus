@@ -231,6 +231,24 @@ async def _reconcile_loop() -> None:
             logger.exception("[Reconcile] cycle failed")
 
 
+def _configure_logging() -> None:
+    """Attaches a stream handler to the ``argus`` logger tree so ARGUS_LOG_LEVEL takes effect (OBS-1).
+
+    Under uvicorn the root logger has no handlers at level WARNING, so every
+    argus.* `logger.info`/`debug` call is silently dropped and
+    ARGUS_LOG_LEVEL is inert. `propagate = False` stops uvicorn's own
+    logging config from resetting this. Idempotent, so re-running lifespan
+    (e.g. across tests) doesn't stack duplicate handlers.
+    """
+    argus_logger = logging.getLogger("argus")
+    argus_logger.setLevel(settings.ARGUS_LOG_LEVEL)
+    argus_logger.propagate = False
+    if not argus_logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        argus_logger.addHandler(handler)
+
+
 def _assert_single_worker() -> None:
     """Fails fast on the two argv/env spellings of "more than one worker" this can detect.
 
@@ -334,6 +352,7 @@ async def lifespan(app: FastAPI):
     """Starts background tasks on startup and stops them cleanly on shutdown."""
     global _mft_pipeline, _pipeline_task, _collector_task, _reconcile_task, _graph, _macro_status_agent
 
+    _configure_logging()
     _assert_single_worker()
     _assert_registered_models()
     _acquire_process_lock()
@@ -497,17 +516,65 @@ class AnalysisResponse(BaseModel):
     errors: list[str] = []
 
 
+def _background_task_status(task: asyncio.Task | None) -> dict:
+    """Reports a background task's liveness, distinguishing "never enabled" from "died" (OBS-2).
+
+    Args:
+        task: The task to inspect, or None if the loop it would run was never
+            started (e.g. ARGUS_COLLECTOR_ENABLED is False).
+
+    Returns:
+        Dict with ``enabled``, ``alive``, and — only when dead — ``error``.
+    """
+    if task is None:
+        return {"enabled": False, "alive": True}
+    if not task.done():
+        return {"enabled": True, "alive": True}
+    if task.cancelled():
+        error = "task was cancelled"
+    else:
+        exc = task.exception()
+        error = str(exc) if exc else "task exited unexpectedly"
+    return {"enabled": True, "alive": False, "error": error}
+
+
 @app.get("/health")
 async def health():
-    """Validates connectivity to model backends, API quotas, and system diagnostics."""
+    """Validates connectivity to model backends, API quotas, and system diagnostics.
+
+    Unlike the P0 gaps it replaces, this reads background-task liveness, the
+    kill switch's halt state, and cache freshness — not just in-memory
+    governor counters — so a dead pipeline/collector/reconcile loop shows up
+    here instead of staying invisible behind a green /health (OBS-2).
+
+    Raises:
+        HTTPException 503: If any background task (MFT pipeline, collector,
+            or reconciliation loop) has stopped running.
+    """
     try:
         llama_cap = governor.get_remaining_capacity(settings.ARGUS_PORTFOLIO_MODEL)
         can_make_calls = llama_cap > 0
     except Exception:
         can_make_calls = False
 
-    return {
-        "status": "ok",
+    background_tasks = {
+        "mft_pipeline": _background_task_status(_pipeline_task),
+        "collector": _background_task_status(_collector_task),
+        "reconcile": _background_task_status(_reconcile_task),
+    }
+    dead_tasks = [name for name, status in background_tasks.items() if not status["alive"]]
+
+    ks = get_kill_switch()
+
+    newest_cache_entry_age_seconds = None
+    if _mft_pipeline is not None and _mft_pipeline.is_market_hours() and _live_session_cache:
+        now = datetime.now()
+        newest_cache_entry_age_seconds = min(
+            (now - updated_at).total_seconds() for _, updated_at in _live_session_cache.values()
+        )
+
+    body = {
+        "status": "ok" if not dead_tasks else "degraded",
         "model_versions": {
             "synthesis": settings.ARGUS_PORTFOLIO_MODEL,
             "sentiment": settings.ARGUS_SENTIMENT_MODEL,
@@ -516,7 +583,14 @@ async def health():
         },
         "can_make_calls": can_make_calls,
         "governor_report": governor.get_usage_report(),
+        "background_tasks": background_tasks,
+        "kill_switch_halted": ks.is_halted if ks else False,
+        "newest_cache_entry_age_seconds": newest_cache_entry_age_seconds,
     }
+
+    if dead_tasks:
+        raise HTTPException(503, f"Background task(s) not running: {', '.join(dead_tasks)}")
+    return body
 
 
 @app.get("/pipeline/status")
