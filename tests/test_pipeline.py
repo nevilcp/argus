@@ -469,7 +469,7 @@ def _seed_two_session_buffer(
 
 def test_compress_all_skips_a_ticker_whose_get_candles_raises(monkeypatch):
     """compress_all catches a get_candles failure for one ticker and still returns the rest."""
-    pipeline = MFTDataPipeline([], interval="1m")
+    pipeline = MFTDataPipeline(["BAD", "GOOD"], interval="1m")
     _seed_two_session_buffer(pipeline, "GOOD")
 
     real_get_candles = pipeline.buffer.get_candles
@@ -488,9 +488,33 @@ def test_compress_all_skips_a_ticker_whose_get_candles_raises(monkeypatch):
     assert "BAD" not in states
 
 
+def test_compress_all_ignores_an_untracked_ticker(monkeypatch):
+    """compress_all only considers tickers still in self.tickers (API-10)."""
+    pipeline = MFTDataPipeline(["GOOD"], interval="1m")
+    _seed_two_session_buffer(pipeline, "GOOD")
+    _seed_two_session_buffer(pipeline, "ORPHAN")
+
+    states = pipeline.compress_all()
+
+    assert "GOOD" in states
+    assert "ORPHAN" not in states
+
+
+def test_compress_all_prunes_untracked_buffer_rows():
+    """compress_all deletes buffered rows for a ticker no longer in self.tickers (API-9)."""
+    pipeline = MFTDataPipeline(["GOOD"], interval="1m")
+    _seed_two_session_buffer(pipeline, "GOOD")
+    _seed_two_session_buffer(pipeline, "ORPHAN")
+
+    pipeline.compress_all()
+
+    assert "ORPHAN" not in pipeline.buffer.get_all_tickers()
+    assert "GOOD" in pipeline.buffer.get_all_tickers()
+
+
 def test_compress_all_skips_a_ticker_below_the_readiness_floor():
     """compress_all omits a ticker whose buffered bars don't clear the resampled MACD warmup floor."""
-    pipeline = MFTDataPipeline([], interval="1m")
+    pipeline = MFTDataPipeline(["COLD"], interval="1m")
     # 20 raw bars clear OHLCVBuffer's own 14-row floor but fall far short of
     # _required_raw_bars(1) == 391
     _seed_buffer(pipeline, "COLD", n=20)

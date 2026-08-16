@@ -19,6 +19,8 @@ Responsibilities:
   - Optionally run the unattended collector and daily reconciliation loops
     (ARGUS_COLLECTOR_ENABLED / ARGUS_RECONCILE_ENABLED) so the system keeps
     accumulating decisions and outcomes without a human calling /analyze
+  - Serialize graph invocations across /analyze and the collector loop, and
+    guard against a second process sharing this one's data directory
 
 Not responsible for:
   - Agent logic (see argus/agents/)
@@ -27,11 +29,14 @@ Not responsible for:
 """
 
 import asyncio
+import fcntl
 import logging
+import os
 import sys
 from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Literal, Optional
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -55,7 +60,7 @@ from argus.orchestration.governor import REGISTERED_MODELS, RateLimitExceeded, U
 from argus.orchestration.graph import build_graph
 from argus.orchestration.reconciliation import load_decisions_from_jsonl, reconcile_decisions
 from argus.orchestration.state import ARGUSState
-from argus.params import RECONCILIATION
+from argus.params import RECONCILIATION, SYSTEM
 from argus.risk import paper_book
 from argus.risk.kill_switch import get_kill_switch, initialize_kill_switch
 from argus.seams import LiveMarketDataProvider
@@ -73,6 +78,16 @@ _pipeline_task: asyncio.Task | None = None
 _collector_task: asyncio.Task | None = None
 _reconcile_task: asyncio.Task | None = None
 _last_collection_result: CollectionResult | None = None
+
+# Serializes graph invocations across /analyze and the unattended collector
+# loop (API-3) — both call the same governor-gated graph, and a second
+# concurrent run only pushes both toward RateLimitExceeded rather than adding
+# real throughput. Held only around the graph invoke itself.
+_analyze_semaphore = asyncio.Semaphore(1)
+
+# Holds the open file object backing the process-exclusivity flock (API-2) for
+# as long as this process runs; garbage-collecting it would release the lock
+_process_lock_file = None
 
 # Built once in lifespan startup, pointed at the same persistent checkpoint
 # path the collector loop uses, so /analyze and the unattended collector
@@ -99,6 +114,16 @@ async def _mft_session_callback(session_states: dict) -> None:
     now = datetime.now()
     for ticker, state in session_states.items():
         _live_session_cache[ticker] = (state, now)
+
+    # Drops entries for tickers no longer tracked (API-9) — without this the
+    # cache only ever grows, holding a stale allocation-eligible entry for any
+    # ticker that was ever registered even after it stops being tracked
+    if _mft_pipeline is not None:
+        tracked = set(_mft_pipeline.tickers)
+        for ticker in list(_live_session_cache):
+            if ticker not in tracked:
+                del _live_session_cache[ticker]
+
     logger.info("[MFT] Live session cache updated: %d ticker(s)", len(_live_session_cache))
 
 
@@ -142,6 +167,7 @@ async def _collector_loop(pipeline: MFTDataPipeline, compiled_graph) -> None:
                 pipeline=pipeline,
                 compiled_graph=compiled_graph,
                 decisions_log_path=f"{settings.ARGUS_DATA_DIR}/decisions.jsonl",
+                analyze_lock=_analyze_semaphore,
             )
             logger.info("[Collector] cycle result: %s", _last_collection_result)
         except Exception:
@@ -206,7 +232,7 @@ async def _reconcile_loop() -> None:
 
 
 def _assert_single_worker() -> None:
-    """Fails fast if launched with more than one uvicorn worker.
+    """Fails fast on the two argv/env spellings of "more than one worker" this can detect.
 
     The rate governor and kill switch are in-process singletons (see
     argus/orchestration/governor.py). A second worker process would run its
@@ -216,8 +242,16 @@ def _assert_single_worker() -> None:
     independent governor against that same key, and this assertion exists so
     a deployment doesn't add a third by accident. See Dockerfile.api's CMD.
 
+    This is a best-effort pre-flight only, not the real guard: it can't see
+    gunicorn's `-w`, a gunicorn config file, or a programmatic
+    `uvicorn.run(workers=N)`. `_acquire_process_lock` (API-2) is what actually
+    catches those, and the case that costs real money — two containers on one
+    data volume — which no argv/env spelling of "workers" describes at all.
+
     Raises:
-        RuntimeError: If ``--workers`` appears in argv with a value other than "1".
+        RuntimeError: If ``--workers``/``--workers=N`` in argv, or
+            ``WEB_CONCURRENCY`` in the environment, requests a value other
+            than "1".
     """
     argv = sys.argv
     if "--workers" in argv:
@@ -227,6 +261,52 @@ def _assert_single_worker() -> None:
                 f"ARGUS must run with --workers 1 (in-process governor/kill-switch "
                 f"singletons); got --workers {argv[idx + 1]}"
             )
+    for arg in argv:
+        if arg.startswith("--workers=") and arg.removeprefix("--workers=") != "1":
+            raise RuntimeError(
+                f"ARGUS must run with --workers 1 (in-process governor/kill-switch "
+                f"singletons); got {arg}"
+            )
+
+    web_concurrency = os.environ.get("WEB_CONCURRENCY")
+    if web_concurrency is not None and web_concurrency != "1":
+        raise RuntimeError(
+            f"ARGUS must run with WEB_CONCURRENCY=1 (in-process governor/kill-switch "
+            f"singletons); got WEB_CONCURRENCY={web_concurrency}"
+        )
+
+
+def _acquire_process_lock() -> None:
+    """Takes an exclusive, non-blocking flock on ``${ARGUS_DATA_DIR}/argus.lock`` (API-2).
+
+    This is the real single-process guard, unlike `_assert_single_worker`'s
+    argv/env pre-flight: it catches every way two ARGUS processes could end up
+    sharing one data directory — including two whole containers — not just
+    the worker-count spellings that pre-flight can parse. Note this only runs
+    during lifespan startup, so ``uvicorn --reload``'s parent process (which
+    doesn't run lifespan) is not itself protected; the reloaded child is.
+    Scoping the lock file to ``ARGUS_DATA_DIR`` also correctly leaves
+    ``scripts/collect_session.py``'s GitHub Actions runner unblocked — it
+    writes to its own runner-local directory, not this deployment's, and is
+    already an accepted second governor/kill-switch process (see
+    ``argus/orchestration/collector.py``'s module docstring).
+
+    Raises:
+        RuntimeError: If another process already holds the lock.
+    """
+    global _process_lock_file
+    lock_path = Path(settings.ARGUS_DATA_DIR) / "argus.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = open(lock_path, "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        lock_file.close()
+        raise RuntimeError(
+            f"Another ARGUS process already holds {lock_path} — refusing to start a "
+            f"second process against the same data directory."
+        ) from exc
+    _process_lock_file = lock_file
 
 
 def _assert_registered_models() -> None:
@@ -256,6 +336,7 @@ async def lifespan(app: FastAPI):
 
     _assert_single_worker()
     _assert_registered_models()
+    _acquire_process_lock()
 
     _graph = build_graph(checkpoint_db_path=f"{settings.ARGUS_DATA_DIR}/argus_graph.db")
 
@@ -330,6 +411,11 @@ async def lifespan(app: FastAPI):
 
     if _mft_pipeline is not None:
         _mft_pipeline.buffer.close()
+
+    if _process_lock_file is not None:
+        fcntl.flock(_process_lock_file, fcntl.LOCK_UN)
+        _process_lock_file.close()
+
     logger.info("[Shutdown] Complete.")
 
 
@@ -498,8 +584,11 @@ async def analyze(req: AnalysisRequest):
     Raises:
         HTTPException 401: If ARGUS_API_KEY is set and the X-API-Key header doesn't match.
         HTTPException 429: If the governor's rate budget is exhausted for a
-            configured model (GOV-7) — retry after a short wait.
-        HTTPException 503: If the kill switch is triggered, VIX is above the blackout
+            configured model (GOV-7), or another analysis (a concurrent
+            /analyze call or the unattended collector) is already in progress
+            (API-3) — retry after a short wait.
+        HTTPException 503: If the graph hasn't finished initializing, the kill switch
+            is triggered (before or after the graph run), VIX is above the blackout
             threshold, the market is currently closed, the MFT cache has not yet
             been populated for all requested tickers, the cache hasn't been
             refreshed recently (pipeline stalled), the cached bars are older
@@ -597,10 +686,24 @@ async def analyze(req: AnalysisRequest):
         errors=[],
     )
 
+    if _graph is None:
+        raise HTTPException(503, "Agent graph not yet initialized.")
+
     config = {"configurable": {"thread_id": str(uuid4())}}
 
+    # No await between this check and the acquire below, so nothing can slip
+    # in between them (API-3) — Semaphore.acquire returns synchronously when
+    # unlocked, and a later refactor that inserts an await here breaks that.
+    if _analyze_semaphore.locked():
+        raise HTTPException(
+            429,
+            "Another analysis is already in progress. Retry shortly.",
+            headers={"Retry-After": str(SYSTEM.analyze_retry_after_seconds)},
+        )
+
     try:
-        final_state = await asyncio.to_thread(_graph.invoke, state, config)
+        async with _analyze_semaphore:
+            final_state = await asyncio.to_thread(_graph.invoke, state, config)
     except RateLimitExceeded as e:
         logger.warning("[API] Governor rate limit exhausted: %s", e)
         raise HTTPException(429, f"Rate limit exhausted: {e}")
@@ -611,6 +714,15 @@ async def analyze(req: AnalysisRequest):
         ref = uuid4()
         logger.error("[API] Graph error (ref %s): %s", ref, e, exc_info=True)
         raise HTTPException(500, f"Agent graph error (ref {ref})")
+
+    # Re-checked rather than trusted from before the (potentially many-second)
+    # graph run: the kill switch is process-global and the reconcile loop can
+    # trip it mid-run (API-8)
+    ks = get_kill_switch()
+    if ks and ks.is_halted:
+        raise HTTPException(
+            503, "System halted during analysis. Kill switch triggered. Manual reset required."
+        )
 
     allocation = final_state.get("portfolio_allocation")
     if not allocation:
