@@ -165,7 +165,7 @@ ARGUS sits at the intersection of quantitative finance, statistical modeling, an
   - *VWAP* (Volume-Weighted Average Price): an intraday benchmark price; distance from it signals whether price is running ahead of or behind volume-weighted flow.
 - **Risk measures** — VaR (Value-at-Risk) and CVaR (Conditional VaR / Expected Shortfall) quantify loss size at a confidence level and average loss beyond that level, respectively; beta measures sensitivity to a market benchmark. All three derive from the daily-bar covariance the risk engine estimates from `price_history`. See [`argus/agents/risk.py`](argus/agents/risk.py).
 - **Kelly criterion / half-Kelly** — the Kelly criterion computes the wealth-maximizing bet size given a signal's edge; full Kelly is well known to overshoot under real-world estimation error, so ARGUS sizes at half that value.
-- **Kill switch / VIX blackout** — independent of the graph, monitored by a background thread: a drawdown kill switch halts all trading once realized portfolio drawdown crosses a risk-tolerance-scaled threshold (8/12/18%), and a VIX blackout blocks *new* positions (not existing ones) once VIX crosses a configured level, regardless of drawdown. See [`argus/risk/kill_switch.py`](argus/risk/kill_switch.py).
+- **Kill switch / VIX blackout** — independent of the graph, monitored by a background thread: a drawdown kill switch halts all trading once realized portfolio drawdown crosses a risk-tolerance-scaled threshold (8/12/18%, `argus/params.py`'s `KILL_SWITCH` group), and a VIX blackout blocks *new* positions (not existing ones) once VIX crosses a configured level, regardless of drawdown. VIX is read once per `check_interval_seconds` (default 900s) and cached for that long, since it's a daily-close figure. The gate is process-global — one threshold, fixed at startup from `ARGUS_RISK_TOLERANCE` — not per-request; `GET /kill-switch/status` reports its current state. See [`argus/risk/kill_switch.py`](argus/risk/kill_switch.py).
 
 ### Interpreting the Evaluation
 
@@ -274,6 +274,7 @@ Every secret field defaults to an empty string (see `argus/config.py`) — the p
 | `ARGUS_INVEST_PCT` | `0.6` | Invest fraction used by unattended collection cycles. |
 | `ARGUS_RISK_TOLERANCE` | `MODERATE` | Risk tolerance used by unattended collection cycles. |
 | `ARGUS_CORS_ORIGINS` | `*` | Comma-separated allowed CORS origins for the FastAPI gateway. |
+| `ARGUS_API_KEY` | (blank) | Shared secret required via the `X-API-Key` header on `POST /analyze` and `POST /kill-switch/reset`. Blank (the default) disables the check — set this before exposing the API beyond a trusted network. |
 | `ARGUS_LOG_LEVEL` | `INFO` | Root log level for `argus.*` loggers. |
 | `ARGUS_HMM_MODEL_PATH` | `argus/models/macro_hmm.joblib` | Path to the persisted macro `RegimeClassifier` artifact (see [Training the Macro Classifier](#training-the-macro-classifier)). |
 
@@ -287,10 +288,11 @@ Every secret field defaults to an empty string (see `argus/config.py`) — the p
 |---|---|---|
 | `GET` | `/health` | Model versions and current governor capacity. |
 | `GET` | `/pipeline/status` | Live MFT buffer depth, session-cache freshness, the last unattended collection cycle's result, and whether the macro HMM classifier is fitted or running the rule-based fallback. |
-| `POST` | `/analyze` | Runs the full graph over a ticker universe and returns an allocation. |
+| `POST` | `/analyze` | Runs the full graph over a ticker universe and returns an allocation. Requires `X-API-Key` if `ARGUS_API_KEY` is set. |
 | `GET` | `/memory/stats` | Summary stats from the ChromaDB cultural-memory vault. |
 | `GET` | `/governor/report` | Per-model request/token usage against rate limits. |
-| `POST` | `/kill-switch/reset` | Clears an active halt and re-bases the tracked portfolio value. |
+| `GET` | `/kill-switch/status` | Current halt/blackout state, drawdown, and last-observed VIX. |
+| `POST` | `/kill-switch/reset` | Clears an active halt, re-bases the tracked portfolio value, and deletes persisted halt dumps. Requires `X-API-Key` if `ARGUS_API_KEY` is set. |
 
 `/analyze` is the primary entrypoint. It only serves requests once the MFT pipeline has warmed up for the requested tickers, and only during US equity market hours:
 

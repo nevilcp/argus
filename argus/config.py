@@ -122,6 +122,14 @@ class Settings(BaseSettings):
     ARGUS_CORS_ORIGINS: Annotated[List[str], NoDecode] = Field(
         default=["*"], description="Allowed CORS origins for the FastAPI gateway"
     )
+    ARGUS_API_KEY: str = Field(
+        default="",
+        description=(
+            "Shared secret required via the X-API-Key header on /analyze and "
+            "/kill-switch/reset. Blank (the default) disables the check — fine for "
+            "local development behind a trusted network boundary, not production."
+        ),
+    )
     ARGUS_LOG_LEVEL: str = Field(default="INFO", description="Root log level for argus.* loggers")
     ARGUS_HMM_MODEL_PATH: str = Field(
         default=str(BASE_DIR / "argus" / "models" / "macro_hmm.joblib"),
@@ -149,7 +157,6 @@ class Settings(BaseSettings):
     MAX_PORTFOLIO_BETA: float = SYSTEM.max_portfolio_beta
 
     VIX_BLACKOUT_THRESHOLD: float = SYSTEM.vix_blackout_threshold
-    MAX_DRAWDOWN_HALT: float = SYSTEM.max_drawdown_halt
 
     # Historical lookback window used in rolling indicator calculations
     LOOKBACK_DAYS: int = SYSTEM.lookback_days
