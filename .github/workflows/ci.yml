@@ -31,6 +31,21 @@ jobs:
       - name: Type-check (mypy)
         run: mypy argus/
 
+      - name: DIAGNOSTIC settings probe
+        run: |
+          python -c "
+          import os
+          print('os.environ FRED_API_KEY repr:', repr(os.environ.get('FRED_API_KEY')))
+          from argus.config import settings
+          print('settings.fred_api_key repr:', repr(settings.fred_api_key))
+          print('settings model_config env_file:', settings.model_config.get('env_file'))
+          import dotenv
+          print('find_dotenv():', repr(dotenv.find_dotenv()))
+          "
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          GROQ_API_KEY: ""
+
       - name: Run test suite
         run: |
           python -m pytest tests/ -v --tb=short
