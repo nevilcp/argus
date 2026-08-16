@@ -3,6 +3,7 @@ Tests for the MFT Data Pipeline.
 """
 
 import asyncio
+import dataclasses
 import importlib
 import math
 import sys
@@ -46,6 +47,31 @@ def test_register_tickers():
     pipeline.register_tickers(["AAPL", "TSLA"])
     assert len(pipeline.tickers) == 3
     assert "TSLA" in pipeline.tickers
+
+
+def test_register_tickers_rejects_malformed_symbols():
+    """A malformed ticker is dropped; well-formed siblings in the same call still register."""
+    pipeline = MFTDataPipeline([])
+    pipeline.register_tickers(["AAPL", "", "'; DROP TABLE ohlcv; --", "../../etc/passwd", "aapl"])
+    assert pipeline.tickers == ["AAPL"]
+
+
+def test_register_tickers_caps_the_tracked_universe(monkeypatch):
+    """Registrations beyond SYSTEM.max_tracked_tickers are dropped, not appended (API-1)."""
+    monkeypatch.setattr(pipeline_module, "SYSTEM", dataclasses.replace(SYSTEM, max_tracked_tickers=3))
+    pipeline = MFTDataPipeline([])
+    pipeline.register_tickers(["AAPL", "MSFT", "TSLA", "NVDA", "GOOGL"])
+    assert pipeline.tickers == ["AAPL", "MSFT", "TSLA"]
+
+    pipeline.register_tickers(["NVDA"])
+    assert pipeline.tickers == ["AAPL", "MSFT", "TSLA"]
+
+
+def test_init_routes_initial_universe_through_register_tickers(monkeypatch):
+    """A malformed ticker in the constructor's initial universe is dropped, not stored raw."""
+    monkeypatch.setattr(pipeline_module, "SYSTEM", dataclasses.replace(SYSTEM, max_tracked_tickers=2))
+    pipeline = MFTDataPipeline(["AAPL", "not-a-ticker!", "MSFT", "TSLA"])
+    assert pipeline.tickers == ["AAPL", "MSFT"]
 
 
 def test_compress_candles():
@@ -312,7 +338,7 @@ async def test_sweep_uses_a_constant_inter_request_gap_independent_of_universe_s
     await small._sweep_once()
     small_elapsed = time.monotonic() - small_start
 
-    big = MFTDataPipeline([f"T{i}" for i in range(20)], interval="1m")
+    big = MFTDataPipeline([f"T{chr(65 + i)}" for i in range(20)], interval="1m")
     monkeypatch.setattr(big, "_fetch_one_ticker", fake_fetch_one)
     big_start = time.monotonic()
     await big._sweep_once()

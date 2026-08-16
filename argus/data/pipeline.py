@@ -41,6 +41,7 @@ import pandas_ta as ta
 from argus.config import settings
 from argus.data.cache import OHLCVBuffer
 from argus.data.fetchers import fetch_ohlcv_intraday
+from argus.data.tickers import is_valid_ticker
 from argus.params import SYSTEM
 from argus.schemas.signals import missing_session_state_keys
 
@@ -275,7 +276,6 @@ class MFTDataPipeline:
                 a process restart resumes with a warm buffer instead of the
                 cold start a fresh buffer would otherwise incur.
         """
-        self.tickers = tickers
         self.interval = interval or settings.MFT_CANDLE_INTERVAL
         self.interval_minutes = _parse_interval_minutes(self.interval)
         self.session_interval_seconds = settings.MFT_DECISION_INTERVAL_SECONDS
@@ -287,9 +287,15 @@ class MFTDataPipeline:
         self.buffer = OHLCVBuffer(db_path=db_path, buffer_size=buffer_size, interval=self.interval)
         self.running = False
         self._stop_event = asyncio.Event()
+        # Routed through register_tickers rather than a bare assignment, so the
+        # ticker-shape and universe-cap invariants apply uniformly here, to
+        # run_collection_cycle, and to collect_session.py's --universe CLI arg
+        # (API-1) — not just to /analyze's already-validated request tickers
+        self.tickers: list[str] = []
+        self.register_tickers(tickers)
         logger.info(
             "MFTDataPipeline initialised: %d tickers, interval=%s, buffer_size=%d, buffer=%s",
-            len(tickers),
+            len(self.tickers),
             self.interval,
             buffer_size,
             db_path,
@@ -332,18 +338,39 @@ class MFTDataPipeline:
 
         Safe to call while the pipeline is running. The ``_fetch_loop`` reads
         ``self.tickers`` on every iteration, so new entries are picked up within
-        ``_FETCH_INTERVAL`` seconds.
+        ``_FETCH_INTERVAL`` seconds. This is the single enforcement point for
+        ticker-shape validation and the SYSTEM.max_tracked_tickers cap (API-1):
+        __init__ routes its initial universe through here too.
 
         Args:
-            tickers: Ticker symbols to add. Duplicates are silently ignored.
+            tickers: Ticker symbols to add. Malformed symbols and duplicates
+                are dropped; entries beyond the tracked-universe cap are
+                dropped too, both logged at WARNING.
         """
-        new = [t for t in tickers if t not in self.tickers]
-        if new:
-            self.tickers.extend(new)
+        valid = [t for t in tickers if is_valid_ticker(t)]
+        invalid = [t for t in tickers if t not in valid]
+        if invalid:
+            logger.warning(
+                "MFTDataPipeline.register_tickers: rejected malformed ticker(s): %s", invalid
+            )
+
+        new = [t for t in valid if t not in self.tickers]
+        room = max(SYSTEM.max_tracked_tickers - len(self.tickers), 0)
+        accepted, dropped = new[:room], new[room:]
+        if dropped:
+            logger.warning(
+                "MFTDataPipeline.register_tickers: universe cap (%d) reached; dropping %d "
+                "ticker(s): %s",
+                SYSTEM.max_tracked_tickers,
+                len(dropped),
+                dropped,
+            )
+        if accepted:
+            self.tickers.extend(accepted)
             logger.info(
                 "MFTDataPipeline.register_tickers: added %d ticker(s): %s",
-                len(new),
-                new,
+                len(accepted),
+                accepted,
             )
 
     async def stop(self) -> None:

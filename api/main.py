@@ -43,11 +43,12 @@ load_dotenv()
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from argus.agents.macro import MacroStatisticalAgent
 from argus.config import settings
 from argus.data.pipeline import MFTDataPipeline, max_bar_age_seconds, session_state_ttl_seconds
+from argus.data.tickers import TICKER_PATTERN
 from argus.memory.cultural import get_cultural_memory
 from argus.orchestration.collector import CollectionResult, run_collection_cycle
 from argus.orchestration.governor import REGISTERED_MODELS, RateLimitExceeded, UnregisteredModel, governor
@@ -369,6 +370,32 @@ class AnalysisRequest(BaseModel):
     invest_pct: float = Field(gt=0.05, le=0.95)
     risk_tolerance: Literal["CONSERVATIVE", "MODERATE", "AGGRESSIVE"] = "MODERATE"
 
+    @field_validator("tickers")
+    @classmethod
+    def _normalize_tickers(cls, tickers: list[str]) -> list[str]:
+        """Strips whitespace, upper-cases, validates ticker shape, then dedupes (API-1, API-6).
+
+        Runs in that order deliberately: pydantic's StringConstraints checks
+        `pattern` against the raw, pre-transform string even when combined
+        with `to_upper`/`strip_whitespace`, so a case/whitespace-only field
+        constraint can't do this — the transform has to happen before the
+        pattern check runs.
+
+        Raises:
+            ValueError: If any entry doesn't match TICKER_PATTERN after normalization.
+        """
+        normalized = [t.strip().upper() for t in tickers]
+        invalid = [t for t in normalized if not TICKER_PATTERN.match(t)]
+        if invalid:
+            raise ValueError(f"Invalid ticker symbol(s): {invalid}")
+        seen: set[str] = set()
+        deduped = []
+        for t in normalized:
+            if t not in seen:
+                seen.add(t)
+                deduped.append(t)
+        return deduped
+
 
 class AnalysisResponse(BaseModel):
     """Synthesized portfolio allocation recommendation and system diagnostics."""
@@ -581,8 +608,9 @@ async def analyze(req: AnalysisRequest):
         logger.error("[API] Model configuration error: %s", e)
         raise HTTPException(503, f"Model configuration error: {e}")
     except Exception as e:
-        logger.error("[API] Graph error: %s", e)
-        raise HTTPException(500, f"Agent graph error: {str(e)}")
+        ref = uuid4()
+        logger.error("[API] Graph error (ref %s): %s", ref, e, exc_info=True)
+        raise HTTPException(500, f"Agent graph error (ref {ref})")
 
     allocation = final_state.get("portfolio_allocation")
     if not allocation:

@@ -35,7 +35,7 @@ from dataclasses import dataclass, field, fields
 from enum import Enum
 from typing import Any
 
-PARAMS_VERSION = 10
+PARAMS_VERSION = 11
 
 
 class Provenance(str, Enum):
@@ -108,6 +108,13 @@ class SystemParams:
         "sweep, to avoid rate limiting; a fixed floor rather than a fill-the-interval "
         "spread, since pacing exists for rate limiting, not to occupy the cadence "
         "budget — not evaluated against alternatives",
+    )
+    max_tracked_tickers: int = p(
+        100,
+        Provenance.ARBITRARY,
+        "ceiling on MFTDataPipeline.tickers enforced in register_tickers; stops "
+        "unbounded universe growth from repeated /analyze requests (API-1) — not "
+        "evaluated against alternatives",
     )
 
 
