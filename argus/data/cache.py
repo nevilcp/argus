@@ -258,6 +258,33 @@ class OHLCVBuffer:
             rows = self._conn.execute(_SELECT_TICKERS, (self._interval,)).fetchall()
         return [r[0] for r in rows]
 
+    def prune_untracked(self, tracked_tickers: set[str]) -> int:
+        """Deletes every row for a ticker outside the given tracked set (API-9/API-10).
+
+        Without this, a ticker fetched once (e.g. a one-off `/analyze` request)
+        keeps being swept and compressed forever, since `compress_all` used to
+        iterate every ticker ever inserted rather than the tracked universe.
+
+        Args:
+            tracked_tickers: Tickers that should be retained; empty is treated
+                as "unknown universe" and skipped rather than wiping the buffer.
+
+        Returns:
+            Row count deleted.
+        """
+        if not tracked_tickers:
+            return 0
+        tracked = {t.upper() for t in tracked_tickers}
+        placeholders = ",".join("?" for _ in tracked)
+        with self._lock:
+            cursor = self._conn.execute(
+                f"DELETE FROM ohlcv WHERE ticker NOT IN ({placeholders})", tuple(tracked)
+            )
+            self._conn.commit()
+        if cursor.rowcount:
+            logger.info("OHLCVBuffer.prune_untracked: discarded %d row(s)", cursor.rowcount)
+        return cursor.rowcount
+
     def row_counts(self) -> dict[str, int]:
         """Returns each tracked ticker's row count without materializing its candle frame.
 
