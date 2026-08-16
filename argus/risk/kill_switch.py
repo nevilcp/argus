@@ -58,6 +58,10 @@ class KillSwitch:
     }
     VIX_BLACKOUT = getattr(settings, "VIX_BLACKOUT_THRESHOLD", 35.0)
 
+    # Consecutive VIX-fetch failures before failing closed (blocking new
+    # positions) rather than continuing to trust a possibly-stale reading
+    _VIX_FAILURE_HALT_THRESHOLD = 5
+
     def __init__(self, user_risk_tolerance: str, check_interval_seconds: int = 60):
         """Initializes the kill switch, deferring monitoring until start() is called.
 
@@ -81,6 +85,10 @@ class KillSwitch:
 
         self._portfolio_inception_value: Optional[float] = None
         self._current_portfolio_value: Optional[float] = None
+        self._high_water_mark: float = 0.0
+
+        self._last_vix: Optional[float] = None
+        self._consecutive_vix_failures: int = 0
 
         self._thread: Optional[threading.Thread] = None
         self._logger = logging.getLogger("argus.kill_switch")
@@ -93,6 +101,7 @@ class KillSwitch:
         """
         self._portfolio_inception_value = initial_portfolio_value
         self._current_portfolio_value = initial_portfolio_value
+        self._high_water_mark = initial_portfolio_value
         self._thread = threading.Thread(
             target=self._monitor_loop, daemon=True, name="KillSwitchMonitor"
         )
@@ -104,10 +113,15 @@ class KillSwitch:
     def update_portfolio_value(self, current_value: float) -> None:
         """Thread-safe update of the current portfolio valuation.
 
+        Also advances the high-water mark if this value is a new peak, so
+        drawdown is always measured peak-to-trough rather than against the
+        (possibly stale) inception value.
+
         Args:
             current_value: Current mark-to-market portfolio value (USD).
         """
         self._current_portfolio_value = current_value
+        self._high_water_mark = max(self._high_water_mark, current_value)
 
     def _monitor_loop(self) -> None:
         """Infinite monitoring loop sleeping between checks."""
@@ -121,32 +135,58 @@ class KillSwitch:
     def _check(self) -> None:
         """Evaluates portfolio drawdown and VIX levels against safety limits.
 
-        Fetches the live VIX value; falls back to 20.0 if the API call fails to
-        prevent a monitor crash from silently disabling the safety gate.
+        Drawdown is measured peak-to-trough against _high_water_mark, not
+        against the inception value. A VIX fetch failure never clears an
+        active blackout; after _VIX_FAILURE_HALT_THRESHOLD consecutive
+        failures it sets one — a monitor that can't observe volatility fails
+        closed rather than silently substituting a benign guess.
         """
         if self._portfolio_inception_value is None:
             return
 
-        current = self._current_portfolio_value or self._portfolio_inception_value
-        drawdown = (self._portfolio_inception_value - current) / self._portfolio_inception_value
+        current = (
+            self._current_portfolio_value
+            if self._current_portfolio_value is not None
+            else self._portfolio_inception_value
+        )
+        self._high_water_mark = max(self._high_water_mark, current)
+        drawdown = (
+            (self._high_water_mark - current) / self._high_water_mark
+            if self._high_water_mark > 0
+            else 0.0
+        )
         threshold = self.DRAWDOWN_THRESHOLDS[self.risk_tolerance]
 
         try:
             from argus.data.fetchers import fetch_vix
 
             vix = fetch_vix()
-        except Exception:
-            vix = 20.0
-
-        if vix >= self.VIX_BLACKOUT and not self._new_positions_blocked.is_set():
-            self._new_positions_blocked.set()
-            self._logger.warning(
-                f"VIX BLACKOUT: {vix:.1f} >= {self.VIX_BLACKOUT}. New positions blocked."
+        except Exception as exc:
+            self._consecutive_vix_failures += 1
+            self._logger.error(
+                f"VIX fetch failed ({self._consecutive_vix_failures} consecutive): {exc}"
             )
+            if (
+                self._consecutive_vix_failures >= self._VIX_FAILURE_HALT_THRESHOLD
+                and not self._new_positions_blocked.is_set()
+            ):
+                self._new_positions_blocked.set()
+                self._logger.warning(
+                    "VIX BLACKOUT (fail-closed): "
+                    f"{self._consecutive_vix_failures} consecutive fetch failures."
+                )
+        else:
+            self._consecutive_vix_failures = 0
+            self._last_vix = vix
 
-        elif vix < self.VIX_BLACKOUT and self._new_positions_blocked.is_set():
-            self._new_positions_blocked.clear()
-            self._logger.info(f"VIX normalized to {vix:.1f}. New positions unblocked.")
+            if vix >= self.VIX_BLACKOUT and not self._new_positions_blocked.is_set():
+                self._new_positions_blocked.set()
+                self._logger.warning(
+                    f"VIX BLACKOUT: {vix:.1f} >= {self.VIX_BLACKOUT}. New positions blocked."
+                )
+            elif vix < self.VIX_BLACKOUT and self._new_positions_blocked.is_set():
+                self._new_positions_blocked.clear()
+                self._logger.info(f"VIX normalized to {vix:.1f}. New positions unblocked.")
 
         if drawdown >= threshold and not self._halted.is_set():
             self._halt_reason = (
@@ -155,7 +195,7 @@ class KillSwitch:
             self._halt_time = datetime.now()
             self._halted.set()
             self._logger.critical(f"KILL SWITCH TRIGGERED: {self._halt_reason}")
-            self._persist_halt_event(drawdown, vix)
+            self._persist_halt_event(drawdown, self._last_vix or 0.0)
 
     def _persist_halt_event(self, drawdown: float, vix: float) -> None:
         """Saves a JSON crash dump to disk upon triggering a circuit breaker halt.
@@ -195,8 +235,13 @@ class KillSwitch:
         if self._portfolio_inception_value is None:
             drawdown = 0.0
         else:
-            current = self._current_portfolio_value or self._portfolio_inception_value
-            drawdown = (self._portfolio_inception_value - current) / self._portfolio_inception_value
+            current = (
+                self._current_portfolio_value
+                if self._current_portfolio_value is not None
+                else self._portfolio_inception_value
+            )
+            hwm = self._high_water_mark if self._high_water_mark > 0 else self._portfolio_inception_value
+            drawdown = (hwm - current) / hwm if hwm > 0 else 0.0
 
         return KillSwitchStatus(
             halted=self._halted.is_set(),
@@ -254,6 +299,8 @@ class KillSwitch:
         self._halt_time = None
         self._portfolio_inception_value = new_inception_value
         self._current_portfolio_value = new_inception_value
+        self._high_water_mark = new_inception_value
+        self._consecutive_vix_failures = 0
         self._logger.info(f"Kill switch reset. New inception value: ${new_inception_value:,.0f}")
 
 

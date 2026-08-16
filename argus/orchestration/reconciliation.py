@@ -198,7 +198,11 @@ def _realized_return_from_prices(
 
 
 def compute_realized_return(
-    decision: ARGUSDecision, market_data: MarketDataProvider, horizon_days: int
+    decision: ARGUSDecision,
+    market_data: MarketDataProvider,
+    horizon_days: int,
+    *,
+    prices: Optional[pd.Series] = None,
 ) -> Optional[tuple[float, int, str]]:
     """Computes realized return by pairing the decision's entry price with a later close.
 
@@ -212,6 +216,10 @@ def compute_realized_return(
         market_data: Source of the ticker's daily close price series.
         horizon_days: Calendar days after session_timestamp defining the
             target exit date.
+        prices: Pre-fetched close-price Series for decision.ticker. Passed by
+            callers batching one fetch per ticker across several decisions
+            (see reconcile_decisions, risk/paper_book.py); fetched here when
+            omitted.
 
     Returns:
         (actual_return_pct, holding_days, exit_reason), or None when there is
@@ -222,7 +230,8 @@ def compute_realized_return(
     """
     if not _needs_reconciliation(decision):
         return None
-    prices = market_data.ohlcv_daily(decision.ticker)["close"]
+    if prices is None:
+        prices = market_data.ohlcv_daily(decision.ticker)["close"]
     return _realized_return_from_prices(decision, prices, horizon_days)
 
 
