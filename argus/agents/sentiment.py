@@ -33,6 +33,7 @@ from pydantic import ValidationError
 
 from argus.config import settings
 from argus.data import fetchers
+from argus.orchestration.governor import RateLimitExceeded, UnregisteredModel
 from argus.schemas.signals import SentimentSignal
 from argus.seams import GroqLLMClient, LiveMarketDataProvider, LLMClient, MarketDataProvider
 
@@ -391,7 +392,7 @@ class SentimentAgent:
                     "SentimentAgent: GROQ_API_KEY is not set — LLM calls will fail at invocation time."
                 )
             llm_client = GroqLLMClient(
-                model="llama-3.1-8b-instant",
+                model=settings.ARGUS_SENTIMENT_MODEL,
                 temperature=0.1,
                 max_tokens=350,
                 api_key=api_key,
@@ -510,6 +511,15 @@ class SentimentAgent:
                         )
                     return None
                 time.sleep(2**attempt)
+            except (RateLimitExceeded, UnregisteredModel) as e:
+                # The governor already exhausted its own bounded wait before raising
+                # either of these — retrying here would just re-run into the same
+                # wall, not recover from it. Degrade this ticker immediately instead
+                # of burning three more rounds of governor waits.
+                logger.warning("[Sentiment] Governor rejected call for %s: %s", ticker, e)
+                if errors is not None:
+                    errors.append(f"sentiment_analysis[{ticker}]: rate limited: {e}")
+                return None
             except Exception as e:
                 logger.warning("[Sentiment] Attempt %d failed: %s", attempt + 1, e)
                 if attempt == 2:
