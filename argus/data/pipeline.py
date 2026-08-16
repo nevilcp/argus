@@ -28,6 +28,7 @@ import importlib.metadata  # noqa: F401 — pandas_ta.maps uses this without imp
 import logging
 import math
 import re
+import time
 from collections.abc import Callable
 from datetime import datetime, time as dtime
 from pathlib import Path
@@ -63,10 +64,6 @@ _FETCH_PERIOD = f"{_FETCH_PERIOD_DAYS}d"
 _INDICATOR_RESAMPLE_MINUTES = 5
 
 _FETCH_INTERVAL = 300
-
-# Conservative, unmeasured estimate of one yfinance round-trip; used only to
-# derive inter-ticker spacing so a sweep finishes within _FETCH_INTERVAL
-_ESTIMATED_FETCH_SECONDS_PER_TICKER = 1.0
 
 _INTERVAL_RE = re.compile(r"^(\d+)(m|h)$")
 
@@ -371,27 +368,36 @@ class MFTDataPipeline:
             await self._sweep_once()
         else:
             logger.debug("run_once: outside market hours — compressing existing buffer only")
-        return self.compress_all()
+        return await asyncio.to_thread(self.compress_all)
 
     async def _sweep_once(self) -> None:
         """Fetches the latest candlesticks for every tracked ticker, one pass.
 
-        Spaces requests across the sweep so it finishes within ``_FETCH_INTERVAL``
-        rather than on a fixed per-batch schedule. Iterates over a snapshot of
+        Pauses ``SYSTEM.min_inter_request_seconds`` between requests — a fixed
+        floor against yfinance rate limiting, not a spread computed to fill
+        ``_FETCH_INTERVAL``; that framing was wrong in principle (pacing exists
+        for rate limiting, not to occupy the cadence budget) and meaningless for
+        a one-shot ``run_once()`` sweep. Iterates over a snapshot of
         ``self.tickers`` so that concurrent ``register_tickers`` calls cannot corrupt iteration.
         """
         tickers_snapshot = list(self.tickers)
         logger.debug("_sweep_once: starting universe sweep (%d tickers)", len(tickers_snapshot))
-        sleep_seconds = self._inter_request_sleep(len(tickers_snapshot))
         last = len(tickers_snapshot) - 1
         for i, ticker in enumerate(tickers_snapshot):
             await self._fetch_one_ticker(ticker)
             if i < last:
-                await asyncio.sleep(sleep_seconds)
+                await asyncio.sleep(SYSTEM.min_inter_request_seconds)
 
     async def _fetch_loop(self) -> None:
-        """Periodically downloads the latest intraday candlesticks for the tracking universe."""
+        """Periodically downloads the latest intraday candlesticks for the tracking universe.
+
+        Sleeps only the remainder of ``_FETCH_INTERVAL`` after each sweep, not a
+        full interval on top of however long the sweep itself took — otherwise
+        the real cadence drifts to sweep_duration + _FETCH_INTERVAL instead of
+        the intended _FETCH_INTERVAL.
+        """
         while self.running:
+            started = time.monotonic()
             try:
                 if self._is_market_hours():
                     await self._sweep_once()
@@ -402,34 +408,8 @@ class MFTDataPipeline:
                     "_fetch_loop: sweep failed — %s: %s", type(exc).__name__, exc
                 )
 
-            await self._wait_or_stop(_FETCH_INTERVAL)
-
-    def _inter_request_sleep(self, n_tickers: int) -> float:
-        """Derives the per-ticker sleep so a sweep finishes within `_FETCH_INTERVAL`.
-
-        Args:
-            n_tickers: Number of tickers in the current sweep.
-
-        Returns:
-            Seconds to sleep between consecutive ticker fetches. 0.0 if there's
-            nothing to space out, or if the universe is too large to fit even an
-            unpaced sweep inside `_FETCH_INTERVAL` — in which case candles simply
-            refresh less often than `_FETCH_INTERVAL` implies.
-        """
-        if n_tickers <= 1:
-            return 0.0
-        estimated_fetch_seconds = n_tickers * _ESTIMATED_FETCH_SECONDS_PER_TICKER
-        slack = _FETCH_INTERVAL - estimated_fetch_seconds
-        if slack <= 0:
-            logger.warning(
-                "_inter_request_sleep: %d tickers won't fit an estimated %.0fs fetch "
-                "into the %ds cycle even unpaced; sweeping back-to-back",
-                n_tickers,
-                estimated_fetch_seconds,
-                _FETCH_INTERVAL,
-            )
-            return 0.0
-        return slack / n_tickers
+            elapsed = time.monotonic() - started
+            await self._wait_or_stop(max(0.0, _FETCH_INTERVAL - elapsed))
 
     def _buffer_warm(self) -> bool:
         """Checks whether any tracked ticker already has an indicator-ready buffer depth.
@@ -465,7 +445,7 @@ class MFTDataPipeline:
             try:
                 if self._is_market_hours():
                     logger.info("_session_loop: triggering decision cycle")
-                    session_states = self.compress_all()
+                    session_states = await asyncio.to_thread(self.compress_all)
                     try:
                         await callback(session_states)
                     except Exception as exc:
@@ -483,39 +463,29 @@ class MFTDataPipeline:
     async def _fetch_one_ticker(self, ticker: str) -> None:
         """Downloads and bulk-inserts all available candles for a specific symbol.
 
-        Fetches `_FETCH_PERIOD` of candles at `self.interval` and inserts every row
-        into the buffer. This warms the buffer to a full indicator-ready depth on
-        the very first fetch cycle, eliminating the cold start that would result
-        from inserting only the latest candle. Duplicate timestamps are safely
-        overwritten via the buffer's INSERT OR REPLACE contract.
+        Runs the network fetch and the buffer insert together inside one
+        ``to_thread`` call — a `pd.DataFrame.iterrows()` insert loop run
+        directly on the event loop measured ~655ms/ticker of blocking cost, on
+        top of the network round-trip. Fetches `_FETCH_PERIOD` of candles at
+        `self.interval` and inserts every row, warming the buffer to a full
+        indicator-ready depth on the very first fetch cycle rather than only
+        the latest candle. Duplicate timestamps are safely overwritten via the
+        buffer's INSERT OR REPLACE contract.
 
         Args:
             ticker: Equity ticker symbol to fetch.
         """
         try:
-            df: pd.DataFrame = await asyncio.to_thread(
-                fetch_ohlcv_intraday, ticker, self.interval, _FETCH_PERIOD
-            )
-            if df is None or df.empty:
+            n_candles, latest_close = await asyncio.to_thread(self._fetch_and_insert, ticker)
+            if n_candles == 0:
                 logger.warning("_fetch_one_ticker: empty result for %s", ticker)
                 return
-
-            for idx, row in df.iterrows():
-                candle = {
-                    "timestamp": idx.isoformat(),
-                    "open": float(row["open"]) if "open" in row.index else None,
-                    "high": float(row["high"]) if "high" in row.index else None,
-                    "low": float(row["low"]) if "low" in row.index else None,
-                    "close": float(row["close"]) if "close" in row.index else None,
-                    "volume": float(row["volume"]) if "volume" in row.index else None,
-                }
-                self.buffer.insert_candle(ticker, candle)
 
             logger.debug(
                 "_fetch_one_ticker: %s → %d candles inserted, latest close=%.2f",
                 ticker,
-                len(df),
-                float(df["close"].iloc[-1]) if "close" in df.columns else 0.0,
+                n_candles,
+                latest_close,
             )
 
         except Exception as exc:
@@ -525,6 +495,34 @@ class MFTDataPipeline:
                 type(exc).__name__,
                 exc,
             )
+
+    def _fetch_and_insert(self, ticker: str) -> tuple[int, float]:
+        """Synchronous fetch-and-bulk-insert for one ticker; run off the event loop.
+
+        Args:
+            ticker: Equity ticker symbol to fetch.
+
+        Returns:
+            Tuple of (candles inserted, latest close). (0, 0.0) on an empty fetch.
+        """
+        df: pd.DataFrame = fetch_ohlcv_intraday(ticker, self.interval, _FETCH_PERIOD)
+        if df is None or df.empty:
+            return 0, 0.0
+
+        candles = [
+            {
+                "timestamp": idx.isoformat(),
+                "open": float(row["open"]) if "open" in row.index else None,
+                "high": float(row["high"]) if "high" in row.index else None,
+                "low": float(row["low"]) if "low" in row.index else None,
+                "close": float(row["close"]) if "close" in row.index else None,
+                "volume": float(row["volume"]) if "volume" in row.index else None,
+            }
+            for idx, row in df.iterrows()
+        ]
+        self.buffer.insert_candles(ticker, candles)
+        latest_close = float(df["close"].iloc[-1]) if "close" in df.columns else 0.0
+        return len(df), latest_close
 
     def compress_all(self) -> dict[str, dict]:
         """Compresses cached candle metrics across all universe symbols into a feature dictionary.

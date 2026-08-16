@@ -4,9 +4,9 @@ Tests for the MFT Data Pipeline.
 
 import asyncio
 import importlib
-import logging
 import math
 import sys
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -19,7 +19,6 @@ from argus.config import settings
 from argus.data.cache import OHLCVBuffer
 from argus.data.pipeline import (
     _FETCH_INTERVAL,
-    _ESTIMATED_FETCH_SECONDS_PER_TICKER,
     MFTDataPipeline,
     _bars_per_day,
     _derive_buffer_size,
@@ -300,31 +299,80 @@ def test_max_bar_age_seconds_scales_with_interval():
     assert max_bar_age_seconds(5) > max_bar_age_seconds(1)
 
 
-def test_inter_request_sleep_derives_spacing_from_universe_size():
-    """Inter-ticker spacing splits the fetch cycle's slack evenly across the universe."""
+@pytest.mark.asyncio
+async def test_sweep_uses_a_constant_inter_request_gap_independent_of_universe_size(monkeypatch):
+    """The pause between per-ticker fetches is SYSTEM.min_inter_request_seconds regardless of universe size."""
+
+    async def fake_fetch_one(_ticker):
+        return None
+
+    small = MFTDataPipeline(["A", "B", "C"], interval="1m")
+    monkeypatch.setattr(small, "_fetch_one_ticker", fake_fetch_one)
+    small_start = time.monotonic()
+    await small._sweep_once()
+    small_elapsed = time.monotonic() - small_start
+
+    big = MFTDataPipeline([f"T{i}" for i in range(20)], interval="1m")
+    monkeypatch.setattr(big, "_fetch_one_ticker", fake_fetch_one)
+    big_start = time.monotonic()
+    await big._sweep_once()
+    big_elapsed = time.monotonic() - big_start
+
+    # 2 gaps for 3 tickers, 19 gaps for 20 — a fixed per-gap cost, not a
+    # fill-the-interval spread that would instead keep total elapsed time constant
+    assert small_elapsed == pytest.approx(2 * SYSTEM.min_inter_request_seconds, abs=0.05)
+    assert big_elapsed == pytest.approx(19 * SYSTEM.min_inter_request_seconds, abs=0.1)
+
+
+@pytest.mark.asyncio
+async def test_fetch_loop_sleeps_the_remainder_of_the_interval_not_a_full_one(monkeypatch):
+    """A fetch_loop iteration's wait is shortened by however long the sweep itself took."""
     pipeline = MFTDataPipeline([], interval="1m")
-    n = 20
-    expected = (_FETCH_INTERVAL - n * _ESTIMATED_FETCH_SECONDS_PER_TICKER) / n
-    assert pipeline._inter_request_sleep(n) == pytest.approx(expected)
+    waits = []
+
+    async def fake_sweep():
+        await asyncio.sleep(0.05)
+
+    async def fake_wait_or_stop(timeout):
+        waits.append(timeout)
+        pipeline.running = False
+
+    monkeypatch.setattr(pipeline, "_is_market_hours", lambda: True)
+    monkeypatch.setattr(pipeline, "_sweep_once", fake_sweep)
+    monkeypatch.setattr(pipeline, "_wait_or_stop", fake_wait_or_stop)
+    pipeline.running = True
+
+    await pipeline._fetch_loop()
+
+    assert len(waits) == 1
+    assert waits[0] < _FETCH_INTERVAL
+    assert waits[0] == pytest.approx(_FETCH_INTERVAL - 0.05, abs=0.05)
 
 
-def test_inter_request_sleep_returns_zero_with_no_gaps_to_space():
-    """A sweep of zero or one tickers has no gaps between fetches to pace."""
+@pytest.mark.asyncio
+async def test_fetch_loop_cadence_holds_across_a_slow_sweep(monkeypatch):
+    """The measured gap between sweep starts tracks _FETCH_INTERVAL, not sweep_duration + _FETCH_INTERVAL."""
+    monkeypatch.setattr(pipeline_module, "_FETCH_INTERVAL", 0.2)
     pipeline = MFTDataPipeline([], interval="1m")
-    assert pipeline._inter_request_sleep(0) == 0.0
-    assert pipeline._inter_request_sleep(1) == 0.0
+    monkeypatch.setattr(pipeline, "_is_market_hours", lambda: True)
 
+    starts = []
 
-def test_inter_request_sleep_floors_at_zero_and_warns_when_universe_outgrows_cadence(caplog):
-    """A universe too large to fit even an unpaced sweep logs a warning and sweeps back-to-back."""
-    pipeline = MFTDataPipeline([], interval="1m")
-    huge = int(_FETCH_INTERVAL // _ESTIMATED_FETCH_SECONDS_PER_TICKER) + 10
+    async def fake_sweep():
+        starts.append(time.monotonic())
+        await asyncio.sleep(0.05)
 
-    with caplog.at_level(logging.WARNING, logger="argus.pipeline"):
-        result = pipeline._inter_request_sleep(huge)
+    monkeypatch.setattr(pipeline, "_sweep_once", fake_sweep)
 
-    assert result == 0.0
-    assert any("won't fit" in record.message for record in caplog.records)
+    pipeline.running = True
+    task = asyncio.create_task(pipeline._fetch_loop())
+    await asyncio.sleep(0.55)
+    await pipeline.stop()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    assert len(starts) >= 2
+    gaps = [b - a for a, b in zip(starts, starts[1:])]
+    assert all(gap == pytest.approx(0.2, abs=0.05) for gap in gaps)
 
 
 def test_default_db_path_uses_isolated_data_dir(tmp_path):
@@ -481,3 +529,40 @@ async def test_stop_ends_both_loops_promptly():
     # Without the stop_event-based wait, this would block for up to
     # _WARMUP_POLL_INTERVAL/_FETCH_INTERVAL seconds instead of returning almost immediately
     await asyncio.wait_for(task, timeout=2.0)
+
+
+def test_fetch_and_insert_bulk_inserts_in_one_call(monkeypatch):
+    """`_fetch_and_insert` hands the whole fetched frame to insert_candles in one call, not per-row."""
+    pipeline = MFTDataPipeline([], interval="1m")
+    df = et_intraday_candles(5)
+    df[["open", "high", "low", "close"]] += 100
+
+    monkeypatch.setattr(
+        pipeline_module, "fetch_ohlcv_intraday", lambda ticker, interval, period: df
+    )
+    calls = []
+    monkeypatch.setattr(
+        pipeline.buffer, "insert_candles", lambda ticker, candles: calls.append((ticker, candles))
+    )
+
+    n_candles, latest_close = pipeline._fetch_and_insert("AAPL")
+
+    assert n_candles == 5
+    assert latest_close == pytest.approx(float(df["close"].iloc[-1]))
+    assert len(calls) == 1
+    assert calls[0][0] == "AAPL"
+    assert len(calls[0][1]) == 5
+
+
+def test_fetch_and_insert_returns_zero_on_an_empty_fetch(monkeypatch):
+    """An empty fetch result reports zero candles rather than raising."""
+    pipeline = MFTDataPipeline([], interval="1m")
+    monkeypatch.setattr(
+        pipeline_module,
+        "fetch_ohlcv_intraday",
+        lambda ticker, interval, period: pd.DataFrame(),
+    )
+
+    n_candles, latest_close = pipeline._fetch_and_insert("AAPL")
+
+    assert (n_candles, latest_close) == (0, 0.0)
