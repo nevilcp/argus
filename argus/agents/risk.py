@@ -59,17 +59,17 @@ def get_sector(ticker: str) -> str:
     """
     if ticker in _SECTOR_CACHE:
         sector, cached_at = _SECTOR_CACHE[ticker]
-        if (datetime.now() - cached_at).total_seconds() < _SECTOR_CACHE_TTL_SECONDS:
+        if (datetime.now() - cached_at).total_seconds() < _SECTOR_CACHE_TTL_SECONDS:  # noqa: DTZ005
             return sector
 
     try:
         info = fetchers.fetch_ticker_info(ticker)
         sector = info.get("sector", "Unknown")
-        _SECTOR_CACHE[ticker] = (sector, datetime.now())
+        _SECTOR_CACHE[ticker] = (sector, datetime.now())  # noqa: DTZ005
         return sector
     except Exception:
         logger.warning(f"Failed to fetch sector for {ticker}, defaulting to 'Unknown'")
-        _SECTOR_CACHE[ticker] = ("Unknown", datetime.now())
+        _SECTOR_CACHE[ticker] = ("Unknown", datetime.now())  # noqa: DTZ005
         return "Unknown"
 
 
@@ -394,7 +394,7 @@ class RiskStatisticalEngine:
                 avg_correlation=None,
                 stop_loss=0.0,
                 api_calls_used=0,
-                timestamp=datetime.now(),
+                timestamp=datetime.now(),  # noqa: DTZ005
             )
 
         sector_weights: dict[str, float] = {}
@@ -534,7 +534,7 @@ class RiskStatisticalEngine:
                 avg_correlation=corr,
                 stop_loss=0.0,
                 api_calls_used=0,
-                timestamp=datetime.now(),
+                timestamp=datetime.now(),  # noqa: DTZ005
             )
 
         stops = atr_stop_losses(proposed_positions, price_history)
@@ -559,5 +559,5 @@ class RiskStatisticalEngine:
             avg_correlation=corr,
             stop_loss=stop_val,
             api_calls_used=0,
-            timestamp=datetime.now(),
+            timestamp=datetime.now(),  # noqa: DTZ005
         )

@@ -209,7 +209,7 @@ class SentimentDailyCache:
         """
         if ticker in self._cache:
             signal, cached_at = self._cache[ticker]
-            if (datetime.now() - cached_at).total_seconds() < self._ttl_days * 86400:
+            if (datetime.now() - cached_at).total_seconds() < self._ttl_days * 86400:  # noqa: DTZ005
                 return signal
         return None
 
@@ -220,7 +220,7 @@ class SentimentDailyCache:
             ticker: Equity ticker symbol.
             signal: Validated SentimentSignal to cache.
         """
-        self._cache[ticker] = (signal, datetime.now())
+        self._cache[ticker] = (signal, datetime.now())  # noqa: DTZ005
 
     def is_stale(self, ticker: str) -> bool:
         """Returns True if the ticker has no valid cached signal.
@@ -254,11 +254,11 @@ def _check_earnings_calendar(ticker: str) -> bool:
             earnings_dates = cal.loc["Earnings Date"]
             if not earnings_dates.empty:
                 dt = pd.to_datetime(earnings_dates.iloc[0])
-                if 0 <= (dt.tz_localize(None) - datetime.now()).days <= 14:
+                if 0 <= (dt.tz_localize(None) - datetime.now()).days <= 14:  # noqa: DTZ005
                     return True
         elif isinstance(cal, dict) and "Earnings Date" in cal:
             dt = pd.to_datetime(cal["Earnings Date"][0])
-            if 0 <= (dt.tz_localize(None) - datetime.now()).days <= 14:
+            if 0 <= (dt.tz_localize(None) - datetime.now()).days <= 14:  # noqa: DTZ005
                 return True
     except Exception as e:
         logger.debug("[EarningsCalendar] %s check failed: %s", ticker, e)
@@ -496,7 +496,7 @@ class SentimentAgent:
                     conviction=float(data["conviction"]),
                     sentiment_decay_risk=data.get("sentiment_decay_risk", "MEDIUM"),
                     reasoning=data.get("reasoning", "")[:400],
-                    timestamp=datetime.now(),
+                    timestamp=datetime.now(),  # noqa: DTZ005
                     api_calls_used=1,
                 )
                 self.cache.set(ticker, signal)

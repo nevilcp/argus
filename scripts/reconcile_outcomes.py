@@ -91,7 +91,7 @@ def main() -> None:
     ):
         book.apply_run(run_timestamp, run_return)
 
-    cutoff = datetime.now() - timedelta(
+    cutoff = datetime.now() - timedelta(  # noqa: DTZ005
         days=args.horizon_days + RECONCILIATION.retention_margin_days
     )
     book.prune_runs_applied(cutoff)
