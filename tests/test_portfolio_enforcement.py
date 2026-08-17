@@ -15,10 +15,27 @@ import json
 from datetime import datetime
 
 from argus.agents.portfolio import PortfolioManagerAgent
-from argus.schemas.signals import RiskAssessment, RiskVerdict
+from argus.params import PORTFOLIO, SYSTEM
+from argus.schemas.signals import PortfolioAllocation, PositionAllocation, RiskAssessment, RiskVerdict
 from argus.seams import FixtureLLMClient
 
 TIMESTAMP = datetime(2026, 1, 1)
+
+
+class _CapturingLLMClient:
+    """A stub LLMClient that records the prompt it was called with.
+
+    Unlike FixtureLLMClient (keyed lookup by design), tests that need to
+    inspect the exact prompt text sent to the model use this instead.
+    """
+
+    def __init__(self, response_json: dict) -> None:
+        self._response_json = response_json
+        self.last_prompt: str | None = None
+
+    def complete(self, system_prompt: str, user_prompt: str) -> str:
+        self.last_prompt = user_prompt
+        return json.dumps(self._response_json)
 
 
 def _risk(verdict: RiskVerdict, approved_weight: float, proposed_weight: float) -> RiskAssessment:
@@ -141,3 +158,86 @@ def test_allocate_names_the_schema_validation_stage_on_exhausted_retries(monkeyp
 
     assert alloc is None
     assert any("schema_validation" in a for a in adjustments)
+
+
+def test_allocation_pct_cap_matches_system_max_single_position_pct():
+    """PA-6 regression: PositionAllocation.allocation_pct's upper bound must track
+    SYSTEM.max_single_position_pct rather than duplicate it as a bare literal that a
+    param change would silently stop enforcing.
+    """
+    le_constraint = next(
+        m for m in PositionAllocation.model_fields["allocation_pct"].metadata if hasattr(m, "le")
+    )
+    assert le_constraint.le == SYSTEM.max_single_position_pct
+
+
+def test_portfolio_allocation_has_no_expected_sharpe_field():
+    """PA-5 regression: expected_sharpe used to pass through from the LLM's raw JSON with no
+    enforcement, unlike every other numeric field on this schema. Dropped rather than left
+    unenforced — no agent in the system produces a genuine expected-return estimate to
+    compute a real Sharpe figure from.
+    """
+    assert "expected_sharpe" not in PortfolioAllocation.model_fields
+
+
+def test_allocate_clamps_cash_reserve_to_schema_floor_at_high_deployment():
+    """PA-4 regression: cash_reserve_pct must clamp to PORTFOLIO.cash_reserve_floor_pct rather
+    than leave a residual just under the schema's floor, which used to fail model_validate
+    (and surface as a 500) on a near-fully-deployed session.
+    """
+    tickers = [f"T{i}" for i in range(6)]
+    caps = {t: 0.15 for t in tickers}
+    caps["T6"] = 0.051
+    tickers.append("T6")
+
+    all_signals = {
+        t: {"risk": _risk(RiskVerdict.APPROVE, approved_weight=caps[t], proposed_weight=caps[t])}
+        for t in tickers
+    }
+    portfolio = [
+        {
+            "ticker": t,
+            "allocation_pct": caps[t],
+            "stop_loss": 10.0,
+            "thesis": "Bullish",
+            "composite_conviction": 0.7,
+            "time_horizon": "3-6 months",
+        }
+        for t in tickers
+    ]
+    llm_client = _llm_response(portfolio)
+
+    agent = PortfolioManagerAgent(llm_client=llm_client)
+    alloc = agent.allocate(
+        user_profile={"total_wealth": 100_000.0, "invest_pct": 0.95, "risk_tolerance": "MODERATE"},
+        all_signals=all_signals,
+        macro=None,
+    )
+
+    assert alloc is not None
+    assert alloc.cash_reserve_pct == PORTFOLIO.cash_reserve_floor_pct
+
+
+def test_allocate_states_achievable_deployment_ceiling_not_raw_invest_pct():
+    """PA-4 regression: the prompt must state the achievable deployment ceiling
+    (min(invest_pct, sum of approved Caps)), not raw invest_pct, so ALLOCATION RULE 3's
+    target is reachable for a small approved universe under per-position caps.
+    """
+    all_signals = {
+        t: {"risk": _risk(RiskVerdict.APPROVE, approved_weight=0.15, proposed_weight=0.15)}
+        for t in ("A", "B", "C")
+    }
+    llm_client = _CapturingLLMClient(
+        {"portfolio": [], "cash_reserve_pct": 1.0, "rebalance_trigger": "MONTHLY"}
+    )
+
+    agent = PortfolioManagerAgent(llm_client=llm_client)
+    agent.allocate(
+        user_profile={"total_wealth": 100_000.0, "invest_pct": 0.95, "risk_tolerance": "MODERATE"},
+        all_signals=all_signals,
+        macro=None,
+    )
+
+    # 3 tickers capped at 0.15 each => achievable ceiling is 0.45, not the requested 0.95
+    assert "deployment_ceiling: 45%" in llm_client.last_prompt
+    assert "invest_pct: 95%" in llm_client.last_prompt

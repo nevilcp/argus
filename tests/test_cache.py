@@ -82,6 +82,25 @@ def test_put_overwrites_prior_rows_for_same_ticker(cache):
     assert len(result) == 2
 
 
+def test_put_prunes_rows_older_than_the_freshly_fetched_window(cache):
+    """RE-14 regression: a later put() with a newer window discards the prior window's rows.
+
+    fetch_multiple_daily re-fetches a full trailing window (e.g. period="1y")
+    on every cache miss and re-supplies it to put(); without pruning here,
+    each day's now-stale leading edge stayed in daily_ohlcv forever, growing
+    it by one row per ticker per day and silently widening every consumer
+    (e.g. ols_portfolio_beta) past its intended lookback window.
+    """
+    cache.put("AAPL", _bars(["2020-01-01", "2020-01-02"]))
+    cache.put("AAPL", _bars(["2026-08-11", "2026-08-12"]))
+
+    rows = cache._conn.execute(
+        "SELECT trading_date FROM daily_ohlcv WHERE ticker = ? ORDER BY trading_date", ("AAPL",)
+    ).fetchall()
+
+    assert [r[0] for r in rows] == ["2026-08-11", "2026-08-12"]
+
+
 def test_get_is_isolated_per_ticker(cache):
     """Caching one ticker doesn't make an unrelated ticker appear cached."""
     cache.put("AAPL", _bars(["2026-08-12"]))

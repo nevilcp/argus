@@ -524,7 +524,7 @@ def build_graph(
             errors.extend(
                 f"risk_evaluation: {r}"
                 for r in portfolio_result.veto_reasons
-                if r.startswith("Below diversification floor")
+                if r.startswith("Below diversification floor") or r.startswith("Covariance:")
             )
 
             assessments = {}

@@ -34,6 +34,8 @@ from pydantic import (
     computed_field,
 )
 
+from argus.params import PORTFOLIO, SYSTEM
+
 logger = logging.getLogger(__name__)
 
 
@@ -504,7 +506,10 @@ class PositionAllocation(BaseModel):
 
     ticker: str = Field(..., description="Equity ticker symbol")
     allocation_pct: float = Field(
-        ..., ge=0.0, le=0.15, description="Target portfolio weight [0, 0.15]"
+        ...,
+        ge=0.0,
+        le=SYSTEM.max_single_position_pct,
+        description="Target portfolio weight [0, SYSTEM.max_single_position_pct]",
     )
     allocation_usd: float = Field(..., ge=0.0, description="Dollar value of the position")
     stop_loss: float = Field(..., description="Stop-loss price level")
@@ -536,12 +541,9 @@ class PortfolioAllocation(BaseModel):
     )
     cash_reserve_pct: float = Field(
         ...,
-        ge=0.05,
+        ge=PORTFOLIO.cash_reserve_floor_pct,
         le=1.00,
-        description="Fraction of capital held as cash [0.05, 1.00]",
-    )
-    expected_sharpe: float | None = Field(
-        None, description="Forward-looking Sharpe estimate for the proposed portfolio"
+        description="Fraction of capital held as cash [PORTFOLIO.cash_reserve_floor_pct, 1.00]",
     )
     rebalance_trigger: str = Field(
         ..., description="Condition that will next trigger rebalancing, e.g. 'VIX > 35'"

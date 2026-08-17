@@ -338,6 +338,8 @@ ON CONFLICT(ticker) DO UPDATE SET refreshed_on = excluded.refreshed_on
 
 _SELECT_DAILY_REFRESH = "SELECT refreshed_on FROM daily_ohlcv_refresh WHERE ticker = ?"
 
+_DELETE_STALE_DAILY_OHLCV = "DELETE FROM daily_ohlcv WHERE ticker = ? AND trading_date < ?"
+
 _SELECT_DAILY_OHLCV = """
 SELECT trading_date, open, high, low, close, volume
 FROM daily_ohlcv
@@ -404,6 +406,12 @@ class DailyBarCache:
     def put(self, ticker: str, df: pd.DataFrame) -> None:
         """Stores a ticker's freshly fetched daily bars and marks it refreshed for today.
 
+        Also prunes any rows older than the fetched window (RE-14) — each
+        `fetch_ohlcv_daily(ticker, period=...)` call re-supplies a full
+        trailing window, but INSERT OR REPLACE never removed the prior
+        window's now-stale rows, so daily_ohlcv grew by one row per ticker
+        per day forever.
+
         Args:
             ticker: Equity ticker symbol.
             df: DataFrame with lowercase OHLCV columns and a datetime index,
@@ -425,6 +433,9 @@ class DailyBarCache:
 
         with self._lock:
             self._conn.executemany(_INSERT_DAILY_OHLCV, rows)
+            if not df.empty:
+                earliest = df.index.min().date().isoformat()
+                self._conn.execute(_DELETE_STALE_DAILY_OHLCV, (ticker, earliest))
             self._conn.execute(_UPSERT_DAILY_REFRESH, (ticker, today))
             self._conn.commit()
 
