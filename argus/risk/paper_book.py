@@ -10,13 +10,17 @@ rebalance: within a run, decisions that took a position are weighted by
 allocation_pct and averaged into that run's realized return once at least one
 matured decision's outcome is known, then compounded onto the running equity
 curve. A run with only some decisions matured is not diluted with fabricated
-zeros for the rest — it's averaged over the matured subset only.
+zeros for the rest — it's averaged over the matured subset only. Runs are
+compounded at most once per horizon_days window, so a decision made every
+session doesn't compound the same overlapping days many times over (KS-14).
 
 Responsibilities:
   - compute_run_returns: group decisions by run (shared session_timestamp),
-    weight-average each run's matured outcomes into one compounding return
+    weight-average each non-overlapping run's matured outcomes into one
+    compounding return
   - PaperBook: equity/high-water-mark/applied-runs state, with idempotent
-    run application
+    run application and manual rebasing (see rebase(), used by
+    KillSwitch.reset())
   - load / save: JSON round trip at a caller-supplied path
 
 Not responsible for:
@@ -31,7 +35,7 @@ import json
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -67,16 +71,23 @@ def compute_run_returns(
         (run_timestamp, weighted_return) pairs, one per run with at least one
         matured, priceable decision, sorted by run_timestamp. A run with no
         matured decisions yet, or whose tickers all failed to fetch, is
-        omitted rather than reported as a 0.0 return.
+        omitted rather than reported as a 0.0 return. Runs falling inside a
+        previously kept run's horizon window are also omitted (not zeroed) so
+        overlapping runs are never compounded together (KS-14).
     """
     by_run: dict[datetime, list[ARGUSDecision]] = defaultdict(list)
     for decision in decisions:
         if _needs_reconciliation(decision):
             by_run[decision.session_timestamp].append(decision)
 
+    horizon = timedelta(days=horizon_days)
     prices_by_ticker: dict[str, Optional[pd.Series]] = {}
     results: list[tuple[datetime, float]] = []
+    last_kept_timestamp: Optional[datetime] = None
     for run_timestamp in sorted(by_run):
+        if last_kept_timestamp is not None and run_timestamp < last_kept_timestamp + horizon:
+            continue
+
         weighted_sum = 0.0
         weight_total = 0.0
         for decision in by_run[run_timestamp]:
@@ -105,6 +116,7 @@ def compute_run_returns(
 
         if weight_total > 0:
             results.append((run_timestamp, weighted_sum / weight_total))
+            last_kept_timestamp = run_timestamp
 
     return results
 
@@ -120,6 +132,8 @@ class PaperBook:
     """ISO-formatted session_timestamps of runs already compounded in, so a
     re-run of compute_run_returns over a growing decision history doesn't
     double-apply one already reflected in equity."""
+    rebased_at: Optional[datetime] = None
+    """When this book was last manually rebased via reset() (KS-15), if ever."""
 
     def apply_run(self, run_timestamp: datetime, run_return: float) -> bool:
         """Compounds one run's weighted return onto the curve, unless already applied.
@@ -148,6 +162,24 @@ class PaperBook:
             return 0.0
         return max(0.0, (self.high_water_mark - self.equity) / self.high_water_mark)
 
+    def rebase(self, new_inception_value: float, rebased_at: Optional[datetime] = None) -> None:
+        """Rebases equity and high-water mark to a new inception value in place (KS-15).
+
+        Called alongside KillSwitch.reset() so an operator's manual reset is
+        reflected in the persisted curve, not just the in-memory kill switch —
+        otherwise the next reconcile pass calls update_portfolio_value with the
+        stale, already-drawn-down equity and re-halts within
+        check_interval_seconds. runs_applied is left untouched, so runs already
+        compounded into the old curve are never re-applied against the new base.
+
+        Args:
+            new_inception_value: Replacement equity and high-water-mark value.
+            rebased_at: Timestamp of the rebase; defaults to now.
+        """
+        self.equity = new_inception_value
+        self.high_water_mark = new_inception_value
+        self.rebased_at = rebased_at or datetime.now()
+
 
 def load(path: str) -> PaperBook:
     """Loads a persisted PaperBook, or starts a fresh one at ARGUS_TOTAL_WEALTH.
@@ -172,11 +204,13 @@ def load(path: str) -> PaperBook:
         with open(file_path, encoding="utf-8") as f:
             raw = json.load(f)
         last_run_raw = raw.get("last_run_timestamp")
+        rebased_at_raw = raw.get("rebased_at")
         return PaperBook(
             equity=raw["equity"],
             high_water_mark=raw["high_water_mark"],
             last_run_timestamp=datetime.fromisoformat(last_run_raw) if last_run_raw else None,
             runs_applied=set(raw.get("runs_applied", [])),
+            rebased_at=datetime.fromisoformat(rebased_at_raw) if rebased_at_raw else None,
         )
     except Exception as exc:
         logger.warning("[PaperBook] failed to load %s, starting fresh: %s", path, exc)
@@ -201,6 +235,7 @@ def save(book: PaperBook, path: str) -> None:
             book.last_run_timestamp.isoformat() if book.last_run_timestamp else None
         ),
         "runs_applied": sorted(book.runs_applied),
+        "rebased_at": book.rebased_at.isoformat() if book.rebased_at else None,
     }
     with open(file_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
