@@ -375,7 +375,7 @@ ARGUS needs to run continuously to be useful unattended — the MFT pipeline onl
 Three workflows under `.github/workflows/`:
 
 - **`image.yml`** — builds `Dockerfile.api` and pushes it to GHCR (`ghcr.io/<owner>/argus:latest`) on every push to `main`, plus a weekly rebuild for base-image security patches.
-- **`collector.yml`** — runs `argus-collect` (the `scripts/collect_session.py` entry point) hourly during US market hours against the published image.
+- **`collector.yml`** — runs `argus-collect` (the `scripts/collect_session.py` entry point) every 2 hours during US market hours against the published image — 5 ticks/weekday, matching NewsAPI's 5-run/day free-tier ceiling below.
 - **`reconcile.yml`** — runs `argus-reconcile` once daily, after market close.
 
 To enable: add `GROQ_API_KEY`, `FRED_API_KEY`, and `NEWSAPI_KEY` as repository secrets (**Settings → Secrets and variables → Actions**), then push to `main` so `image.yml` publishes the first image. Both scheduled workflows write their state — `chroma_db/`, `decisions.jsonl`, `status.json` — to an orphan `argus-data` branch, force-pushed as a single commit each run so the branch never grows unbounded. `collector.yml` and `reconcile.yml` share a concurrency group so they never race each other on that branch.

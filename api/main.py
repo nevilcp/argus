@@ -868,7 +868,22 @@ async def analyze(req: AnalysisRequest):
 
     try:
         async with _analyze_semaphore:
-            final_state = await asyncio.to_thread(_graph.invoke, state, config)
+            final_state = await asyncio.wait_for(
+                asyncio.to_thread(_graph.invoke, state, config),
+                timeout=settings.ARGUS_ANALYZE_DEADLINE_SECONDS,
+            )
+    except asyncio.TimeoutError:
+        # The underlying thread can't be cancelled and keeps running (GOV-12
+        # notes async job submission as future work), but the server no longer
+        # holds the connection open past a proxy's own timeout with no signal.
+        logger.error(
+            "[API] Graph run exceeded the %ss deadline", settings.ARGUS_ANALYZE_DEADLINE_SECONDS
+        )
+        raise HTTPException(
+            504,
+            f"Analysis did not complete within {settings.ARGUS_ANALYZE_DEADLINE_SECONDS}s. "
+            "It may still be running and consuming governor quota in the background.",
+        )
     except RateLimitExceeded as e:
         logger.warning("[API] Governor rate limit exhausted: %s", e)
         raise HTTPException(429, f"Rate limit exhausted: {e}")

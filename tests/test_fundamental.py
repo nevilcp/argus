@@ -6,6 +6,7 @@ import json
 from datetime import datetime, timedelta
 
 
+import argus.agents.fundamental as fundamental_module
 from argus.agents.fundamental import (
     FundamentalAgent,
     FundamentalCache,
@@ -14,6 +15,7 @@ from argus.agents.fundamental import (
     anonymize_ticker,
     build_compact_prompt,
 )
+from argus.orchestration.governor import BOOTSTRAP_LIMITS, RateLimitGovernor
 from argus.schemas.signals import FundamentalSignal, Signal
 from argus.seams import FixtureLLMClient
 
@@ -220,3 +222,29 @@ def test_analyze_retries_with_the_prior_validation_error_in_the_prompt():
     assert signal is not None
     assert len(prompts) == 2
     assert "Your previous response was invalid" in prompts[1]
+
+
+def test_analyze_does_not_skip_every_ticker_at_a_low_configured_rpm(monkeypatch):
+    """A low ARGUS_GROQ_RPM must not make the pre-flight capacity reserve exceed
+    the budget itself (GOV-13) — an idle governor should still admit the call.
+
+    BOOTSTRAP_LIMITS is a dict computed once from settings at governor import
+    time, not re-read per call, so simulating ARGUS_GROQ_RPM=10 requires
+    patching it directly rather than just monkeypatching settings.
+    """
+    model = fundamental_module.settings.ARGUS_FUNDAMENTAL_MODEL
+    monkeypatch.setattr(fundamental_module.settings, "ARGUS_GROQ_RPM", 10)
+    monkeypatch.setitem(BOOTSTRAP_LIMITS[model], "requests_per_minute", 10)
+    monkeypatch.setattr(fundamental_module, "governor", RateLimitGovernor())
+
+    market_data = _StubMarketData({"sector": "Technology", "industry": "Consumer Electronics"})
+    llm = _RecordingLLMClient(
+        json.dumps({"signal": "NEUTRAL", "conviction": 0.5, "moat_score": 5, "reasoning": "r"})
+    )
+    agent = FundamentalAgent(llm_client=llm, market_data=market_data)
+
+    errors: list[str] = []
+    signal = agent.analyze("AAPL", errors=errors)
+
+    assert signal is not None
+    assert errors == []
