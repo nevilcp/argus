@@ -8,6 +8,7 @@ import importlib
 import math
 import sys
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -71,6 +72,52 @@ def test_init_routes_initial_universe_through_register_tickers(monkeypatch):
     """A malformed ticker in the constructor's initial universe is dropped, not stored raw."""
     monkeypatch.setattr(pipeline_module, "SYSTEM", dataclasses.replace(SYSTEM, max_tracked_tickers=2))
     pipeline = MFTDataPipeline(["AAPL", "not-a-ticker!", "MSFT", "TSLA"])
+    assert pipeline.tickers == ["AAPL", "MSFT"]
+
+
+def test_register_tickers_refreshes_last_requested_at_for_already_tracked_tickers():
+    """A repeat request for an already-tracked ticker still bumps its last_requested_at (API-12)."""
+    pipeline = MFTDataPipeline(["AAPL"])
+    stale = datetime.now(pipeline_module._ET) - timedelta(days=10)
+    pipeline.last_requested_at["AAPL"] = stale
+
+    pipeline.register_tickers(["AAPL"])
+
+    assert pipeline.last_requested_at["AAPL"] > stale
+
+
+def test_evict_stale_tickers_drops_a_non_seed_ticker_unused_beyond_the_ttl(monkeypatch):
+    """A ticker registered outside the pipeline's seed universe expires after the TTL (API-12)."""
+    monkeypatch.setattr(pipeline_module, "SYSTEM", dataclasses.replace(SYSTEM, tracked_ticker_ttl_seconds=60))
+    pipeline = MFTDataPipeline(["AAPL"])
+    pipeline.register_tickers(["MSFT"])
+    pipeline.last_requested_at["MSFT"] = datetime.now(pipeline_module._ET) - timedelta(seconds=120)
+
+    pipeline._evict_stale_tickers()
+
+    assert pipeline.tickers == ["AAPL"]
+    assert "MSFT" not in pipeline.last_requested_at
+
+
+def test_evict_stale_tickers_exempts_the_seed_universe(monkeypatch):
+    """The pipeline's own seed tickers survive the TTL even if never re-requested (API-12)."""
+    monkeypatch.setattr(pipeline_module, "SYSTEM", dataclasses.replace(SYSTEM, tracked_ticker_ttl_seconds=60))
+    pipeline = MFTDataPipeline(["AAPL"])
+    pipeline.last_requested_at["AAPL"] = datetime.now(pipeline_module._ET) - timedelta(seconds=120)
+
+    pipeline._evict_stale_tickers()
+
+    assert pipeline.tickers == ["AAPL"]
+
+
+def test_evict_stale_tickers_keeps_a_recently_requested_ticker(monkeypatch):
+    """A ticker requested within the TTL window is not evicted (API-12)."""
+    monkeypatch.setattr(pipeline_module, "SYSTEM", dataclasses.replace(SYSTEM, tracked_ticker_ttl_seconds=3600))
+    pipeline = MFTDataPipeline(["AAPL"])
+    pipeline.register_tickers(["MSFT"])
+
+    pipeline._evict_stale_tickers()
+
     assert pipeline.tickers == ["AAPL", "MSFT"]
 
 
@@ -309,13 +356,9 @@ def test_momentum_1d_is_stable_under_dropping_up_to_10_oldest_bars(drop: int):
     assert trimmed == baseline
 
 
-def test_session_state_ttl_seconds_tracks_decision_interval(monkeypatch):
-    """The write-age TTL is derived from the configured decision interval, not hardcoded."""
-    monkeypatch.setattr(settings, "MFT_DECISION_INTERVAL_SECONDS", 1800)
-    assert session_state_ttl_seconds() == 1800 + _FETCH_INTERVAL + SYSTEM.freshness_margin_seconds
-
-    monkeypatch.setattr(settings, "MFT_DECISION_INTERVAL_SECONDS", 900)
-    assert session_state_ttl_seconds() == 900 + _FETCH_INTERVAL + SYSTEM.freshness_margin_seconds
+def test_session_state_ttl_seconds_tolerates_one_missed_sweep():
+    """The write-age TTL covers two fetch sweeps (MFT-14), not one decision cycle's worth."""
+    assert session_state_ttl_seconds() == 2 * _FETCH_INTERVAL + SYSTEM.freshness_margin_seconds
 
 
 def test_max_bar_age_seconds_scales_with_interval():
@@ -350,6 +393,10 @@ async def test_sweep_uses_a_constant_inter_request_gap_independent_of_universe_s
     assert big_elapsed == pytest.approx(19 * SYSTEM.min_inter_request_seconds, abs=0.1)
 
 
+async def _noop_callback(states: dict) -> None:
+    """A no-op on_session_ready callback for _fetch_loop tests that don't care about publication."""
+
+
 @pytest.mark.asyncio
 async def test_fetch_loop_sleeps_the_remainder_of_the_interval_not_a_full_one(monkeypatch):
     """A fetch_loop iteration's wait is shortened by however long the sweep itself took."""
@@ -365,10 +412,11 @@ async def test_fetch_loop_sleeps_the_remainder_of_the_interval_not_a_full_one(mo
 
     monkeypatch.setattr(pipeline, "_is_market_hours", lambda: True)
     monkeypatch.setattr(pipeline, "_sweep_once", fake_sweep)
+    monkeypatch.setattr(pipeline, "compress_all", lambda: {})
     monkeypatch.setattr(pipeline, "_wait_or_stop", fake_wait_or_stop)
     pipeline.running = True
 
-    await pipeline._fetch_loop()
+    await pipeline._fetch_loop(_noop_callback)
 
     assert len(waits) == 1
     assert waits[0] < _FETCH_INTERVAL
@@ -381,6 +429,7 @@ async def test_fetch_loop_cadence_holds_across_a_slow_sweep(monkeypatch):
     monkeypatch.setattr(pipeline_module, "_FETCH_INTERVAL", 0.2)
     pipeline = MFTDataPipeline([], interval="1m")
     monkeypatch.setattr(pipeline, "_is_market_hours", lambda: True)
+    monkeypatch.setattr(pipeline, "compress_all", lambda: {})
 
     starts = []
 
@@ -391,7 +440,7 @@ async def test_fetch_loop_cadence_holds_across_a_slow_sweep(monkeypatch):
     monkeypatch.setattr(pipeline, "_sweep_once", fake_sweep)
 
     pipeline.running = True
-    task = asyncio.create_task(pipeline._fetch_loop())
+    task = asyncio.create_task(pipeline._fetch_loop(_noop_callback))
     await asyncio.sleep(0.55)
     await pipeline.stop()
     await asyncio.wait_for(task, timeout=1.0)
@@ -399,6 +448,30 @@ async def test_fetch_loop_cadence_holds_across_a_slow_sweep(monkeypatch):
     assert len(starts) >= 2
     gaps = [b - a for a, b in zip(starts, starts[1:])]
     assert all(gap == pytest.approx(0.2, abs=0.05) for gap in gaps)
+
+
+@pytest.mark.asyncio
+async def test_fetch_loop_publishes_compressed_state_after_each_sweep():
+    """Publication is merged into the fetch loop (MFT-14): one sweep, one compress, one callback."""
+    pipeline = MFTDataPipeline(["AAPL"], interval="1m")
+    _seed_two_session_buffer(pipeline, "AAPL")
+    pipeline._is_market_hours = lambda: True
+    received = []
+
+    async def fake_sweep():
+        return None
+
+    pipeline._sweep_once = fake_sweep
+
+    async def stop_after_one(states: dict) -> None:
+        received.append(states)
+        await pipeline.stop()
+
+    pipeline.running = True
+    await pipeline._fetch_loop(stop_after_one)
+
+    assert len(received) == 1
+    assert "AAPL" in received[0]
 
 
 def test_default_db_path_uses_isolated_data_dir(tmp_path):
@@ -543,41 +616,31 @@ def test_buffer_warm_skips_a_ticker_whose_get_candles_raises(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_start_cancels_the_sibling_loop_when_one_dies(monkeypatch):
-    """If one loop raises out of start()'s gather, the other is cancelled rather than orphaned."""
+async def test_start_propagates_a_fetch_loop_exception(monkeypatch):
+    """start() surfaces _fetch_loop's exception rather than swallowing it (single loop now, MFT-14)."""
     pipeline = MFTDataPipeline([], interval="1m")
-    session_loop_cancelled = asyncio.Event()
 
-    async def dying_fetch_loop():
+    async def dying_fetch_loop(on_session_ready):
         raise RuntimeError("simulated crash")
 
-    async def long_session_loop(callback):
-        try:
-            await asyncio.sleep(10)
-        except asyncio.CancelledError:
-            session_loop_cancelled.set()
-            raise
-
     monkeypatch.setattr(pipeline, "_fetch_loop", dying_fetch_loop)
-    monkeypatch.setattr(pipeline, "_session_loop", long_session_loop)
 
     with pytest.raises(RuntimeError):
-        await pipeline.start(on_session_ready=lambda states: None)
-
-    assert session_loop_cancelled.is_set()
+        await pipeline.start(on_session_ready=_noop_callback)
 
 
 @pytest.mark.asyncio
-async def test_stop_ends_both_loops_promptly():
-    """stop() wakes both loops immediately rather than waiting out their full interval."""
+async def test_stop_ends_the_loop_promptly(monkeypatch):
+    """stop() wakes the loop immediately rather than waiting out its full interval."""
     pipeline = MFTDataPipeline([], interval="1m")
-    task = asyncio.create_task(pipeline.start(on_session_ready=lambda states: None))
+    monkeypatch.setattr(pipeline, "_is_market_hours", lambda: False)
+    task = asyncio.create_task(pipeline.start(on_session_ready=_noop_callback))
     await asyncio.sleep(0.05)
 
     await pipeline.stop()
 
     # Without the stop_event-based wait, this would block for up to
-    # _WARMUP_POLL_INTERVAL/_FETCH_INTERVAL seconds instead of returning almost immediately
+    # _FETCH_INTERVAL seconds instead of returning almost immediately
     await asyncio.wait_for(task, timeout=2.0)
 
 

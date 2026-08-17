@@ -97,7 +97,14 @@ SESSION_STATE_REQUIRED_KEYS: frozenset[str] = frozenset({
     "momentum_30m",
     "momentum_1d",
     "close",
+    "timestamp",
 })
+
+# timestamp is a required key but not a numeric indicator (API-11) — it's
+# checked for presence like every other key, but exempt from the
+# finite-float check below, which would otherwise raise trying to float() an
+# ISO string
+_NUMERIC_SESSION_STATE_KEYS = SESSION_STATE_REQUIRED_KEYS - {"timestamp"}
 
 
 def missing_session_state_keys(state: dict) -> list[str]:
@@ -120,7 +127,7 @@ def missing_session_state_keys(state: dict) -> list[str]:
     if missing:
         return sorted(missing)
     return sorted(
-        k for k in SESSION_STATE_REQUIRED_KEYS if not math.isfinite(float(state[k]))
+        k for k in _NUMERIC_SESSION_STATE_KEYS if not math.isfinite(float(state[k]))
     )
 
 
