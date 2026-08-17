@@ -292,7 +292,7 @@ Every secret field defaults to an empty string (see `argus/config.py`) — the p
 | `GET` | `/memory/stats` | Summary stats from the ChromaDB cultural-memory vault. |
 | `GET` | `/governor/report` | Per-model request/token usage against rate limits. |
 | `GET` | `/kill-switch/status` | Current halt/blackout state, drawdown, and last-observed VIX. |
-| `POST` | `/kill-switch/reset` | Clears an active halt, re-bases the tracked portfolio value, and deletes persisted halt dumps. Requires `X-API-Key` if `ARGUS_API_KEY` is set. |
+| `POST` | `/kill-switch/reset` | Clears an active halt, re-bases both the in-memory drawdown base and the persisted paper-equity curve to the given value, and deletes persisted halt dumps. Requires `X-API-Key` if `ARGUS_API_KEY` is set. |
 
 `/analyze` is the primary entrypoint. It only serves requests once the MFT pipeline has warmed up for the requested tickers, and only during US equity market hours:
 
