@@ -10,6 +10,8 @@ Responsibilities:
   - Persist successful and failed trade outcomes as embedded documents
   - Retrieve semantically similar historical patterns for current macro and technical contexts
   - Expose agent-level accuracy statistics and regime diagnostics
+  - Expire PENDING decision snapshots that never settled (see
+    expire_pending_snapshots), so the collection stays bounded
 
 Not responsible for:
   - Real-time signal generation (see agents/)
@@ -460,6 +462,58 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
         except Exception as e:
             logger.warning("[Memory] Failed to snapshot decision for %s: %s", decision.ticker, e)
             return False
+
+    def expire_pending_snapshots(self, cutoff: datetime) -> int:
+        """Deletes PENDING decision snapshots older than cutoff (MEM-3).
+
+        A snapshot only leaves PENDING once store_trade_outcome settles it
+        (see its docstring); a decision that never took a position, or whose
+        reconciliation permanently fails (e.g. the ticker's price history is
+        never fetchable again), would otherwise sit PENDING indefinitely,
+        growing the collection and dragging summary_stats.pending_count up
+        forever. Called on the same reconciliation cadence as
+        orchestration.reconciliation.prune_checkpoints and
+        compact_decisions_jsonl, with the same horizon-plus-margin cutoff — a
+        snapshot that old has already had its chance to settle.
+
+        Args:
+            cutoff: Snapshots whose ``timestamp`` metadata is before this are
+                deleted. Should be tz-naive, matching the naive
+                session_timestamps snapshots are stored with.
+
+        Returns:
+            Count of snapshots deleted.
+        """
+        try:
+            results = self.collection.get(where={"outcome": "PENDING"})
+        except Exception as e:
+            logger.warning("[Memory] Failed to query PENDING snapshots for expiry: %s", e)
+            return 0
+
+        ids = results.get("ids") or []
+        metadatas = results.get("metadatas") or []
+        stale_ids = []
+        for doc_id, meta in zip(ids, metadatas):
+            timestamp_raw = meta.get("timestamp")
+            if not timestamp_raw:
+                continue
+            try:
+                if datetime.fromisoformat(str(timestamp_raw)) < cutoff:
+                    stale_ids.append(doc_id)
+            except ValueError:
+                continue
+
+        if not stale_ids:
+            return 0
+
+        try:
+            self.collection.delete(ids=stale_ids)
+        except Exception as e:
+            logger.warning("[Memory] Failed to delete stale PENDING snapshot(s): %s", e)
+            return 0
+
+        logger.info("[Memory] Expired %d stale PENDING snapshot(s)", len(stale_ids))
+        return len(stale_ids)
 
 
 _cultural_memory: Optional[CulturalMemoryManager] = None
