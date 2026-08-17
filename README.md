@@ -4,7 +4,7 @@ Multi-agent financial intelligence system orchestrating specialist LLMs and stat
 
 ![CI](https://github.com/nevilcp/argus/actions/workflows/ci.yml/badge.svg)
 ![Python Version](https://img.shields.io/badge/python-%E2%89%A53.11-blue)
-![Tests](https://img.shields.io/badge/tests-212_passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-437_passing-brightgreen)
 ![License](https://img.shields.io/badge/license-Proprietary-red)
 
 > **RESEARCH PROJECT ONLY — NOT FINANCIAL ADVICE.** ARGUS is not registered with the SEC or any regulatory body. All outputs are for educational and research purposes only. Do not make investment decisions based on this system's output.
@@ -146,15 +146,16 @@ ARGUS sits at the intersection of quantitative finance, statistical modeling, an
 
 | Field | Meaning | How to read it |
 |---|---|---|
-| `conviction` (per position) | Categorical strength of the agents' agreement on a position's direction (e.g. `STRONG_BUY` → `STRONG_SELL`) | Strength of agreement, not a probability of profit or an expected return. Its underlying aggregated score is scaled against the full three-agent vote mass, so it falls when specialists disagree or are absent rather than saturating near its cap whenever the agents who did vote agree |
-| `allocation_pct` | Fraction of the *invested* portion of `total_wealth` assigned to this ticker | Multiply by `total_wealth * (1 - cash_reserve_pct)` for a dollar figure — it is not a fraction of total wealth directly |
+| `composite_conviction` (per position) | Float `[0, 1]` — aggregated strength of the agents' agreement on a position's direction | Strength of agreement, not a probability of profit or an expected return. It is scaled against the full three-agent vote mass, so it falls when specialists disagree or are absent rather than saturating near its cap whenever the agents who did vote agree |
+| `allocation_pct` | Fraction of `total_wealth` (the request's `user_investable_capital`) assigned to this ticker, `[0, SYSTEM.max_single_position_pct]` | Multiply by `total_wealth` directly for a dollar figure — `allocation_usd` on the same position is that product, already computed |
 | `cash_reserve_pct` | Fraction of `total_wealth` held back from any position | Recomputed server-side from the risk engine's own figures rather than trusted verbatim from the LLM, so it always stays consistent with the position sizes actually returned |
 | `macro_regime` | The Gaussian HMM's current 3-state classification (e.g. `EXPANSION`, `CONTRACTION`) | Its multiplier is applied once, at signal-aggregation time, to each specialist's vote weight — never to a specialist's own analysis, which runs independently of macro classification. A `CONTRACTION` regime can still override an otherwise-bullish consensus after aggregation |
 | `vix_level` | The VIX close feeding the macro and risk engines this session | Above the configured blackout threshold (default 35), the safety layer blocks new positions before `/analyze` even runs — an elevated-but-sub-threshold value here signals wider risk-engine caution (VIX scaling), not a guarantee of safety |
+| `errors` | List of non-fatal gaps the graph hit this session (e.g. a macro data outage) | Empty on a clean run. A populated list doesn't mean the response is unusable — the specialists, aggregation, and portfolio allocation still ran on whatever evidence they had — but it says which inputs were degraded |
 
 ### Concepts Behind Each Agent
 
-- **Macro regime (Gaussian HMM)** — a Hidden Markov Model fit on FRED macro indicators (CPI, Fed Funds, unemployment, 10Y-2Y yield curve) plus VIX, classifying the current environment into one of three latent regimes rather than a hand-coded rule. It classifies from a trailing ~90-day feature window rather than a single observation, so the transition matrix — not one noisy print — drives the call. The fitted model ships as a committed artifact (`argus-train-macro` retrains it; see [Training the Macro Classifier](#training-the-macro-classifier)); if the artifact is missing or fails to load, the agent degrades to a static VIX/yield-curve rule rather than failing. See [`argus/agents/macro.py`](argus/agents/macro.py).
+- **Macro regime (Gaussian HMM)** — a Hidden Markov Model fit on FRED macro indicators (CPI, Fed Funds, unemployment, 10Y-2Y yield curve) plus VIX, classifying the current environment into one of three latent regimes rather than a hand-coded rule. It classifies from a trailing 36-month-end feature window rather than a single observation, so the transition matrix — not one noisy print — drives the call. The fitted model ships as a committed artifact (`argus-train-macro` retrains it; see [Training the Macro Classifier](#training-the-macro-classifier)); if the artifact is missing or fails to load, the agent degrades to a static VIX/yield-curve rule rather than failing. See [`argus/agents/macro.py`](argus/agents/macro.py).
 - **Technical indicators** — fetched as 1-minute intraday candles, resampled to 5-minute bars for indicator calculation, and compressed every 30 minutes. See [`argus/agents/technical.py`](argus/agents/technical.py) and [`argus/data/pipeline.py`](argus/data/pipeline.py).
   - *RSI* (Relative Strength Index): 0–100 momentum oscillator identifying overbought/oversold conditions.
   - *MACD*: trend-following momentum, read via the histogram (the gap between the MACD line and its signal line).
@@ -183,7 +184,7 @@ At small sample sizes — inherent to a system that has only recently started cl
 - **Historical covariance breaks down during shocks** (correlations tend toward 1); VaR/CVaR estimates during genuine crises should be treated as understated.
 - **Long-only** — no shorting, options, or hedging; a bearish `macro_regime` can only reduce exposure, not profit from it.
 - **LLM outputs are non-deterministic** — the fundamental, sentiment, and portfolio-synthesis agents can return slightly different conviction scores and notes between runs on identical inputs.
-- **A macro data outage doesn't blank the session** — if FRED/VIX data is unavailable, `macro_regime` comes back `"unknown"` and `vix_level` `0.0`, but the three specialist agents, aggregation, and portfolio allocation still run on whatever evidence they do have, rather than the whole session being scrapped. The graph's internal state records the specific gap (`state["errors"]`), though `/analyze`'s response schema doesn't currently surface that list to the caller — a `macro_regime` of `"unknown"` is presently the only client-visible signal that this happened.
+- **A macro data outage doesn't blank the session** — if FRED/VIX data is unavailable, `macro_regime` comes back `"unknown"` and `vix_level` `0.0`, but the three specialist agents, aggregation, and portfolio allocation still run on whatever evidence they do have, rather than the whole session being scrapped. The graph's internal state records the specific gap and `/analyze`'s response surfaces it in `errors` — a `macro_regime` of `"unknown"` is a secondary signal, not the only one.
 
 ## Prerequisites
 
@@ -312,13 +313,24 @@ curl -X POST http://localhost:8000/analyze \
 {
   "session_id": "a1b2c3d4-...",
   "portfolio": [
-    { "ticker": "AAPL", "allocation_pct": 0.32, "conviction": "MODERATE_BUY" }
+    {
+      "ticker": "AAPL",
+      "allocation_pct": 0.12,
+      "allocation_usd": 12000.0,
+      "stop_loss": 172.50,
+      "target_price": 210.0,
+      "thesis": "Momentum and margin trend both improving into earnings.",
+      "advisor_note": "...",
+      "composite_conviction": 0.71,
+      "time_horizon": "30 days"
+    }
   ],
   "cash_reserve_pct": 0.4,
   "macro_regime": "EXPANSION",
   "vix_level": 14.2,
   "governor_report": { "...": "per-model request/token usage" },
-  "timestamp": "2026-08-13T14:30:00"
+  "timestamp": "2026-08-13T14:30:00",
+  "errors": []
 }
 ```
 
@@ -439,7 +451,7 @@ pytest tests/ --cov=argus --cov-report=term-missing
 ```
 
 - **Categories**: Tests cover Pydantic validation boundaries, mathematical boundaries (e.g., Half-Kelly position sizing constraints), caching TTL expiration logic, and thread-safe rate limit assertions.
-- **Approximate Run Time**: ~140 seconds for 212 tests across 23 files, entirely offline by design — no live API calls, network access, or API keys required.
+- **Approximate Run Time**: ~155 seconds for 437 tests across 35 files, entirely offline by design — no live API calls, network access, or API keys required.
 - **CI gate**: `.github/workflows/ci.yml` additionally runs `ruff check .` and `mypy argus/` (pinned `ruff==0.16.2`, `mypy==2.3.0`) before the test step.
 
 ## Contributing

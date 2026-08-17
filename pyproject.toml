@@ -107,13 +107,19 @@ target-version = "py311"
 [tool.ruff.lint]
 # Stated explicitly rather than inherited from whatever the installed ruff
 # version defaults to. This is the set that was actually enforced across the
-# rebuild (ruff 0.15's defaults): pyflakes plus the pycodestyle error subset.
-# Ruff 0.16 would additionally flag ~230 findings, mostly DTZ (naive
-# `datetime.now()`) and UP (PEP 604/585 annotations). Those are real and worth
-# fixing — DTZ especially, in a system whose outcome resolution is date-keyed —
-# but adopting them is a code change, not a CI fix, so it is tracked separately
-# rather than smuggled in here.
-select = ["E4", "E7", "E9", "F"]
+# rebuild (ruff 0.15's defaults): pyflakes plus the pycodestyle error subset,
+# plus DTZ (naive datetime construction) — real in a system whose outcome
+# resolution is date-keyed (DEP-10). UP (PEP 604/585 annotations) is still
+# deferred; it's a style change, not a correctness one.
+select = ["E4", "E7", "E9", "F", "DTZ"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test fixtures deliberately construct the same naive local timestamps production
+# code does (every session_timestamp/timestamp field is documented in
+# argus/schemas/signals.py as "naive local"); flagging each one individually
+# would be noise, not signal, unlike the reviewed per-call-site DTZ suppressions
+# production code carries
+"tests/*" = ["DTZ"]
 
 [tool.mypy]
 python_version = "3.11"

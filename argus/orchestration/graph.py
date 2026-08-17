@@ -640,7 +640,7 @@ def build_graph(
         positions = {pos.ticker: pos for pos in allocation.portfolio}
         # A replayed session's as_of is the fixture's own capture date; falling back
         # to wall-clock only applies to genuinely live sessions
-        now = state.get("as_of") or datetime.now()
+        now = state.get("as_of") or datetime.now()  # noqa: DTZ005
         decisions: list[ARGUSDecision] = []
         errors: list[str] = []
 

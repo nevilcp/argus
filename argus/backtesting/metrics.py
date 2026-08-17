@@ -1,9 +1,11 @@
 """
 argus/backtesting/metrics.py
 
-Pure return-series risk and performance metrics, reused by PR 10's
-pre-registered evaluation (rank IC, hit-rate-with-dead-band, Sharpe,
-Sortino, max drawdown).
+Pure return-series risk and performance metrics. Its trade-level block
+(win rate, profit factor, avg win/loss) is reused by
+backtesting/evaluation.py's trade_level_win_loss_stats; the return-series
+block (Sharpe, Sortino, max drawdown, alpha/beta, VaR/CVaR) has no caller
+yet — nothing in this repo produces a daily equity curve for it to score.
 
 Responsibilities:
   - Compute return, drawdown, benchmark-adjusted, tail-risk, and trade-level statistics

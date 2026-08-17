@@ -28,6 +28,7 @@ import importlib.metadata  # noqa: F401 — pandas_ta.maps uses this without imp
 import logging
 import math
 import re
+import threading
 import time
 from collections.abc import Callable
 from datetime import datetime, time as dtime, timedelta
@@ -290,6 +291,10 @@ class MFTDataPipeline:
         self.buffer = OHLCVBuffer(db_path=db_path, buffer_size=buffer_size, interval=self.interval)
         self.running = False
         self._stop_event = asyncio.Event()
+        # Held for the full body of every to_thread-run, buffer-touching worker
+        # (_fetch_and_insert, compress_all) so close_buffer can wait out one that's
+        # still running after its owning task was cancelled rather than joined (MFT-16)
+        self._buffer_op_lock = threading.Lock()
         # Routed through register_tickers rather than a bare assignment, so the
         # ticker-shape and universe-cap invariants apply uniformly here, to
         # run_collection_cycle, and to collect_session.py's --universe CLI arg
@@ -410,6 +415,26 @@ class MFTDataPipeline:
         self.running = False
         self._stop_event.set()
         logger.info("MFTDataPipeline.stop: shutdown requested")
+
+    async def close_buffer(self) -> None:
+        """Closes the candle buffer, waiting out any still-running buffer worker first (MFT-16).
+
+        Cancelling the fetch/collector loops' asyncio tasks unwinds their
+        coroutines but can't interrupt a `to_thread` call already executing on
+        a worker thread — that worker runs `_fetch_and_insert`/`compress_all`
+        to completion regardless of the task's cancellation. Both methods hold
+        `_buffer_op_lock` for their entire body, so blocking here until it's
+        acquired guarantees any such orphaned worker has actually finished
+        touching the buffer before its connection is closed. Callers must
+        await both loops' tasks to completion first — with `self.running`
+        already False by then, neither loop can start a *new* worker after
+        this returns.
+        """
+        await asyncio.to_thread(self._buffer_op_lock.acquire)
+        try:
+            self.buffer.close()
+        finally:
+            self._buffer_op_lock.release()
 
     async def run_once(self) -> dict[str, dict]:
         """Runs a single fetch-and-compress cycle without the background loops.
@@ -557,26 +582,29 @@ class MFTDataPipeline:
         Returns:
             Tuple of (candles inserted, latest close). (0, 0.0) on an empty fetch.
         """
-        is_cold = self.buffer.row_counts().get(ticker, 0) < _required_raw_bars(self.interval_minutes)
-        period = _FETCH_PERIOD if is_cold else _STEADY_STATE_FETCH_PERIOD
-        df: pd.DataFrame = fetch_ohlcv_intraday(ticker, self.interval, period)
-        if df is None or df.empty:
-            return 0, 0.0
+        with self._buffer_op_lock:
+            is_cold = (
+                self.buffer.row_counts().get(ticker, 0) < _required_raw_bars(self.interval_minutes)
+            )
+            period = _FETCH_PERIOD if is_cold else _STEADY_STATE_FETCH_PERIOD
+            df: pd.DataFrame = fetch_ohlcv_intraday(ticker, self.interval, period)
+            if df is None or df.empty:
+                return 0, 0.0
 
-        candles = [
-            {
-                "timestamp": idx.isoformat(),
-                "open": float(row["open"]) if "open" in row.index else None,
-                "high": float(row["high"]) if "high" in row.index else None,
-                "low": float(row["low"]) if "low" in row.index else None,
-                "close": float(row["close"]) if "close" in row.index else None,
-                "volume": float(row["volume"]) if "volume" in row.index else None,
-            }
-            for idx, row in df.iterrows()
-        ]
-        self.buffer.insert_candles(ticker, candles)
-        latest_close = float(df["close"].iloc[-1]) if "close" in df.columns else 0.0
-        return len(df), latest_close
+            candles = [
+                {
+                    "timestamp": idx.isoformat(),
+                    "open": float(row["open"]) if "open" in row.index else None,
+                    "high": float(row["high"]) if "high" in row.index else None,
+                    "low": float(row["low"]) if "low" in row.index else None,
+                    "close": float(row["close"]) if "close" in row.index else None,
+                    "volume": float(row["volume"]) if "volume" in row.index else None,
+                }
+                for idx, row in df.iterrows()
+            ]
+            self.buffer.insert_candles(ticker, candles)
+            latest_close = float(df["close"].iloc[-1]) if "close" in df.columns else 0.0
+            return len(df), latest_close
 
     def compress_all(self) -> dict[str, dict]:
         """Compresses cached candle metrics across all universe symbols into a feature dictionary.
@@ -601,32 +629,33 @@ class MFTDataPipeline:
         """
         states: dict[str, dict] = {}
         required_raw = _required_raw_bars(self.interval_minutes)
-        tracked = set(self.tickers)
-        for ticker in tracked & set(self.buffer.get_all_tickers()):
-            try:
-                df = self.buffer.get_candles(ticker)
-                if df is None or len(df) < required_raw:
-                    continue
-                state = self._compress_candles(df)
-                if state is None:
-                    continue
-                missing = missing_session_state_keys(state)
-                if missing:
+        with self._buffer_op_lock:
+            tracked = set(self.tickers)
+            for ticker in tracked & set(self.buffer.get_all_tickers()):
+                try:
+                    df = self.buffer.get_candles(ticker)
+                    if df is None or len(df) < required_raw:
+                        continue
+                    state = self._compress_candles(df)
+                    if state is None:
+                        continue
+                    missing = missing_session_state_keys(state)
+                    if missing:
+                        logger.warning(
+                            "compress_all: %s missing/non-finite required keys %s — omitting",
+                            ticker,
+                            missing,
+                        )
+                        continue
+                    states[ticker] = state
+                except Exception as exc:
                     logger.warning(
-                        "compress_all: %s missing/non-finite required keys %s — omitting",
+                        "compress_all: %s compression failed — %s: %s",
                         ticker,
-                        missing,
+                        type(exc).__name__,
+                        exc,
                     )
-                    continue
-                states[ticker] = state
-            except Exception as exc:
-                logger.warning(
-                    "compress_all: %s compression failed — %s: %s",
-                    ticker,
-                    type(exc).__name__,
-                    exc,
-                )
-        self.buffer.prune_untracked(tracked)
+            self.buffer.prune_untracked(tracked)
         logger.info("compress_all: %d tickers compressed", len(states))
         return states
 

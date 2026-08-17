@@ -262,7 +262,7 @@ class KillSwitch:
 
         if drawdown >= threshold and not self._halted.is_set():
             reason = f"Drawdown {drawdown:.1%} >= {threshold:.0%} limit ({self.risk_tolerance})"
-            halt_time = datetime.now()
+            halt_time = datetime.now()  # noqa: DTZ005
             with self._state_lock:
                 self._halt_reason = reason
                 self._halt_time = halt_time
@@ -353,7 +353,8 @@ class KillSwitch:
 
         reason = dump.get("reason") or f"Restored from {path.name}"
         halt_time_raw = dump.get("halt_time")
-        halt_time = datetime.fromisoformat(halt_time_raw) if halt_time_raw else datetime.now()
+        # Naive local if no persisted halt_time — matches fromisoformat's naive parse of halt_time_raw
+        halt_time = datetime.fromisoformat(halt_time_raw) if halt_time_raw else datetime.now()  # noqa: DTZ005
         with self._state_lock:
             self._halt_reason = reason
             self._halt_time = halt_time
@@ -429,7 +430,8 @@ def _list_halt_dumps(runs_dir: Optional[str] = None) -> list[Path]:
                 return datetime.fromisoformat(raw)
         except Exception:
             pass
-        return datetime.fromtimestamp(path.stat().st_mtime)
+        # Naive local, matching the fromisoformat fallback above — must not mix aware/naive in the sort key
+        return datetime.fromtimestamp(path.stat().st_mtime)  # noqa: DTZ006
 
     return sorted(directory.glob("argus_halt_*.json"), key=_halt_time)
 
