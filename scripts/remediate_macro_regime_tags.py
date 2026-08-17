@@ -46,13 +46,15 @@ def main() -> None:
     shutil.copy2(sqlite_path, backup_path)
     print(f"Backed up {sqlite_path} to {backup_path}")
 
-    import chromadb
+    from argus.memory.cultural import CulturalMemoryManager
 
-    client = chromadb.PersistentClient(
-        path=args.persist_dir,
-        settings=chromadb.config.Settings(anonymized_telemetry=False),
-    )
-    collection = client.get_or_create_collection(name="argus_wisdom")
+    # Opening the collection with its configured embedding_function (rather than
+    # bare chromadb.get_or_create_collection, which falls back to Chroma's default
+    # ONNX function) matters here: update() below re-embeds every document it
+    # touches (MEM-1) — the wrong function would silently corrupt the very rows
+    # this script means to fix.
+    manager = CulturalMemoryManager(persist_dir=args.persist_dir)
+    collection = manager.collection
 
     rows = collection.get(where={"regime": STALE_REGIME})
     ids = rows["ids"]

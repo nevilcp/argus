@@ -10,6 +10,8 @@ and query-shaping over already-stored metadata.
 from datetime import datetime
 from unittest import mock
 
+import pytest
+
 from argus.memory.cultural import CulturalMemoryManager, get_cultural_memory
 from argus.params import MEMORY, RECONCILIATION
 from argus.schemas.signals import (
@@ -222,6 +224,45 @@ def test_already_reconciled_empty_input_skips_the_query():
 
     assert manager.already_reconciled([]) == set()
     manager.collection.get.assert_not_called()
+
+
+def test_summary_stats_averages_return_over_settled_rows_only():
+    """avg_return_pct excludes PENDING rows from both the numerator and denominator.
+
+    Regression test for MEM-2: PENDING snapshots carry no return_pct, so
+    dividing by total_stored (which includes them) structurally biases the
+    average toward 0.0.
+    """
+    manager = _manager_with_metadatas(
+        [
+            {"outcome": "SUCCESSFUL", "return_pct": 0.10, "regime": "EXPANSION"},
+            {"outcome": "FAILED", "return_pct": -0.04, "regime": "EXPANSION"},
+            {"outcome": "PENDING", "regime": "EXPANSION"},
+            {"outcome": "PENDING", "regime": "EXPANSION"},
+        ]
+    )
+
+    stats = manager.summary_stats()
+
+    assert stats["total_stored"] == 4
+    assert stats["pending_count"] == 2
+    assert stats["successful_count"] == 1
+    assert stats["failed_count"] == 1
+    assert stats["avg_return_pct"] == pytest.approx((0.10 - 0.04) / 2)
+
+
+def test_summary_stats_all_pending_reports_zero_average_without_dividing_by_zero():
+    """An all-PENDING store reports avg_return_pct=0.0 rather than raising ZeroDivisionError."""
+    manager = _manager_with_metadatas(
+        [
+            {"outcome": "PENDING", "regime": "EXPANSION"},
+        ]
+    )
+
+    stats = manager.summary_stats()
+
+    assert stats["pending_count"] == 1
+    assert stats["avg_return_pct"] == 0.0
 
 
 def test_store_decision_snapshot_returns_true_on_success():
