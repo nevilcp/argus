@@ -30,7 +30,7 @@ import math
 import re
 import time
 from collections.abc import Callable
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timedelta
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -203,10 +203,10 @@ def session_state_ttl_seconds() -> int:
     `mypy argus/`'s scope.
 
     Returns:
-        Budget in seconds: the decision cadence plus one fetch sweep plus a
-        fixed jitter margin.
+        Budget in seconds: two fetch sweeps — tolerating one missed sweep
+        before a cache entry counts as stalled — plus a fixed jitter margin.
     """
-    return settings.MFT_DECISION_INTERVAL_SECONDS + _FETCH_INTERVAL + SYSTEM.freshness_margin_seconds
+    return 2 * _FETCH_INTERVAL + SYSTEM.freshness_margin_seconds
 
 
 def max_bar_age_seconds(interval_minutes: int) -> int:
@@ -246,17 +246,14 @@ def _resample_ohlcv(df: pd.DataFrame, interval_minutes: int, target_minutes: int
     return resampled.dropna(subset=["close"])
 
 
-# Cold-start warmup poll cadence — much shorter than a real session interval so
-# a fresh buffer doesn't sit idle for the whole interval before its first compress
-_WARMUP_POLL_INTERVAL = 60
-
-
 class MFTDataPipeline:
     """Asynchronous mid-frequency data pipeline coordinating candlestick updates and feature extraction.
 
-    Runs two concurrent asyncio loops: one that periodically fetches intraday
-    candles for all tracked tickers, and one that fires a decision-cycle callback
-    at a longer interval. Both loops only execute during US equity market hours.
+    Runs a single asyncio loop that periodically fetches intraday candles for
+    all tracked tickers, then republishes compressed session state from the
+    same pass (MFT-14) — publication used to sit on its own, much longer
+    timer, so a live-cache entry was fresh for only a fraction of each cycle.
+    The loop only runs during US equity market hours.
     """
 
     def __init__(
@@ -278,7 +275,6 @@ class MFTDataPipeline:
         """
         self.interval = interval or settings.MFT_CANDLE_INTERVAL
         self.interval_minutes = _parse_interval_minutes(self.interval)
-        self.session_interval_seconds = settings.MFT_DECISION_INTERVAL_SECONDS
         buffer_size = settings.CANDLE_BUFFER_SIZE or _derive_buffer_size(self.interval_minutes)
         if db_path is None:
             data_dir = Path(settings.ARGUS_DATA_DIR)
@@ -292,7 +288,13 @@ class MFTDataPipeline:
         # run_collection_cycle, and to collect_session.py's --universe CLI arg
         # (API-1) — not just to /analyze's already-validated request tickers
         self.tickers: list[str] = []
+        self.last_requested_at: dict[str, datetime] = {}
         self.register_tickers(tickers)
+        # The constructor's own universe is pinned against _evict_stale_tickers
+        # (API-12) — the unattended collector never calls register_tickers to
+        # "touch" these, so a TTL applied uniformly would silently starve the
+        # universe it exists to track
+        self._pinned_tickers: frozenset[str] = frozenset(self.tickers)
         logger.info(
             "MFTDataPipeline initialised: %d tickers, interval=%s, buffer_size=%d, buffer=%s",
             len(self.tickers),
@@ -302,27 +304,15 @@ class MFTDataPipeline:
         )
 
     async def start(self, on_session_ready: Callable) -> None:
-        """Starts concurrent fetch and session cycles, blocking until stopped.
+        """Starts the fetch loop, blocking until stopped.
 
         Args:
             on_session_ready: Async callback invoked with compressed session states
-                after each session interval elapses during market hours.
+                after each sweep during market hours (MFT-14).
         """
         self.running = True
-        logger.info("MFTDataPipeline.start: launching fetch and session loops")
-        tasks = [
-            asyncio.create_task(self._fetch_loop()),
-            asyncio.create_task(self._session_loop(on_session_ready)),
-        ]
-        try:
-            await asyncio.gather(*tasks)
-        finally:
-            # Either task ending (return or raise) must not orphan the other —
-            # cancel and await both so a dead fetch loop can't leave the session
-            # loop sweeping into a closed buffer, or vice versa
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+        logger.info("MFTDataPipeline.start: launching fetch loop")
+        await self._fetch_loop(on_session_ready)
 
     async def _wait_or_stop(self, timeout: float) -> None:
         """Sleeps up to `timeout` seconds, waking immediately if `stop()` is called.
@@ -373,6 +363,41 @@ class MFTDataPipeline:
                 accepted,
             )
 
+        # Touches every already-tracked ticker too, not just newly-accepted
+        # ones (API-12) — a repeatedly-requested ticker must never look
+        # unused to _evict_stale_tickers just because it was already tracked
+        now = datetime.now(_ET)
+        for ticker in valid:
+            if ticker in self.tickers:
+                self.last_requested_at[ticker] = now
+
+    def _evict_stale_tickers(self) -> None:
+        """Drops tracked tickers unused beyond SYSTEM.tracked_ticker_ttl_seconds (API-12).
+
+        Without this, `register_tickers` only ever appends: repeated one-off
+        `/analyze` requests for different tickers permanently saturate
+        `SYSTEM.max_tracked_tickers` with no eviction and no new ticker ever
+        admitted. Exempts `self._pinned_tickers` — the pipeline's own seed
+        universe — since the unattended collector never calls
+        `register_tickers` to refresh their `last_requested_at`.
+        """
+        cutoff = datetime.now(_ET) - timedelta(seconds=SYSTEM.tracked_ticker_ttl_seconds)
+        stale = [
+            t
+            for t in self.tickers
+            if t not in self._pinned_tickers and self.last_requested_at.get(t, cutoff) < cutoff
+        ]
+        if not stale:
+            return
+        for ticker in stale:
+            self.tickers.remove(ticker)
+            self.last_requested_at.pop(ticker, None)
+        logger.info(
+            "MFTDataPipeline._evict_stale_tickers: evicted %d unused ticker(s): %s",
+            len(stale),
+            stale,
+        )
+
     async def stop(self) -> None:
         """Signals active loops to stop execution."""
         self.running = False
@@ -407,6 +432,7 @@ class MFTDataPipeline:
         a one-shot ``run_once()`` sweep. Iterates over a snapshot of
         ``self.tickers`` so that concurrent ``register_tickers`` calls cannot corrupt iteration.
         """
+        self._evict_stale_tickers()
         tickers_snapshot = list(self.tickers)
         logger.debug("_sweep_once: starting universe sweep (%d tickers)", len(tickers_snapshot))
         last = len(tickers_snapshot) - 1
@@ -415,19 +441,35 @@ class MFTDataPipeline:
             if i < last:
                 await asyncio.sleep(SYSTEM.min_inter_request_seconds)
 
-    async def _fetch_loop(self) -> None:
-        """Periodically downloads the latest intraday candlesticks for the tracking universe.
+    async def _fetch_loop(self, on_session_ready: Callable) -> None:
+        """Periodically downloads intraday candlesticks and republishes compressed session state.
 
-        Sleeps only the remainder of ``_FETCH_INTERVAL`` after each sweep, not a
-        full interval on top of however long the sweep itself took — otherwise
-        the real cadence drifts to sweep_duration + _FETCH_INTERVAL instead of
-        the intended _FETCH_INTERVAL.
+        Publication is merged into this loop (MFT-14) rather than living on
+        a separate, much longer timer: the old split meant a live-cache entry
+        was only fresh for a fraction of each publish cycle, since
+        ``max_bar_age_seconds`` was sized off the fetch cadence while
+        publication ran on a slower one. Sleeps only the remainder of
+        ``_FETCH_INTERVAL`` after each pass, not a full interval on top of
+        however long the pass itself took — otherwise the real cadence drifts
+        to pass_duration + _FETCH_INTERVAL instead of the intended
+        _FETCH_INTERVAL.
+
+        Args:
+            on_session_ready: Async callable receiving the ``session_states`` dict
+                after each sweep during market hours.
         """
         while self.running:
             started = time.monotonic()
             try:
                 if self._is_market_hours():
                     await self._sweep_once()
+                    session_states = await asyncio.to_thread(self.compress_all)
+                    try:
+                        await on_session_ready(session_states)
+                    except Exception as exc:
+                        logger.error(
+                            "_fetch_loop: callback raised %s: %s", type(exc).__name__, exc
+                        )
                 else:
                     logger.debug("_fetch_loop: outside market hours — idle")
             except Exception as exc:
@@ -443,8 +485,7 @@ class MFTDataPipeline:
 
         Returns:
             True once at least one ticker holds >= 14 rows (``OHLCVBuffer.get_candles``'
-            own floor), letting callers skip waiting a full session interval on a
-            cold start.
+            own floor).
         """
         for ticker in self.buffer.get_all_tickers():
             try:
@@ -455,37 +496,6 @@ class MFTDataPipeline:
                     "_buffer_warm: %s check failed — %s: %s", ticker, type(exc).__name__, exc
                 )
         return False
-
-    async def _session_loop(self, callback: Callable) -> None:
-        """Periodically compiles buffered candlesticks and triggers downstream agent actions.
-
-        Args:
-            callback: Async callable receiving the ``session_states`` dict.
-        """
-        # A fresh buffer sleeping a full session interval before its first
-        # compress would leave the live cache empty for that whole stretch for
-        # no reason; poll faster until there's actually something to compress
-        while self.running and not self._buffer_warm():
-            await self._wait_or_stop(_WARMUP_POLL_INTERVAL)
-
-        while self.running:
-            try:
-                if self._is_market_hours():
-                    logger.info("_session_loop: triggering decision cycle")
-                    session_states = await asyncio.to_thread(self.compress_all)
-                    try:
-                        await callback(session_states)
-                    except Exception as exc:
-                        logger.error(
-                            "_session_loop: callback raised %s: %s",
-                            type(exc).__name__,
-                            exc,
-                        )
-            except Exception as exc:
-                logger.error(
-                    "_session_loop: iteration failed — %s: %s", type(exc).__name__, exc
-                )
-            await self._wait_or_stop(self.session_interval_seconds)
 
     async def _fetch_one_ticker(self, ticker: str) -> None:
         """Downloads and bulk-inserts all available candles for a specific symbol.

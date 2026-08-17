@@ -35,7 +35,7 @@ from dataclasses import dataclass, field, fields
 from enum import Enum
 from typing import Any
 
-PARAMS_VERSION = 12
+PARAMS_VERSION = 13
 
 
 class Provenance(str, Enum):
@@ -70,9 +70,6 @@ def p(value: Any, provenance: Provenance, note: str = "") -> Any:
 class SystemParams:
     """Timing, universe, and hard-limit parameters formerly inline in config.py."""
 
-    mft_decision_interval_seconds: int = p(
-        1800, Provenance.ARBITRARY, "30-minute decision cadence; not evaluated against alternatives"
-    )
     candle_buffer_days_retained: int = p(
         2,
         Provenance.CONVENTION,
@@ -115,6 +112,14 @@ class SystemParams:
         "ceiling on MFTDataPipeline.tickers enforced in register_tickers; stops "
         "unbounded universe growth from repeated /analyze requests (API-1) — not "
         "evaluated against alternatives",
+    )
+    tracked_ticker_ttl_seconds: int = p(
+        86400,
+        Provenance.ARBITRARY,
+        "how long a non-seed ticker (one registered by an /analyze request rather "
+        "than the pipeline's initial universe) stays tracked without being "
+        "re-requested before register_tickers evicts it (API-12) — not evaluated "
+        "against alternatives",
     )
     analyze_retry_after_seconds: int = p(
         5,

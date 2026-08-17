@@ -105,7 +105,6 @@ class Settings(BaseSettings):
     # against any rate limit — see data/pipeline.py for how coarser resolutions
     # are derived locally via resampling rather than fetched separately
     MFT_CANDLE_INTERVAL: str = "1m"
-    MFT_DECISION_INTERVAL_SECONDS: int = SYSTEM.mft_decision_interval_seconds
     # None means "derive from MFT_CANDLE_INTERVAL" (see data/pipeline.py's
     # _derive_buffer_size); set explicitly only to override that derivation
     CANDLE_BUFFER_SIZE: Optional[int] = None
