@@ -54,6 +54,14 @@ _SECTOR_PE_MEDIANS: dict[str, float] = {
 }
 _DEFAULT_PE_MEDIAN = 20.0
 
+# Fraction of the configured per-minute request budget held back before a
+# ticker's fundamental analysis is even attempted, so the same-model portfolio
+# agent (GOV-13: ARGUS_PORTFOLIO_MODEL defaults to the same model as
+# ARGUS_FUNDAMENTAL_MODEL) still has room after a fundamental batch. Scaled
+# off ARGUS_GROQ_RPM rather than a fixed constant, so a low configured RPM
+# doesn't leave a reserve larger than the budget itself and skip every ticker.
+_CAPACITY_RESERVE_FRACTION = 0.1
+
 # Ratios fetched from market_data.fundamentals(ticker): measured data, never
 # LLM output. The LLM only ever supplies signal/conviction/moat_score/reasoning.
 _MEASURED_FUNDAMENTAL_FIELDS = (
@@ -355,7 +363,8 @@ class FundamentalAgent:
                 logger.debug("FundamentalAgent.analyze: Cache hit for %s", ticker)
                 return cached
 
-        if governor.get_remaining_capacity(settings.ARGUS_FUNDAMENTAL_MODEL) < 20:
+        capacity_reserve = max(1, int(settings.ARGUS_GROQ_RPM * _CAPACITY_RESERVE_FRACTION))
+        if governor.get_remaining_capacity(settings.ARGUS_FUNDAMENTAL_MODEL) < capacity_reserve:
             logger.warning(
                 "[Fundamental] Low capacity for %s, skipping %s", settings.ARGUS_FUNDAMENTAL_MODEL, ticker
             )

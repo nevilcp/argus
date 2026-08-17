@@ -167,6 +167,17 @@ class Settings(BaseSettings):
     ARGUS_GROQ_TPM: int = Field(
         default=6_000, gt=0, description="Bootstrap tokens-per-minute floor before headers are observed"
     )
+    ARGUS_ANALYZE_DEADLINE_SECONDS: int = Field(
+        default=360,
+        gt=0,
+        description=(
+            "Server-side deadline for a single /analyze graph run (GOV-12). At the "
+            "6,000 TPM bootstrap floor, a cold 20-ticker sweep spends ~256s in "
+            "governor sleeps plus ~50s of sentiment pacing; a proxy that times out "
+            "well before this would otherwise leave the server burning quota on a "
+            "request nothing is still waiting on."
+        ),
+    )
 
     # Model IDs for the three LLM-backed agents. Must each be a member of
     # argus.orchestration.governor.REGISTERED_MODELS — asserted at API startup

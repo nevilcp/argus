@@ -27,6 +27,7 @@ Dependencies:
 
 from __future__ import annotations
 
+import json
 import logging
 import random
 import time
@@ -588,6 +589,11 @@ class _NewsApiBudget:
     A 20-ticker sweep spends 20 of the 100 — a 5-run/day ceiling, tighter than
     anything Groq imposes — so this is checked before every request rather
     than discovered from a 426/429 response.
+
+    Persisted under ARGUS_DATA_DIR (GOV-14): the Actions collector starts a
+    fresh container on every tick, so an in-memory-only counter always read
+    zero used and never actually enforced the daily ceiling in that
+    deployment.
     """
 
     def __init__(self, daily_limit: int = _NEWSAPI_DAILY_LIMIT) -> None:
@@ -600,6 +606,32 @@ class _NewsApiBudget:
         self._lock = Lock()
         self._requests_today = 0
         self._date = datetime.now(timezone.utc).date()
+        self._loaded_from_disk = False
+
+    def _persist_path(self) -> Path:
+        """Returns the counter's persistence path, read lazily so it honors
+        whatever ARGUS_DATA_DIR is current when first used rather than at
+        import time (matches _daily_bar_cache's convention above)."""
+        return Path(settings.ARGUS_DATA_DIR) / "newsapi_budget.json"
+
+    def _load_from_disk(self) -> None:
+        """Restores today's persisted request count, if any, once per process."""
+        try:
+            raw = json.loads(self._persist_path().read_text())
+            if date.fromisoformat(raw["date"]) == self._date:
+                self._requests_today = raw["requests_today"]
+        except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError):
+            pass
+
+    def _save_to_disk(self) -> None:
+        """Writes the current count to disk, tmp-file-then-replace for atomicity."""
+        path = self._persist_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_text(
+            json.dumps({"date": self._date.isoformat(), "requests_today": self._requests_today})
+        )
+        tmp_path.replace(path)
 
     def try_reserve(self) -> bool:
         """Reserves one request against today's budget if any remains.
@@ -608,6 +640,9 @@ class _NewsApiBudget:
             True if a request was reserved, False if today's budget is spent.
         """
         with self._lock:
+            if not self._loaded_from_disk:
+                self._load_from_disk()
+                self._loaded_from_disk = True
             today = datetime.now(timezone.utc).date()
             if today != self._date:
                 self._requests_today = 0
@@ -615,6 +650,7 @@ class _NewsApiBudget:
             if self._requests_today >= self._daily_limit:
                 return False
             self._requests_today += 1
+            self._save_to_disk()
             return True
 
 
