@@ -39,6 +39,7 @@ def test_bullish_signal(agent: TechnicalStatisticalAgent) -> None:
         "momentum_30m": 0.012,
         "momentum_1d": 0.025,
         "close": 100.0,
+        "timestamp": "2024-01-02T10:00:00-05:00",
     }
     result = agent.analyze("TEST", session_state)
     assert result.signal == Signal.BULLISH
@@ -59,6 +60,7 @@ def test_bearish_signal(agent: TechnicalStatisticalAgent) -> None:
         "momentum_30m": -0.012,  # Opposite
         "momentum_1d": -0.025,  # Opposite
         "close": 100.0,
+        "timestamp": "2024-01-02T10:00:00-05:00",
     }
     result = agent.analyze("TEST", session_state)
     assert result.signal == Signal.BEARISH
@@ -79,6 +81,7 @@ def test_neutral_signal(agent: TechnicalStatisticalAgent) -> None:
         "momentum_30m": 0.0,
         "momentum_1d": 0.0,
         "close": 100.0,
+        "timestamp": "2024-01-02T10:00:00-05:00",
     }
     result = agent.analyze("TEST", session_state)
     assert result.signal == Signal.NEUTRAL
@@ -98,6 +101,7 @@ def test_zero_api_calls(agent: TechnicalStatisticalAgent) -> None:
         "momentum_30m": 0.0,
         "momentum_1d": 0.0,
         "close": 100.0,
+        "timestamp": "2024-01-02T10:00:00-05:00",
     }
     result = agent.analyze("TEST", session_state)
     assert result.api_calls_used == 0
@@ -116,6 +120,7 @@ def test_batch_analyze_reports_dropped_tickers_in_errors(agent: TechnicalStatist
         "momentum_30m": 0.0,
         "momentum_1d": 0.0,
         "close": 100.0,
+        "timestamp": "2024-01-02T10:00:00-05:00",
     }
     incomplete_state = {k: v for k, v in complete_state.items() if k != "adx_14"}
 
@@ -141,6 +146,7 @@ def _complete_state(**overrides: float) -> dict:
         "momentum_30m": 0.0,
         "momentum_1d": 0.0,
         "close": 100.0,
+        "timestamp": "2024-01-02T10:00:00-05:00",
     }
     base.update(overrides)
     return base
