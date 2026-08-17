@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta
+from pathlib import Path
 from unittest import mock
 
 import pytest
@@ -27,6 +28,7 @@ from fastapi.testclient import TestClient
 import api.main as api_main
 import argus.risk.kill_switch as kill_switch_module
 from argus.risk.kill_switch import KillSwitch
+from argus.schemas.signals import ARGUSDecision
 
 _PAYLOAD = {"tickers": ["AAPL"], "total_wealth": 100_000, "invest_pct": 0.5}
 
@@ -164,3 +166,60 @@ async def test_mft_session_callback_evicts_untracked_tickers(monkeypatch):
 
     assert "MSFT" not in api_main._live_session_cache
     assert "AAPL" in api_main._live_session_cache
+
+
+# ---------------------------------------------------------------------------
+# RE-11: /analyze decisions reach decisions.jsonl
+# ---------------------------------------------------------------------------
+
+
+def test_analyze_appends_decisions_to_decisions_jsonl(client, monkeypatch):
+    """A successful /analyze run appends its decisions to the log the collector also writes to.
+
+    Without this, decisions.jsonl — the only source reconcile_decisions
+    reads — never sees a decision made through /analyze, and an API-only
+    deployment reconciles nothing.
+    """
+    _ready(client, monkeypatch)
+    decision = ARGUSDecision(ticker="AAPL", session_timestamp=datetime.now())
+    allocation = mock.Mock(
+        session_id="sess-1", portfolio=[], cash_reserve_pct=0.5, expected_sharpe=1.0
+    )
+    fake_graph = mock.Mock()
+    fake_graph.invoke.return_value = {
+        "decisions": [decision],
+        "errors": [],
+        "portfolio_allocation": allocation,
+        "macro_context": None,
+    }
+    monkeypatch.setattr(api_main, "_graph", fake_graph)
+
+    response = client.post("/analyze", json=_PAYLOAD)
+
+    assert response.status_code == 200
+    log_path = Path(api_main.settings.ARGUS_DATA_DIR) / "decisions.jsonl"
+    lines = log_path.read_text().splitlines()
+    assert len(lines) == 1
+    assert ARGUSDecision.model_validate_json(lines[0]).decision_id == decision.decision_id
+
+
+def test_analyze_writes_nothing_when_the_graph_produces_no_decisions(client, monkeypatch):
+    """A run with an empty decisions list leaves decisions.jsonl unwritten, not an empty file."""
+    _ready(client, monkeypatch)
+    allocation = mock.Mock(
+        session_id="sess-1", portfolio=[], cash_reserve_pct=0.5, expected_sharpe=1.0
+    )
+    fake_graph = mock.Mock()
+    fake_graph.invoke.return_value = {
+        "decisions": [],
+        "errors": [],
+        "portfolio_allocation": allocation,
+        "macro_context": None,
+    }
+    monkeypatch.setattr(api_main, "_graph", fake_graph)
+
+    response = client.post("/analyze", json=_PAYLOAD)
+
+    assert response.status_code == 200
+    log_path = Path(api_main.settings.ARGUS_DATA_DIR) / "decisions.jsonl"
+    assert not log_path.exists()

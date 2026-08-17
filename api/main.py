@@ -11,6 +11,9 @@ that is genuinely available.
 
 Responsibilities:
   - Route analysis requests to the LangGraph execution pipeline
+  - Append every /analyze decision to the same decisions.jsonl log the
+    unattended collector writes to (see argus/orchestration/collector.py),
+    so reconciliation sees both entry points into the graph
   - Enforce kill-switch and VIX blackout checks before every allocation request
   - Expose health, memory, governor, and kill-switch management endpoints
   - Host the MFT pipeline as a background asyncio task and maintain a live
@@ -50,7 +53,11 @@ from argus.config import settings
 from argus.data.pipeline import MFTDataPipeline, max_bar_age_seconds, session_state_ttl_seconds
 from argus.data.tickers import TICKER_PATTERN
 from argus.memory.cultural import get_cultural_memory
-from argus.orchestration.collector import CollectionResult, run_collection_cycle
+from argus.orchestration.collector import (
+    CollectionResult,
+    append_decisions_jsonl,
+    run_collection_cycle,
+)
 from argus.orchestration.governor import REGISTERED_MODELS, RateLimitExceeded, UnregisteredModel, governor
 from argus.orchestration.graph import build_graph
 from argus.orchestration.reconciliation import load_decisions_from_jsonl, reconcile_decisions
@@ -824,6 +831,14 @@ async def analyze(req: AnalysisRequest):
         ref = uuid4()
         logger.error("[API] Graph error (ref %s): %s", ref, e, exc_info=True)
         raise HTTPException(500, f"Agent graph error (ref {ref})")
+
+    # /analyze is the other entry point into the graph besides the unattended
+    # collector (RE-11) — without this, decisions.jsonl (the only source
+    # reconcile_decisions reads) never sees a request served through this
+    # endpoint, and an API-only deployment reconciles nothing
+    append_decisions_jsonl(
+        final_state.get("decisions") or [], f"{settings.ARGUS_DATA_DIR}/decisions.jsonl"
+    )
 
     # Re-checked rather than trusted from before the (potentially many-second)
     # graph run: the kill switch is process-global and the reconcile loop can

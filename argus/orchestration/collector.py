@@ -15,6 +15,9 @@ Responsibilities:
   - Invoke the caller-supplied compiled LangGraph DAG over whatever tickers
     the sweep actually populated
   - Append every resulting ARGUSDecision to a JSONL decision log
+    (append_decisions_jsonl is also called directly by api/main.py's
+    /analyze, the loop's other entry point into the graph, so the log
+    reflects both)
 
 Not responsible for:
   - Scheduling (see api/main.py's collector loop and scripts/collect_session.py)
@@ -55,8 +58,13 @@ class CollectionResult:
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
 
-def _append_decisions_jsonl(decisions: list[ARGUSDecision], path: str) -> int:
+def append_decisions_jsonl(decisions: list[ARGUSDecision], path: str) -> int:
     """Appends each decision to a JSONL log, one compact JSON object per line.
+
+    Shared by run_collection_cycle and api/main.py's /analyze — the two
+    entry points into the graph — so decisions.jsonl (the source
+    reconciliation reads, see orchestration/reconciliation.py) reflects
+    both instead of only the unattended collector's.
 
     Args:
         decisions: Decisions produced by this cycle's graph invocation.
@@ -191,7 +199,7 @@ async def run_collection_cycle(
         final_state = await asyncio.to_thread(compiled_graph.invoke, state, config)
 
     decisions: list[ARGUSDecision] = final_state.get("decisions") or []
-    logged = _append_decisions_jsonl(decisions, decisions_log_path)
+    logged = append_decisions_jsonl(decisions, decisions_log_path)
     errors = final_state.get("errors") or []
 
     macro_context = final_state.get("macro_context")

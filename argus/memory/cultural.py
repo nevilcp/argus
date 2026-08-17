@@ -342,9 +342,14 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
     def summary_stats(self) -> dict:
         """Compiles aggregate performance statistics and regime diagnostics from the memory database.
 
+        avg_return_pct averages over settled rows only (SUCCESSFUL/FAILED/FLAT
+        outcomes carry a real return_pct; PENDING snapshots don't). Dividing by
+        total_stored instead — which includes every still-open PENDING
+        snapshot — structurally biases the average toward 0.0 (MEM-2).
+
         Returns:
             Dict with keys: total_stored, successful_count, failed_count,
-            avg_return_pct, best_regime_for_wins.
+            pending_count, avg_return_pct, best_regime_for_wins.
         """
         count = self.collection.count()
         if count == 0:
@@ -352,6 +357,7 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
                 "total_stored": 0,
                 "successful_count": 0,
                 "failed_count": 0,
+                "pending_count": 0,
                 "avg_return_pct": 0.0,
                 "best_regime_for_wins": "N/A",
             }
@@ -361,15 +367,21 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
             metadatas = results.get("metadatas") or []
             wins = 0
             fails = 0
+            pending = 0
+            settled = 0
             total_ret = 0.0
             regime_wins: dict[str, int] = {}
 
             for m in metadatas:
                 outcome = m.get("outcome")
-                ret = float(m.get("return_pct", 0.0) or 0.0)  # type: ignore[arg-type]  # chromadb metadata values are typed as a broad scalar union
                 regime = str(m.get("regime", "unknown"))
 
-                total_ret += ret
+                if outcome == "PENDING":
+                    pending += 1
+                    continue
+
+                settled += 1
+                total_ret += float(m.get("return_pct", 0.0) or 0.0)  # type: ignore[arg-type]  # chromadb metadata values are typed as a broad scalar union
                 if outcome == "SUCCESSFUL":
                     wins += 1
                     regime_wins[regime] = regime_wins.get(regime, 0) + 1
@@ -384,7 +396,8 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
                 "total_stored": count,
                 "successful_count": wins,
                 "failed_count": fails,
-                "avg_return_pct": total_ret / count if count > 0 else 0.0,
+                "pending_count": pending,
+                "avg_return_pct": total_ret / settled if settled > 0 else 0.0,
                 "best_regime_for_wins": best_regime,
             }
         except Exception as e:
