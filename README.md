@@ -149,7 +149,6 @@ ARGUS sits at the intersection of quantitative finance, statistical modeling, an
 | `conviction` (per position) | Categorical strength of the agents' agreement on a position's direction (e.g. `STRONG_BUY` → `STRONG_SELL`) | Strength of agreement, not a probability of profit or an expected return. Its underlying aggregated score is scaled against the full three-agent vote mass, so it falls when specialists disagree or are absent rather than saturating near its cap whenever the agents who did vote agree |
 | `allocation_pct` | Fraction of the *invested* portion of `total_wealth` assigned to this ticker | Multiply by `total_wealth * (1 - cash_reserve_pct)` for a dollar figure — it is not a fraction of total wealth directly |
 | `cash_reserve_pct` | Fraction of `total_wealth` held back from any position | Recomputed server-side from the risk engine's own figures rather than trusted verbatim from the LLM, so it always stays consistent with the position sizes actually returned |
-| `expected_sharpe` | Portfolio-level expected Sharpe ratio from the risk engine's covariance-based estimate | A model estimate under the current regime, not a guarantee; can be `null` if the risk engine couldn't compute one |
 | `macro_regime` | The Gaussian HMM's current 3-state classification (e.g. `EXPANSION`, `CONTRACTION`) | Its multiplier is applied once, at signal-aggregation time, to each specialist's vote weight — never to a specialist's own analysis, which runs independently of macro classification. A `CONTRACTION` regime can still override an otherwise-bullish consensus after aggregation |
 | `vix_level` | The VIX close feeding the macro and risk engines this session | Above the configured blackout threshold (default 35), the safety layer blocks new positions before `/analyze` even runs — an elevated-but-sub-threshold value here signals wider risk-engine caution (VIX scaling), not a guarantee of safety |
 
@@ -316,7 +315,6 @@ curl -X POST http://localhost:8000/analyze \
     { "ticker": "AAPL", "allocation_pct": 0.32, "conviction": "MODERATE_BUY" }
   ],
   "cash_reserve_pct": 0.4,
-  "expected_sharpe": 1.12,
   "macro_regime": "EXPANSION",
   "vix_level": 14.2,
   "governor_report": { "...": "per-model request/token usage" },
