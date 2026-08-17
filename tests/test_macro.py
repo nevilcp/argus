@@ -19,6 +19,7 @@ from argus.agents.macro import (
     MacroStatisticalAgent,
     RegimeClassifier,
 )
+from argus.config import settings
 from argus.schemas.signals import Regime, VixRegime
 
 
@@ -279,6 +280,22 @@ def test_save_load_round_trip(tmp_path: Path) -> None:
     loaded_regime, loaded_confidence = loaded.predict(window)
     assert loaded_regime == orig_regime
     assert loaded_confidence == pytest.approx(orig_confidence)
+
+
+def test_committed_artifact_loads_and_discriminates_regimes() -> None:
+    """The artifact shipped at ARGUS_HMM_MODEL_PATH loads under the pinned library
+    versions (DEP-3) and is actually a function of the macro data (DEP-4) — this is
+    the guard that would have caught a version mismatch silently degrading
+    production to the rule-based fallback."""
+    classifier = RegimeClassifier.load(settings.ARGUS_HMM_MODEL_PATH)
+
+    assert classifier.is_fitted
+
+    labels = {
+        classifier.predict(pd.DataFrame([scenario]))[0]
+        for scenario in DISCRIMINATION_SCENARIOS.values()
+    }
+    assert len(labels) >= 2, f"discrimination scenarios collapsed to a single label: {labels}"
 
 
 def test_load_missing_file_returns_unfitted_and_logs_error(

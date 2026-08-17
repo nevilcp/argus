@@ -1,4 +1,3 @@
-# ruff: noqa: E402
 """
 api/main.py
 
@@ -41,15 +40,11 @@ from typing import Literal, Optional
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from dotenv import load_dotenv
-
-# .env must be loaded before any LangChain/Groq imports that read env vars
-load_dotenv()
-
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 
+import argus
 from argus.agents.macro import MacroStatisticalAgent
 from argus.config import settings
 from argus.data.pipeline import MFTDataPipeline, max_bar_age_seconds, session_state_ttl_seconds
@@ -327,6 +322,26 @@ def _acquire_process_lock() -> None:
     _process_lock_file = lock_file
 
 
+def _warn_on_permissive_security_defaults() -> None:
+    """Logs a WARNING for each security-relevant setting still at its permissive default (DEP-8).
+
+    ARGUS_CORS_ORIGINS defaulting to ``["*"]`` and a blank ARGUS_API_KEY are
+    both fine for local development behind a trusted network boundary, but
+    silent in a deployment actually exposed to the internet. Neither default
+    changes here — only whether the deployment says so out loud.
+    """
+    if settings.ARGUS_CORS_ORIGINS == ["*"]:
+        logger.warning(
+            "[Startup] ARGUS_CORS_ORIGINS is at its default (\"*\"): every origin is allowed. "
+            "Set it explicitly for a deployment reachable outside a trusted network."
+        )
+    if not settings.ARGUS_API_KEY:
+        logger.warning(
+            "[Startup] ARGUS_API_KEY is unset: /analyze and /kill-switch/reset accept requests "
+            "with no X-API-Key check. Set it for a deployment reachable outside a trusted network."
+        )
+
+
 def _assert_registered_models() -> None:
     """Fails fast if a configured agent model has no rate-limit profile (GOV-11).
 
@@ -353,6 +368,7 @@ async def lifespan(app: FastAPI):
     global _mft_pipeline, _pipeline_task, _collector_task, _reconcile_task, _graph, _macro_status_agent
 
     _configure_logging()
+    _warn_on_permissive_security_defaults()
     _assert_single_worker()
     _assert_registered_models()
     _acquire_process_lock()
@@ -438,7 +454,7 @@ async def lifespan(app: FastAPI):
     logger.info("[Shutdown] Complete.")
 
 
-app = FastAPI(title="ARGUS API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="ARGUS API", version=argus.__version__, lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(settings.ARGUS_CORS_ORIGINS),

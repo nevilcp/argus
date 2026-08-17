@@ -1,4 +1,3 @@
-# ruff: noqa: E402
 """
 scripts/train_macro_hmm.py
 
@@ -20,11 +19,6 @@ function of the macro data, and no artifact is written for it.
 
 import argparse
 import logging
-
-from dotenv import load_dotenv
-
-# .env must be loaded before any LangChain/Groq imports that read env vars
-load_dotenv()
 
 from argus.agents.macro import MacroStatisticalAgent
 from argus.config import settings

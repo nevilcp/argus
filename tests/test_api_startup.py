@@ -12,6 +12,8 @@ cross-process guard (an exclusive flock on `${ARGUS_DATA_DIR}/argus.lock`).
 
 Also covers PR 1 of the release-remediation issue: `_configure_logging`
 (OBS-1) and `/health`'s background-task liveness reporting (OBS-2).
+
+Also covers PR 2's `_warn_on_permissive_security_defaults` (DEP-8).
 """
 
 from __future__ import annotations
@@ -156,6 +158,30 @@ def test_configure_logging_is_idempotent():
     api_main._configure_logging()
 
     assert len(logging.getLogger("argus").handlers) == 1
+
+
+def test_warns_on_permissive_cors_and_blank_api_key(monkeypatch, caplog):
+    """Both defaults being permissive (DEP-8) logs a WARNING for each, naming the setting."""
+    monkeypatch.setattr(api_main.settings, "ARGUS_CORS_ORIGINS", ["*"])
+    monkeypatch.setattr(api_main.settings, "ARGUS_API_KEY", "")
+
+    with caplog.at_level(logging.WARNING, logger="argus.api"):
+        api_main._warn_on_permissive_security_defaults()
+
+    messages = [r.message for r in caplog.records]
+    assert any("ARGUS_CORS_ORIGINS" in m for m in messages)
+    assert any("ARGUS_API_KEY" in m for m in messages)
+
+
+def test_no_warning_once_cors_and_api_key_are_configured(monkeypatch, caplog):
+    """A deployment that set both non-default values gets no security WARNING."""
+    monkeypatch.setattr(api_main.settings, "ARGUS_CORS_ORIGINS", ["https://example.com"])
+    monkeypatch.setattr(api_main.settings, "ARGUS_API_KEY", "a-real-secret")
+
+    with caplog.at_level(logging.WARNING, logger="argus.api"):
+        api_main._warn_on_permissive_security_defaults()
+
+    assert caplog.records == []
 
 
 @pytest.fixture

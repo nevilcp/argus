@@ -31,6 +31,11 @@ from argus.params import KILL_SWITCH
 logger = logging.getLogger("argus.kill_switch")
 
 
+def _default_runs_dir() -> str:
+    """Resolves the halt-dump directory: settings.ARGUS_RUNS_DIR, or <ARGUS_DATA_DIR>/runs."""
+    return settings.ARGUS_RUNS_DIR or f"{settings.ARGUS_DATA_DIR}/runs"
+
+
 @dataclass
 class KillSwitchStatus:
     """Snapshot of the active kill switch status and calculated indicators."""
@@ -283,7 +288,7 @@ class KillSwitch:
             vix: VIX level at the time of halt.
         """
         timestamp = halt_time.strftime("%Y%m%d_%H%M%S")
-        runs_dir = Path("runs")
+        runs_dir = Path(_default_runs_dir())
         runs_dir.mkdir(parents=True, exist_ok=True)
         filename = runs_dir / f"argus_halt_{timestamp}.json"
 
@@ -398,7 +403,7 @@ class KillSwitch:
 _kill_switch: Optional[KillSwitch] = None
 
 
-def _list_halt_dumps(runs_dir: str = "runs") -> list[Path]:
+def _list_halt_dumps(runs_dir: Optional[str] = None) -> list[Path]:
     """Lists halt-event dumps oldest-to-newest by their own ``halt_time`` field.
 
     Ranks by content rather than the filename's embedded timestamp (KS-13) —
@@ -407,11 +412,12 @@ def _list_halt_dumps(runs_dir: str = "runs") -> list[Path]:
 
     Args:
         runs_dir: Directory ``_persist_halt_event`` writes halt dumps to.
+            None resolves to :func:`_default_runs_dir`.
 
     Returns:
         Halt-dump paths sorted oldest to newest; empty if none exist.
     """
-    directory = Path(runs_dir)
+    directory = Path(runs_dir if runs_dir is not None else _default_runs_dir())
     if not directory.is_dir():
         return []
 
@@ -428,11 +434,12 @@ def _list_halt_dumps(runs_dir: str = "runs") -> list[Path]:
     return sorted(directory.glob("argus_halt_*.json"), key=_halt_time)
 
 
-def _prune_halt_dumps(runs_dir: str = "runs") -> None:
+def _prune_halt_dumps(runs_dir: Optional[str] = None) -> None:
     """Deletes all but the most recent KILL_SWITCH.max_halt_dumps_retained halt dumps.
 
     Args:
         runs_dir: Directory ``_persist_halt_event`` writes halt dumps to.
+            None resolves to :func:`_default_runs_dir`.
     """
     keep = KILL_SWITCH.max_halt_dumps_retained
     dumps = _list_halt_dumps(runs_dir)
@@ -444,11 +451,12 @@ def _prune_halt_dumps(runs_dir: str = "runs") -> None:
             logger.error(f"Failed to prune halt dump {path}: {e}")
 
 
-def _find_latest_halt_file(runs_dir: str = "runs") -> Optional[Path]:
+def _find_latest_halt_file(runs_dir: Optional[str] = None) -> Optional[Path]:
     """Finds the most recently written halt-event dump, if any exist.
 
     Args:
         runs_dir: Directory ``_persist_halt_event`` writes halt dumps to.
+            None resolves to :func:`_default_runs_dir`.
 
     Returns:
         Path to the newest ``argus_halt_*.json`` file, or None if none exist.
