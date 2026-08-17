@@ -265,6 +265,48 @@ def test_summary_stats_all_pending_reports_zero_average_without_dividing_by_zero
     assert stats["avg_return_pct"] == 0.0
 
 
+def _manager_with_pending(ids: list[str], timestamps: list[str]) -> CulturalMemoryManager:
+    manager = object.__new__(CulturalMemoryManager)
+    manager.collection = mock.Mock()
+    manager.collection.get.return_value = {
+        "ids": ids,
+        "metadatas": [{"outcome": "PENDING", "timestamp": ts} for ts in timestamps],
+    }
+    return manager
+
+
+def test_expire_pending_snapshots_deletes_only_entries_before_cutoff():
+    """MEM-3: a snapshot older than cutoff is deleted; one at or after it survives."""
+    manager = _manager_with_pending(
+        ids=["snapshot_old", "snapshot_new"],
+        timestamps=["2026-01-01T00:00:00", "2026-01-20T00:00:00"],
+    )
+
+    deleted = manager.expire_pending_snapshots(cutoff=datetime(2026, 1, 10))
+
+    assert deleted == 1
+    manager.collection.get.assert_called_once_with(where={"outcome": "PENDING"})
+    manager.collection.delete.assert_called_once_with(ids=["snapshot_old"])
+
+
+def test_expire_pending_snapshots_nothing_stale_does_not_call_delete():
+    """When every PENDING snapshot is at or after cutoff, delete() is never called."""
+    manager = _manager_with_pending(ids=["snapshot_new"], timestamps=["2026-01-20T00:00:00"])
+
+    deleted = manager.expire_pending_snapshots(cutoff=datetime(2026, 1, 1))
+
+    assert deleted == 0
+    manager.collection.delete.assert_not_called()
+
+
+def test_expire_pending_snapshots_empty_store_is_a_noop():
+    """No PENDING rows at all is a no-op, not an error."""
+    manager = _manager_with_pending(ids=[], timestamps=[])
+
+    assert manager.expire_pending_snapshots(cutoff=datetime(2026, 1, 1)) == 0
+    manager.collection.delete.assert_not_called()
+
+
 def test_store_decision_snapshot_returns_true_on_success():
     """A successful upsert reports success so callers can count real writes."""
     manager = _manager_with_metadatas([])

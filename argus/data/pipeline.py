@@ -59,6 +59,13 @@ _TRADING_MINUTES_PER_DAY = 390
 _FETCH_PERIOD_DAYS = SYSTEM.candle_buffer_days_retained
 _FETCH_PERIOD = f"{_FETCH_PERIOD_DAYS}d"
 
+# Once a ticker's buffer already holds an indicator-ready depth, a sweep only
+# needs to catch the candles written since the last one — "1d" (yfinance's
+# shortest supported intraday period) comfortably covers one _FETCH_INTERVAL
+# gap, and insert_candles' INSERT OR REPLACE makes the overlap with what's
+# already buffered a no-op rather than a duplicate (MFT-15)
+_STEADY_STATE_FETCH_PERIOD = "1d"
+
 # RSI/MACD/BB/ATR/ADX/VWAP/volume-ratio are computed on bars resampled to this
 # resolution regardless of the raw fetch interval — RSI-14 on 1m bars is a
 # 14-minute lookback, too twitchy for a decision cadence measured in tens of minutes
@@ -536,13 +543,23 @@ class MFTDataPipeline:
     def _fetch_and_insert(self, ticker: str) -> tuple[int, float]:
         """Synchronous fetch-and-bulk-insert for one ticker; run off the event loop.
 
+        Fetches the full `_FETCH_PERIOD` only while the ticker's buffer is
+        still cold (a new ticker, or the first sweep after a restart);
+        otherwise fetches just `_STEADY_STATE_FETCH_PERIOD`'s worth (MFT-15).
+        Re-downloading and re-upserting two full days of 1-minute candles
+        every `_FETCH_INTERVAL` regardless of how warm the buffer already is
+        multiplies out to ~15,600 row upserts per sweep at 20 tickers, almost
+        all of them re-writing rows already on disk unchanged.
+
         Args:
             ticker: Equity ticker symbol to fetch.
 
         Returns:
             Tuple of (candles inserted, latest close). (0, 0.0) on an empty fetch.
         """
-        df: pd.DataFrame = fetch_ohlcv_intraday(ticker, self.interval, _FETCH_PERIOD)
+        is_cold = self.buffer.row_counts().get(ticker, 0) < _required_raw_bars(self.interval_minutes)
+        period = _FETCH_PERIOD if is_cold else _STEADY_STATE_FETCH_PERIOD
+        df: pd.DataFrame = fetch_ohlcv_intraday(ticker, self.interval, period)
         if df is None or df.empty:
             return 0, 0.0
 

@@ -35,7 +35,7 @@ from dataclasses import dataclass, field, fields
 from enum import Enum
 from typing import Any
 
-PARAMS_VERSION = 13
+PARAMS_VERSION = 14
 
 
 class Provenance(str, Enum):
@@ -346,6 +346,14 @@ class ReconciliationParams:
         Provenance.ARBITRARY,
         "matches cultural.store_trade_outcome's SUCCESSFUL/FAILED/FLAT |return| "
         "classification threshold; kept here so both live in one place",
+    )
+    retention_margin_days: int = p(
+        2,
+        Provenance.ARBITRARY,
+        "buffer beyond horizon_days before a decision, checkpoint, or PENDING "
+        "snapshot is pruned as growing-store cleanup (PR 6) — wide enough that "
+        "a delayed reconcile pass still finds it first, no basis for this "
+        "specific width",
     )
 
 
