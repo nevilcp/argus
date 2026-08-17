@@ -527,7 +527,15 @@ class RegimeClassifier:
         if isinstance(current, pd.DataFrame):
             arr = current[FEATURE_COLUMNS].values
         else:
-            arr = np.array([[current.get(col, _FEATURE_DEFAULTS[col]) for col in FEATURE_COLUMNS]])
+            # current may be a macro_bundle() dict, whose "t10y2y"/"cpi_yoy" keys overlap
+            # FEATURE_COLUMNS and are present-but-None on a failed FRED fetch — .get(col,
+            # default) only substitutes on a missing key, not an explicit None, and a bare
+            # `or` would also wrongly substitute a genuine 0.0
+            def _value(col: str) -> float:
+                v = current.get(col)
+                return v if v is not None else _FEATURE_DEFAULTS[col]
+
+            arr = np.array([[_value(col) for col in FEATURE_COLUMNS]])
 
         if not np.isfinite(arr).all():
             raise ValueError("RegimeClassifier.predict: feature array contains NaN/inf")
