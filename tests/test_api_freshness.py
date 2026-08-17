@@ -6,6 +6,11 @@ must reject on bar age, not just cache-write age, and must check market
 hours before either age check so bar-age is never evaluated outside a
 weekday 09:30-16:00 ET session.
 
+Also covers PR3's MFT-14 (publication merged into the fetch loop, so a bar
+published a full fetch interval ago still clears the gate) and API-11 (a
+malformed or naive bar timestamp fails closed as staleness instead of
+raising).
+
 These exercise the route function directly via FastAPI's TestClient rather
 than going through the app's lifespan, so no MFT pipeline, collector, or
 reconcile loop needs to start. `_mft_pipeline` and `_live_session_cache`
@@ -22,6 +27,7 @@ from fastapi.testclient import TestClient
 
 import api.main as api_main
 import argus.risk.kill_switch as kill_switch_module
+from argus.data.pipeline import _FETCH_INTERVAL
 
 _PAYLOAD = {"tickers": ["AAPL"], "total_wealth": 100_000, "invest_pct": 0.5}
 
@@ -126,3 +132,44 @@ def test_analyze_passes_freshness_gate_with_a_current_bar(client, monkeypatch):
     # so it isn't asserted here.
     assert response.status_code == 500
     assert fake_graph.invoke.called
+
+
+def test_analyze_passes_freshness_gate_with_a_bar_one_full_fetch_interval_old(client, monkeypatch):
+    """MFT-14: publication now runs on the same cadence as the fetch sweep, so a bar as old as one
+    full _FETCH_INTERVAL still clears max_bar_age_seconds — the case that a slower, decoupled
+    publish timer used to miss for most of each cycle.
+    """
+    _pipeline(monkeypatch, market_hours=True)
+    _seed_cache("AAPL", bar_age_seconds=_FETCH_INTERVAL, write_age_seconds=5)
+    fake_graph = mock.Mock()
+    fake_graph.invoke.side_effect = RuntimeError("sentinel: freshness gate cleared")
+    monkeypatch.setattr(api_main, "_graph", fake_graph)
+
+    response = client.post("/analyze", json=_PAYLOAD)
+
+    assert response.status_code == 500
+    assert fake_graph.invoke.called
+
+
+def test_analyze_rejects_a_malformed_bar_timestamp_as_stale(client, monkeypatch):
+    """API-11: a non-ISO timestamp fails closed as staleness (503) instead of raising a 500."""
+    _pipeline(monkeypatch, market_hours=True)
+    write_ts = datetime.now()
+    api_main._live_session_cache["AAPL"] = ({"timestamp": "not-a-timestamp"}, write_ts)
+
+    response = client.post("/analyze", json=_PAYLOAD)
+
+    assert response.status_code == 503
+    assert "stale" in response.json()["detail"].lower()
+
+
+def test_analyze_rejects_a_naive_bar_timestamp_as_stale(client, monkeypatch):
+    """API-11: a naive (tz-less) timestamp fails closed as staleness rather than raising a TypeError."""
+    _pipeline(monkeypatch, market_hours=True)
+    write_ts = datetime.now()
+    api_main._live_session_cache["AAPL"] = ({"timestamp": datetime.now().isoformat()}, write_ts)
+
+    response = client.post("/analyze", json=_PAYLOAD)
+
+    assert response.status_code == 503
+    assert "stale" in response.json()["detail"].lower()
