@@ -25,6 +25,7 @@ from argus.backtesting.evaluation import (
     rank_information_coefficient,
     signed_conviction,
     system_behavior_report,
+    trade_level_win_loss_stats,
 )
 from argus.backtesting.replay import SessionResult, replay_session
 from argus.schemas.signals import ARGUSDecision, Signal
@@ -141,6 +142,27 @@ def test_hit_rate_excludes_returns_inside_deadband():
     hit_rate, n_scored = hit_rate_with_deadband(pairs, deadband=0.01)
     assert n_scored == 0
     assert hit_rate is None
+
+
+# ---------------------------------------------------------------------------
+# trade_level_win_loss_stats
+# ---------------------------------------------------------------------------
+
+
+def test_trade_level_win_loss_stats_empty_for_no_pairs():
+    """Trade-level stats are an empty dict when there are no paired outcomes."""
+    assert trade_level_win_loss_stats([]) == {}
+
+
+def test_trade_level_win_loss_stats_computes_win_rate_and_profit_factor():
+    """Trade-level stats key on forward_return sign, independent of conviction."""
+    pairs = _pairs(convictions=[0.5, -0.5, 0.5], returns=[0.05, -0.02, -0.01])
+    stats = trade_level_win_loss_stats(pairs)
+    assert stats["total_trades"] == 3
+    assert stats["win_rate"] == pytest.approx(1 / 3, abs=1e-4)
+    assert stats["avg_win_pct"] == pytest.approx(0.05)
+    assert stats["avg_loss_pct"] == pytest.approx(-0.015)
+    assert stats["avg_holding_days"] == pytest.approx(5.0)
 
 
 # ---------------------------------------------------------------------------

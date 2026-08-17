@@ -23,8 +23,8 @@ Responsibilities:
     stores above so neither grows forever (PR 6)
 
 Not responsible for:
-  - Deciding what a "good" outcome is, or evaluation metrics (see PR 10 /
-    backtesting/metrics.py)
+  - Deciding what a "good" outcome is, or evaluation metrics (see
+    backtesting/evaluation.py and backtesting/metrics.py)
   - Scheduling reconciliation runs (see scripts/reconcile_outcomes.py)
 
 Dependencies:

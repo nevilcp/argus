@@ -646,6 +646,20 @@ async def test_stop_ends_the_loop_promptly(monkeypatch):
     await asyncio.wait_for(task, timeout=2.0)
 
 
+@pytest.mark.asyncio
+async def test_close_buffer_waits_out_an_in_flight_buffer_worker():
+    """close_buffer blocks until a worker holding _buffer_op_lock releases it (MFT-16)."""
+    pipeline = MFTDataPipeline([], interval="1m")
+    pipeline._buffer_op_lock.acquire()
+
+    close_task = asyncio.create_task(pipeline.close_buffer())
+    await asyncio.sleep(0.05)
+    assert not close_task.done(), "close_buffer must not close the buffer while the lock is held"
+
+    pipeline._buffer_op_lock.release()
+    await asyncio.wait_for(close_task, timeout=2.0)
+
+
 def test_fetch_and_insert_bulk_inserts_in_one_call(monkeypatch):
     """`_fetch_and_insert` hands the whole fetched frame to insert_candles in one call, not per-row."""
     pipeline = MFTDataPipeline([], interval="1m")

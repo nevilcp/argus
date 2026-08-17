@@ -120,7 +120,7 @@ async def _mft_session_callback(session_states: dict) -> None:
     Args:
         session_states: Mapping of ticker → technical feature dict from MFTDataPipeline.
     """
-    now = datetime.now()
+    now = datetime.now()  # noqa: DTZ005
     for ticker, state in session_states.items():
         _live_session_cache[ticker] = (state, now)
 
@@ -214,7 +214,7 @@ def _prune_growing_stores(decisions_log: str) -> None:
     Args:
         decisions_log: Same decisions.jsonl path the caller just reconciled.
     """
-    cutoff = datetime.now() - timedelta(
+    cutoff = datetime.now() - timedelta(  # noqa: DTZ005
         days=RECONCILIATION.horizon_days + RECONCILIATION.retention_margin_days
     )
 
@@ -264,7 +264,7 @@ def _reconcile_once() -> None:
         ):
             book.apply_run(run_timestamp, run_return)
         book.prune_runs_applied(
-            datetime.now()
+            datetime.now()  # noqa: DTZ005
             - timedelta(days=RECONCILIATION.horizon_days + RECONCILIATION.retention_margin_days)
         )
         paper_book.save(book, book_path)
@@ -363,20 +363,26 @@ def _assert_single_worker() -> None:
         if idx + 1 < len(argv) and argv[idx + 1] != "1":
             raise RuntimeError(
                 f"ARGUS must run with --workers 1 (in-process governor/kill-switch "
-                f"singletons); got --workers {argv[idx + 1]}"
+                f"singletons); got --workers {argv[idx + 1]}. This is only a pre-flight "
+                f"check of argv/env — it can't see a gunicorn config file or "
+                f"uvicorn.run(workers=N), and _acquire_process_lock's flock is the real guard."
             )
     for arg in argv:
         if arg.startswith("--workers=") and arg.removeprefix("--workers=") != "1":
             raise RuntimeError(
                 f"ARGUS must run with --workers 1 (in-process governor/kill-switch "
-                f"singletons); got {arg}"
+                f"singletons); got {arg}. This is only a pre-flight check of argv/env — it "
+                f"can't see a gunicorn config file or uvicorn.run(workers=N), and "
+                f"_acquire_process_lock's flock is the real guard."
             )
 
     web_concurrency = os.environ.get("WEB_CONCURRENCY")
     if web_concurrency is not None and web_concurrency != "1":
         raise RuntimeError(
             f"ARGUS must run with WEB_CONCURRENCY=1 (in-process governor/kill-switch "
-            f"singletons); got WEB_CONCURRENCY={web_concurrency}"
+            f"singletons); got WEB_CONCURRENCY={web_concurrency}. This is only a pre-flight "
+            f"check of argv/env — it can't see a gunicorn config file or "
+            f"uvicorn.run(workers=N), and _acquire_process_lock's flock is the real guard."
         )
 
 
@@ -536,7 +542,9 @@ async def lifespan(app: FastAPI):
         await asyncio.to_thread(_ks.stop, 5.0)
 
     if _mft_pipeline is not None:
-        _mft_pipeline.buffer.close()
+        # Pipeline-owned so it can wait out an orphaned buffer worker rather than
+        # racing it — cancelling the loops above can't stop one already mid-`to_thread` (MFT-16)
+        await _mft_pipeline.close_buffer()
 
     if _process_lock_file is not None:
         fcntl.flock(_process_lock_file, fcntl.LOCK_UN)
@@ -674,7 +682,7 @@ async def health():
 
     newest_cache_entry_age_seconds = None
     if _mft_pipeline is not None and _mft_pipeline.is_market_hours() and _live_session_cache:
-        now = datetime.now()
+        now = datetime.now()  # noqa: DTZ005
         newest_cache_entry_age_seconds = min(
             (now - updated_at).total_seconds() for _, updated_at in _live_session_cache.values()
         )
@@ -715,7 +723,7 @@ async def pipeline_status():
 
     buffer_depth = await asyncio.to_thread(_mft_pipeline.buffer.row_counts)
 
-    now = datetime.now()
+    now = datetime.now()  # noqa: DTZ005
     now_et = datetime.now(_ET)
     cache_age_seconds = {
         ticker: (now - updated_at).total_seconds()
@@ -813,7 +821,7 @@ async def analyze(req: AnalysisRequest):
             "The pipeline is warming up — retry after the next session cycle (~30 min after market open).",
         )
 
-    now = datetime.now()
+    now = datetime.now()  # noqa: DTZ005
     stalled = [
         t for t in req.tickers
         if (now - _live_session_cache[t][1]).total_seconds() > session_state_ttl_seconds()
@@ -943,7 +951,7 @@ async def analyze(req: AnalysisRequest):
         macro_regime=macro_regime,
         vix_level=vix_level,
         governor_report=governor.get_usage_report(),
-        timestamp=datetime.now().isoformat(),
+        timestamp=datetime.now().isoformat(),  # noqa: DTZ005
         errors=final_state.get("errors") or [],
     )
 

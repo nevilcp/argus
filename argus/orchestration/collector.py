@@ -55,7 +55,7 @@ class CollectionResult:
     decisions_logged: int = 0
     macro_regime: str | None = None
     errors: list[str] = field(default_factory=list)
-    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())  # noqa: DTZ005
 
 
 def append_decisions_jsonl(decisions: list[ARGUSDecision], path: str) -> int:
@@ -181,7 +181,8 @@ async def run_collection_cycle(
         logger.info("run_collection_cycle: skipping graph invocation — %s", reason)
         return CollectionResult(ran=False, reason=reason)
 
-    config = {"configurable": {"thread_id": f"collector-{datetime.now().strftime('%Y%m%d%H%M%S')}"}}
+    thread_id = f"collector-{datetime.now().strftime('%Y%m%d%H%M%S')}"  # noqa: DTZ005
+    config = {"configurable": {"thread_id": thread_id}}
 
     logger.info(
         "run_collection_cycle: invoking graph for %d/%d ticker(s) with session data",

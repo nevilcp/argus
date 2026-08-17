@@ -26,6 +26,7 @@ from argus.backtesting.evaluation import (
     check_replay_determinism,
     evaluate_decisions,
     system_behavior_report,
+    trade_level_win_loss_stats,
 )
 from argus.backtesting.replay import replay_session
 from argus.params import RECONCILIATION
@@ -51,6 +52,15 @@ def _print_evaluation(label: str, result: EvaluationResult) -> None:
         print(f"  hit-rate:       {result.hit_rate:.4f} (n={result.hit_rate_n}), 95% CI {ci}")
     else:
         print("  hit-rate:       undefined (every decision fell inside the dead band)")
+
+    trade_stats = trade_level_win_loss_stats(result.pairs)
+    if trade_stats:
+        print(f"  win rate:       {trade_stats['win_rate']:.4f} "
+              f"({trade_stats['total_trades']} decisions)")
+        print(f"  profit factor:  {trade_stats['profit_factor']}")
+        print(f"  avg win/loss:   {trade_stats['avg_win_pct']:+.4f} / "
+              f"{trade_stats['avg_loss_pct']:+.4f} pct, "
+              f"avg holding {trade_stats['avg_holding_days']:.1f}d")
 
 
 def main() -> None:

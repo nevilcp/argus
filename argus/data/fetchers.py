@@ -430,7 +430,7 @@ def fetch_fundamentals(ticker: str) -> dict:
         "industry": info.get("industry"),
         "marketCap": mktcap,
         "p_fcf": p_fcf,
-        "as_of_date": date.today().isoformat(),
+        "as_of_date": date.today().isoformat(),  # noqa: DTZ011
     }
     logger.info(
         "fetch_fundamentals: %s → %d keys populated",
@@ -725,7 +725,7 @@ def fetch_news(
         from newsapi import NewsApiClient  # Lazy import; only loaded when NewsAPI is used
 
         client = NewsApiClient(api_key=settings.newsapi_key)
-        from_date = (datetime.utcnow() - timedelta(days=days_back)).strftime("%Y-%m-%d")
+        from_date = (datetime.now(timezone.utc) - timedelta(days=days_back)).strftime("%Y-%m-%d")
         query = f"{ticker} OR {company_name}"
 
         result = _fetch_news_page(client, query, from_date)
