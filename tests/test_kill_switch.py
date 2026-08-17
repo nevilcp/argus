@@ -589,6 +589,35 @@ def test_paperbook_load_missing_file_starts_fresh_at_total_wealth(tmp_path):
     assert book.runs_applied == set()
 
 
+def test_paperbook_prune_runs_applied_drops_only_entries_older_than_cutoff():
+    """COL-1: entries before cutoff are dropped; entries at or after it survive."""
+    book = PaperBook(
+        equity=100_000.0,
+        high_water_mark=100_000.0,
+        runs_applied={
+            "2026-01-01T00:00:00",
+            "2026-01-10T00:00:00",
+            "2026-01-20T00:00:00",
+        },
+    )
+
+    dropped = book.prune_runs_applied(cutoff=datetime(2026, 1, 10))
+
+    assert dropped == 1
+    assert book.runs_applied == {"2026-01-10T00:00:00", "2026-01-20T00:00:00"}
+
+
+def test_paperbook_prune_runs_applied_leaves_equity_and_hwm_untouched():
+    """Pruning runs_applied is bookkeeping only — it must not touch the equity curve itself."""
+    book = PaperBook(equity=88_000.0, high_water_mark=100_000.0)
+    book.apply_run(datetime(2026, 1, 1), -0.12)
+
+    book.prune_runs_applied(cutoff=datetime(2026, 2, 1))
+
+    assert book.equity == pytest.approx(88_000.0 * 0.88)
+    assert book.runs_applied == set()
+
+
 # ---------------------------------------------------------------------------
 # Lifecycle: stop() and idempotent start() (KS-10)
 # ---------------------------------------------------------------------------

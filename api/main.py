@@ -20,7 +20,9 @@ Responsibilities:
     session state cache consumed by /analyze
   - Optionally run the unattended collector and daily reconciliation loops
     (ARGUS_COLLECTOR_ENABLED / ARGUS_RECONCILE_ENABLED) so the system keeps
-    accumulating decisions and outcomes without a human calling /analyze
+    accumulating decisions and outcomes without a human calling /analyze,
+    pruning every store the reconcile loop touches back to a bounded window
+    (PR 6) as part of the same daily pass
   - Serialize graph invocations across /analyze and the collector loop, and
     guard against a second process sharing this one's data directory
 
@@ -60,7 +62,12 @@ from argus.orchestration.collector import (
 )
 from argus.orchestration.governor import REGISTERED_MODELS, RateLimitExceeded, UnregisteredModel, governor
 from argus.orchestration.graph import build_graph
-from argus.orchestration.reconciliation import load_decisions_from_jsonl, reconcile_decisions
+from argus.orchestration.reconciliation import (
+    compact_decisions_jsonl,
+    load_decisions_from_jsonl,
+    prune_checkpoints,
+    reconcile_decisions,
+)
 from argus.orchestration.state import ARGUSState
 from argus.params import RECONCILIATION, SYSTEM
 from argus.risk import paper_book
@@ -196,8 +203,43 @@ async def _collector_loop(pipeline: MFTDataPipeline, compiled_graph) -> None:
         await asyncio.sleep(settings.ARGUS_COLLECTOR_INTERVAL_SECONDS)
 
 
+def _prune_growing_stores(decisions_log: str) -> None:
+    """Bounds the decision/checkpoint/PENDING-snapshot stores, all on one horizon-plus-margin cutoff (PR 6).
+
+    Runs after reconcile_decisions has already had its chance at every session
+    up to the same cutoff, so nothing pruned here was still reconcilable.
+    Failures are logged and swallowed independently per store — a checkpoint
+    DB VACUUM failing must not skip compacting decisions.jsonl, or vice versa.
+
+    Args:
+        decisions_log: Same decisions.jsonl path the caller just reconciled.
+    """
+    cutoff = datetime.now() - timedelta(
+        days=RECONCILIATION.horizon_days + RECONCILIATION.retention_margin_days
+    )
+
+    try:
+        kept = compact_decisions_jsonl(decisions_log, cutoff)
+        logger.info("[Reconcile] compacted decisions.jsonl to %d retained decision(s)", kept)
+    except Exception:
+        logger.exception("[Reconcile] decisions.jsonl compaction failed")
+
+    try:
+        checkpoint_db = f"{settings.ARGUS_DATA_DIR}/argus_graph.db"
+        pruned = prune_checkpoints(checkpoint_db, cutoff)
+        logger.info("[Reconcile] pruned %d stale checkpoint thread(s)", pruned)
+    except Exception:
+        logger.exception("[Reconcile] checkpoint pruning failed")
+
+    try:
+        expired = get_cultural_memory().expire_pending_snapshots(cutoff)
+        logger.info("[Reconcile] expired %d stale PENDING snapshot(s)", expired)
+    except Exception:
+        logger.exception("[Reconcile] PENDING snapshot expiry failed")
+
+
 def _reconcile_once() -> None:
-    """Runs one reconciliation pass: outcome backfill, paper-book update, kill-switch sync.
+    """Runs one reconciliation pass: outcome backfill, paper-book update, kill-switch sync, store pruning.
 
     Synchronous by design — `_reconcile_loop` runs this via `asyncio.to_thread`
     since it performs per-ticker yfinance fetches directly, which would
@@ -221,6 +263,10 @@ def _reconcile_once() -> None:
             decisions, market_data, RECONCILIATION.horizon_days
         ):
             book.apply_run(run_timestamp, run_return)
+        book.prune_runs_applied(
+            datetime.now()
+            - timedelta(days=RECONCILIATION.horizon_days + RECONCILIATION.retention_margin_days)
+        )
         paper_book.save(book, book_path)
 
         ks = get_kill_switch()
@@ -233,6 +279,8 @@ def _reconcile_once() -> None:
         )
     except Exception:
         logger.exception("[Reconcile] paper-book update failed")
+
+    _prune_growing_stores(decisions_log)
 
 
 async def _reconcile_loop() -> None:

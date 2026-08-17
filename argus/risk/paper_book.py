@@ -19,8 +19,8 @@ Responsibilities:
     weight-average each non-overlapping run's matured outcomes into one
     compounding return
   - PaperBook: equity/high-water-mark/applied-runs state, with idempotent
-    run application and manual rebasing (see rebase(), used by
-    KillSwitch.reset())
+    run application, manual rebasing (see rebase(), used by
+    KillSwitch.reset()), and bounded runs_applied retention (prune_runs_applied)
   - load / save: JSON round trip at a caller-supplied path
 
 Not responsible for:
@@ -179,6 +179,30 @@ class PaperBook:
         self.equity = new_inception_value
         self.high_water_mark = new_inception_value
         self.rebased_at = rebased_at or datetime.now()
+
+    def prune_runs_applied(self, cutoff: datetime) -> int:
+        """Drops runs_applied entries older than cutoff, so the set doesn't grow forever (COL-1).
+
+        Safe to prune independently of equity/high_water_mark: runs_applied
+        exists only to make apply_run idempotent against re-processing a run
+        compute_run_returns has already returned once, and a run this old will
+        never be recomputed again — decisions that far back have either
+        already been compacted out of decisions.jsonl or fall outside every
+        horizon window compute_run_returns groups by.
+
+        Args:
+            cutoff: Runs applied before this timestamp are dropped from
+                tracking. Should be tz-naive, matching the naive
+                session_timestamps runs_applied entries are derived from.
+
+        Returns:
+            Count of entries dropped.
+        """
+        before = len(self.runs_applied)
+        self.runs_applied = {
+            key for key in self.runs_applied if datetime.fromisoformat(key) >= cutoff
+        }
+        return before - len(self.runs_applied)
 
 
 def load(path: str) -> PaperBook:

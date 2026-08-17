@@ -100,11 +100,17 @@ def _strip_volatile(obj):
     return obj
 
 
-def _run_fixture_graph() -> dict:
+def _run_fixture_graph(tmp_path: Path) -> dict:
     """Invoke the fixture-backed DAG once, with cultural memory mocked out.
 
     The governor needs no patch: every LLM call here is fixture-backed, and
     FixtureLLMClient never reaches it (only GroqLLMClient does).
+
+    Args:
+        tmp_path: Per-test checkpoint directory (X-5) — keeps this run's
+            checkpoints out of the real argus_graph.db, not just the fixture
+            autouse `_isolated_data_dir` build_graph()'s default would also
+            resolve against.
 
     Returns:
         The final ARGUSState dict produced by the graph.
@@ -114,6 +120,7 @@ def _run_fixture_graph() -> dict:
         fundamental_llm=_per_ticker_llm("fundamental.json"),
         sentiment_llm=_per_ticker_llm("sentiment.json"),
         portfolio_llm=_portfolio_llm(),
+        checkpoint_db_path=str(tmp_path / "argus_graph_test.db"),
     )
     config = {"configurable": {"thread_id": str(uuid4())}}
 
@@ -142,7 +149,7 @@ class _NoneMacroMarketData(FixtureMarketDataProvider):
         return {"vix": None, "fed_funds": None, "t10y2y": None}
 
 
-def test_macro_context_none_still_produces_a_degraded_allocation():
+def test_macro_context_none_still_produces_a_degraded_allocation(tmp_path):
     """A None macro_context must not gate the three specialists or the allocator.
 
     Regression test for X1: no specialist agent consumes MacroContext, so a FRED
@@ -155,6 +162,7 @@ def test_macro_context_none_still_produces_a_degraded_allocation():
         fundamental_llm=_per_ticker_llm("fundamental.json"),
         sentiment_llm=_per_ticker_llm("sentiment.json"),
         portfolio_llm=_portfolio_llm(),
+        checkpoint_db_path=str(tmp_path / "argus_graph_test.db"),
     )
     config = {"configurable": {"thread_id": str(uuid4())}}
 
@@ -212,7 +220,7 @@ class _SpyCountingMarketData(FixtureMarketDataProvider):
         return result
 
 
-def test_spy_fetched_once_per_graph_run_not_once_per_risk_call():
+def test_spy_fetched_once_per_graph_run_not_once_per_risk_call(tmp_path):
     """RE-5 regression: SPY rides along with node_fetch_price_history's universe fetch.
 
     Before the fix, node_fetch_price_history never carried SPY in price_history, so
@@ -226,6 +234,7 @@ def test_spy_fetched_once_per_graph_run_not_once_per_risk_call():
         fundamental_llm=_per_ticker_llm("fundamental.json"),
         sentiment_llm=_per_ticker_llm("sentiment.json"),
         portfolio_llm=_portfolio_llm(),
+        checkpoint_db_path=str(tmp_path / "argus_graph_test.db"),
     )
     config = {"configurable": {"thread_id": str(uuid4())}}
 
@@ -254,7 +263,7 @@ class _CountingVixMarketData(_NoneMacroMarketData):
         return super().vix()
 
 
-def test_macro_context_none_still_reaches_a_real_vix_reading():
+def test_macro_context_none_still_reaches_a_real_vix_reading(tmp_path):
     """RE-6 regression: a FRED outage must not silently default the blackout gate to 20.0.
 
     _NoneMacroMarketData forces macro_bundle() (hence macro_context) to None but leaves
@@ -268,6 +277,7 @@ def test_macro_context_none_still_reaches_a_real_vix_reading():
         fundamental_llm=_per_ticker_llm("fundamental.json"),
         sentiment_llm=_per_ticker_llm("sentiment.json"),
         portfolio_llm=_portfolio_llm(),
+        checkpoint_db_path=str(tmp_path / "argus_graph_test.db"),
     )
     config = {"configurable": {"thread_id": str(uuid4())}}
 
@@ -284,9 +294,9 @@ def test_macro_context_none_still_reaches_a_real_vix_reading():
     assert provider.vix_calls == 1
 
 
-def test_golden_dag_runs_offline_and_produces_a_valid_allocation():
+def test_golden_dag_runs_offline_and_produces_a_valid_allocation(tmp_path):
     """The fixture-backed DAG runs end to end with zero network/LLM/torch dependencies."""
-    final_state = _run_fixture_graph()
+    final_state = _run_fixture_graph(tmp_path)
 
     assert final_state.get("macro_context") is not None
     assert final_state.get("technical_signals")
@@ -314,7 +324,7 @@ def test_golden_dag_runs_offline_and_produces_a_valid_allocation():
             assert pos.allocation_pct == 0.0
 
 
-def test_missing_indicator_is_reported_in_errors_not_silently_dropped():
+def test_missing_indicator_is_reported_in_errors_not_silently_dropped(tmp_path):
     """A ticker missing a required indicator is excluded from technical_signals
 
     and named in state["errors"], rather than vanishing with no trace.
@@ -331,6 +341,7 @@ def test_missing_indicator_is_reported_in_errors_not_silently_dropped():
         fundamental_llm=_per_ticker_llm("fundamental.json"),
         sentiment_llm=_per_ticker_llm("sentiment.json"),
         portfolio_llm=_portfolio_llm(),
+        checkpoint_db_path=str(tmp_path / "argus_graph_test.db"),
     )
     config = {"configurable": {"thread_id": str(uuid4())}}
 
@@ -347,7 +358,7 @@ def test_missing_indicator_is_reported_in_errors_not_silently_dropped():
     assert any("NVDA" in e for e in final_state["errors"])
 
 
-def test_missing_indicator_still_reaches_aggregation_with_evidence_surfaced():
+def test_missing_indicator_still_reaches_aggregation_with_evidence_surfaced(tmp_path):
     """A ticker missing one specialist still reaches aggregated_signals
 
     with the gap named in agents_present, and the allocator's prompt shows
@@ -377,6 +388,7 @@ def test_missing_indicator_still_reaches_aggregation_with_evidence_surfaced():
         fundamental_llm=_per_ticker_llm("fundamental.json"),
         sentiment_llm=_per_ticker_llm("sentiment.json"),
         portfolio_llm=portfolio_llm,
+        checkpoint_db_path=str(tmp_path / "argus_graph_test.db"),
     )
     config = {"configurable": {"thread_id": str(uuid4())}}
 
@@ -397,7 +409,7 @@ def test_missing_indicator_still_reaches_aggregation_with_evidence_surfaced():
     assert "Evidence=2/3" in captured_prompts[0]
 
 
-def test_cultural_memory_import_error_degrades_instead_of_crashing_the_run():
+def test_cultural_memory_import_error_degrades_instead_of_crashing_the_run(tmp_path):
     """A missing sentence-transformers/torch [models] extra must not abort the session.
 
     Regression test for C1: get_cultural_memory() raising ImportError must degrade
@@ -409,6 +421,7 @@ def test_cultural_memory_import_error_degrades_instead_of_crashing_the_run():
         fundamental_llm=_per_ticker_llm("fundamental.json"),
         sentiment_llm=_per_ticker_llm("sentiment.json"),
         portfolio_llm=_portfolio_llm(),
+        checkpoint_db_path=str(tmp_path / "argus_graph_test.db"),
     )
     config = {"configurable": {"thread_id": str(uuid4())}}
 
@@ -428,10 +441,10 @@ def test_cultural_memory_import_error_degrades_instead_of_crashing_the_run():
     assert all(agg.model_healthy is False for agg in aggs.values())
 
 
-def test_golden_dag_output_is_stable_across_runs():
+def test_golden_dag_output_is_stable_across_runs(tmp_path):
     """Two independent invocations of the same fixture-backed graph are byte-identical."""
-    first = _run_fixture_graph()
-    second = _run_fixture_graph()
+    first = _run_fixture_graph(tmp_path)
+    second = _run_fixture_graph(tmp_path)
 
     first_alloc = _strip_volatile(first["portfolio_allocation"].model_dump(mode="json"))
     second_alloc = _strip_volatile(second["portfolio_allocation"].model_dump(mode="json"))

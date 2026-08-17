@@ -203,7 +203,7 @@ def build_graph(
     fundamental_llm: Optional[LLMClient] = None,
     sentiment_llm: Optional[LLMClient] = None,
     portfolio_llm: Optional[LLMClient] = None,
-    checkpoint_db_path: str = "argus_graph.db",
+    checkpoint_db_path: Optional[str] = None,
 ):
     """Constructs and compiles the ARGUS decision graph.
 
@@ -220,14 +220,19 @@ def build_graph(
         checkpoint_db_path: SQLite file each invocation checkpoints ARGUSState
             to. Exposed (rather than hardcoded) so tests — and
             argus/orchestration/reconciliation.py's own tests — can point it
-            at a temp file instead of the real argus_graph.db production
-            callers use.
+            at a temp file instead of the real store production callers use.
+            None (default) resolves to ``<ARGUS_DATA_DIR>/argus_graph.db`` at
+            call time (X-5), so tests/conftest.py's per-test ARGUS_DATA_DIR
+            override also isolates a call site that omits this argument.
 
     Returns:
         A _CheckpointedGraph, ready for .invoke(). Recompiles with a fresh
         checkpointer connection on every call rather than baking one
         connection into a single compiled graph — see _CheckpointedGraph.
     """
+    if checkpoint_db_path is None:
+        checkpoint_db_path = str(Path(settings.ARGUS_DATA_DIR) / "argus_graph.db")
+
     market_data = market_data or LiveMarketDataProvider()
 
     macro_agent = MacroStatisticalAgent(market_data=market_data)

@@ -19,6 +19,8 @@ Responsibilities:
     argus_graph.db
   - load_decisions_from_jsonl: read ARGUSDecision objects back out of a
     decisions.jsonl log (the unattended collector's lighter-weight alternative)
+  - prune_checkpoints / compact_decisions_jsonl: bound the two decision
+    stores above so neither grows forever (PR 6)
 
 Not responsible for:
   - Deciding what a "good" outcome is, or evaluation metrics (see PR 10 /
@@ -413,3 +415,109 @@ def load_decisions_from_jsonl(path: str) -> list[ARGUSDecision]:
                     exc,
                 )
     return decisions
+
+
+def compact_decisions_jsonl(path: str, cutoff: datetime) -> int:
+    """Rewrites a decisions.jsonl log, dropping sessions older than cutoff (COL-1).
+
+    Meant to run right after a reconcile_decisions() pass over the same log
+    (see api/main.py's _reconcile_once and scripts/reconcile_outcomes.py) with
+    a cutoff at or before that pass's horizon: a decision that old has already
+    had its one chance at reconciliation, so dropping it here only stops the
+    log growing forever, it does not cost a delayed reconcile pass anything.
+
+    Args:
+        path: decisions.jsonl path.
+        cutoff: Decisions with session_timestamp before this are dropped. Should
+            be tz-naive, matching the naive timestamps this log stores.
+
+    Returns:
+        Count of decisions retained. 0 (and no file written) if the file
+        doesn't exist yet.
+    """
+    file_path = Path(path)
+    if not file_path.exists():
+        return 0
+
+    decisions = load_decisions_from_jsonl(path)
+    cutoff_naive = _as_naive_timestamp(cutoff)
+    kept = [d for d in decisions if _as_naive_timestamp(d.session_timestamp) >= cutoff_naive]
+    if len(kept) == len(decisions):
+        return len(kept)
+
+    tmp_path = file_path.with_suffix(file_path.suffix + ".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        for decision in kept:
+            f.write(decision.model_dump_json() + "\n")
+    tmp_path.replace(file_path)
+
+    logger.info(
+        "compact_decisions_jsonl: kept %d/%d decision(s) in %s (cutoff=%s)",
+        len(kept),
+        len(decisions),
+        path,
+        cutoff_naive.isoformat(),
+    )
+    return len(kept)
+
+
+def prune_checkpoints(db_path: str, cutoff: datetime) -> int:
+    """Deletes every checkpoint thread whose most recent checkpoint predates cutoff, then VACUUMs (RE-13).
+
+    Each build_graph() invocation checkpoints under a fresh, never-reused
+    thread_id (see build_graph()'s callers) and nothing resumes a thread by
+    id, so a thread's checkpoints exist only as load_decisions_from_checkpoints'
+    read path — a fallback now that RE-11 makes decisions.jsonl the durable
+    record both /analyze and the collector write to. Retention, not removal:
+    the checkpoint DB stays available as that fallback for anything within the
+    reconciliation window, it just no longer grows without bound.
+
+    Args:
+        db_path: Path to the SQLite file build_graph() checkpoints to.
+        cutoff: Threads whose newest checkpoint timestamp is before this are
+            deleted. Should be tz-naive, matching the naive timestamps
+            LangGraph checkpoint metadata is compared against here.
+
+    Returns:
+        Count of threads deleted. 0 if the database doesn't exist yet.
+    """
+    if not Path(db_path).exists():
+        return 0
+
+    cutoff_naive = _as_naive_timestamp(cutoff)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    try:
+        saver = SqliteSaver(conn, serde=build_checkpoint_serde())
+        seen_threads: set[str] = set()
+        stale_threads: list[str] = []
+        for tup in saver.list(None):
+            thread_id = tup.config["configurable"]["thread_id"]
+            if thread_id in seen_threads:
+                continue
+            seen_threads.add(thread_id)
+            ts_raw = tup.checkpoint.get("ts")
+            if ts_raw is None:
+                continue
+            if _as_naive_timestamp(datetime.fromisoformat(ts_raw)) < cutoff_naive:
+                stale_threads.append(thread_id)
+
+        if not stale_threads:
+            return 0
+
+        cur = conn.cursor()
+        cur.executemany(
+            "DELETE FROM checkpoints WHERE thread_id = ?", [(t,) for t in stale_threads]
+        )
+        cur.executemany("DELETE FROM writes WHERE thread_id = ?", [(t,) for t in stale_threads])
+        conn.commit()
+        conn.execute("VACUUM")
+    finally:
+        conn.close()
+
+    logger.info(
+        "prune_checkpoints: deleted %d thread(s) from %s (cutoff=%s)",
+        len(stale_threads),
+        db_path,
+        cutoff_naive.isoformat(),
+    )
+    return len(stale_threads)
