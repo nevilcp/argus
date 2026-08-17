@@ -80,8 +80,13 @@ def test_analyze_rejects_malformed_ticker_with_422(client, ticker):
 
 
 def test_analyze_accepts_share_class_tickers(client, monkeypatch):
-    """Dotted and hyphenated share-class symbols pass validation and reach the pipeline."""
-    fake_pipeline = _pipeline(monkeypatch, market_hours=False)
+    """Dotted and hyphenated share-class symbols pass validation and reach the pipeline.
+
+    Market is open here (rather than closed) because register_tickers now only
+    runs once the market-hours gate clears (API-12) — a rejected request must
+    not mutate pipeline state.
+    """
+    fake_pipeline = _pipeline(monkeypatch, market_hours=True)
     response = client.post(
         "/analyze",
         json={"tickers": ["BRK.B", "BRK-B"], "total_wealth": 100_000, "invest_pct": 0.5},
@@ -92,7 +97,7 @@ def test_analyze_accepts_share_class_tickers(client, monkeypatch):
 
 def test_analyze_upcases_and_dedupes_tickers(client, monkeypatch):
     """Lowercase, whitespace-padded, and repeated tickers collapse to one upper-cased entry each."""
-    fake_pipeline = _pipeline(monkeypatch, market_hours=False)
+    fake_pipeline = _pipeline(monkeypatch, market_hours=True)
     response = client.post(
         "/analyze",
         json={"tickers": [" aapl ", "AAPL", "msft"], "total_wealth": 100_000, "invest_pct": 0.5},

@@ -122,6 +122,25 @@ async def _mft_session_callback(session_states: dict) -> None:
     logger.info("[MFT] Live session cache updated: %d ticker(s)", len(_live_session_cache))
 
 
+def _bar_age_seconds(state: dict, now_et: datetime) -> Optional[float]:
+    """Computes a session state's bar age in seconds, failing closed on a bad timestamp (API-11).
+
+    A missing, malformed, or naive ``timestamp`` must not raise out of
+    /analyze or /pipeline/status — it's treated as staleness instead.
+
+    Args:
+        state: A compressed technical feature dict from the live cache.
+        now_et: Current time, ET-aware, to measure age against.
+
+    Returns:
+        Age in seconds, or None if ``timestamp`` can't be parsed against `now_et`.
+    """
+    try:
+        return (now_et - datetime.fromisoformat(state["timestamp"])).total_seconds()
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def _log_task_exception(task: asyncio.Task, name: str) -> None:
     """Logs a background task's exception instead of letting it vanish silently.
 
@@ -632,8 +651,7 @@ async def pipeline_status():
         for ticker, (_, updated_at) in _live_session_cache.items()
     }
     bar_age_seconds = {
-        ticker: (now_et - datetime.fromisoformat(state["timestamp"])).total_seconds()
-        for ticker, (state, _) in _live_session_cache.items()
+        ticker: _bar_age_seconds(state, now_et) for ticker, (state, _) in _live_session_cache.items()
     }
 
     return {
@@ -700,9 +718,6 @@ async def analyze(req: AnalysisRequest):
             ks.risk_tolerance,
         )
 
-    if _mft_pipeline is not None:
-        _mft_pipeline.register_tickers(req.tickers)
-
     # Daily bars would mismatch the resolution the technical agent expects, so a
     # closed market (checked first) means idle rather than a lower-resolution
     # fallback. Checking it first also confines every age check below to a
@@ -713,6 +728,11 @@ async def analyze(req: AnalysisRequest):
             "US equity market is currently closed. MFT pipeline is idle. "
             "Retry between 09:30 and 16:00 ET on a weekday.",
         )
+
+    # Registered only once every earlier gate has cleared (API-12) — a
+    # rejected request must not mutate pipeline state or spend a slot in the
+    # tracked-universe cap
+    _mft_pipeline.register_tickers(req.tickers)
 
     absent = [t for t in req.tickers if t not in _live_session_cache]
     if absent:
@@ -735,13 +755,13 @@ async def analyze(req: AnalysisRequest):
         )
 
     # Catches what a write-time TTL can't: a restart that republishes old candles
-    # under a fresh write timestamp (MFT-1)
+    # under a fresh write timestamp (MFT-1). A timestamp that fails to parse
+    # fails closed as stale rather than raising (API-11).
     now_et = datetime.now(_ET)
     max_bar_age = max_bar_age_seconds(_mft_pipeline.interval_minutes)
     stale = [
         t for t in req.tickers
-        if (now_et - datetime.fromisoformat(_live_session_cache[t][0]["timestamp"])).total_seconds()
-        > max_bar_age
+        if (age := _bar_age_seconds(_live_session_cache[t][0], now_et)) is None or age > max_bar_age
     ]
     if stale:
         raise HTTPException(
