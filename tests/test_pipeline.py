@@ -21,6 +21,8 @@ from argus.config import settings
 from argus.data.cache import OHLCVBuffer
 from argus.data.pipeline import (
     _FETCH_INTERVAL,
+    _FETCH_PERIOD,
+    _STEADY_STATE_FETCH_PERIOD,
     MFTDataPipeline,
     _bars_per_day,
     _derive_buffer_size,
@@ -679,3 +681,39 @@ def test_fetch_and_insert_returns_zero_on_an_empty_fetch(monkeypatch):
     n_candles, latest_close = pipeline._fetch_and_insert("AAPL")
 
     assert (n_candles, latest_close) == (0, 0.0)
+
+
+def test_fetch_and_insert_uses_the_full_period_for_a_cold_buffer(monkeypatch):
+    """A ticker with no buffered rows yet gets the full `_FETCH_PERIOD` fetch (MFT-15)."""
+    pipeline = MFTDataPipeline([], interval="1m")
+    captured = {}
+
+    def fake_fetch(ticker, interval, period):
+        captured["period"] = period
+        return et_intraday_candles(5)
+
+    monkeypatch.setattr(pipeline_module, "fetch_ohlcv_intraday", fake_fetch)
+    monkeypatch.setattr(pipeline.buffer, "row_counts", lambda: {})
+
+    pipeline._fetch_and_insert("AAPL")
+
+    assert captured["period"] == _FETCH_PERIOD
+
+
+def test_fetch_and_insert_uses_the_steady_state_period_for_a_warm_buffer(monkeypatch):
+    """A ticker already holding an indicator-ready depth gets the short trailing fetch (MFT-15)."""
+    pipeline = MFTDataPipeline([], interval="1m")
+    captured = {}
+
+    def fake_fetch(ticker, interval, period):
+        captured["period"] = period
+        return et_intraday_candles(5)
+
+    monkeypatch.setattr(pipeline_module, "fetch_ohlcv_intraday", fake_fetch)
+    monkeypatch.setattr(
+        pipeline.buffer, "row_counts", lambda: {"AAPL": _required_raw_bars(1)}
+    )
+
+    pipeline._fetch_and_insert("AAPL")
+
+    assert captured["period"] == _STEADY_STATE_FETCH_PERIOD

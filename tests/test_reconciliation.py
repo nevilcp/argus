@@ -6,20 +6,25 @@ assignment, entry/exit price outcome computation, and reading decisions back
 out of the LangGraph checkpoint.
 """
 
-from datetime import datetime
+import sqlite3
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
 import pandas as pd
 import pytest
+from langgraph.checkpoint.sqlite import SqliteSaver
 
 from argus.memory.cultural import CulturalMemoryManager
 from argus.orchestration.aggregator import HybridSignalAggregator
-from argus.orchestration.graph import build_graph
+from argus.orchestration.graph import build_checkpoint_serde, build_graph
 from argus.orchestration.reconciliation import (
+    compact_decisions_jsonl,
     compute_realized_return,
     credit_primary_driver,
     load_decisions_from_checkpoints,
+    load_decisions_from_jsonl,
+    prune_checkpoints,
     reconcile_decision,
     reconcile_decisions,
 )
@@ -611,3 +616,101 @@ def test_load_decisions_from_checkpoints_round_trips_a_real_graph_run(tmp_path):
     assert decisions, "expected at least one decision to round-trip"
     assert all(isinstance(d, ARGUSDecision) for d in decisions)
     assert {d.ticker for d in decisions} <= set(universe)
+
+
+# ---------------------------------------------------------------------------
+# compact_decisions_jsonl (COL-1)
+# ---------------------------------------------------------------------------
+
+
+def test_compact_decisions_jsonl_drops_sessions_before_cutoff(tmp_path):
+    """Decisions older than cutoff are dropped; everything at or after it is kept."""
+    path = tmp_path / "decisions.jsonl"
+    old = ARGUSDecision(ticker="OLD", session_timestamp=datetime(2026, 1, 1))
+    kept_exact = ARGUSDecision(ticker="EXACT", session_timestamp=datetime(2026, 1, 10))
+    new = ARGUSDecision(ticker="NEW", session_timestamp=datetime(2026, 1, 20))
+    with open(path, "w", encoding="utf-8") as f:
+        for d in (old, kept_exact, new):
+            f.write(d.model_dump_json() + "\n")
+
+    retained = compact_decisions_jsonl(str(path), cutoff=datetime(2026, 1, 10))
+
+    assert retained == 2
+    tickers = {d.ticker for d in load_decisions_from_jsonl(str(path))}
+    assert tickers == {"EXACT", "NEW"}
+
+
+def test_compact_decisions_jsonl_missing_file_is_a_noop():
+    """A path that doesn't exist yet returns 0 and writes nothing."""
+    assert compact_decisions_jsonl("/nonexistent/decisions.jsonl", cutoff=datetime(2026, 1, 1)) == 0
+
+
+def test_compact_decisions_jsonl_nothing_to_drop_leaves_the_file_untouched(tmp_path):
+    """When every decision is at or after cutoff, the file is not rewritten."""
+    path = tmp_path / "decisions.jsonl"
+    decision = ARGUSDecision(ticker="NEW", session_timestamp=datetime(2026, 1, 20))
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(decision.model_dump_json() + "\n")
+    original_mtime = path.stat().st_mtime_ns
+
+    retained = compact_decisions_jsonl(str(path), cutoff=datetime(2026, 1, 1))
+
+    assert retained == 1
+    assert path.stat().st_mtime_ns == original_mtime
+
+
+# ---------------------------------------------------------------------------
+# prune_checkpoints (RE-13)
+# ---------------------------------------------------------------------------
+
+
+def _put_checkpoint(saver: SqliteSaver, thread_id: str, ts: datetime) -> None:
+    """Writes a minimal checkpoint for `thread_id` stamped with `ts`."""
+    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    checkpoint = {
+        "v": 1,
+        "ts": ts.isoformat(),
+        "id": thread_id,
+        "channel_values": {},
+        "channel_versions": {},
+        "versions_seen": {},
+    }
+    saver.put(config, checkpoint, {"source": "input", "step": 1, "writes": {}}, {})
+
+
+def test_prune_checkpoints_deletes_only_threads_older_than_cutoff(tmp_path):
+    """A thread whose newest checkpoint predates cutoff is deleted; a newer one survives."""
+    db_path = str(tmp_path / "argus_graph.db")
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    saver = SqliteSaver(conn, serde=build_checkpoint_serde())
+    _put_checkpoint(saver, "stale-thread", datetime(2026, 1, 1))
+    _put_checkpoint(saver, "fresh-thread", datetime(2026, 1, 20))
+    conn.close()
+
+    deleted = prune_checkpoints(db_path, cutoff=datetime(2026, 1, 10))
+
+    assert deleted == 1
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    checkpoint_threads = {
+        row[0] for row in conn.execute("SELECT DISTINCT thread_id FROM checkpoints").fetchall()
+    }
+    conn.close()
+    assert checkpoint_threads == {"fresh-thread"}
+
+
+def test_prune_checkpoints_missing_db_is_a_noop():
+    """A checkpoint database that doesn't exist yet returns 0 rather than raising."""
+    assert prune_checkpoints("/nonexistent/argus_graph.db", cutoff=datetime(2026, 1, 1)) == 0
+
+
+def test_prune_checkpoints_nothing_stale_deletes_nothing(tmp_path):
+    """Every thread newer than cutoff survives untouched."""
+    db_path = str(tmp_path / "argus_graph.db")
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    saver = SqliteSaver(conn, serde=build_checkpoint_serde())
+    _put_checkpoint(saver, "fresh-thread", datetime.now())
+    conn.close()
+
+    deleted = prune_checkpoints(db_path, cutoff=datetime.now() - timedelta(days=30))
+
+    assert deleted == 0
