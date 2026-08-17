@@ -455,7 +455,7 @@ class PortfolioManagerAgent:
 
                 data["session_id"] = str(uuid4())
                 data["user_investable_capital"] = investable
-                data["timestamp"] = datetime.now().isoformat()
+                data["timestamp"] = datetime.now().isoformat()  # noqa: DTZ005
 
                 stage = "schema_validation"
                 allocation = PortfolioAllocation.model_validate(data)
@@ -500,5 +500,5 @@ class PortfolioManagerAgent:
             portfolio=[],
             cash_reserve_pct=1.0,
             rebalance_trigger="MONTHLY",
-            timestamp=datetime.now(),
+            timestamp=datetime.now(),  # noqa: DTZ005
         )
