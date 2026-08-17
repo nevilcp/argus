@@ -193,6 +193,30 @@ def test_newsapi_budget_resets_on_new_day():
     assert budget.try_reserve() is True
 
 
+def test_newsapi_budget_survives_a_fresh_process(monkeypatch):
+    """A second _NewsApiBudget instance under the same ARGUS_DATA_DIR resumes today's
+    count instead of restarting at zero — the Actions collector's cold-start case (GOV-14)."""
+    first = fetchers._NewsApiBudget(daily_limit=2)
+    assert first.try_reserve() is True
+
+    second = fetchers._NewsApiBudget(daily_limit=2)
+    assert second.try_reserve() is True
+    assert second.try_reserve() is False
+
+
+def test_newsapi_budget_ignores_a_stale_persisted_date(monkeypatch):
+    """A persisted count from a prior UTC day is not carried into a new process's day."""
+    stale = fetchers._NewsApiBudget(daily_limit=2)
+    assert stale.try_reserve() is True
+    stale._date = stale._date - timedelta(days=1)
+    stale._save_to_disk()
+
+    fresh = fetchers._NewsApiBudget(daily_limit=2)
+    assert fresh.try_reserve() is True
+    assert fresh.try_reserve() is True
+    assert fresh.try_reserve() is False
+
+
 def test_fetch_news_returns_none_without_api_key(monkeypatch):
     """No NEWSAPI_KEY means no request is even attempted."""
     monkeypatch.setattr(fetchers.settings, "newsapi_key", "")

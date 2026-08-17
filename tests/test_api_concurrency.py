@@ -18,6 +18,7 @@ lifespan, so no MFT pipeline, collector, or reconcile loop needs to start.
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
@@ -105,6 +106,27 @@ def test_analyze_releases_the_semaphore_when_the_graph_raises(client, monkeypatc
     response = client.post("/analyze", json=_PAYLOAD)
 
     assert response.status_code == 500
+    assert not api_main._analyze_semaphore.locked()
+
+
+# ---------------------------------------------------------------------------
+# GOV-12: request deadline
+# ---------------------------------------------------------------------------
+
+
+def test_analyze_returns_504_when_the_graph_exceeds_its_deadline(client, monkeypatch):
+    """A graph run that outlives ARGUS_ANALYZE_DEADLINE_SECONDS is bounded with a
+    504, not left open past whatever timeout the caller's own proxy already gave up at."""
+    _ready(client, monkeypatch)
+    monkeypatch.setattr(api_main.settings, "ARGUS_ANALYZE_DEADLINE_SECONDS", 0.05)
+
+    fake_graph = mock.Mock()
+    fake_graph.invoke.side_effect = lambda *a, **kw: time.sleep(0.5)
+    monkeypatch.setattr(api_main, "_graph", fake_graph)
+
+    response = client.post("/analyze", json=_PAYLOAD)
+
+    assert response.status_code == 504
     assert not api_main._analyze_semaphore.locked()
 
 

@@ -11,9 +11,11 @@ name: Unattended collector
 
 on:
   schedule:
-    # Every hour, 13:05-21:05 UTC covers 09:00-17:00 ET across both EST and
-    # EDT — wide enough that DST transitions don't need a second cron line
-    - cron: "5 13-21 * * 1-5"
+    # Every 2 hours, 13:05-21:05 UTC covers 09:00-17:00 ET across both EST
+    # and EDT — 5 ticks/weekday (GOV-14), matching NewsAPI's free-tier
+    # 100 request/day budget at 20 requests per 20-ticker sweep (see
+    # README.md's stated 5-run/day ceiling)
+    - cron: "5 13-21/2 * * 1-5"
   workflow_dispatch:
 
 concurrency:
@@ -40,6 +42,7 @@ jobs:
           mkdir -p data chroma_db
           [ -d state/chroma_db ] && cp -r state/chroma_db/. ./chroma_db/ || echo "no prior chroma_db"
           [ -f state/decisions.jsonl ] && cp state/decisions.jsonl data/decisions.jsonl || echo "no prior decisions.jsonl"
+          [ -f state/newsapi_budget.json ] && cp state/newsapi_budget.json data/newsapi_budget.json || echo "no prior newsapi_budget.json"
           # World-writable so the image's non-root `argus` user (uid 1000) can
           # write here regardless of the runner's own uid
           chmod -R a+rwX data chroma_db
@@ -73,6 +76,7 @@ jobs:
           else
             echo "::warning::decisions.jsonl absent after this cycle — nothing has ever been logged"
           fi
+          [ -f data/newsapi_budget.json ] && cp data/newsapi_budget.json publish/newsapi_budget.json || echo "no newsapi_budget.json to publish"
           # Merge rather than overwrite — reconcile.yml writes to the same
           # status.json on the same branch and its field must survive this
           ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
