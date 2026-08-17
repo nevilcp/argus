@@ -335,7 +335,7 @@ class TechnicalStatisticalAgent:
             conviction=conviction,
             net_score=net_score,
             api_calls_used=0,
-            timestamp=datetime.now(),
+            timestamp=datetime.now(),  # noqa: DTZ005
         )
 
     def batch_analyze(

@@ -178,7 +178,7 @@ class PaperBook:
         """
         self.equity = new_inception_value
         self.high_water_mark = new_inception_value
-        self.rebased_at = rebased_at or datetime.now()
+        self.rebased_at = rebased_at or datetime.now()  # noqa: DTZ005
 
     def prune_runs_applied(self, cutoff: datetime) -> int:
         """Drops runs_applied entries older than cutoff, so the set doesn't grow forever (COL-1).

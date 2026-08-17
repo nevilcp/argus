@@ -105,7 +105,7 @@ def _session_seed_to_date(session_seed: int) -> date:
     Returns:
         The corresponding calendar date.
     """
-    return datetime.strptime(str(session_seed), "%Y%m%d").date()
+    return datetime.strptime(str(session_seed), "%Y%m%d").date()  # noqa: DTZ007
 
 
 def anonymize_ticker(ticker: str, session_seed: int) -> str:
@@ -273,7 +273,7 @@ class FundamentalCache:
         key = (ticker, session_seed)
         if key in self._cache:
             signal, cached_at = self._cache[key]
-            if (datetime.now() - cached_at).days < self._ttl_days:
+            if (datetime.now() - cached_at).days < self._ttl_days:  # noqa: DTZ005
                 return signal
         return None
 
@@ -285,7 +285,7 @@ class FundamentalCache:
             signal: Validated FundamentalSignal to cache.
             session_seed: Session scope to cache the signal under.
         """
-        self._cache[(ticker, session_seed)] = (signal, datetime.now())
+        self._cache[(ticker, session_seed)] = (signal, datetime.now())  # noqa: DTZ005
 
     def is_stale(self, ticker: str, session_seed: Optional[int] = None) -> bool:
         """Returns True if the (ticker, session_seed) has no valid cached signal.
@@ -380,7 +380,7 @@ class FundamentalAgent:
                 errors.append(f"fundamental_analysis[{ticker}]: failed to fetch fundamentals: {e}")
             return None
 
-        as_of_date = date.today()
+        as_of_date = date.today()  # noqa: DTZ011
         anon_id = None
         if _use_backtest_seed(backtest_mode, session_seed):
             assert session_seed is not None
@@ -419,7 +419,7 @@ class FundamentalAgent:
 
                 data["ticker"] = ticker
                 data["data_as_of_date"] = pit_data["as_of_date"]
-                data["timestamp"] = datetime.now().isoformat()
+                data["timestamp"] = datetime.now().isoformat()  # noqa: DTZ005
                 data["api_calls_used"] = 1
 
                 # All measured ratios come from the fetched payload, never the LLM
