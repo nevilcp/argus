@@ -15,12 +15,16 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
+from datetime import datetime, timezone
 from unittest import mock
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
 
 import api.main as api_main
+
+_ET = ZoneInfo("America/New_York")
 
 
 @pytest.fixture(autouse=True)
@@ -56,6 +60,35 @@ def test_pipeline_status_reports_buffer_depth_without_materializing_frames(monke
 def test_reconcile_once_is_a_plain_sync_function():
     """`_reconcile_once` is synchronous, so `_reconcile_loop` can run it via `asyncio.to_thread`."""
     assert not inspect.iscoroutinefunction(api_main._reconcile_once)
+
+
+def test_seconds_until_next_reconcile_is_dst_safe():
+    """API-13 regression: the sleep duration must reflect real elapsed time across a DST jump.
+
+    `target - now_et` alone is wrong here: both operands are built from the
+    same ZoneInfo("America/New_York") instance, so aware-datetime
+    subtraction compares wall-clock fields directly rather than each side's
+    own UTC offset — silently off by exactly the DST shift. 2026-03-08 is a
+    US spring-forward date (clocks jump 2:00 AM -> 3:00 AM), so the true gap
+    from 19:00 EST the day before to 18:00 EDT the next day is 22 hours, not
+    the 23 naive wall-clock hours between the two timestamps.
+    """
+    now_et = datetime(2026, 3, 7, 19, 0, tzinfo=_ET)  # after 18:00, so target rolls to tomorrow
+
+    seconds = api_main._seconds_until_next_reconcile(now_et, hour=18)
+
+    assert seconds == 22 * 3600
+
+
+def test_seconds_until_next_reconcile_matches_utc_diff_on_a_normal_day():
+    """Outside a DST transition, the DST-safe computation still matches a plain UTC diff."""
+    now_et = datetime(2026, 6, 1, 9, 0, tzinfo=_ET)
+    target_et = datetime(2026, 6, 1, 18, 0, tzinfo=_ET)
+
+    seconds = api_main._seconds_until_next_reconcile(now_et, hour=18)
+
+    expected = (target_et.astimezone(timezone.utc) - now_et.astimezone(timezone.utc)).total_seconds()
+    assert seconds == expected == 9 * 3600
 
 
 @pytest.mark.asyncio

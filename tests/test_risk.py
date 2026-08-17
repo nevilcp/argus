@@ -10,7 +10,9 @@ from argus.agents.risk import (
     RiskStatisticalEngine,
     compute_asset_returns,
     compute_portfolio_returns,
+    ols_portfolio_beta,
 )
+from argus.params import RISK
 from argus.schemas.signals import RiskVerdict
 
 
@@ -191,3 +193,118 @@ def test_per_ticker_var_normalized_to_full_weight() -> None:
 
     assert result.verdict == RiskVerdict.REDUCE
     assert result.var_99 > 0.03
+
+
+def test_ols_portfolio_beta_uses_lookback_window() -> None:
+    """RE-14 regression: beta must come from RISK.returns_lookback_days, not the full series.
+
+    Without .tail(lookback), a DailyBarCache holding more than a year of
+    history would silently widen beta's window, diluting a recent, real
+    change in co-movement with older data the risk gates were never
+    calibrated against.
+    """
+    total_days = RISK.returns_lookback_days * 2 + 5
+    dates = pd.date_range(start="2020-01-01", periods=total_days, freq="B")
+
+    np.random.seed(7)
+    spy_returns = np.random.normal(0.0005, 0.01, total_days)
+    spy_prices = 100 * np.exp(np.cumsum(spy_returns))
+
+    # Pre-lookback segment: unrelated to SPY (beta ~ 0). In-lookback segment: exactly
+    # 2x SPY's return each day (beta == 2). Only .tail(lookback) should see the latter.
+    split = total_days - RISK.returns_lookback_days - 1
+    old_segment = np.random.normal(0.0, 0.02, split)
+    recent_segment = spy_returns[split:] * 2.0
+    asset_prices = 100 * np.exp(np.cumsum(np.concatenate([old_segment, recent_segment])))
+
+    price_history = {
+        "AAPL": pd.Series(asset_prices, index=dates),
+        "SPY": pd.Series(spy_prices, index=dates),
+    }
+
+    beta = ols_portfolio_beta([{"ticker": "AAPL", "weight": 0.1}], price_history)
+
+    assert beta == pytest.approx(2.0, abs=0.1)
+
+
+def test_compute_asset_returns_drops_short_history_ticker_without_shrinking_others() -> None:
+    """RE-15 regression: one short-history ticker must not truncate the joint returns matrix.
+
+    Before the fix, pd.DataFrame(returns_dict).dropna() intersected on the
+    short ticker's handful of overlapping dates, shrinking every other
+    ticker's return series down to that same handful of rows and wrecking
+    the covariance SLSQP and the VaR/CVaR gates depend on.
+    """
+    dates = pd.date_range(start="2023-01-01", periods=253, freq="B")
+    short_dates = dates[-5:]
+
+    hist = {
+        "AAPL": pd.Series(np.linspace(100, 150, len(dates)), index=dates),
+        "MSFT": pd.Series(np.linspace(200, 250, len(dates)), index=dates),
+        "NEWCO": pd.Series(np.linspace(10, 11, len(short_dates)), index=short_dates),
+    }
+    positions = [{"ticker": t} for t in ("AAPL", "MSFT", "NEWCO")]
+
+    dropped: list[str] = []
+    df = compute_asset_returns(positions, hist, dropped=dropped)
+
+    assert dropped == ["NEWCO"]
+    assert "NEWCO" not in df.columns
+    assert len(df) > 200
+
+
+def test_evaluate_excludes_short_history_ticker_from_covariance(monkeypatch) -> None:
+    """RE-15 regression: evaluate() surfaces the excluded ticker as a Covariance veto_reason
+    note (picked up by graph.py's error-surfacing filter) rather than silently degrading
+    every other ticker's covariance.
+    """
+    monkeypatch.setattr("argus.agents.risk.get_sector", lambda ticker: "Diversified")
+    engine = RiskStatisticalEngine()
+
+    dates = pd.date_range(start="2023-01-01", periods=253, freq="B")
+    np.random.seed(5)
+    hist = {}
+    for t in ["AAPL", "MSFT", "GOOGL", "META", "AMZN"]:
+        returns = np.random.normal(0.001, 0.015, len(dates))
+        hist[t] = pd.Series(100 * np.exp(np.cumsum(returns)), index=dates)
+    hist["SPY"] = pd.Series(
+        100 * np.exp(np.cumsum(np.random.normal(0.0005, 0.01, len(dates)))), index=dates
+    )
+    hist["NEWCO"] = pd.Series(np.linspace(10, 11, 5), index=dates[-5:])
+
+    positions = [
+        {"ticker": t, "weight": 0.1} for t in ["AAPL", "MSFT", "GOOGL", "META", "AMZN", "NEWCO"]
+    ]
+    result = engine.evaluate(positions, hist, current_vix=20.0)
+
+    assert any(r.startswith("Covariance: excluded NEWCO") for r in result.veto_reasons)
+    assert "NEWCO" not in result.optimal_weights
+
+
+def test_evaluate_skips_optimizer_on_non_finite_covariance(monkeypatch) -> None:
+    """RE-15 regression: a non-finite covariance (e.g. a zero-price data glitch producing an
+    infinite return that survives dropna()) must not reach SLSQP silently.
+    """
+    monkeypatch.setattr("argus.agents.risk.get_sector", lambda ticker: "Diversified")
+    engine = RiskStatisticalEngine()
+
+    dates = pd.date_range(start="2023-01-01", periods=253, freq="B")
+    np.random.seed(11)
+    aapl_prices = 100 * np.exp(np.cumsum(np.random.normal(0.0005, 0.01, len(dates))))
+    aapl_prices[100] = 0.0  # a zero print makes the next day's pct_change +inf, not NaN
+    hist = {
+        "AAPL": pd.Series(aapl_prices, index=dates),
+        "MSFT": pd.Series(
+            100 * np.exp(np.cumsum(np.random.normal(0.0005, 0.01, len(dates)))), index=dates
+        ),
+        "SPY": pd.Series(
+            100 * np.exp(np.cumsum(np.random.normal(0.0003, 0.008, len(dates)))), index=dates
+        ),
+    }
+    positions = [{"ticker": "AAPL", "weight": 0.1}, {"ticker": "MSFT", "weight": 0.1}]
+
+    result = engine.evaluate(positions, hist, current_vix=20.0)
+
+    assert result.optimal_weights == {}
+    assert result.optimizer_converged is None
+    assert any(r.startswith("Covariance: non-finite") for r in result.veto_reasons)

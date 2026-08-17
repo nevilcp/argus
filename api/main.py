@@ -39,7 +39,7 @@ import os
 import sys
 from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal, Optional
 from uuid import uuid4
@@ -283,16 +283,33 @@ def _reconcile_once() -> None:
     _prune_growing_stores(decisions_log)
 
 
+def _seconds_until_next_reconcile(now_et: datetime, hour: int) -> float:
+    """Seconds to sleep until the next `hour:00` ET, correct across DST transitions (API-13).
+
+    `target - now_et` alone is unsafe here: both are built from the same
+    ZoneInfo instance, and aware-datetime subtraction with a shared tzinfo
+    object compares wall-clock fields directly rather than each side's own
+    UTC offset, so the result silently drops or adds an hour across a DST
+    boundary. Converting both to UTC first sidesteps that.
+
+    Args:
+        now_et: Current time in America/New_York.
+        hour: Target hour (0-23) in America/New_York.
+
+    Returns:
+        Seconds until the next occurrence of that hour, today or tomorrow.
+    """
+    target = now_et.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if target <= now_et:
+        target += timedelta(days=1)
+    return (target.astimezone(timezone.utc) - now_et.astimezone(timezone.utc)).total_seconds()
+
+
 async def _reconcile_loop() -> None:
     """Runs reconcile_decisions once a day at settings.ARGUS_RECONCILE_HOUR_ET."""
     while True:
         now_et = datetime.now(_ET)
-        target = now_et.replace(
-            hour=settings.ARGUS_RECONCILE_HOUR_ET, minute=0, second=0, microsecond=0
-        )
-        if target <= now_et:
-            target += timedelta(days=1)
-        await asyncio.sleep((target - now_et).total_seconds())
+        await asyncio.sleep(_seconds_until_next_reconcile(now_et, settings.ARGUS_RECONCILE_HOUR_ET))
 
         try:
             await asyncio.to_thread(_reconcile_once)
@@ -598,7 +615,6 @@ class AnalysisResponse(BaseModel):
     session_id: str
     portfolio: list[dict]
     cash_reserve_pct: float
-    expected_sharpe: Optional[float]
     macro_regime: str
     vix_level: float
     governor_report: dict
@@ -924,7 +940,6 @@ async def analyze(req: AnalysisRequest):
         session_id=allocation.session_id,
         portfolio=[p.model_dump() for p in allocation.portfolio],
         cash_reserve_pct=allocation.cash_reserve_pct,
-        expected_sharpe=allocation.expected_sharpe,
         macro_regime=macro_regime,
         vix_level=vix_level,
         governor_report=governor.get_usage_report(),

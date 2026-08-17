@@ -35,7 +35,7 @@ from dataclasses import dataclass, field, fields
 from enum import Enum
 from typing import Any
 
-PARAMS_VERSION = 14
+PARAMS_VERSION = 15
 
 
 class Provenance(str, Enum):
@@ -232,6 +232,7 @@ class PortfolioParams:
     llm_temperature: float = p(0.05, Provenance.CONVENTION, "near-zero temperature for reproducible structured output")
     llm_max_tokens: int = p(2400, Provenance.ARBITRARY, "sized to fit observed response length with headroom")
     equity_floor_adjustment: float = p(0.05, Provenance.ARBITRARY, "no basis for this specific adjustment")
+    cash_reserve_floor_pct: float = p(0.05, Provenance.ARBITRARY, "matches PortfolioAllocation.cash_reserve_pct's schema floor")
     thesis_char_limit: int = p(120, Provenance.ARBITRARY, "no basis beyond keeping per-position text short")
     advisor_note_char_limit: int = p(600, Provenance.ARBITRARY, "no basis beyond keeping the rationale readable")
 
