@@ -12,7 +12,7 @@ findings originally.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest import mock
 
 import pandas as pd
@@ -436,6 +436,61 @@ def test_compute_run_returns_skips_decisions_that_took_no_position():
     assert compute_run_returns([zero_weight], prices, horizon_days=5) == []
 
 
+def test_compute_run_returns_skips_runs_inside_the_previous_kept_runs_horizon():
+    """KS-14: a run timestamped inside the previous kept run's horizon is omitted, not compounded."""
+    run1 = datetime(2026, 1, 1)
+    run2 = run1 + timedelta(days=2)  # inside run1's 5-day horizon
+    d1 = _decision("AAA", run1, price=100.0, pct=0.1)
+    d2 = _decision("AAA", run2, price=100.0, pct=0.1)
+    prices = _FakePrices({"AAA": _series(run1, 100.0, days=20, drift=1.0)})
+
+    results = compute_run_returns([d1, d2], prices, horizon_days=5)
+
+    assert [r[0] for r in results] == [run1]
+
+
+def test_compute_run_returns_keeps_runs_exactly_horizon_days_apart():
+    """A run landing exactly on the previous kept run's horizon boundary is kept, not skipped."""
+    run1 = datetime(2026, 1, 1)
+    run2 = run1 + timedelta(days=5)
+    d1 = _decision("AAA", run1, price=100.0, pct=0.1)
+    d2 = _decision("AAA", run2, price=100.0, pct=0.1)
+    prices = _FakePrices({"AAA": _series(run1, 100.0, days=20, drift=1.0)})
+
+    results = compute_run_returns([d1, d2], prices, horizon_days=5)
+
+    assert [r[0] for r in results] == [run1, run2]
+
+
+def test_compute_run_returns_and_paperbook_survive_the_audit_simulation():
+    """KS-14: 120 daily runs at -0.1%/day must compound to their true cumulative decline,
+    not a MODERATE-halt-tripping blowup from compounding ~24x overlapping 5-day windows."""
+    start = datetime(2026, 1, 1)
+    decay = 0.999
+    days = 130
+    closes = pd.Series(
+        [100.0 * (decay**i) for i in range(days)],
+        index=pd.date_range(start=start, periods=days, freq="D"),
+    )
+    prices = _FakePrices({"AAA": closes})
+    decisions = [
+        _decision("AAA", start + timedelta(days=i), price=100.0 * (decay**i), pct=0.15)
+        for i in range(120)
+    ]
+
+    results = compute_run_returns(decisions, prices, horizon_days=5)
+
+    # Non-overlapping: one kept run every 5 days, not one per day
+    assert len(results) == 24
+
+    book = PaperBook(equity=100_000.0, high_water_mark=100_000.0)
+    for run_timestamp, run_return in results:
+        book.apply_run(run_timestamp, run_return)
+
+    assert book.drawdown_from_peak() == pytest.approx(1 - decay**120, abs=1e-4)
+    assert book.drawdown_from_peak() < kill_switch_module.KILL_SWITCH.moderate_drawdown_halt
+
+
 # ---------------------------------------------------------------------------
 # paper_book: PaperBook
 # ---------------------------------------------------------------------------
@@ -481,6 +536,46 @@ def test_paperbook_save_load_round_trip(tmp_path):
     assert loaded.high_water_mark == pytest.approx(110_000.0)
     assert loaded.last_run_timestamp == datetime(2026, 1, 1)
     assert loaded.runs_applied == {"2026-01-01T00:00:00"}
+
+
+def test_paperbook_rebase_sets_equity_and_hwm_and_leaves_runs_applied():
+    """KS-15: rebase() replaces equity/high_water_mark but leaves runs_applied untouched,
+    so a run already compounded into the old curve is never re-applied against the new base."""
+    book = PaperBook(
+        equity=88_000.0, high_water_mark=100_000.0, runs_applied={"2026-01-01T00:00:00"}
+    )
+
+    book.rebase(120_000.0, rebased_at=datetime(2026, 2, 1))
+
+    assert book.equity == pytest.approx(120_000.0)
+    assert book.high_water_mark == pytest.approx(120_000.0)
+    assert book.rebased_at == datetime(2026, 2, 1)
+    assert book.runs_applied == {"2026-01-01T00:00:00"}
+
+
+def test_paperbook_rebase_then_reapplying_an_already_applied_run_is_a_noop():
+    """After a rebase, re-running compute_run_returns over old decisions can't drag the
+    rebased equity back down, since the run is already in runs_applied (KS-15)."""
+    book = PaperBook(equity=100_000.0, high_water_mark=100_000.0)
+    ts = datetime(2026, 1, 1)
+    book.apply_run(ts, -0.12)
+
+    book.rebase(150_000.0)
+
+    assert book.apply_run(ts, -0.12) is False
+    assert book.equity == pytest.approx(150_000.0)
+
+
+def test_paperbook_save_load_round_trip_includes_rebased_at(tmp_path):
+    """rebased_at survives a save/load round trip."""
+    path = str(tmp_path / "paper_equity.json")
+    book = PaperBook(equity=100_000.0, high_water_mark=100_000.0)
+    book.rebase(150_000.0, rebased_at=datetime(2026, 2, 1))
+
+    paper_book.save(book, path)
+    loaded = paper_book.load(path)
+
+    assert loaded.rebased_at == datetime(2026, 2, 1)
 
 
 def test_paperbook_load_missing_file_starts_fresh_at_total_wealth(tmp_path):

@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 
 import api.main as api_main
 import argus.risk.kill_switch as kill_switch_module
+from argus.risk import paper_book
 from argus.risk.kill_switch import KillSwitch
 
 
@@ -75,6 +76,24 @@ def test_kill_switch_reset_accepts_matching_api_key(client, monkeypatch):
         headers={"X-API-Key": "secret123"},
     )
     assert response.status_code == 200
+
+
+def test_kill_switch_reset_rebases_the_persisted_paper_book(client, monkeypatch, tmp_path):
+    """KS-15: reset rebases paper_equity.json, not just the in-memory kill switch —
+    otherwise the next reconcile pass would feed the stale, drawn-down equity back in
+    and re-halt within check_interval_seconds."""
+    monkeypatch.setattr(api_main.settings, "ARGUS_API_KEY", "")
+    kill_switch_module._kill_switch = KillSwitch("MODERATE")
+    book_path = tmp_path / "paper_equity.json"  # ARGUS_DATA_DIR is this tmp_path (conftest)
+    paper_book.save(paper_book.PaperBook(equity=80_000.0, high_water_mark=100_000.0), str(book_path))
+
+    response = client.post("/kill-switch/reset", params={"new_inception_value": 150_000})
+
+    assert response.status_code == 200
+    rebased = paper_book.load(str(book_path))
+    assert rebased.equity == pytest.approx(150_000.0)
+    assert rebased.high_water_mark == pytest.approx(150_000.0)
+    assert rebased.rebased_at is not None
 
 
 def test_kill_switch_reset_rejects_value_at_or_below_floor(client, monkeypatch):

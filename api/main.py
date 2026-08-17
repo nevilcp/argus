@@ -873,6 +873,10 @@ async def reset_kill_switch(new_inception_value: float = Query(gt=1000)):
 
     Also deletes any persisted halt-dump files (see KillSwitch.reset), so a
     subsequent restart can't silently re-apply a halt this call just resolved.
+    Rebases the persisted paper-equity curve to new_inception_value in the same
+    operation (KS-15) — otherwise the next reconcile pass would call
+    update_portfolio_value with the stale, already-drawn-down equity and
+    re-halt within check_interval_seconds.
 
     Args:
         new_inception_value: New portfolio value to use as the drawdown base
@@ -887,6 +891,10 @@ async def reset_kill_switch(new_inception_value: float = Query(gt=1000)):
     """
     ks = get_kill_switch()
     if ks:
+        book_path = f"{settings.ARGUS_DATA_DIR}/paper_equity.json"
+        book = paper_book.load(book_path)
+        book.rebase(new_inception_value)
+        paper_book.save(book, book_path)
         ks.reset(new_inception_value)
         return {"status": "Reset successful"}
     raise HTTPException(404, "Kill switch not initialized")
