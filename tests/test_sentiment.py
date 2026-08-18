@@ -53,8 +53,6 @@ def test_sentiment_daily_cache():
         pct_positive=0.7,
         pct_negative=0.1,
         news_volume_7d=12,
-        social_volume_change_pct=10.0,
-        social_mention_surge=True,
         upcoming_catalyst=False,
         signal=Signal.BULLISH,
         conviction=0.8,
@@ -77,15 +75,11 @@ def test_sentiment_daily_cache():
 class _StubMarketData:
     """Minimal MarketDataProvider stub exposing only what SentimentAgent.analyze uses."""
 
-    def __init__(self, news, social):
+    def __init__(self, news):
         self._news = news
-        self._social = social
 
     def news(self, ticker, company_name, days_back=7):
         return self._news
-
-    def social_sentiment(self, ticker):
-        return self._social
 
     def ohlcv_daily(self, ticker, period="2y"):
         raise NotImplementedError
@@ -118,20 +112,11 @@ class _RecordingLLMClient:
         return self._response_text
 
 
-def test_analyze_flags_unavailable_news_and_social_in_the_llm_prompt(monkeypatch):
-    """A None news result and an unavailable social result surface as explicit False flags, not silent zeros."""
+def test_analyze_flags_unavailable_news_in_the_llm_prompt(monkeypatch):
+    """A None news result surfaces as an explicit False flag, not a silent zero."""
     monkeypatch.setattr("argus.agents.sentiment._check_earnings_calendar", lambda ticker: False)
 
-    market_data = _StubMarketData(
-        news=None,
-        social={
-            "mention_surge": False,
-            "volume_change_pct": 0.0,
-            "top_posts": [],
-            "earnings_within_14d": False,
-            "social_data_available": False,
-        },
-    )
+    market_data = _StubMarketData(news=None)
     llm = _RecordingLLMClient(
         '{"signal": "NEUTRAL", "conviction": 0.3, "sentiment_decay_risk": "LOW", "reasoning": "no data"}'
     )
@@ -143,16 +128,14 @@ def test_analyze_flags_unavailable_news_and_social_in_the_llm_prompt(monkeypatch
     assert signal.news_volume_7d == 0
     assert signal.news_scored_count == 0
     assert signal.news_data_available is False
-    assert signal.social_data_available is False
     # A failed fetch's 0.0 is indistinguishable from a real neutral read;
     # the persisted signal must not fabricate a measured score
     assert signal.finbert_net_score is None
     assert "news_data_available: False" in llm.last_user_prompt
-    assert "social_data_available: False" in llm.last_user_prompt
 
 
 def test_analyze_reports_availability_true_with_real_data(monkeypatch):
-    """Genuine news/social data is flagged available, not confused with the absence placeholder."""
+    """Genuine news data is flagged available, not confused with the absence placeholder."""
     monkeypatch.setattr("argus.agents.sentiment._check_earnings_calendar", lambda ticker: False)
     # Headlines are non-empty here, which would otherwise load the real FinBERT
     # pipeline; stub it out since this test only cares about the availability flags.
@@ -172,13 +155,6 @@ def test_analyze_reports_availability_true_with_real_data(monkeypatch):
 
     market_data = _StubMarketData(
         news=[{"title": "Real headline", "description": "", "published_at": "", "source": ""}],
-        social={
-            "mention_surge": True,
-            "volume_change_pct": 0.4,
-            "top_posts": [],
-            "earnings_within_14d": False,
-            "social_data_available": True,
-        },
     )
     llm = _RecordingLLMClient(
         '{"signal": "BULLISH", "conviction": 0.6, "sentiment_decay_risk": "LOW", "reasoning": "positive"}'
@@ -191,17 +167,15 @@ def test_analyze_reports_availability_true_with_real_data(monkeypatch):
     assert signal.news_volume_7d == 1
     assert signal.news_scored_count == 1
     assert signal.news_data_available is True
-    assert signal.social_data_available is True
     assert signal.finbert_net_score == 0.0
     assert "news_data_available: True" in llm.last_user_prompt
-    assert "social_data_available: True" in llm.last_user_prompt
 
 
 def test_batch_analyze_paces_only_against_a_live_market_data_provider(monkeypatch):
     """Fixture-backed providers skip fan-out pacing so the test suite stays fast."""
     monkeypatch.setattr("argus.agents.sentiment._check_earnings_calendar", lambda ticker: False)
 
-    market_data = _StubMarketData(news=[], social={"social_data_available": False})
+    market_data = _StubMarketData(news=[])
     llm = _RecordingLLMClient(
         '{"signal": "NEUTRAL", "conviction": 0.3, "sentiment_decay_risk": "LOW", "reasoning": "n/a"}'
     )
@@ -247,7 +221,6 @@ def test_scored_articles_are_sorted_by_published_at_before_aggregation(monkeypat
             {"title": "stale bad news", "published_at": "2024-01-01T00:00:00Z"},
             {"title": "fresh good news", "published_at": "2024-06-01T00:00:00Z"},
         ],
-        social={"social_data_available": False},
     )
     llm = _RecordingLLMClient(
         '{"signal": "NEUTRAL", "conviction": 0.3, "sentiment_decay_risk": "LOW", "reasoning": "n/a"}'
@@ -268,7 +241,7 @@ def test_analyze_tolerates_a_raising_news_provider(monkeypatch):
         def news(self, ticker, company_name, days_back=7):
             raise RuntimeError("provider outage")
 
-    market_data = _RaisingNewsMarketData(news=None, social={"social_data_available": False})
+    market_data = _RaisingNewsMarketData(news=None)
     llm = _RecordingLLMClient(
         '{"signal": "NEUTRAL", "conviction": 0.3, "sentiment_decay_risk": "LOW", "reasoning": "n/a"}'
     )
@@ -285,7 +258,7 @@ def test_batch_analyze_tolerates_a_single_ticker_raising(monkeypatch):
     """One ticker's uncaught exception must not abort the batch; the rest still complete."""
     monkeypatch.setattr("argus.agents.sentiment._check_earnings_calendar", lambda ticker: False)
 
-    market_data = _StubMarketData(news=[], social={"social_data_available": False})
+    market_data = _StubMarketData(news=[])
     llm = _RecordingLLMClient(
         '{"signal": "NEUTRAL", "conviction": 0.3, "sentiment_decay_risk": "LOW", "reasoning": "n/a"}'
     )
@@ -318,7 +291,7 @@ def test_batch_analyze_passes_company_name_for_known_tickers(monkeypatch):
             received[ticker] = company_name
             return []
 
-    market_data = _RecordingMarketData(news=[], social={"social_data_available": False})
+    market_data = _RecordingMarketData(news=[])
     llm = _RecordingLLMClient(
         '{"signal": "NEUTRAL", "conviction": 0.3, "sentiment_decay_risk": "LOW", "reasoning": "n/a"}'
     )

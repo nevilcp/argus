@@ -314,7 +314,7 @@ class FundamentalSignal(BaseModel):
 
 
 class SentimentSignal(BaseModel):
-    """News and social sentiment features with associated signal conviction scores."""
+    """News sentiment features with associated signal conviction scores."""
 
     ticker: str = Field(..., description="Equity ticker symbol")
 
@@ -342,13 +342,6 @@ class SentimentSignal(BaseModel):
     )
     news_data_available: bool = Field(
         True, description="False means the news fetch failed; news metrics are placeholders"
-    )
-    social_volume_change_pct: float = Field(..., description="Change in social volume (%)")
-    social_mention_surge: bool = Field(
-        ..., description="True if social mentions > 2× 30-day average"
-    )
-    social_data_available: bool = Field(
-        True, description="False means the social fetch failed; social metrics are placeholders"
     )
     upcoming_catalyst: bool = Field(..., description="True if earnings / FDA / FOMC within 14 days")
 
