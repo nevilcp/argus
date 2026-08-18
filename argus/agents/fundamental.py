@@ -326,7 +326,11 @@ class FundamentalAgent:
             llm_client = GroqLLMClient(
                 model=settings.ARGUS_FUNDAMENTAL_MODEL,
                 temperature=0.1,
-                max_tokens=600,
+                # Measured against gpt-oss-120b at reasoning_effort="low" on
+                # reconstructed fixture prompts (AAPL/MSFT/NVDA): completion_tokens
+                # peaked at 327, of which up to 193 was reasoning. 450 leaves ~35%
+                # headroom above that peak.
+                max_tokens=450,
                 api_key=api_key,
             )
         self.llm_client = llm_client

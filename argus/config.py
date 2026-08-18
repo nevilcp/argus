@@ -182,9 +182,9 @@ class Settings(BaseSettings):
     # Model IDs for the three LLM-backed agents. Must each be a member of
     # argus.orchestration.governor.REGISTERED_MODELS — asserted at API startup
     # so a typo or unsupported model fails at boot rather than at first call.
-    ARGUS_FUNDAMENTAL_MODEL: str = Field(default="llama-3.3-70b-versatile")
-    ARGUS_SENTIMENT_MODEL: str = Field(default="llama-3.1-8b-instant")
-    ARGUS_PORTFOLIO_MODEL: str = Field(default="llama-3.3-70b-versatile")
+    ARGUS_FUNDAMENTAL_MODEL: str = Field(default="openai/gpt-oss-120b")
+    ARGUS_SENTIMENT_MODEL: str = Field(default="openai/gpt-oss-20b")
+    ARGUS_PORTFOLIO_MODEL: str = Field(default="openai/gpt-oss-120b")
 
     ARGUS_HMM_MODEL_PATH: str = Field(
         default=str(BASE_DIR / "argus" / "models" / "macro_hmm.joblib"),

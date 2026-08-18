@@ -21,7 +21,7 @@ from argus.agents.portfolio import half_kelly_weight
 from argus.agents.risk import RiskStatisticalEngine
 from argus.agents.technical import TechnicalStatisticalAgent
 from argus.data.pipeline import MFTDataPipeline
-from argus.orchestration.governor import BOOTSTRAP_LIMITS, governor
+from argus.orchestration.governor import BOOTSTRAP_LIMITS, REGISTERED_MODELS, governor
 from argus.orchestration.graph import build_graph
 from argus.orchestration.state import ARGUSState
 from argus.schemas.signals import (
@@ -301,7 +301,7 @@ class TestEndToEnd:
 
     def test_governor_prevents_over_limit(self):
         """The shared governor sleeps once a model's rolling-window request count reaches its limit."""
-        model = "llama-3.3-70b-versatile"
+        model = list(REGISTERED_MODELS)[0]
         limit = BOOTSTRAP_LIMITS[model]["requests_per_minute"]
 
         usage = governor._get_usage(model)
