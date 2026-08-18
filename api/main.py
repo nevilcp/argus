@@ -111,7 +111,7 @@ _macro_status_agent: MacroStatisticalAgent | None = None
 
 
 async def _mft_session_callback(session_states: dict) -> None:
-    """Receives compressed technical feature dicts from the MFT pipeline every 30 minutes.
+    """Receives compressed technical feature dicts from the MFT pipeline on every sweep.
 
     Updates the module-level live cache so the next /analyze call picks up
     fresh intraday indicators without re-fetching historical data. Each entry
@@ -818,7 +818,7 @@ async def analyze(req: AnalysisRequest):
         raise HTTPException(
             503,
             f"MFT live cache not yet populated for: {absent}. "
-            "The pipeline is warming up — retry after the next session cycle (~30 min after market open).",
+            "The pipeline is warming up — retry after the next sweep (~5 min).",
         )
 
     now = datetime.now()  # noqa: DTZ005
