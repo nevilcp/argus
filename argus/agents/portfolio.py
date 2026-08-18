@@ -15,7 +15,7 @@ Not responsible for:
   - Macro regime classification (see agents/macro.py)
 
 Dependencies:
-  - langchain_groq (llama-3.3-70b-versatile)
+  - langchain_groq (openai/gpt-oss-120b)
   - GROQ_API_KEY env var must be set (see .env.example)
 """
 

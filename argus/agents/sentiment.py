@@ -389,7 +389,11 @@ class SentimentAgent:
             llm_client = GroqLLMClient(
                 model=settings.ARGUS_SENTIMENT_MODEL,
                 temperature=0.1,
-                max_tokens=350,
+                # Measured against gpt-oss-20b at reasoning_effort="low" on
+                # reconstructed fixture prompts (AAPL/MSFT/NVDA): completion_tokens
+                # peaked at 417, of which up to 357 was reasoning. 550 leaves ~30%
+                # headroom above that peak.
+                max_tokens=550,
                 api_key=api_key,
             )
         self.llm_client = llm_client
