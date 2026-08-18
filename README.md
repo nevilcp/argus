@@ -4,7 +4,7 @@ Multi-agent financial intelligence system orchestrating specialist LLMs and stat
 
 ![CI](https://github.com/nevilcp/argus/actions/workflows/ci.yml/badge.svg)
 ![Python Version](https://img.shields.io/badge/python-%E2%89%A53.11-blue)
-![Tests](https://img.shields.io/badge/tests-437_passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-432_passing-brightgreen)
 ![License](https://img.shields.io/badge/license-Proprietary-red)
 
 > **RESEARCH PROJECT ONLY — NOT FINANCIAL ADVICE.** ARGUS is not registered with the SEC or any regulatory body. All outputs are for educational and research purposes only. Do not make investment decisions based on this system's output.
@@ -41,7 +41,7 @@ flowchart TD
         direction TB
         FL["_fetch_loop\nEvery 5 min (sweep duration subtracted from the wait) · bulk 1m candles\n2-day history on first fetch"]
         BUF["OHLCVBuffer\nPersistent SQLite (data/) · 1,173-bar rolling (1m × 2d + slack)\nINSERT OR REPLACE — safe for bulk re-insert"]
-        SL["_session_loop\nEvery 30 min → compress_all\nResamples to 5m · RSI · MACD · BB · ATR · ADX · VWAP · Momentum"]
+        SL["compress_all — same 5-min pass as the sweep, not a separate timer\nResamples to 5m · RSI · MACD · BB · ATR · ADX · VWAP · Momentum"]
         CACHE["_live_session_cache\nIn-memory dict · ticker → feature dict\nUpdated via on_session_ready callback"]
     end
 
@@ -106,11 +106,11 @@ flowchart TD
     %% ── Safety Layer (Independent of Graph) ─────────────────────────────
     subgraph SAFETY["🛡️ Safety Layer  (Independent of Graph)"]
         direction LR
-        KS["KillSwitch Daemon<br/>Background thread · 60s poll<br/>Drawdown: 8/12/18% by tolerance<br/>VIX Blackout ≥ 35 → block positions<br/>Halt file → manual reset required"]
+        KS["KillSwitch Daemon<br/>Background thread · 900s poll<br/>Drawdown: 8/12/18% by tolerance<br/>VIX Blackout ≥ 35 → block positions<br/>Halt file → manual reset required"]
         GOV["RateLimitGovernor<br/>Singleton · thread-safe<br/>RPM sliding window (sleep)<br/>RPD hard cap (exception)<br/>TPM warning"]
     end
 
-    YF -->|"^VIX every 60s"| KS
+    YF -->|"^VIX every 900s (cached)"| KS
     KS -->|"is_halted / new_positions_allowed<br/>checked before graph invoke"| GATE
     GOV -.-|"wait_if_needed() before<br/>every LLM call"| N3 & N4 & N8
 
@@ -155,7 +155,7 @@ ARGUS sits at the intersection of quantitative finance, statistical modeling, an
 ### Concepts Behind Each Agent
 
 - **Macro regime (Gaussian HMM)** — a Hidden Markov Model fit on FRED macro indicators (CPI, Fed Funds, unemployment, 10Y-2Y yield curve) plus VIX, classifying the current environment into one of three latent regimes rather than a hand-coded rule. It classifies from a trailing 36-month-end feature window rather than a single observation, so the transition matrix — not one noisy print — drives the call. The fitted model ships as a committed artifact (`argus-train-macro` retrains it; see [Training the Macro Classifier](#training-the-macro-classifier)); if the artifact is missing or fails to load, the agent degrades to a static VIX/yield-curve rule rather than failing. See [`argus/agents/macro.py`](argus/agents/macro.py).
-- **Technical indicators** — fetched as 1-minute intraday candles, resampled to 5-minute bars for indicator calculation, and compressed every 30 minutes. See [`argus/agents/technical.py`](argus/agents/technical.py) and [`argus/data/pipeline.py`](argus/data/pipeline.py).
+- **Technical indicators** — fetched as 1-minute intraday candles, resampled to 5-minute bars for indicator calculation, and recompressed on every 5-minute pipeline pass. See [`argus/agents/technical.py`](argus/agents/technical.py) and [`argus/data/pipeline.py`](argus/data/pipeline.py).
   - *RSI* (Relative Strength Index): 0–100 momentum oscillator identifying overbought/oversold conditions.
   - *MACD*: trend-following momentum, read via the histogram (the gap between the MACD line and its signal line).
   - *Bollinger %B*: price's position within its rolling volatility bands.
@@ -432,7 +432,7 @@ With the default `.env`, this alone gives the same unattended behavior — hourl
 
 ## Testing
 
-ARGUS includes a suite of deterministic unit tests that execute without triggering external API calls (via `pytest-mock`), covering core agents, rate limit governors, and the intraday MFT pipeline.
+ARGUS includes a suite of deterministic unit tests covering core agents, rate limit governors, and the intraday MFT pipeline. Every LLM boundary is fixture-backed or mocked (via `argus/seams.py` and `pytest-mock`), so no test ever calls Groq. One class — `tests/test_integration.py::TestEndToEnd` — deliberately exercises live yfinance and FRED calls; everything else runs offline.
 
 **Run the full test suite:**
 ```bash
@@ -450,8 +450,8 @@ pytest tests/ --cov=argus --cov-report=term-missing
 ```
 
 - **Categories**: Tests cover Pydantic validation boundaries, mathematical boundaries (e.g., Half-Kelly position sizing constraints), caching TTL expiration logic, and thread-safe rate limit assertions.
-- **Approximate Run Time**: ~155 seconds for 437 tests across 35 files, entirely offline by design — no live API calls, network access, or API keys required.
-- **CI gate**: `.github/workflows/ci.yml` additionally runs `ruff check .` and `mypy argus/` (pinned `ruff==0.16.2`, `mypy==2.3.0`) before the test step.
+- **Approximate Run Time**: ~150 seconds for 432 tests across 35 files. No Groq key is needed — LLM agents are always fixture-backed or mocked. `TestEndToEnd` needs network access and a `FRED_API_KEY`; the rest of the suite needs neither.
+- **CI gate**: `.github/workflows/ci.yml` additionally runs `ruff check .` and `mypy argus/` (pinned `ruff==0.16.2`, `mypy==2.3.0`) before the test step, and runs the suite on both Python 3.11 and 3.12 so the `requires-python = ">=3.11"` floor is actually exercised.
 
 ## Contributing
 
