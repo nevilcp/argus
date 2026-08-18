@@ -335,7 +335,7 @@ def build_graph(
         return {"fundamental_signals": signals, "errors": errors}
 
     def node_sentiment_analysis(state: ARGUSState) -> dict:
-        """Scores news articles and social media sentiment signals.
+        """Scores news article sentiment signals.
 
         Args:
             state: ARGUSState with ``universe`` list of tickers.
