@@ -80,10 +80,6 @@ class MarketDataProvider(Protocol):
         """Returns recent news articles for a ticker, or None if unavailable."""
         ...
 
-    def social_sentiment(self, ticker: str) -> dict:
-        """Returns social media sentiment metrics for a ticker."""
-        ...
-
     def vix(self) -> float:
         """Returns the current CBOE VIX level."""
         ...
@@ -115,10 +111,6 @@ class LiveMarketDataProvider:
     def news(self, ticker: str, company_name: str, days_back: int = 7) -> Optional[list[dict]]:
         """Delegates to fetchers.fetch_news."""
         return fetchers.fetch_news(ticker, company_name, days_back=days_back)
-
-    def social_sentiment(self, ticker: str) -> dict:
-        """Delegates to fetchers.fetch_social_sentiment."""
-        return fetchers.fetch_social_sentiment(ticker)
 
     def vix(self) -> float:
         """Delegates to fetchers.fetch_vix."""
@@ -179,17 +171,6 @@ class FixtureMarketDataProvider:
     def news(self, ticker: str, company_name: str, days_back: int = 7) -> list[dict]:
         """Returns cached news articles from the news fixture, or an empty list if none."""
         return list(self._load("news").get(ticker, []))
-
-    def social_sentiment(self, ticker: str) -> dict:
-        """Returns cached social sentiment metrics from the social_sentiment fixture.
-
-        A ticker absent from the fixture reports unavailability rather than an
-        empty dict, which would otherwise default to social_data_available=True.
-        """
-        fixture = self._load("social_sentiment").get(ticker)
-        if fixture is None:
-            return {"social_data_available": False}
-        return dict(fixture)
 
     def vix(self) -> float:
         """Returns the cached VIX level from the macro_bundle fixture."""

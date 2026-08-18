@@ -1,10 +1,10 @@
 """
 argus/agents/sentiment.py
 
-Multi-tier media and social sentiment analysis agent for the ARGUS platform.
+Multi-tier media sentiment analysis agent for the ARGUS platform.
 
 Responsibilities:
-  - Fetch and aggregate raw financial news and social sentiment data
+  - Fetch and aggregate raw financial news data
   - Classify news headlines locally using a HuggingFace FinBERT pipeline
   - Synthesize discrete sentiment metrics into a unified SentimentSignal via LLM
 
@@ -280,9 +280,6 @@ _SENTIMENT_METRIC_LABELS: dict[str, str] = {
     "(<=25) — the denominator behind pct_positive/pct_negative",
     "news_data_available": "[bool]           False means the news fetch failed or hit its daily "
     "quota — news_volume_7d is a placeholder 0, not a real zero",
-    "social_mention_surge": "[bool]           True if social mention volume is unusually high",
-    "social_data_available": "[bool]           False means social data couldn't be fetched — "
-    "social_mention_surge/social_volume_change_pct are placeholders, not real observations",
     "upcoming_catalyst": "[bool]           True if earnings are expected within 14 days",
 }
 
@@ -316,7 +313,6 @@ def _build_synthesis_prompt(ticker: str, metrics: dict) -> str:
         "  • net_finbert_score < -0.20 with pct_negative > 0.40 → negative pressure.\n"
         "  • finbert_confidence < 0.30 (< 3 articles) → evidence too thin; cap conviction at 0.45.\n"
         "  • upcoming_catalyst=True → sentiment_decay_risk must be at least MEDIUM.\n"
-        "  • social_mention_surge=True alone is insufficient for BULLISH unless FinBERT confirms.\n"
         "\n"
         "Step 2 — Classify the sentiment regime: BULLISH, BEARISH, or NEUTRAL.\n"
         "Step 3 — Assign conviction [0.0, 1.0]; cite the single most determinative metric.\n"
@@ -331,14 +327,14 @@ def _build_synthesis_prompt(ticker: str, metrics: dict) -> str:
 
 SYSTEM_PROMPT = (
     "You are a quantitative sentiment analyst at a systematic equity fund. "
-    "You work exclusively with pre-computed FinBERT and social media metrics provided in each request. "
+    "You work exclusively with pre-computed FinBERT news metrics provided in each request. "
     "You do not generate investment advice. All outputs are research inputs requiring downstream human review.\n"
     "\n"
     "EPISTEMIC STANDARD: If the provided data is insufficient to determine a signal with confidence, "
     "assign signal=NEUTRAL and cap conviction at 0.40. Do not infer or recall any information "
-    "about the ticker beyond what is explicitly supplied. When news_data_available or "
-    "social_data_available is False, treat the corresponding metrics as unknown, not as zero — "
-    "a failed fetch is not evidence of a neutral or absent signal.\n"
+    "about the ticker beyond what is explicitly supplied. When news_data_available is False, "
+    "treat the news metrics as unknown, not as zero — a failed fetch is not evidence of a "
+    "neutral or absent signal.\n"
     "\n"
     "DATA SCHEMA — interpret each field strictly per the following units and ranges:\n"
     "  net_finbert_score    : float [-1.0, +1.0]  Exponential-decay-weighted mean FinBERT polarity\n"
@@ -348,7 +344,6 @@ SYSTEM_PROMPT = (
     "  finbert_confidence   : float [0.0, 1.0]    Article-volume confidence proxy; caps at 1.0 for ≥10 articles.\n"
     "                         Values below 0.30 indicate thin evidence — reduce conviction accordingly.\n"
     "  news_volume_7d       : integer              Total articles fetched in the prior 7-day window.\n"
-    "  social_mention_surge : boolean              True if 7-day social volume is statistically abnormal.\n"
     "  upcoming_catalyst    : boolean              True if an earnings event falls within 14 calendar days.\n"
     "                         Presence elevates sentiment_decay_risk because event-driven sentiment\n"
     "                         typically reverts rapidly post-announcement.\n"
@@ -358,7 +353,6 @@ SYSTEM_PROMPT = (
     "  2. net_finbert_score < -0.20 AND pct_negative > 0.40 → negative sentiment pressure.\n"
     "  3. finbert_confidence < 0.30 → evidence too thin; cap conviction at 0.45 regardless of score.\n"
     "  4. upcoming_catalyst=True → sentiment_decay_risk must be MEDIUM or HIGH.\n"
-    "  5. social_mention_surge without FinBERT confirmation is insufficient for BULLISH.\n"
     "\n"
     "OUTPUT: Return ONLY a valid JSON object — no markdown, no preamble, no trailing text.\n"
     'Schema: {"signal": "BULLISH|BEARISH|NEUTRAL", "conviction": <float 0.0–1.0>, '
@@ -367,7 +361,8 @@ SYSTEM_PROMPT = (
 
 
 class SentimentAgent:
-    """LLM-backed sentiment analysis agent combining FinBERT and social media signals.
+    """LLM-backed sentiment analysis agent combining FinBERT headline scores with
+    LLM synthesis.
 
     Uses a daily cache to prevent redundant inference for the same ticker within a
     trading session. Retries the LLM call up to 3 times with exponential back-off
@@ -429,11 +424,6 @@ class SentimentAgent:
         except Exception as e:
             logger.warning("[Sentiment] %s news fetch raised: %s", ticker, e)
             news = None
-        try:
-            social = self.market_data.social_sentiment(ticker)
-        except Exception as e:
-            logger.warning("[Sentiment] %s social fetch raised: %s", ticker, e)
-            social = {"social_data_available": False}
 
         news_available = news is not None
         news_list = news or []
@@ -453,11 +443,6 @@ class SentimentAgent:
             "news_volume_7d": len(news_list),
             "news_scored_count": len(scored),
             "news_data_available": news_available,
-            "social_mention_surge": social.get("mention_surge", False),
-            "social_volume_change_pct": social.get("volume_change_pct", 0.0),
-            # fetch_social_sentiment always sets this key live; the default only covers
-            # fixtures captured before the key existed, which hold real data
-            "social_data_available": social.get("social_data_available", True),
             "upcoming_catalyst": _check_earnings_calendar(ticker),
         }
 
@@ -488,9 +473,6 @@ class SentimentAgent:
                     news_volume_7d=metrics["news_volume_7d"],
                     news_scored_count=metrics["news_scored_count"],
                     news_data_available=metrics["news_data_available"],
-                    social_volume_change_pct=metrics["social_volume_change_pct"],
-                    social_mention_surge=metrics["social_mention_surge"],
-                    social_data_available=metrics["social_data_available"],
                     upcoming_catalyst=metrics["upcoming_catalyst"],
                     signal=data["signal"],
                     conviction=float(data["conviction"]),
@@ -534,7 +516,7 @@ class SentimentAgent:
         """Generates SentimentSignals sequentially for a list of tickers.
 
         Against a live market-data provider, paces each ticker's scraper calls
-        (pytrends + NewsAPI + the yfinance earnings-calendar lookup) rather than
+        (NewsAPI + the yfinance earnings-calendar lookup) rather than
         bursting all of them in the first few seconds. In graph.py's fan-out,
         this node runs concurrently with fundamental_analysis's ~20 sequential
         Groq round-trips — the slower node either way — so spreading sentiment's
