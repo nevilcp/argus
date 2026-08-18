@@ -288,6 +288,14 @@ class GroqLLMClient:
             # The groq SDK's own retry (default 2) would silently double-retry
             # underneath this client's retry loop and hide 429s from the governor.
             max_retries=0,
+            # Both registered gpt-oss models are reasoning models; "low" keeps
+            # reasoning-token spend down since reasoning is billed against the
+            # same completion budget as max_tokens (see fundamental.py/sentiment.py's
+            # max_tokens comments). reasoning_format is deliberately left unset —
+            # Groq does not support it on gpt-oss, and the reasoning text already
+            # comes back in a separate `reasoning` field rather than inlined into
+            # content, so the existing fence-strip parsers are unaffected either way.
+            reasoning_effort="low",
         )
 
     def _on_response(self, response: httpx.Response) -> None:
