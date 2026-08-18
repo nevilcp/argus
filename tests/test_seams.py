@@ -148,10 +148,18 @@ def _client_with_mocked_llm() -> GroqLLMClient:
         given a side_effect.
     """
     client = GroqLLMClient(
-        model="llama-3.1-8b-instant", temperature=0.1, max_tokens=50, api_key="test-key"
+        model="openai/gpt-oss-20b", temperature=0.1, max_tokens=50, api_key="test-key"
     )
     client._llm = mock.Mock()
     return client
+
+
+def test_groq_llm_client_sets_reasoning_effort_low():
+    """The registered gpt-oss models are reasoning models; low effort caps their token spend."""
+    client = GroqLLMClient(
+        model="openai/gpt-oss-20b", temperature=0.1, max_tokens=50, api_key="test-key"
+    )
+    assert client._llm.reasoning_effort == "low"
 
 
 def test_groq_llm_client_retries_retryable_error_then_succeeds():

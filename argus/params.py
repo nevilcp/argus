@@ -230,7 +230,7 @@ class PortfolioParams:
     kelly_max_position: float = p(0.15, Provenance.CONVENTION, "matches SystemParams.max_single_position_pct")
     kelly_divisor: float = p(2.0, Provenance.CONVENTION, "half-Kelly is a standard variance-reduction convention")
     llm_temperature: float = p(0.05, Provenance.CONVENTION, "near-zero temperature for reproducible structured output")
-    llm_max_tokens: int = p(2400, Provenance.ARBITRARY, "sized to fit observed response length with headroom")
+    llm_max_tokens: int = p(1000, Provenance.ARBITRARY, "gpt-oss-120b at reasoning_effort='low' on a reconstructed dense-portfolio prompt peaked at 785 completion tokens (up to 458 reasoning) across 4 runs; 1000 leaves ~25% headroom")
     equity_floor_adjustment: float = p(0.05, Provenance.ARBITRARY, "no basis for this specific adjustment")
     cash_reserve_floor_pct: float = p(0.05, Provenance.ARBITRARY, "matches PortfolioAllocation.cash_reserve_pct's schema floor")
     thesis_char_limit: int = p(120, Provenance.ARBITRARY, "no basis beyond keeping per-position text short")

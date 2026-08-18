@@ -69,8 +69,8 @@ flowchart TD
             direction LR
             N1["node: macro_analysis<br/>MacroStatisticalAgent<br/>Gaussian HMM · 3-state regime<br/>FRED + VIX features"]
             N2["node: technical_analysis<br/>TechnicalStatisticalAgent<br/>Reads MFT session_states<br/>RSI · MACD · BB · ADX · VWAP · Momentum<br/>→ score ∈ [-1,+1]"]
-            N3["node: fundamental_analysis<br/>FundamentalAgent<br/>Llama-3.3-70b-versatile<br/>7-day cache · yfinance.info"]
-            N4["node: sentiment_analysis<br/>SentimentAgent<br/>FinBERT + Llama-3.1-8b<br/>News"]
+            N3["node: fundamental_analysis<br/>FundamentalAgent<br/>gpt-oss-120b<br/>7-day cache · yfinance.info"]
+            N4["node: sentiment_analysis<br/>SentimentAgent<br/>FinBERT + gpt-oss-20b<br/>News"]
         end
 
         N6["node: signal_aggregation<br/>HybridSignalAggregator<br/>Weighted conviction voting<br/>tech 0.35 · fund 0.35 · sent 0.30<br/>Conviction scaled to available vote mass, not votes cast<br/>Macro multipliers applied if macro present<br/>Per-regime reliability persisted for later credit assignment<br/>Contraction regime override"]
@@ -81,7 +81,7 @@ flowchart TD
             N7["node: risk_evaluation<br/>RiskStatisticalEngine<br/>VaR · CVaR · Beta · SLSQP optimizer<br/>Portfolio covariance from daily price_history<br/>Half-Kelly sizing · VIX scaling"]
         end
 
-        N8["node: portfolio_allocation<br/>PortfolioManagerAgent<br/>Llama-3.3-70b-versatile<br/>Half-Kelly sizing · Pydantic-validated output<br/>Cultural wisdom injected<br/>Degrades gracefully if macro unavailable"]
+        N8["node: portfolio_allocation<br/>PortfolioManagerAgent<br/>gpt-oss-120b<br/>Half-Kelly sizing · Pydantic-validated output<br/>Cultural wisdom injected<br/>Degrades gracefully if macro unavailable"]
 
         N9["node: log_decisions<br/>ARGUSDecision snapshots<br/>Persisted to ChromaDB cultural memory"]
 
@@ -234,9 +234,9 @@ curl http://localhost:8000/health
 {
   "status": "ok",
   "model_versions": {
-    "synthesis": "llama-3.3-70b-versatile",
-    "sentiment": "llama-3.1-8b-instant",
-    "fundamental": "llama-3.3-70b-versatile",
+    "synthesis": "openai/gpt-oss-120b",
+    "sentiment": "openai/gpt-oss-20b",
+    "fundamental": "openai/gpt-oss-120b",
     "finbert": "ProsusAI/finbert"
   },
   "can_make_calls": true,
@@ -252,7 +252,7 @@ Required environment variables must be placed in a `.env` file at the project ro
 
 | Variable | Required? | Description / Default |
 |----------|-----------|-----------------------|
-| `GROQ_API_KEY` | Yes | Authenticates Llama 3.3-70b/3.1-8b for core agent synthesis. |
+| `GROQ_API_KEY` | Yes | Authenticates gpt-oss-120b/gpt-oss-20b for core agent synthesis. |
 | `FRED_API_KEY` | Yes | Retrieves macroeconomic indicators (CPI, Fed Funds, UNRATE). |
 | `NEWSAPI_KEY` | Yes | Fetches recent headlines for FinBERT sentiment scoring. |
 | `LANGCHAIN_TRACING_V2` / `LANGCHAIN_API_KEY` / `LANGCHAIN_PROJECT` / `LANGCHAIN_ENDPOINT` | Optional | Enables LangSmith tracing. Read directly by `langchain-core`, not by `argus/config.py`. |
