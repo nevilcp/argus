@@ -57,14 +57,14 @@ class UnregisteredModel(ValueError):
     """Raised when a model with no known rate-limit profile is passed to the governor."""
 
 
-# The two Llama IDs the system actually calls (see argus/seams.py, GroqLLMClient
+# The two gpt-oss IDs the system actually calls (see argus/seams.py, GroqLLMClient
 # construction sites in fundamental.py/sentiment.py/portfolio.py, sourced from
 # argus/config.py's ARGUS_*_MODEL settings). Membership only — the numbers live
 # in BOOTSTRAP_LIMITS below since headers are the real source.
 REGISTERED_MODELS: frozenset[str] = frozenset(
     {
-        "llama-3.3-70b-versatile",
-        "llama-3.1-8b-instant",
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b",
     }
 )
 
@@ -135,12 +135,14 @@ def _parse_reset_duration(value: str) -> float:
 
 
 # Measured against representative reconstructed prompts (fundamental, sentiment,
-# and portfolio system+user pairs built from tests/fixtures/market_data/) run
-# through the Llama-3.1 chat template and tokenizer: raw content averaged ~2.0
-# tokens/word (peak ~2.2 on the portfolio prompt's dense numeric signal table),
-# far above the previous 1.3 guess, plus a constant ~15-token template overhead
-# for the role wrapper and special tokens. Both figures are rounded up for
-# headroom rather than fit exactly.
+# and portfolio system+user pairs built from tests/fixtures/market_data/): raw
+# content averaged ~2.0 tokens/word (peak ~2.2 on the portfolio prompt's dense
+# numeric signal table), far above the previous 1.3 guess, plus a constant
+# ~15-token template overhead for the role wrapper and special tokens. gpt-oss
+# uses a different tokenizer than the Llama-3.1 one this was originally measured
+# against, but 2.2 is a deliberate over-estimate that still errs safe, so the
+# value stays unchanged. Both figures are rounded up for headroom rather than
+# fit exactly.
 _WORD_TO_TOKEN_RATIO = 2.2
 _CHAT_TEMPLATE_OVERHEAD_TOKENS = 20
 
