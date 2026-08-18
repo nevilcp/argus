@@ -166,8 +166,6 @@ class TestEndToEnd:
                 pct_positive=0.6,
                 pct_negative=0.1,
                 news_volume_7d=10,
-                social_volume_change_pct=10.0,
-                social_mention_surge=False,
                 upcoming_catalyst=False,
                 sentiment_decay_risk="LOW",
                 reasoning="Test",
