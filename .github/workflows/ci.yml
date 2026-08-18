@@ -8,27 +8,39 @@ on:
 
 jobs:
   test:
-    name: Integration Test Suite
+    name: Integration Test Suite (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
+
+    # pyproject.toml declares requires-python = ">=3.11", but only 3.11 was ever
+    # exercised — so a 3.12-only failure would reach a developer running 3.12
+    # locally before it ever reached CI. Both ends of the supported range now run.
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
           cache: "pip"
 
       - name: Install package with dev extras
         run: |
           pip install -e ".[dev]"
 
+      # Lint and type-check are version-independent; running them once keeps the
+      # matrix from reporting the same finding twice
       - name: Lint (ruff)
+        if: matrix.python-version == '3.11'
         run: ruff check .
 
       - name: Type-check (mypy)
+        if: matrix.python-version == '3.11'
         run: mypy argus/
 
       - name: Run test suite
