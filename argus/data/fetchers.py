@@ -9,9 +9,9 @@ Responsibilities:
   - Fetch and cache macroeconomic FRED series with a 6-hour TTL
   - Cache daily OHLCV bars per (ticker, trading day) so a sweep only pays for
     the first fetch of each trading day
-  - Aggregate news headlines and social sentiment from free-tier APIs,
-    enforcing NewsAPI's 100 request/day budget and returning None — never a
-    fabricated empty result — when a source can't be reached
+  - Aggregate news headlines from free-tier APIs, enforcing NewsAPI's 100
+    request/day budget and returning None — never a fabricated empty result —
+    when a source can't be reached
 
 Not responsible for:
   - Data compression or indicator calculation (see data/pipeline.py)
@@ -22,7 +22,6 @@ Dependencies:
   - yfinance
   - fredapi (optional; requires FRED_API_KEY)
   - newsapi-python (optional; requires NEWSAPI_KEY)
-  - pytrends (optional)
 """
 
 from __future__ import annotations
@@ -92,9 +91,8 @@ def _is_retryable(exc: Exception) -> bool:
         provider-specific equivalents.
     """
     import yfinance.exceptions as yf_exceptions
-    from pytrends.exceptions import TooManyRequestsError
 
-    if isinstance(exc, (yf_exceptions.YFRateLimitError, TooManyRequestsError)):
+    if isinstance(exc, yf_exceptions.YFRateLimitError):
         return True
 
     try:
@@ -735,98 +733,6 @@ def fetch_news(
     except DataFetchError as exc:
         logger.warning("fetch_news: %s failed — %s", ticker, exc)
         return None
-
-
-def fetch_social_sentiment(ticker: str) -> dict:
-    """Aggregates Google Trends signals into a normalized sentiment dict.
-
-    Returns the same key set regardless of whether trends data is available,
-    so downstream callers don't need to guard against missing keys — but
-    ``social_data_available`` distinguishes a real observation from the
-    neutral placeholder used when Google Trends couldn't be reached.
-
-    Args:
-        ticker: Equity ticker symbol.
-
-    Returns:
-        Dict with keys: mention_surge, volume_change_pct, top_posts,
-        earnings_within_14d, social_data_available.
-    """
-    trends = _fetch_google_trends(ticker)
-
-    if trends is None:
-        return {
-            "mention_surge": False,
-            "volume_change_pct": 0.0,
-            "top_posts": [],
-            "earnings_within_14d": False,
-            "social_data_available": False,
-        }
-
-    # Maps the 0–100 Google Trends score to a ±1 deviation from baseline (50 = neutral)
-    volume_change_pct = (trends["trend_score"] - 50) / 50.0
-
-    return {
-        "mention_surge": trends["surge"],
-        "volume_change_pct": round(volume_change_pct, 3),
-        "top_posts": [],
-        "earnings_within_14d": False,
-        "social_data_available": True,
-    }
-
-
-@_with_retry
-def _fetch_google_trends_raw(ticker: str) -> pd.DataFrame:
-    """Fetches raw 7-day Google Trends interest-over-time data for a ticker.
-
-    ``build_payload()`` internally calls pytrends' token endpoint before
-    ``interest_over_time()`` hits the data endpoint, so each call here costs 2
-    HTTP requests — a 20-ticker sweep is 40 Trends requests, not 20. Retries
-    lean on pytrends' own built-in backoff (retries/backoff_factor) in
-    addition to this module's outer retry loop.
-
-    Args:
-        ticker: Equity ticker symbol used as the Google Trends keyword.
-
-    Returns:
-        Raw interest-over-time DataFrame from pytrends.
-    """
-    from pytrends.request import TrendReq
-
-    pt = TrendReq(hl="en-US", tz=360, timeout=(8, 20), retries=2, backoff_factor=0.5)
-    pt.build_payload([ticker], timeframe="now 7-d")
-    return pt.interest_over_time()
-
-
-def _fetch_google_trends(ticker: str) -> Optional[dict]:
-    """Fetches 7-day Google search interest for the ticker via pytrends.
-
-    A score > 1.5× the 7-day average is flagged as a surge. Returns None — not
-    a fabricated neutral score — when pytrends fails after retries or returns
-    no data for this ticker: 50 is a real score some tickers legitimately
-    report, so it must not double as "unknown."
-
-    Args:
-        ticker: Equity ticker symbol used as the Google Trends keyword.
-
-    Returns:
-        Dict with keys: trend_score (int 0–100), surge (bool). None on failure
-        or when no data is available for this ticker.
-    """
-    try:
-        df = _fetch_google_trends_raw(ticker)
-    except DataFetchError as e:
-        logger.warning("[GoogleTrends] Fetch failed for %s: %s", ticker, e)
-        return None
-
-    if df.empty or ticker not in df.columns:
-        return None
-
-    latest = int(df[ticker].iloc[-1])
-    avg = df[ticker].mean()
-    surge = avg > 0 and latest > avg * 1.5
-
-    return {"trend_score": latest, "surge": bool(surge)}
 
 
 @_with_retry

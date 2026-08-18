@@ -1,7 +1,7 @@
 """
 Tests for argus/data/fetchers.py's retry classification, NewsAPI budget
 enforcement, and the "None means unavailable, not neutral" contract for
-Google Trends and NewsAPI.
+NewsAPI.
 """
 
 from datetime import timedelta
@@ -38,13 +38,6 @@ def test_is_retryable_yfinance_rate_limit():
     import yfinance.exceptions as yf_exceptions
 
     assert fetchers._is_retryable(yf_exceptions.YFRateLimitError()) is True
-
-
-def test_is_retryable_pytrends_too_many_requests():
-    """A pytrends 429 is retryable."""
-    from pytrends.exceptions import TooManyRequestsError
-
-    assert fetchers._is_retryable(TooManyRequestsError("rate limited", response=mock.Mock())) is True
 
 
 def test_is_retryable_newsapi_rate_limited_code():
@@ -268,74 +261,6 @@ def test_fetch_news_returns_none_after_retries_exhausted(monkeypatch):
         result = fetchers.fetch_news("AAPL", "Apple Inc")
 
     assert result is None
-
-
-# ---------------------------------------------------------------------------
-# _fetch_google_trends / fetch_social_sentiment
-# ---------------------------------------------------------------------------
-
-
-def test_fetch_google_trends_returns_none_not_fifty_on_rate_limit(monkeypatch):
-    """TooManyRequestsError must surface as None, not the fabricated neutral score 50."""
-    from pytrends.exceptions import TooManyRequestsError
-
-    monkeypatch.setattr(fetchers.time, "sleep", lambda _s: None)
-    mock_pytrends = mock.Mock()
-    mock_pytrends.build_payload.side_effect = TooManyRequestsError(
-        "rate limited", response=mock.Mock(headers={})
-    )
-
-    with mock.patch("pytrends.request.TrendReq", return_value=mock_pytrends):
-        result = fetchers._fetch_google_trends("AAPL")
-
-    assert result is None
-
-
-def test_fetch_google_trends_returns_none_on_empty_dataframe():
-    """No data for this ticker is None, not a fabricated neutral score."""
-    mock_pytrends = mock.Mock()
-    mock_pytrends.interest_over_time.return_value = pd.DataFrame()
-
-    with mock.patch("pytrends.request.TrendReq", return_value=mock_pytrends):
-        result = fetchers._fetch_google_trends("AAPL")
-
-    assert result is None
-
-
-def test_fetch_google_trends_returns_real_score():
-    """A genuine response is parsed into trend_score/surge."""
-    df = pd.DataFrame({"AAPL": [40, 40, 40, 40, 100]})
-    mock_pytrends = mock.Mock()
-    mock_pytrends.interest_over_time.return_value = df
-
-    with mock.patch("pytrends.request.TrendReq", return_value=mock_pytrends):
-        result = fetchers._fetch_google_trends("AAPL")
-
-    assert result == {"trend_score": 100, "surge": True}
-
-
-def test_fetch_social_sentiment_flags_unavailable_data(monkeypatch):
-    """When Google Trends is unreachable, social_data_available is False and values are placeholders."""
-    monkeypatch.setattr(fetchers, "_fetch_google_trends", lambda _ticker: None)
-
-    result = fetchers.fetch_social_sentiment("AAPL")
-
-    assert result["social_data_available"] is False
-    assert result["mention_surge"] is False
-    assert result["volume_change_pct"] == 0.0
-
-
-def test_fetch_social_sentiment_reports_real_data(monkeypatch):
-    """A genuine Trends observation is marked social_data_available=True."""
-    monkeypatch.setattr(
-        fetchers, "_fetch_google_trends", lambda _ticker: {"trend_score": 80, "surge": True}
-    )
-
-    result = fetchers.fetch_social_sentiment("AAPL")
-
-    assert result["social_data_available"] is True
-    assert result["mention_surge"] is True
-    assert result["volume_change_pct"] == 0.6
 
 
 # ---------------------------------------------------------------------------

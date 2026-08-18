@@ -4,7 +4,7 @@ Multi-agent financial intelligence system orchestrating specialist LLMs and stat
 
 ![CI](https://github.com/nevilcp/argus/actions/workflows/ci.yml/badge.svg)
 ![Python Version](https://img.shields.io/badge/python-%E2%89%A53.11-blue)
-![Tests](https://img.shields.io/badge/tests-437_passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-432_passing-brightgreen)
 ![License](https://img.shields.io/badge/license-Proprietary-red)
 
 > **RESEARCH PROJECT ONLY — NOT FINANCIAL ADVICE.** ARGUS is not registered with the SEC or any regulatory body. All outputs are for educational and research purposes only. Do not make investment decisions based on this system's output.
@@ -34,7 +34,6 @@ flowchart TD
         YF["yfinance<br/>OHLCV · Fundamentals · VIX"]
         FRED["FRED API<br/>Fedfunds · CPI · Yield Curve · Unemployment"]
         NEWS["NewsAPI<br/>Headlines"]
-        GT["Google Trends<br/>Search Interest"]
     end
 
     %% ── MFT Data Pipeline ────────────────────────────────────────────────
@@ -42,7 +41,7 @@ flowchart TD
         direction TB
         FL["_fetch_loop\nEvery 5 min (sweep duration subtracted from the wait) · bulk 1m candles\n2-day history on first fetch"]
         BUF["OHLCVBuffer\nPersistent SQLite (data/) · 1,173-bar rolling (1m × 2d + slack)\nINSERT OR REPLACE — safe for bulk re-insert"]
-        SL["_session_loop\nEvery 30 min → compress_all\nResamples to 5m · RSI · MACD · BB · ATR · ADX · VWAP · Momentum"]
+        SL["compress_all — same 5-min pass as the sweep, not a separate timer\nResamples to 5m · RSI · MACD · BB · ATR · ADX · VWAP · Momentum"]
         CACHE["_live_session_cache\nIn-memory dict · ticker → feature dict\nUpdated via on_session_ready callback"]
     end
 
@@ -71,7 +70,7 @@ flowchart TD
             N1["node: macro_analysis<br/>MacroStatisticalAgent<br/>Gaussian HMM · 3-state regime<br/>FRED + VIX features"]
             N2["node: technical_analysis<br/>TechnicalStatisticalAgent<br/>Reads MFT session_states<br/>RSI · MACD · BB · ADX · VWAP · Momentum<br/>→ score ∈ [-1,+1]"]
             N3["node: fundamental_analysis<br/>FundamentalAgent<br/>gpt-oss-120b<br/>7-day cache · yfinance.info"]
-            N4["node: sentiment_analysis<br/>SentimentAgent<br/>FinBERT + gpt-oss-20b<br/>News · Google Trends"]
+            N4["node: sentiment_analysis<br/>SentimentAgent<br/>FinBERT + gpt-oss-20b<br/>News"]
         end
 
         N6["node: signal_aggregation<br/>HybridSignalAggregator<br/>Weighted conviction voting<br/>tech 0.35 · fund 0.35 · sent 0.30<br/>Conviction scaled to available vote mass, not votes cast<br/>Macro multipliers applied if macro present<br/>Per-regime reliability persisted for later credit assignment<br/>Contraction regime override"]
@@ -102,16 +101,16 @@ flowchart TD
     FRED -->|"FEDFUNDS · CPIAUCSL<br/>T10Y2Y · UNRATE"| N1
     YF -->|"^VIX"| N1
     YF -->|"Ticker.info"| N3
-    NEWS & GT --> N4
+    NEWS --> N4
 
     %% ── Safety Layer (Independent of Graph) ─────────────────────────────
     subgraph SAFETY["🛡️ Safety Layer  (Independent of Graph)"]
         direction LR
-        KS["KillSwitch Daemon<br/>Background thread · 60s poll<br/>Drawdown: 8/12/18% by tolerance<br/>VIX Blackout ≥ 35 → block positions<br/>Halt file → manual reset required"]
+        KS["KillSwitch Daemon<br/>Background thread · 900s poll<br/>Drawdown: 8/12/18% by tolerance<br/>VIX Blackout ≥ 35 → block positions<br/>Halt file → manual reset required"]
         GOV["RateLimitGovernor<br/>Singleton · thread-safe<br/>RPM sliding window (sleep)<br/>RPD hard cap (exception)<br/>TPM warning"]
     end
 
-    YF -->|"^VIX every 60s"| KS
+    YF -->|"^VIX every 900s (cached)"| KS
     KS -->|"is_halted / new_positions_allowed<br/>checked before graph invoke"| GATE
     GOV -.-|"wait_if_needed() before<br/>every LLM call"| N3 & N4 & N8
 
@@ -156,7 +155,7 @@ ARGUS sits at the intersection of quantitative finance, statistical modeling, an
 ### Concepts Behind Each Agent
 
 - **Macro regime (Gaussian HMM)** — a Hidden Markov Model fit on FRED macro indicators (CPI, Fed Funds, unemployment, 10Y-2Y yield curve) plus VIX, classifying the current environment into one of three latent regimes rather than a hand-coded rule. It classifies from a trailing 36-month-end feature window rather than a single observation, so the transition matrix — not one noisy print — drives the call. The fitted model ships as a committed artifact (`argus-train-macro` retrains it; see [Training the Macro Classifier](#training-the-macro-classifier)); if the artifact is missing or fails to load, the agent degrades to a static VIX/yield-curve rule rather than failing. See [`argus/agents/macro.py`](argus/agents/macro.py).
-- **Technical indicators** — fetched as 1-minute intraday candles, resampled to 5-minute bars for indicator calculation, and compressed every 30 minutes. See [`argus/agents/technical.py`](argus/agents/technical.py) and [`argus/data/pipeline.py`](argus/data/pipeline.py).
+- **Technical indicators** — fetched as 1-minute intraday candles, resampled to 5-minute bars for indicator calculation, and recompressed on every 5-minute pipeline pass. See [`argus/agents/technical.py`](argus/agents/technical.py) and [`argus/data/pipeline.py`](argus/data/pipeline.py).
   - *RSI* (Relative Strength Index): 0–100 momentum oscillator identifying overbought/oversold conditions.
   - *MACD*: trend-following momentum, read via the histogram (the gap between the MACD line and its signal line).
   - *Bollinger %B*: price's position within its rolling volatility bands.
@@ -179,7 +178,7 @@ At small sample sizes — inherent to a system that has only recently started cl
 - **ROA is used as a proxy for ROIC** — Yahoo Finance's `returnOnAssets` is mapped directly to the `roic` field. The two are mathematically distinct; read capital-efficiency conclusions from the fundamental signal with that substitution in mind.
 - **NewsAPI's free tier only returns the trailing 28 days** of headlines — sentiment signals go silently empty/neutral beyond that window.
 - **NewsAPI's free tier also caps requests at 100/day**, and delays article availability by roughly 24 hours. A 20-ticker sweep spends 20 of those 100 — a 5-run/day ceiling tighter than any Groq quota — and news-derived sentiment is never same-day by construction.
-- **yfinance and pytrends are unofficial clients**, not documented APIs — they drive the private JSON endpoints behind the public Yahoo Finance and Google Trends websites rather than a published, versioned API. There is no rate-limit contract, no `Retry-After` guarantee, and no SLA.
+- **yfinance is an unofficial client**, not a documented API — it drives the private JSON endpoints behind the public Yahoo Finance website rather than a published, versioned API. There is no rate-limit contract, no `Retry-After` guarantee, and no SLA.
 - **No slippage, spread, or market-impact modeling** — allocations are theoretical, not execution-ready.
 - **Historical covariance breaks down during shocks** (correlations tend toward 1); VaR/CVaR estimates during genuine crises should be treated as understated.
 - **Long-only** — no shorting, options, or hedging; a bearish `macro_regime` can only reduce exposure, not profit from it.
@@ -258,7 +257,7 @@ Required environment variables must be placed in a `.env` file at the project ro
 | `NEWSAPI_KEY` | Yes | Fetches recent headlines for FinBERT sentiment scoring. |
 | `LANGCHAIN_TRACING_V2` / `LANGCHAIN_API_KEY` / `LANGCHAIN_PROJECT` / `LANGCHAIN_ENDPOINT` | Optional | Enables LangSmith tracing. Read directly by `langchain-core`, not by `argus/config.py`. |
 
-Every secret field defaults to an empty string (see `argus/config.py`) — the process starts without them, but the feature that depends on a missing key degrades or is skipped rather than failing outright (e.g. a missing `FRED_API_KEY` means the macro classifier's rule-based fallback is used instead of live indicators). Google Trends sentiment analysis needs no API key at all.
+Every secret field defaults to an empty string (see `argus/config.py`) — the process starts without them, but the feature that depends on a missing key degrades or is skipped rather than failing outright (e.g. a missing `FRED_API_KEY` means the macro classifier's rule-based fallback is used instead of live indicators).
 
 ### Unattended Operation
 
@@ -433,7 +432,7 @@ With the default `.env`, this alone gives the same unattended behavior — hourl
 
 ## Testing
 
-ARGUS includes a suite of deterministic unit tests that execute without triggering external API calls (via `pytest-mock`), covering core agents, rate limit governors, and the intraday MFT pipeline.
+ARGUS includes a suite of deterministic unit tests covering core agents, rate limit governors, and the intraday MFT pipeline. Every LLM boundary is fixture-backed or mocked (via `argus/seams.py` and `pytest-mock`), so no test ever calls Groq. One class — `tests/test_integration.py::TestEndToEnd` — deliberately exercises live yfinance and FRED calls; everything else runs offline.
 
 **Run the full test suite:**
 ```bash
@@ -451,8 +450,8 @@ pytest tests/ --cov=argus --cov-report=term-missing
 ```
 
 - **Categories**: Tests cover Pydantic validation boundaries, mathematical boundaries (e.g., Half-Kelly position sizing constraints), caching TTL expiration logic, and thread-safe rate limit assertions.
-- **Approximate Run Time**: ~155 seconds for 437 tests across 35 files, entirely offline by design — no live API calls, network access, or API keys required.
-- **CI gate**: `.github/workflows/ci.yml` additionally runs `ruff check .` and `mypy argus/` (pinned `ruff==0.16.2`, `mypy==2.3.0`) before the test step.
+- **Approximate Run Time**: ~150 seconds for 432 tests across 35 files. No Groq key is needed — LLM agents are always fixture-backed or mocked. `TestEndToEnd` needs network access and a `FRED_API_KEY`; the rest of the suite needs neither.
+- **CI gate**: `.github/workflows/ci.yml` additionally runs `ruff check .` and `mypy argus/` (pinned `ruff==0.16.2`, `mypy==2.3.0`) before the test step, and runs the suite on both Python 3.11 and 3.12 so the `requires-python = ">=3.11"` floor is actually exercised.
 
 ## Contributing
 
