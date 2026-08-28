@@ -35,7 +35,7 @@ from dataclasses import dataclass, field, fields
 from enum import Enum
 from typing import Any
 
-PARAMS_VERSION = 15
+PARAMS_VERSION = 16
 
 
 class Provenance(str, Enum):
@@ -370,6 +370,38 @@ class MemoryParams:
     )
 
 
+@dataclass(frozen=True)
+class StructuredOutputParams:
+    """Retry/back-off controls for the structured-output decoder (structured_output.py).
+
+    One attempt budget replacing the three per-agent copies of ``range(3)`` +
+    ``time.sleep(2**attempt)`` this decoder consolidates (fundamental.py,
+    sentiment.py, portfolio.py) — none of those three had any basis beyond
+    "seemed reasonable" either, so the value carries forward unchanged rather
+    than being re-guessed.
+    """
+
+    max_attempts: int = p(
+        3,
+        Provenance.ARBITRARY,
+        "matches the per-agent retry loops this decoder replaces; not evaluated "
+        "against alternatives",
+    )
+    backoff_base_seconds: float = p(
+        1.0,
+        Provenance.ARBITRARY,
+        "matches the per-agent time.sleep(2**attempt) back-off this decoder "
+        "replaces; not evaluated against alternatives",
+    )
+    backoff_max_seconds: float = p(
+        30.0,
+        Provenance.ARBITRARY,
+        "ceiling on the exponential back-off; the per-agent loops this decoder "
+        "replaces had no cap since 3 attempts alone tops out at 4s, kept here as "
+        "a defensive bound if max_attempts is ever raised",
+    )
+
+
 SYSTEM = SystemParams()
 KILL_SWITCH = KillSwitchParams()
 TECHNICAL_INDICATOR_WEIGHTS = TechnicalIndicatorWeights()
@@ -380,6 +412,7 @@ RISK = RiskParams()
 MACRO = MacroParams()
 RECONCILIATION = ReconciliationParams()
 MEMORY = MemoryParams()
+STRUCTURED_OUTPUT = StructuredOutputParams()
 
 _ALL_GROUPS: dict[str, Any] = {
     "SYSTEM": SYSTEM,
@@ -392,6 +425,7 @@ _ALL_GROUPS: dict[str, Any] = {
     "MACRO": MACRO,
     "RECONCILIATION": RECONCILIATION,
     "MEMORY": MEMORY,
+    "STRUCTURED_OUTPUT": STRUCTURED_OUTPUT,
 }
 
 
