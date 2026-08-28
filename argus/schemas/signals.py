@@ -274,6 +274,28 @@ class TechnicalSignal(BaseModel):
         return _clamp_conviction(v)
 
 
+class FundamentalVerdict(BaseModel):
+    """What the LLM itself returns for a fundamental analysis — judgement only.
+
+    Never carries measured ratios: those come from the market-data provider
+    and are merged in by the agent to build a FundamentalSignal. See
+    GLOSSARY.md's Verdict entry.
+    """
+
+    signal: Signal = Field(..., description="Directional label")
+    conviction: float = Field(..., ge=0.0, le=_CONVICTION_MAX)
+    moat_score: float = Field(
+        ..., ge=0.0, le=10.0, description="Qualitative competitive moat [0, 10]"
+    )
+    reasoning: str = Field(..., description="LLM-generated investment thesis")
+
+    @field_validator("conviction", mode="before")
+    @classmethod
+    def cap_conviction(cls, v: float) -> float:
+        """Silently clamps conviction to the 0.95 maximum."""
+        return _clamp_conviction(v)
+
+
 class FundamentalSignal(BaseModel):
     """Corporate fundamental metrics and qualitative moat ratings for a target asset."""
 
@@ -635,6 +657,7 @@ __all__ = [
     "missing_session_state_keys",
     "MacroContext",
     "TechnicalSignal",
+    "FundamentalVerdict",
     "FundamentalSignal",
     "SentimentSignal",
     "RiskAssessment",

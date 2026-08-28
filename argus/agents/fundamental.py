@@ -22,9 +22,7 @@ Dependencies:
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
-import time
 from datetime import date, datetime
 from typing import Any, Optional
 
@@ -32,8 +30,9 @@ from pydantic import ValidationError
 
 from argus.config import settings
 from argus.orchestration.governor import RateLimitExceeded, UnregisteredModel, governor
-from argus.schemas.signals import FundamentalSignal
+from argus.schemas.signals import FundamentalSignal, FundamentalVerdict
 from argus.seams import GroqLLMClient, LiveMarketDataProvider, LLMClient, MarketDataProvider
+from argus.structured_output import StructuredOutputError, decode
 
 logger = logging.getLogger("argus.fundamental")
 
@@ -53,6 +52,17 @@ _SECTOR_PE_MEDIANS: dict[str, float] = {
     "Basic Materials": 16.0,
 }
 _DEFAULT_PE_MEDIAN = 20.0
+
+# Field descriptions for the prompt's "Fields required" line, keyed by the
+# same names as FundamentalVerdict's schema — a drift test (test_fundamental.py)
+# asserts the two stay equal, so a schema change that isn't mirrored here fails
+# loudly instead of leaving the prompt asking for fields the model can't supply.
+_VERDICT_FIELD_DESCRIPTIONS: dict[str, str] = {
+    "signal": "signal (string)",
+    "conviction": "conviction (float 0.0–1.0)",
+    "moat_score": "moat_score (int 1–10)",
+    "reasoning": "reasoning (string ≤80 words, no markdown)",
+}
 
 # Fraction of the configured per-minute request budget held back before a
 # ticker's fundamental analysis is even attempted, so the same-model portfolio
@@ -197,10 +207,7 @@ def build_compact_prompt(ticker: str, pit_data: dict, anon_id: Optional[str] = N
         "(3) null fields do not drive the primary signal.\n"
         "\n"
         "Output ONLY a valid JSON object — no markdown, no preamble, no trailing text.\n"
-        "Fields required: signal (string), conviction (float 0.0–1.0), pe_ttm (float|null), "
-        "revenue_growth_yoy (float|null), operating_margin (float|null), fcf_yield (float|null), "
-        "debt_to_equity (float|null), roic (float|null), moat_score (int 1–10), "
-        "reasoning (string ≤80 words, no markdown)."
+        "Fields required: " + ", ".join(_VERDICT_FIELD_DESCRIPTIONS.values()) + "."
     )
     return prompt.strip()
 
@@ -302,8 +309,8 @@ class FundamentalAgent:
 
     Uses an injected LLMClient (Groq by default) to construct structured
     investment theses from ratio payloads fetched via an injected
-    MarketDataProvider, applying local caches, governor rate limits, and
-    exponential back-off on transient failures.
+    MarketDataProvider, applying local caches, governor rate limits, and the
+    shared structured-output decoder's parse/validate/retry (with repair).
     """
 
     def __init__(
@@ -347,7 +354,8 @@ class FundamentalAgent:
         """Audits fundamentals for a single ticker and returns a validated Pydantic signal.
 
         Checks the local cache first, enforces governor capacity, fetches current
-        financial ratios, and invokes the LLM with up to 3 retry attempts.
+        financial ratios, and decodes a FundamentalVerdict from the LLM via
+        argus.structured_output.decode (with repair enabled).
 
         Args:
             ticker: Equity ticker symbol.
@@ -359,7 +367,7 @@ class FundamentalAgent:
                 only logging it.
 
         Returns:
-            A validated FundamentalSignal, or None if all attempts fail.
+            A validated FundamentalSignal, or None if decoding ultimately fails.
         """
         if not self.cache.is_stale(ticker, session_seed):
             cached = self.cache.get(ticker, session_seed)
@@ -397,87 +405,59 @@ class FundamentalAgent:
         }
         prompt = build_compact_prompt(ticker, pit_data, anon_id)
 
-        last_error: Optional[str] = None
-        for attempt in range(3):
-            try:
-                user_prompt = prompt
-                if last_error is not None:
-                    user_prompt = (
-                        f"{prompt}\n\n"
-                        f"Your previous response was invalid: {last_error}\n"
-                        "Return a corrected JSON object satisfying the schema above."
-                    )
-                raw = self.llm_client.complete(SYSTEM_PROMPT, user_prompt).strip()
+        try:
+            verdict = decode(self.llm_client, SYSTEM_PROMPT, prompt, FundamentalVerdict, repair=True)
+        except StructuredOutputError as e:
+            logger.warning("[Fundamental] Decode failed for %s: %s", ticker, e)
+            if errors is not None:
+                errors.append(f"fundamental_analysis[{ticker}]: {e}")
+            return None
+        except (RateLimitExceeded, UnregisteredModel) as e:
+            # The governor already exhausted its own bounded wait before raising
+            # either of these — degrade this ticker immediately rather than
+            # retrying into the same wall.
+            logger.warning("[Fundamental] Governor rejected call for %s: %s", ticker, e)
+            if errors is not None:
+                errors.append(f"fundamental_analysis[{ticker}]: rate limited: {e}")
+            return None
+        except Exception as e:
+            logger.error("[Fundamental] API error for %s: %s", ticker, e)
+            if errors is not None:
+                errors.append(f"fundamental_analysis[{ticker}]: API error: {e}")
+            return None
 
-                if raw.startswith("```"):
-                    parts = raw.split("```")
-                    if len(parts) >= 3:
-                        raw = parts[1]
-                    else:
-                        raw = parts[-1]
-                    raw = raw.strip()
-                    if raw.startswith("json"):
-                        raw = raw[4:].strip()
+        data: dict[str, Any] = verdict.model_dump()
+        data["ticker"] = ticker
+        data["data_as_of_date"] = pit_data["as_of_date"]
+        data["timestamp"] = datetime.now().isoformat()  # noqa: DTZ005
+        data["api_calls_used"] = 1
 
-                data = json.loads(raw)
+        # All measured ratios come from the fetched payload, never the LLM
+        # echo — the LLM only supplies signal/conviction/moat_score/reasoning.
+        f = pit_data.get("fundamentals", {})
+        for key in _MEASURED_FUNDAMENTAL_FIELDS:
+            data[key] = f.get(key)
+        data["sector"] = data["sector"] or "Unknown"
+        data["industry"] = data["industry"] or "Unknown"
 
-                data["ticker"] = ticker
-                data["data_as_of_date"] = pit_data["as_of_date"]
-                data["timestamp"] = datetime.now().isoformat()  # noqa: DTZ005
-                data["api_calls_used"] = 1
+        data["reasoning"] = data["reasoning"][:400]
 
-                # All measured ratios come from the fetched payload, never the LLM
-                # echo — the LLM only supplies signal/conviction/moat_score/reasoning.
-                f = pit_data.get("fundamentals", {})
-                for key in _MEASURED_FUNDAMENTAL_FIELDS:
-                    data[key] = f.get(key)
-                data["sector"] = data["sector"] or "Unknown"
-                data["industry"] = data["industry"] or "Unknown"
+        try:
+            signal = FundamentalSignal.model_validate(data)
+        except ValidationError as e:
+            # Merged-in measured data (e.g. a negative debt_to_equity) can violate
+            # the signal schema even though the verdict itself decoded cleanly —
+            # degrade this ticker rather than let it crash the batch.
+            logger.warning("[Fundamental] Measured data failed signal validation for %s: %s", ticker, e)
+            if errors is not None:
+                errors.append(f"fundamental_analysis[{ticker}]: measured data failed validation: {e}")
+            return None
 
-                if "reasoning" in data and isinstance(data["reasoning"], str):
-                    data["reasoning"] = data["reasoning"][:400]
-
-                signal = FundamentalSignal.model_validate(data)
-                self.cache.set(ticker, signal, session_seed)
-                logger.debug(
-                    "[Fundamental] Analysis complete for %s -> %s", ticker, signal.signal.value
-                )
-                return signal
-
-            except (json.JSONDecodeError, ValidationError) as e:
-                logger.warning(
-                    "[Fundamental] Attempt %d parse error for %s: %s", attempt + 1, ticker, e
-                )
-                last_error = str(e)
-                if attempt == 2:
-                    if errors is not None:
-                        errors.append(
-                            f"fundamental_analysis[{ticker}]: parse error after 3 attempts: {e}"
-                        )
-                    return None
-                time.sleep(2**attempt)
-            except (RateLimitExceeded, UnregisteredModel) as e:
-                # The governor already exhausted its own bounded wait before raising
-                # either of these — retrying here would just re-run into the same
-                # wall, not recover from it. Degrade this ticker immediately instead
-                # of burning three more rounds of governor waits.
-                logger.warning("[Fundamental] Governor rejected call for %s: %s", ticker, e)
-                if errors is not None:
-                    errors.append(f"fundamental_analysis[{ticker}]: rate limited: {e}")
-                return None
-            except Exception as e:
-                logger.error(
-                    "[Fundamental] Attempt %d API error for %s: %s", attempt + 1, ticker, e
-                )
-                if attempt == 2:
-                    if errors is not None:
-                        errors.append(
-                            f"fundamental_analysis[{ticker}]: API error after 3 attempts: {e}"
-                        )
-                    return None
-                time.sleep(2**attempt)
-
-        return None
+        self.cache.set(ticker, signal, session_seed)
+        logger.debug(
+            "[Fundamental] Analysis complete for %s -> %s", ticker, signal.signal.value
+        )
+        return signal
 
     def batch_analyze(
         self, tickers: list[str], backtest_mode: bool = False, session_seed: Optional[int] = None
