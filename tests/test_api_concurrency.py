@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient
 
 import api.main as api_main
 import argus.risk.kill_switch as kill_switch_module
+from argus.data.live_session_cache import LiveSessionCache
 from argus.risk.kill_switch import KillSwitch
 from argus.schemas.signals import ARGUSDecision
 
@@ -36,9 +37,9 @@ _PAYLOAD = {"tickers": ["AAPL"], "total_wealth": 100_000, "invest_pct": 0.5}
 
 @pytest.fixture(autouse=True)
 def _reset_singletons(monkeypatch):
-    """Clears the kill-switch singleton and live session cache around each test."""
+    """Clears the kill-switch singleton and installs a fresh live session cache around each test."""
     kill_switch_module._kill_switch = None
-    monkeypatch.setattr(api_main, "_live_session_cache", {})
+    monkeypatch.setattr(api_main, "_live_cache", LiveSessionCache(interval_minutes=1))
     monkeypatch.setattr(api_main.settings, "ARGUS_API_KEY", "")
     monkeypatch.setattr(api_main, "_analyze_semaphore", asyncio.Semaphore(1))
     yield
@@ -61,10 +62,10 @@ def _pipeline(monkeypatch, *, market_hours: bool, interval_minutes: int = 1):
 
 
 def _seed_cache(ticker: str, *, bar_age_seconds: float, write_age_seconds: float = 0.0):
-    """Populates `_live_session_cache` with a state whose bar and write times are both controlled."""
+    """Populates `_live_cache` with a state whose bar and write times are both controlled."""
     bar_ts = datetime.now(api_main._ET) - timedelta(seconds=bar_age_seconds)
     write_ts = datetime.now() - timedelta(seconds=write_age_seconds)
-    api_main._live_session_cache[ticker] = ({"timestamp": bar_ts.isoformat()}, write_ts)
+    api_main._live_cache.publish({ticker: {"timestamp": bar_ts.isoformat()}}, [ticker], now=write_ts)
 
 
 def _ready(client, monkeypatch):
@@ -182,12 +183,13 @@ async def test_mft_session_callback_evicts_untracked_tickers(monkeypatch):
     fake_pipeline = mock.Mock()
     fake_pipeline.tickers = ["AAPL"]
     monkeypatch.setattr(api_main, "_mft_pipeline", fake_pipeline)
-    api_main._live_session_cache["MSFT"] = ({"timestamp": "stale"}, datetime.now())
+    api_main._live_cache.publish({"MSFT": {"timestamp": "stale"}}, ["MSFT"])
 
     await api_main._mft_session_callback({"AAPL": {"timestamp": "2024-01-02T09:30:00-05:00"}})
 
-    assert "MSFT" not in api_main._live_session_cache
-    assert "AAPL" in api_main._live_session_cache
+    result = api_main._live_cache.admit(["MSFT", "AAPL"], datetime.now(), datetime.now(api_main._ET))
+    assert "MSFT" in result.absent
+    assert "AAPL" not in result.absent
 
 
 # ---------------------------------------------------------------------------
