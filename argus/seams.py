@@ -11,8 +11,10 @@ Each boundary gets one Protocol and two implementations:
     argus/data/fetchers.py, unchanged behavior) / `FixtureMarketDataProvider`
     (serves pre-captured JSON from tests/fixtures/market_data/).
   - `LLMClient` / `GroqLLMClient` (wraps ChatGroq construction + invocation,
-    and is the sole choke point for governor rate-limiting, header-driven
-    limit observation, and retry/back-off — see its own docstring)
+    and is the sole choke point for governor rate-limiting and header-driven
+    limit observation; classifies which failures are worth retrying and
+    raises RetryableTransportError for those, but the retry loop itself
+    lives in argus/structured_output.py's decode() — see its own docstring)
     / `FixtureLLMClient` (serves pre-captured response text from
     tests/fixtures/llm_responses/, never touches the governor or the network).
 
@@ -25,8 +27,6 @@ from __future__ import annotations
 
 import json
 import logging
-import random
-import time
 from pathlib import Path
 from typing import Any, Optional, Protocol
 
@@ -188,11 +188,41 @@ class LLMClient(Protocol):
     Callers keep owning response parsing (JSON extraction, markdown-fence
     stripping, schema validation) — this seam only replaces "how do I get an
     LLM to answer this prompt," not "what does the answer mean."
+
+    An implementation makes exactly one invocation per call — it does not
+    loop. A transient failure worth a caller-side retry (see
+    argus/structured_output.py's decode()) must be raised as
+    RetryableTransportError; anything else propagates as-is and is treated
+    as terminal.
     """
 
     def complete(self, system_prompt: str, user_prompt: str) -> str:
         """Sends a system + user prompt to the LLM and returns the raw response text."""
         ...
+
+
+class RetryableTransportError(Exception):
+    """Signals that an LLMClient.complete() attempt failed transiently and is worth retrying.
+
+    Raised by an LLMClient implementation, not by callers. A caller with its
+    own attempt budget (argus/structured_output.py's decode()) catches this
+    to retry the call, without needing to know which provider-specific
+    exceptions are retryable — that classification stays with the adapter
+    that raises this.
+
+    Args:
+        cause: The underlying transport exception.
+        retry_after: Seconds the provider explicitly said to wait before
+            retrying (e.g. a 429's Retry-After header), or None if the
+            provider gave no hint and the caller should decide its own
+            back-off.
+    """
+
+    def __init__(self, cause: Exception, retry_after: Optional[float] = None) -> None:
+        """Wraps the underlying transport exception with an optional retry hint."""
+        self.cause = cause
+        self.retry_after = retry_after
+        super().__init__(str(cause))
 
 
 # Retryable: transient conditions where a second attempt might succeed.
@@ -210,42 +240,37 @@ _TERMINAL_GROQ_ERRORS = (
     groq.NotFoundError,
 )
 
-_MAX_COMPLETE_ATTEMPTS = 3
-_BASE_BACKOFF_SECONDS = 1.0
-_MAX_BACKOFF_SECONDS = 30.0
 
+def _groq_retry_delay(exc: Exception) -> Optional[float]:
+    """Reads the provider's own retry hint off a retryable Groq error, if it gave one.
 
-def _groq_retry_delay(exc: Exception, attempt: int) -> float:
-    """Computes the delay before retrying a failed Groq call.
-
-    A RateLimitError's Retry-After header is honored verbatim when present —
-    Groq is telling us exactly how long its own limit takes to clear. Anything
-    else backs off exponentially with full jitter, capped at 30s.
+    Only a RateLimitError carries an explicit hint (its Retry-After header,
+    honored verbatim since Groq is telling us exactly how long its own limit
+    takes to clear). Every other retryable error has no such hint, so the
+    caller decides its own back-off. Header extraction itself is shared with
+    argus/data/fetchers.py's retry loop rather than reimplemented here.
 
     Args:
         exc: The exception the failed attempt raised.
-        attempt: Zero-based attempt number that just failed.
 
     Returns:
-        Seconds to sleep before the next attempt.
+        Seconds to wait before retrying per the provider's hint, or None.
     """
     if isinstance(exc, groq.RateLimitError):
-        retry_after = exc.response.headers.get("retry-after")
-        if retry_after is not None:
-            try:
-                return float(retry_after)
-            except ValueError:
-                pass
-    return random.uniform(0.0, min(_MAX_BACKOFF_SECONDS, _BASE_BACKOFF_SECONDS * 2**attempt))
+        return fetchers._retry_after_seconds(exc)
+    return None
 
 
 class GroqLLMClient:
     """Wraps a ChatGroq model+params combination. One instance per (model, temperature, max_tokens).
 
     The sole choke point for governance: token estimation, the governor's pre-flight
-    wait, rate-limit-header observation, and retry/back-off all live here rather than
-    duplicated across the three agents that construct this client, so none of them can
-    bypass it by accident.
+    wait, and rate-limit-header observation all live here rather than duplicated
+    across the three agents that construct this client, so none of them can bypass
+    it by accident. It also classifies which Groq failures are worth retrying and
+    supplies the provider's own retry hint, but performs no retry loop itself — see
+    RetryableTransportError and argus/structured_output.py's decode(), which owns
+    the retry loop this client's failures feed into.
     """
 
     def __init__(self, model: str, temperature: float, max_tokens: int, api_key: str) -> None:
@@ -291,77 +316,60 @@ class GroqLLMClient:
         governor.observe_headers(self._model, response.headers)
 
     def complete(self, system_prompt: str, user_prompt: str) -> str:
-        """Invokes the Groq model and returns its response as plain text.
+        """Invokes the Groq model once and returns its response as plain text.
 
-        Waits for governor capacity, then retries transient failures with
-        back-off, honoring Retry-After on 429s. Terminal errors (bad key, bad
-        request) propagate immediately without retrying. Any failure that
-        escapes this method — terminal or retries-exhausted — releases the
-        governor's pre-flight reservation first, since no tokens were ever
-        actually spent (see RateLimitGovernor.release_reservation).
+        Waits for governor capacity, then makes a single invocation — a
+        caller with its own attempt budget (argus/structured_output.py's
+        decode()) is responsible for retrying. A retryable failure (per
+        _RETRYABLE_GROQ_ERRORS) is wrapped in RetryableTransportError,
+        carrying the provider's retry hint if it gave one; a terminal
+        failure (bad key, bad request) propagates as-is. Either way the
+        governor's pre-flight reservation is released first, since no
+        tokens were ever actually spent (see
+        RateLimitGovernor.release_reservation).
 
         Returns:
             The response text, flattened from a content-block list if needed.
 
         Raises:
-            The underlying groq/langchain exception if every attempt fails, or
-            immediately for a terminal (non-retryable) error.
+            RetryableTransportError: If the call fails with a transient error.
+            The underlying groq/langchain exception: For a terminal error.
         """
         estimated_tokens = estimate_tokens(system_prompt, user_prompt, self._max_tokens)
         governor.wait_if_needed(self._model, estimated_tokens)
 
         try:
-            return self._complete_with_retries(system_prompt, user_prompt, estimated_tokens)
+            response = self._llm.invoke(
+                [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
+            )
+        except _TERMINAL_GROQ_ERRORS:
+            governor.release_reservation(self._model, estimated_tokens)
+            raise
+        except _RETRYABLE_GROQ_ERRORS as e:
+            governor.release_reservation(self._model, estimated_tokens)
+            raise RetryableTransportError(e, retry_after=_groq_retry_delay(e)) from e
         except Exception:
             governor.release_reservation(self._model, estimated_tokens)
             raise
 
-    def _complete_with_retries(
-        self, system_prompt: str, user_prompt: str, estimated_tokens: int
-    ) -> str:
-        """Runs the invoke/retry loop assuming the governor has already granted capacity.
+        token_usage = response.response_metadata.get("token_usage") or {}
+        governor.record_usage(
+            self._model,
+            estimated_tokens,
+            token_usage.get("prompt_tokens", 0),
+            token_usage.get("completion_tokens", 0),
+        )
 
-        Args:
-            system_prompt: The system message text.
-            user_prompt: The user message text.
-            estimated_tokens: The pre-flight estimate already reserved with the governor.
-
-        Returns:
-            The response text, flattened from a content-block list if needed.
-        """
-        for attempt in range(_MAX_COMPLETE_ATTEMPTS):
-            try:
-                response = self._llm.invoke(
-                    [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
-                )
-            except _TERMINAL_GROQ_ERRORS:
-                raise
-            except _RETRYABLE_GROQ_ERRORS as e:
-                if attempt == _MAX_COMPLETE_ATTEMPTS - 1:
-                    raise
-                time.sleep(_groq_retry_delay(e, attempt))
-                continue
-
-            token_usage = response.response_metadata.get("token_usage") or {}
-            governor.record_usage(
-                self._model,
-                estimated_tokens,
-                token_usage.get("prompt_tokens", 0),
-                token_usage.get("completion_tokens", 0),
+        raw = response.content
+        if isinstance(raw, list):
+            raw = "".join(
+                item.get("text", "")
+                for item in raw
+                if isinstance(item, dict) and item.get("type") == "text"
             )
-
-            raw = response.content
-            if isinstance(raw, list):
-                raw = "".join(
-                    item.get("text", "")
-                    for item in raw
-                    if isinstance(item, dict) and item.get("type") == "text"
-                )
-            elif not isinstance(raw, str):
-                raw = str(raw)
-            return raw
-
-        raise AssertionError("unreachable: loop always returns or raises")
+        elif not isinstance(raw, str):
+            raw = str(raw)
+        return raw
 
 
 class FixtureLLMClient:

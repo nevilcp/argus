@@ -15,14 +15,20 @@ Responsibilities:
     caller-supplied Pydantic schema
   - Retry invalid-JSON and schema-violating responses up to a declared
     attempt cap, with exponential back-off between attempts
+  - Retry a transport-level RetryableTransportError from the same attempt
+    budget, honoring the provider's own retry hint when the adapter
+    supplies one
   - Optionally re-prompt with the prior failure appended (repair), so the
     model can correct itself
   - Raise a typed, stage-tagged error when every attempt is exhausted
 
 Not responsible for:
   - Sending the request or governing rate limits (argus/seams.py's
-    LLMClient / GroqLLMClient owns transport, and already retries transient
-    network/API errors beneath this call)
+    LLMClient owns transport). An adapter makes one invocation per call and
+    performs no retry loop of its own — this module is the only place that
+    loops
+  - Classifying which transport failures are worth retrying versus terminal
+    — that stays with the LLMClient implementation (e.g. GroqLLMClient)
   - Defining what a valid response looks like for any particular agent —
     callers supply the target schema
   - Deciding what to do when decoding ultimately fails — callers catch
@@ -33,13 +39,14 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import time
 from typing import Optional, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
 from argus.params import STRUCTURED_OUTPUT
-from argus.seams import LLMClient
+from argus.seams import LLMClient, RetryableTransportError
 
 logger = logging.getLogger("argus.structured_output")
 
@@ -50,8 +57,10 @@ class StructuredOutputError(Exception):
     """Raised when every decode attempt is exhausted, naming which stage kept failing.
 
     Args:
-        stage: "json_parse" if the response was never valid JSON, or
-            "schema_validation" if it parsed but never matched the target schema.
+        stage: "json_parse" if the response was never valid JSON,
+            "schema_validation" if it parsed but never matched the target
+            schema, or "transport" if the LLMClient call itself kept failing
+            transiently.
         attempts: Number of attempts made before giving up.
         cause: The last attempt's underlying exception.
     """
@@ -122,19 +131,26 @@ def decode(
 
     Owns everything between "send the prompt" and "hand back a usable
     object": strips a markdown fence, parses JSON, and validates against
-    ``schema``. Invalid JSON and schema-violating JSON are each retried up
-    to ``STRUCTURED_OUTPUT.max_attempts``, backing off exponentially between
-    attempts. With ``repair=True``, a failed attempt's error is appended to
-    the next attempt's prompt; with ``repair=False``, the same prompt is
-    re-sent unchanged.
+    ``schema``. Invalid JSON, schema-violating JSON, and a retryable
+    transport failure are each retried up to ``STRUCTURED_OUTPUT.max_attempts``,
+    backing off exponentially between attempts (full-jitter for an unhinted
+    transport retry, to avoid the parallel agents thundering-herding a
+    shared provider outage; deterministic otherwise). With ``repair=True``,
+    the most recent json_parse/schema_validation failure's error is kept
+    appended to the prompt across attempts, including one interrupted by a
+    transport retry in between — a transport hiccup carries no content
+    feedback of its own, so it must not discard repair context that was
+    about to be sent.
 
-    ``llm_client.complete()`` may itself raise — a transport-level error
-    (GroqLLMClient already retries transient ones beneath this call) or the
-    governor's RateLimitExceeded/UnregisteredModel. None of those are caught
-    here, so they propagate on the first occurrence: the governor has
-    already exhausted its own bounded wait before raising either of its
-    exceptions, and a second retry loop above it would only re-run into the
-    same wall.
+    ``llm_client.complete()`` may itself raise. A RetryableTransportError is
+    retried from this same attempt budget — honoring its ``retry_after``
+    hint when the adapter supplied one, else the same exponential back-off
+    used for invalid-JSON/schema-violation retries. Anything else (a
+    terminal transport error, or the governor's
+    RateLimitExceeded/UnregisteredModel) propagates immediately: the
+    governor has already exhausted its own bounded wait before raising
+    either of its exceptions, and a terminal transport error would only
+    fail identically on a second attempt.
 
     Args:
         llm_client: Transport to send the prompt over.
@@ -148,39 +164,61 @@ def decode(
 
     Raises:
         StructuredOutputError: If every attempt fails to produce valid JSON
-            (stage="json_parse") or schema-valid data (stage="schema_validation").
+            (stage="json_parse"), schema-valid data (stage="schema_validation"),
+            or a successful transport call (stage="transport").
     """
     last_error: Optional[Exception] = None
+    last_content_error: Optional[Exception] = None
     stage = "json_parse"
+    retry_after: Optional[float] = None
 
     for attempt in range(STRUCTURED_OUTPUT.max_attempts):
         prompt = user_prompt
-        if repair and last_error is not None:
-            prompt = _repair_prompt(user_prompt, str(last_error))
-
-        raw = llm_client.complete(system_prompt, prompt)
-        stripped = _strip_markdown_fence(raw)
+        if repair and last_content_error is not None:
+            prompt = _repair_prompt(user_prompt, str(last_content_error))
 
         try:
-            data = json.loads(stripped)
-        except json.JSONDecodeError as e:
+            raw = llm_client.complete(system_prompt, prompt)
+        except RetryableTransportError as e:
             last_error = e
-            stage = "json_parse"
+            stage = "transport"
+            retry_after = e.retry_after
         else:
+            retry_after = None
+            stripped = _strip_markdown_fence(raw)
             try:
-                return schema.model_validate(data)
-            except ValidationError as e:
+                data = json.loads(stripped)
+            except json.JSONDecodeError as e:
                 last_error = e
-                stage = "schema_validation"
+                last_content_error = e
+                stage = "json_parse"
+            else:
+                try:
+                    return schema.model_validate(data)
+                except ValidationError as e:
+                    last_error = e
+                    last_content_error = e
+                    stage = "schema_validation"
 
         if attempt == STRUCTURED_OUTPUT.max_attempts - 1:
             assert last_error is not None
             raise StructuredOutputError(stage, attempt + 1, last_error)
 
-        delay = min(
-            STRUCTURED_OUTPUT.backoff_max_seconds,
-            STRUCTURED_OUTPUT.backoff_base_seconds * 2**attempt,
-        )
+        if retry_after is not None:
+            delay = retry_after
+        elif stage == "transport":
+            delay = random.uniform(
+                0.0,
+                min(
+                    STRUCTURED_OUTPUT.backoff_max_seconds,
+                    STRUCTURED_OUTPUT.backoff_base_seconds * 2**attempt,
+                ),
+            )
+        else:
+            delay = min(
+                STRUCTURED_OUTPUT.backoff_max_seconds,
+                STRUCTURED_OUTPUT.backoff_base_seconds * 2**attempt,
+            )
         logger.warning(
             "[StructuredOutput] Attempt %d %s failed: %s", attempt + 1, stage, last_error
         )
