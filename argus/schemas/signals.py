@@ -24,7 +24,7 @@ import uuid
 import warnings
 from datetime import date, datetime
 from enum import Enum
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
 from pydantic import (
     BaseModel,
@@ -35,6 +35,7 @@ from pydantic import (
 )
 
 from argus.params import PORTFOLIO, SYSTEM
+from argus.schemas.prompting import PromptText
 
 logger = logging.getLogger(__name__)
 
@@ -282,12 +283,18 @@ class FundamentalVerdict(BaseModel):
     GLOSSARY.md's Verdict entry.
     """
 
-    signal: Signal = Field(..., description="Directional label")
-    conviction: float = Field(..., ge=0.0, le=_CONVICTION_MAX)
-    moat_score: float = Field(
+    signal: Annotated[Signal, PromptText("signal (string)")] = Field(
+        ..., description="Directional label"
+    )
+    conviction: Annotated[float, PromptText("conviction (float 0.0–1.0)")] = Field(
+        ..., ge=0.0, le=_CONVICTION_MAX
+    )
+    moat_score: Annotated[float, PromptText("moat_score (int 1–10)")] = Field(
         ..., ge=0.0, le=10.0, description="Qualitative competitive moat [0, 10]"
     )
-    reasoning: str = Field(..., description="LLM-generated investment thesis")
+    reasoning: Annotated[str, PromptText("reasoning (string ≤80 words, no markdown)")] = Field(
+        ..., description="LLM-generated investment thesis"
+    )
 
     @field_validator("conviction", mode="before")
     @classmethod
@@ -342,12 +349,18 @@ class SentimentVerdict(BaseModel):
     in by the agent to build a SentimentSignal. See GLOSSARY.md's Verdict entry.
     """
 
-    signal: Signal = Field(..., description="Directional label")
-    conviction: float = Field(..., ge=0.0, le=_CONVICTION_MAX)
-    sentiment_decay_risk: Literal["LOW", "MEDIUM", "HIGH"] = Field(
-        ..., description="Estimated speed at which the sentiment signal will decay"
+    signal: Annotated[Signal, PromptText('"BULLISH|BEARISH|NEUTRAL"')] = Field(
+        ..., description="Directional label"
     )
-    reasoning: str = Field(..., description="LLM rationale for the signal")
+    conviction: Annotated[float, PromptText("<float 0.0–1.0>")] = Field(
+        ..., ge=0.0, le=_CONVICTION_MAX
+    )
+    sentiment_decay_risk: Annotated[
+        Literal["LOW", "MEDIUM", "HIGH"], PromptText('"LOW|MEDIUM|HIGH"')
+    ] = Field(..., description="Estimated speed at which the sentiment signal will decay")
+    reasoning: Annotated[str, PromptText('"<≤60 words citing the primary driver>"')] = Field(
+        ..., description="LLM rationale for the signal"
+    )
 
     @field_validator("conviction", mode="before")
     @classmethod
@@ -545,18 +558,29 @@ class ProposedPosition(BaseModel):
     own figure when one exists. See GLOSSARY.md's Proposal entry.
     """
 
-    ticker: str = Field(..., description="Equity ticker symbol")
-    allocation_pct: float = Field(0.0, description="Proposed target portfolio weight")
-    stop_loss: float | None = Field(None, description="Model's own stop-loss estimate")
-    target_price: float | None = Field(None, description="12-month price target (optional)")
-    thesis: str = Field(..., description="One-sentence position thesis")
-    advisor_note: str | None = Field(
-        None, description="Professional multi-sentence advisory rationale (optional)"
+    ticker: Annotated[str, PromptText('""')] = Field(..., description="Equity ticker symbol")
+    allocation_pct: Annotated[float, PromptText("0.0")] = Field(
+        0.0, description="Proposed target portfolio weight"
     )
-    composite_conviction: float = Field(
+    stop_loss: Annotated[float | None, PromptText("0.0")] = Field(
+        None, description="Model's own stop-loss estimate"
+    )
+    target_price: Annotated[float | None, PromptText("null")] = Field(
+        None, description="12-month price target (optional)"
+    )
+    thesis: Annotated[str, PromptText('"<≤20 words>"')] = Field(
+        ..., description="One-sentence position thesis"
+    )
+    advisor_note: Annotated[
+        str | None,
+        PromptText('"2–4 professional sentences: rationale, key risks, what to monitor"'),
+    ] = Field(None, description="Professional multi-sentence advisory rationale (optional)")
+    composite_conviction: Annotated[float, PromptText("0.0")] = Field(
         ..., ge=0.0, le=1.0, description="Aggregated conviction across all agents"
     )
-    time_horizon: str = Field(..., description="Expected holding period, e.g. '30 days'")
+    time_horizon: Annotated[str, PromptText('"3-6 months"')] = Field(
+        ..., description="Expected holding period, e.g. '30 days'"
+    )
 
 
 class PortfolioProposal(BaseModel):
@@ -568,8 +592,10 @@ class PortfolioProposal(BaseModel):
     """
 
     portfolio: list[ProposedPosition] = Field(default_factory=list)
-    cash_reserve_pct: float = Field(..., description="Model's own residual estimate")
-    rebalance_trigger: str = Field(
+    cash_reserve_pct: Annotated[float, PromptText("0.0")] = Field(
+        ..., description="Model's own residual estimate"
+    )
+    rebalance_trigger: Annotated[str, PromptText('"MONTHLY"')] = Field(
         ..., description="Condition that will next trigger rebalancing, e.g. 'VIX > 35'"
     )
 

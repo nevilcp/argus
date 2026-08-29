@@ -32,6 +32,7 @@ import numpy as np
 from argus.config import settings
 from argus.data import fetchers
 from argus.orchestration.governor import RateLimitExceeded, UnregisteredModel
+from argus.schemas.prompting import schema_block
 from argus.schemas.signals import SentimentSignal, SentimentVerdict
 from argus.seams import GroqLLMClient, LiveMarketDataProvider, LLMClient, MarketDataProvider
 from argus.structured_output import StructuredOutputError, decode
@@ -283,21 +284,10 @@ _SENTIMENT_METRIC_LABELS: dict[str, str] = {
 }
 
 
-# Field descriptions for the prompt's declared output schema, keyed by the same
-# names as SentimentVerdict's schema — a drift test (test_sentiment.py) asserts
-# the two stay equal, so a schema change that isn't mirrored here fails loudly
-# instead of leaving the prompt asking for fields the model can't supply. Shared
-# between _build_synthesis_prompt and SYSTEM_PROMPT so their two schema restatements
-# can't drift apart from each other either.
-_VERDICT_FIELD_DESCRIPTIONS: dict[str, str] = {
-    "signal": '"BULLISH|BEARISH|NEUTRAL"',
-    "conviction": "<float 0.0–1.0>",
-    "sentiment_decay_risk": '"LOW|MEDIUM|HIGH"',
-    "reasoning": '"<≤60 words citing the primary driver>"',
-}
-_VERDICT_SCHEMA_JSON = (
-    "{" + ", ".join(f'"{k}": {v}' for k, v in _VERDICT_FIELD_DESCRIPTIONS.items()) + "}"
-)
+# Rendered from SentimentVerdict's own PromptText markers, shared between
+# _build_synthesis_prompt and SYSTEM_PROMPT so their two schema restatements
+# can't drift apart from each other or from the schema itself.
+_VERDICT_SCHEMA_JSON = schema_block(SentimentVerdict)
 
 
 def _build_synthesis_prompt(ticker: str, metrics: dict) -> str:
