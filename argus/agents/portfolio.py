@@ -21,9 +21,7 @@ Dependencies:
 
 from __future__ import annotations
 
-import json
 import logging
-import time
 from datetime import datetime
 from typing import Optional, TypeGuard
 from uuid import uuid4
@@ -33,8 +31,16 @@ import numpy as np
 from argus.config import settings
 from argus.orchestration.governor import RateLimitExceeded, UnregisteredModel
 from argus.params import PORTFOLIO
-from argus.schemas.signals import MacroContext, PortfolioAllocation, RiskAssessment, RiskVerdict, Signal
+from argus.schemas.signals import (
+    MacroContext,
+    PortfolioAllocation,
+    PortfolioProposal,
+    RiskAssessment,
+    RiskVerdict,
+    Signal,
+)
 from argus.seams import GroqLLMClient, LLMClient
+from argus.structured_output import StructuredOutputError, decode
 
 logger = logging.getLogger("argus.portfolio")
 
@@ -137,6 +143,35 @@ def build_signal_table(all_signals: dict[str, dict], macro: Optional[MacroContex
     return "\n".join(lines)
 
 
+# Field descriptions for the prompt's declared output schema, keyed by the same
+# names as ProposedPosition's and PortfolioProposal's schemas — a drift test
+# (test_portfolio_enforcement.py) asserts the two stay equal, so a schema change
+# that isn't mirrored here fails loudly instead of leaving the prompt asking for
+# fields the model can't supply.
+_POSITION_FIELD_DESCRIPTIONS: dict[str, str] = {
+    "ticker": '""',
+    "allocation_pct": "0.0",
+    "stop_loss": "0.0",
+    "target_price": "null",
+    "thesis": '"<≤20 words>"',
+    "advisor_note": '"2–4 professional sentences: rationale, key risks, what to monitor"',
+    "composite_conviction": "0.0",
+    "time_horizon": '"3-6 months"',
+}
+_PROPOSAL_FIELD_DESCRIPTIONS: dict[str, str] = {
+    "cash_reserve_pct": "0.0",
+    "rebalance_trigger": '"MONTHLY"',
+}
+_POSITION_SCHEMA_JSON = (
+    "{" + ",".join(f'"{k}":{v}' for k, v in _POSITION_FIELD_DESCRIPTIONS.items()) + "}"
+)
+_PROPOSAL_SCHEMA_JSON = (
+    '{"portfolio":[' + _POSITION_SCHEMA_JSON + "],"
+    + ",".join(f'"{k}":{v}' for k, v in _PROPOSAL_FIELD_DESCRIPTIONS.items())
+    + "}"
+)
+
+
 SYSTEM_PROMPT = (
     "You are a systematic portfolio construction specialist at a quantitative investment fund. "
     "You receive pre-computed, risk-approved signals from four independent analytical agents. "
@@ -184,8 +219,11 @@ class PortfolioManagerAgent:
     """Agent coordinating LLM-driven portfolio optimization and cash allocation.
 
     Synthesizes risk verdicts, specialist convictions, Half-Kelly size suggestions,
-    and cultural memory wisdom into a structured PortfolioAllocation. Falls back to
-    all-cash on API failures or when no tickers are risk-approved.
+    and cultural memory wisdom into a structured PortfolioAllocation. Obtains its
+    proposal via the shared structured-output decoder with repair disabled — the
+    prompt already carries the signal table, sizing anchors, and cultural memory,
+    so a repair round-trip would be a large charge against the governor. Falls
+    back to all-cash on API failures or when no tickers are risk-approved.
     """
 
     def __init__(self, llm_client: Optional[LLMClient] = None) -> None:
@@ -222,10 +260,10 @@ class PortfolioManagerAgent:
         """Aggregates all specialist agent verdicts to construct a consolidated PortfolioAllocation.
 
         Computes Half-Kelly size suggestions as a mathematical anchor, constructs a
-        fully contextualized state prompt, and invokes the LLM to produce the final
-        allocation with advisor notes. Returns None on LLM API or parse failure so
-        the orchestrator can exit gracefully rather than masking the failure with a
-        fabricated all-cash response.
+        fully contextualized state prompt, and decodes a PortfolioProposal from the
+        LLM via argus.structured_output.decode. Returns None on decode failure or a
+        response-enforcement error so the orchestrator can exit gracefully rather
+        than masking the failure with a fabricated all-cash response.
 
         Args:
             user_profile: Dict with keys ``total_wealth``, ``invest_pct``, ``risk_tolerance``.
@@ -238,14 +276,15 @@ class PortfolioManagerAgent:
             adjustments: Optional list that receives one human-readable entry per
                 clamped, zeroed, or dropped position — the caller's record of
                 where the LLM's proposal disagreed with risk enforcement. Also
-                receives one entry naming which of the three retry-loop stages
-                (``llm_call``, ``json_parse``, ``response_enforcement``, or
-                ``schema_validation``) was failing when all 3 attempts were
-                exhausted, if that happens.
+                receives one entry naming which stage failed if allocation
+                ultimately fails: the decoder's ``json_parse``/``schema_validation``
+                stage when the proposal itself never decoded, or the agent's own
+                ``response_enforcement``/``schema_validation`` stage when risk
+                enforcement or the final PortfolioAllocation build failed.
 
         Returns:
             A validated PortfolioAllocation, all-cash if no tickers are approved, or None
-            if all 3 LLM retry attempts fail.
+            if decoding the proposal or enforcing it against risk data ultimately fails.
 
         Raises:
             RateLimitExceeded: If the governor's rate budget is exhausted for this
@@ -367,123 +406,114 @@ class PortfolioManagerAgent:
             "(3) every approved ticker appears in portfolio.\n"
             "\n"
             "Output JSON schema exactly:\n"
-            '{"portfolio":[{"ticker":"","allocation_pct":0.0,"allocation_usd":0.0,"stop_loss":0.0,'
-            '"target_price":null,"thesis":"<≤20 words>",'
-            '"advisor_note":"2–4 professional sentences: rationale, key risks, what to monitor",'
-            '"composite_conviction":0.0,"time_horizon":"3-6 months"}],'
-            '"cash_reserve_pct":0.0,"rebalance_trigger":"MONTHLY"}'
+            f"{_PROPOSAL_SCHEMA_JSON}"
         )
-        for attempt in range(3):
-            stage = "llm_call"
-            try:
-                raw = self.llm_client.complete(SYSTEM_PROMPT, prompt).strip()
-                if raw.startswith("```"):
-                    parts = raw.split("```")
-                    if len(parts) >= 3:
-                        raw = parts[1]
-                    else:
-                        raw = parts[-1]
-                    raw = raw.strip()
-                    if raw.startswith("json"):
-                        raw = raw[4:].strip()
 
-                stage = "json_parse"
-                data = json.loads(raw)
+        try:
+            proposal = decode(self.llm_client, SYSTEM_PROMPT, prompt, PortfolioProposal, repair=False)
+        except StructuredOutputError as e:
+            msg = f"portfolio_allocation: {e}"
+            logger.error("[Portfolio] %s", msg)
+            if adjustments is not None:
+                adjustments.append(msg)
+            return None
+        except (RateLimitExceeded, UnregisteredModel):
+            # There is no per-ticker fallback here the way fundamental/sentiment
+            # have one — a single allocate() call either produces the whole
+            # portfolio or nothing does. The governor has already exhausted its
+            # own bounded wait before raising either of these, so propagate
+            # immediately and let the caller (node_portfolio_allocation -> the
+            # API layer) surface it as a 429/503 instead of a generic 500.
+            raise
+        except Exception as e:
+            msg = f"portfolio_allocation: PortfolioManagerAgent API error: {e}"
+            logger.error("[Portfolio] %s", msg)
+            if adjustments is not None:
+                adjustments.append(msg)
+            return None
 
-                stage = "response_enforcement"
-                # Enforce risk verdicts in code: the LLM's proposal is advisory input,
-                # not a binding allocation, so it cannot be trusted to respect caps it
-                # was merely shown in the prompt.
-                enforced_portfolio = []
-                for pos in data.get("portfolio", []):
-                    ticker = pos["ticker"]
-                    if ticker not in all_signals:
+        stage = "response_enforcement"
+        try:
+            # Enforce risk verdicts in code: the LLM's proposal is advisory input,
+            # not a binding allocation, so it cannot be trusted to respect caps it
+            # was merely shown in the prompt.
+            enforced_portfolio = []
+            for pos in proposal.portfolio:
+                ticker = pos.ticker
+                if ticker not in all_signals:
+                    msg = (
+                        f"portfolio_allocation: dropped {ticker} "
+                        "(not in this session's signal universe)"
+                    )
+                    logger.warning(msg)
+                    if adjustments is not None:
+                        adjustments.append(msg)
+                    continue
+
+                risk = all_signals[ticker].get("risk")
+                proposed_pct = pos.allocation_pct
+                pos_data = pos.model_dump()
+                if not _is_risk_approved(risk):
+                    if proposed_pct:
+                        verdict = risk.verdict.value if risk else "MISSING"
                         msg = (
-                            f"portfolio_allocation: dropped {ticker} "
-                            "(not in this session's signal universe)"
+                            f"portfolio_allocation: zeroed {ticker} allocation "
+                            f"(risk verdict {verdict})"
                         )
                         logger.warning(msg)
                         if adjustments is not None:
                             adjustments.append(msg)
-                        continue
+                    pos_data["allocation_pct"] = 0.0
+                else:
+                    cap = risk.approved_weight
+                    if proposed_pct > cap + 1e-9:
+                        msg = (
+                            f"portfolio_allocation: clamped {ticker} allocation from "
+                            f"{proposed_pct:.4f} to risk cap {cap:.4f}"
+                        )
+                        logger.warning(msg)
+                        if adjustments is not None:
+                            adjustments.append(msg)
+                        pos_data["allocation_pct"] = cap
 
-                    risk = all_signals[ticker].get("risk")
-                    proposed_pct = pos.get("allocation_pct", 0.0)
-                    if not _is_risk_approved(risk):
-                        if proposed_pct:
-                            verdict = risk.verdict.value if risk else "MISSING"
-                            msg = (
-                                f"portfolio_allocation: zeroed {ticker} allocation "
-                                f"(risk verdict {verdict})"
-                            )
-                            logger.warning(msg)
-                            if adjustments is not None:
-                                adjustments.append(msg)
-                        pos["allocation_pct"] = 0.0
-                    else:
-                        cap = risk.approved_weight
-                        if proposed_pct > cap + 1e-9:
-                            msg = (
-                                f"portfolio_allocation: clamped {ticker} allocation from "
-                                f"{proposed_pct:.4f} to risk cap {cap:.4f}"
-                            )
-                            logger.warning(msg)
-                            if adjustments is not None:
-                                adjustments.append(msg)
-                            pos["allocation_pct"] = cap
+                pos_data["allocation_usd"] = round(investable * pos_data["allocation_pct"], 2)
+                pos_data["thesis"] = pos_data["thesis"][:PORTFOLIO.thesis_char_limit]
+                if pos_data["advisor_note"] is not None:
+                    pos_data["advisor_note"] = pos_data["advisor_note"][:PORTFOLIO.advisor_note_char_limit]
+                if risk is not None and risk.stop_loss is not None:
+                    pos_data["stop_loss"] = float(risk.stop_loss)
 
-                    pos["allocation_usd"] = round(investable * pos["allocation_pct"], 2)
-                    if "thesis" in pos and isinstance(pos["thesis"], str):
-                        pos["thesis"] = pos["thesis"][:PORTFOLIO.thesis_char_limit]
-                    if "advisor_note" in pos and isinstance(pos["advisor_note"], str):
-                        pos["advisor_note"] = pos["advisor_note"][:PORTFOLIO.advisor_note_char_limit]
-                    if risk is not None and risk.stop_loss is not None:
-                        pos["stop_loss"] = float(risk.stop_loss)
+                enforced_portfolio.append(pos_data)
 
-                    enforced_portfolio.append(pos)
+            # Force residual exact; LLM may set cash_reserve_pct independently, not as 1-equity.
+            # Clamped to the schema floor (PA-4) rather than left to fail model_validate on a
+            # near-fully-deployed session (e.g. invest_pct=0.95), which surfaced as a 500
+            # instead of the achievable allocation this session actually produced
+            total_equity = sum(p["allocation_pct"] for p in enforced_portfolio)
+            cash_reserve_pct = round(
+                max(PORTFOLIO.cash_reserve_floor_pct, 1.0 - total_equity), 6
+            )
 
-                data["portfolio"] = enforced_portfolio
+            data = {
+                "session_id": str(uuid4()),
+                "user_investable_capital": investable,
+                "portfolio": enforced_portfolio,
+                "cash_reserve_pct": cash_reserve_pct,
+                "rebalance_trigger": proposal.rebalance_trigger,
+                "timestamp": datetime.now().isoformat(),  # noqa: DTZ005
+            }
 
-                # Force residual exact; LLM may set cash_reserve_pct independently, not as 1-equity.
-                # Clamped to the schema floor (PA-4) rather than left to fail model_validate on a
-                # near-fully-deployed session (e.g. invest_pct=0.95), which surfaced as a 500
-                # instead of the achievable allocation this session actually produced
-                total_equity = sum(p["allocation_pct"] for p in data["portfolio"])
-                data["cash_reserve_pct"] = round(
-                    max(PORTFOLIO.cash_reserve_floor_pct, 1.0 - total_equity), 6
-                )
+            stage = "schema_validation"
+            allocation = PortfolioAllocation.model_validate(data)
+        except Exception as e:
+            msg = f"portfolio_allocation: PortfolioManagerAgent failed at {stage}: {e}"
+            logger.error("[Portfolio] %s", msg)
+            if adjustments is not None:
+                adjustments.append(msg)
+            return None
 
-                data["session_id"] = str(uuid4())
-                data["user_investable_capital"] = investable
-                data["timestamp"] = datetime.now().isoformat()  # noqa: DTZ005
-
-                stage = "schema_validation"
-                allocation = PortfolioAllocation.model_validate(data)
-                self._session_count += 1
-                return allocation
-
-            except (RateLimitExceeded, UnregisteredModel):
-                # There is no per-ticker fallback here the way fundamental/sentiment
-                # have one — a single allocate() call either produces the whole
-                # portfolio or nothing does. Retrying would just re-run into the
-                # governor's already-exhausted wait, so propagate immediately and
-                # let the caller (node_portfolio_allocation -> the API layer)
-                # surface it as a 429/503 instead of a generic 500.
-                raise
-            except Exception as e:
-                logger.warning("[Portfolio] Attempt %d failed (%s): %s", attempt + 1, stage, e)
-                if attempt == 2:
-                    msg = (
-                        f"portfolio_allocation: PortfolioManagerAgent failed after 3 attempts "
-                        f"at {stage}: {e}"
-                    )
-                    logger.error("[Portfolio] %s", msg)
-                    if adjustments is not None:
-                        adjustments.append(msg)
-                    return None
-                time.sleep(2**attempt)
-
-        return None
+        self._session_count += 1
+        return allocation
 
     def _all_cash_allocation(self, investable: float) -> PortfolioAllocation:
         """Returns a defensive all-cash portfolio structure during risk vetoes or API failures.
