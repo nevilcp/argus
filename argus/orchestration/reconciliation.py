@@ -609,7 +609,7 @@ def run_reconciliation_pass(
     """
     # Deferred: argus.risk.paper_book imports this module for
     # _needs_reconciliation/compute_realized_return, so importing it at
-    # module level here would be circular.
+    # module level here would be circular
     from argus.risk import paper_book
 
     if decisions_log_path:
@@ -625,7 +625,6 @@ def run_reconciliation_pass(
     report.outcomes_stored = reconcile_decisions(
         decisions, market_data=market_data, cultural=cultural, horizon_days=horizon_days
     )
-    logger.info("[Reconcile] stored %d/%d outcome(s)", report.outcomes_stored, len(decisions))
 
     cutoff = datetime.now() - timedelta(  # noqa: DTZ005
         days=horizon_days + RECONCILIATION.retention_margin_days
@@ -642,11 +641,6 @@ def run_reconciliation_pass(
         report.equity = book.equity
         report.drawdown = book.drawdown_from_peak()
         report.paper_book_updated = True
-        logger.info(
-            "[Reconcile] paper equity=$%.2f (drawdown=%.1f%%)",
-            report.equity,
-            report.drawdown * 100,
-        )
     except Exception as exc:
         logger.exception("[Reconcile] paper-book update failed")
         report.errors.append(f"paper-book update failed: {exc}")

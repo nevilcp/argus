@@ -849,7 +849,7 @@ def test_run_reconciliation_pass_given_both_paths_bounds_both(tmp_path):
         horizon_days=5,
     )
 
-    # The checkpoint's only thread carries no decisions -> the log (with one) is the read source.
+    # The checkpoint's only thread carries no decisions -> the log (with one) is the read source
     assert report.decisions_loaded == 1
     assert report.decisions_compacted is not None
     assert report.checkpoints_pruned is not None
@@ -923,6 +923,6 @@ def test_run_reconciliation_pass_paper_book_not_partially_applied_when_its_step_
     assert len(report.errors) == 1
     assert "paper-book update failed" in report.errors[0]
     assert book_path.read_bytes() == original_bytes
-    # Independent of the failed paper-book step, the other stores still ran.
+    # Independent of the failed paper-book step, the other stores still ran
     assert report.decisions_compacted is not None
     assert report.pending_snapshots_expired == 0
