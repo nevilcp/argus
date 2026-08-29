@@ -5,8 +5,8 @@ The expand half of the LLM seam refactor (issue #67): one structured-output
 call replacing the three near-identical fence-strip/parse/validate/retry
 blocks in agents/fundamental.py, agents/sentiment.py, and agents/portfolio.py.
 Composed over the existing LLMClient transport port rather than widening it —
-see argus/seams.py's LLMClient docstring. Used by agents/fundamental.py;
-sentiment.py and portfolio.py still carry their own copies pending #71/#72.
+see argus/seams.py's LLMClient docstring. Used by agents/fundamental.py and
+agents/sentiment.py; portfolio.py still carries its own copy pending #72.
 
 Responsibilities:
   - Strip a markdown code fence from a raw LLM response, in any of its four
