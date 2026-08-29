@@ -608,7 +608,7 @@ async def health():
 
     newest_cache_entry_age_seconds = None
     if _mft_pipeline is not None and _mft_pipeline.is_market_hours() and _live_cache is not None:
-        cache_age_seconds, _ = _live_cache.ages(datetime.now(), datetime.now(_ET))  # noqa: DTZ005
+        cache_age_seconds, _ = _live_cache.ages(datetime.now(_ET))
         if cache_age_seconds:
             newest_cache_entry_age_seconds = min(cache_age_seconds.values())
 
@@ -648,10 +648,8 @@ async def pipeline_status():
 
     buffer_depth = await asyncio.to_thread(_mft_pipeline.buffer.row_counts)
 
-    now = datetime.now()  # noqa: DTZ005
-    now_et = datetime.now(_ET)
     cache_age_seconds, bar_age_seconds = (
-        _live_cache.ages(now, now_et) if _live_cache is not None else ({}, {})
+        _live_cache.ages(datetime.now(_ET)) if _live_cache is not None else ({}, {})
     )
 
     return {
@@ -740,7 +738,7 @@ async def analyze(req: AnalysisRequest):
     # Admission answers only "how old is this" for each ticker; the ordering
     # against market hours above is what decides whether that age matters
     # right now (issue #78).
-    admission = _live_cache.admit(req.tickers, datetime.now(), datetime.now(_ET))  # noqa: DTZ005
+    admission = _live_cache.admit(req.tickers, datetime.now(_ET))
 
     if admission.absent:
         raise HTTPException(

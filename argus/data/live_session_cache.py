@@ -26,6 +26,13 @@ Not responsible for:
     by the pipeline's compress_all (see
     argus.schemas.signals.missing_session_state_keys)
 
+Publication and admission both measure age against one timezone-aware
+America/New_York clock. Publication used to stamp entries with naive local
+time while admission measured bar age against ET — two clocks that happened
+to agree only because this deployment already ran in ET, the same class of
+latent bug GLOSSARY.md and this module's sibling docs already call out
+elsewhere in the freshness path.
+
 Dependencies:
   - argus.data.pipeline (_FETCH_INTERVAL, the sweep cadence both thresholds
     below are built from)
@@ -38,9 +45,12 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from argus.data.pipeline import _FETCH_INTERVAL
 from argus.params import SYSTEM
+
+_ET = ZoneInfo("America/New_York")
 
 
 def session_state_ttl_seconds() -> int:
@@ -144,10 +154,11 @@ class LiveSessionCache:
                 absent from `session_states` — a repeated call with a
                 shrinking universe is what actually evicts a dropped ticker.
             now: Publication timestamp to stamp every entry with. Defaults
-                to the current local time; tests pass an explicit value to
-                control write age without reaching into private state.
+                to the current ET-aware time — the same clock admit()/ages()
+                measure against; tests pass an explicit value to control
+                write age without reaching into private state.
         """
-        published_at = now if now is not None else datetime.now()  # noqa: DTZ005
+        published_at = now if now is not None else datetime.now(_ET)
         for ticker, state in session_states.items():
             self._states[ticker] = (state, published_at)
 
@@ -156,16 +167,14 @@ class LiveSessionCache:
             if ticker not in tracked:
                 del self._states[ticker]
 
-    def admit(self, tickers: Iterable[str], now: datetime, now_et: datetime) -> AdmissionResult:
+    def admit(self, tickers: Iterable[str], now: datetime) -> AdmissionResult:
         """Determines which of the requested tickers may be allocated against right now.
 
         Args:
             tickers: Tickers to check.
-            now: Current local time, matching the clock `publish` stamped
-                entries with, to measure publication age against
-                session_state_ttl_seconds.
-            now_et: Current time, ET-aware, to measure each entry's own bar
-                age against max_bar_age_seconds.
+            now: Current time, ET-aware — the one clock both publication age
+                (against session_state_ttl_seconds) and bar age (against
+                max_bar_age_seconds) are measured against.
 
         Returns:
             An AdmissionResult with every ticker sorted into exactly one of
@@ -186,7 +195,7 @@ class LiveSessionCache:
                 result.stalled.append(ticker)
                 continue
 
-            age = _bar_age_seconds(state, now_et)
+            age = _bar_age_seconds(state, now)
             if age is None or age > max_bar_age:
                 result.stale.append(ticker)
                 continue
@@ -195,9 +204,7 @@ class LiveSessionCache:
 
         return result
 
-    def ages(
-        self, now: datetime, now_et: datetime
-    ) -> tuple[dict[str, float], dict[str, Optional[float]]]:
+    def ages(self, now: datetime) -> tuple[dict[str, float], dict[str, Optional[float]]]:
         """Reports per-ticker publication age and bar age for everything held.
 
         A different question from admit(): this answers "how old is X" for
@@ -206,9 +213,8 @@ class LiveSessionCache:
         rejecting requests.
 
         Args:
-            now: Current local time, matching the clock `publish` stamped
+            now: Current time, ET-aware — the same clock `publish` stamps
                 entries with.
-            now_et: Current time, ET-aware.
 
         Returns:
             Tuple of (cache_age_seconds, bar_age_seconds), each a mapping of
@@ -220,6 +226,6 @@ class LiveSessionCache:
             for ticker, (_, published_at) in self._states.items()
         }
         bar_age_seconds = {
-            ticker: _bar_age_seconds(state, now_et) for ticker, (state, _) in self._states.items()
+            ticker: _bar_age_seconds(state, now) for ticker, (state, _) in self._states.items()
         }
         return cache_age_seconds, bar_age_seconds

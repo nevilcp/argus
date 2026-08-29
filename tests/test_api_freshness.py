@@ -61,9 +61,8 @@ def _pipeline(monkeypatch, *, market_hours: bool, interval_minutes: int = 1):
 def test_analyze_market_closed_outranks_bar_age(client, monkeypatch):
     """A hopelessly stale bar still surfaces as market-closed, not stale, outside session hours (issue #78)."""
     _pipeline(monkeypatch, market_hours=False)
-    bar_ts = datetime.now(api_main._ET) - timedelta(days=9)
-    write_ts = datetime.now() - timedelta(days=9)
-    api_main._live_cache.publish({"AAPL": {"timestamp": bar_ts.isoformat()}}, ["AAPL"], now=write_ts)
+    now = datetime.now(api_main._ET) - timedelta(days=9)
+    api_main._live_cache.publish({"AAPL": {"timestamp": now.isoformat()}}, ["AAPL"], now=now)
 
     response = client.post("/analyze", json=_PAYLOAD)
 
