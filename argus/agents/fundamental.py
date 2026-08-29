@@ -30,6 +30,7 @@ from pydantic import ValidationError
 
 from argus.config import settings
 from argus.orchestration.governor import RateLimitExceeded, UnregisteredModel, governor
+from argus.schemas.prompting import field_list
 from argus.schemas.signals import FundamentalSignal, FundamentalVerdict
 from argus.seams import GroqLLMClient, LiveMarketDataProvider, LLMClient, MarketDataProvider
 from argus.structured_output import StructuredOutputError, decode
@@ -52,17 +53,6 @@ _SECTOR_PE_MEDIANS: dict[str, float] = {
     "Basic Materials": 16.0,
 }
 _DEFAULT_PE_MEDIAN = 20.0
-
-# Field descriptions for the prompt's "Fields required" line, keyed by the
-# same names as FundamentalVerdict's schema — a drift test (test_fundamental.py)
-# asserts the two stay equal, so a schema change that isn't mirrored here fails
-# loudly instead of leaving the prompt asking for fields the model can't supply.
-_VERDICT_FIELD_DESCRIPTIONS: dict[str, str] = {
-    "signal": "signal (string)",
-    "conviction": "conviction (float 0.0–1.0)",
-    "moat_score": "moat_score (int 1–10)",
-    "reasoning": "reasoning (string ≤80 words, no markdown)",
-}
 
 # Fraction of the configured per-minute request budget held back before a
 # ticker's fundamental analysis is even attempted, so the same-model portfolio
@@ -207,7 +197,7 @@ def build_compact_prompt(ticker: str, pit_data: dict, anon_id: Optional[str] = N
         "(3) null fields do not drive the primary signal.\n"
         "\n"
         "Output ONLY a valid JSON object — no markdown, no preamble, no trailing text.\n"
-        "Fields required: " + ", ".join(_VERDICT_FIELD_DESCRIPTIONS.values()) + "."
+        "Fields required: " + field_list(FundamentalVerdict) + "."
     )
     return prompt.strip()
 

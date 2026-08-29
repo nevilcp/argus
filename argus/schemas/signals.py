@@ -24,7 +24,7 @@ import uuid
 import warnings
 from datetime import date, datetime
 from enum import Enum
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
 from pydantic import (
     BaseModel,
@@ -35,6 +35,7 @@ from pydantic import (
 )
 
 from argus.params import PORTFOLIO, SYSTEM
+from argus.schemas.prompting import PromptText
 
 logger = logging.getLogger(__name__)
 
@@ -282,12 +283,18 @@ class FundamentalVerdict(BaseModel):
     GLOSSARY.md's Verdict entry.
     """
 
-    signal: Signal = Field(..., description="Directional label")
-    conviction: float = Field(..., ge=0.0, le=_CONVICTION_MAX)
-    moat_score: float = Field(
+    signal: Annotated[Signal, PromptText("signal (string)")] = Field(
+        ..., description="Directional label"
+    )
+    conviction: Annotated[float, PromptText("conviction (float 0.0–1.0)")] = Field(
+        ..., ge=0.0, le=_CONVICTION_MAX
+    )
+    moat_score: Annotated[float, PromptText("moat_score (int 1–10)")] = Field(
         ..., ge=0.0, le=10.0, description="Qualitative competitive moat [0, 10]"
     )
-    reasoning: str = Field(..., description="LLM-generated investment thesis")
+    reasoning: Annotated[str, PromptText("reasoning (string ≤80 words, no markdown)")] = Field(
+        ..., description="LLM-generated investment thesis"
+    )
 
     @field_validator("conviction", mode="before")
     @classmethod
