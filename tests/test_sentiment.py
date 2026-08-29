@@ -5,13 +5,15 @@ Tests for the Sentiment Agent and its pure-Python helpers.
 from datetime import datetime, timedelta
 
 
+import argus.agents.sentiment as sentiment_module
 from argus.agents.sentiment import (
     SentimentAgent,
     aggregate_finbert_scores,
     SentimentDailyCache,
     _check_earnings_calendar,
 )
-from argus.schemas.signals import SentimentSignal, Signal
+from argus.orchestration.governor import RateLimitExceeded
+from argus.schemas.signals import SentimentSignal, SentimentVerdict, Signal
 
 def test_aggregate_finbert_scores_empty():
     """An empty article list returns the neutral, low-confidence default."""
@@ -110,6 +112,54 @@ class _RecordingLLMClient:
     def complete(self, system_prompt, user_prompt):
         self.last_user_prompt = user_prompt
         return self._response_text
+
+
+def test_prompt_declared_fields_match_the_verdict_schema():
+    """The prompt's declared output fields and SentimentVerdict's fields must never drift apart."""
+    assert set(sentiment_module._VERDICT_FIELD_DESCRIPTIONS) == set(SentimentVerdict.model_fields)
+
+
+def test_analyze_degrades_the_ticker_on_governor_exhaustion_without_retrying(monkeypatch):
+    """A RateLimitExceeded from the LLM client fails that ticker immediately, once, into errors."""
+    monkeypatch.setattr("argus.agents.sentiment._check_earnings_calendar", lambda ticker: False)
+
+    market_data = _StubMarketData(news=[])
+
+    class _RateLimitedLLMClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(self, system_prompt: str, user_prompt: str) -> str:
+            self.calls += 1
+            raise RateLimitExceeded("gpt-oss-20b quota exhausted")
+
+    llm = _RateLimitedLLMClient()
+    agent = SentimentAgent(llm_client=llm, market_data=market_data)
+
+    errors: list[str] = []
+    signal = agent.analyze("AAPL", errors=errors)
+
+    assert signal is None
+    assert llm.calls == 1
+    assert len(errors) == 1
+    assert "rate limited" in errors[0]
+
+
+def test_analyze_degrades_the_ticker_without_repairing_a_bad_response(monkeypatch):
+    """Repair stays disabled: an invalid response is not re-prompted with the failure appended."""
+    monkeypatch.setattr("argus.agents.sentiment._check_earnings_calendar", lambda ticker: False)
+    monkeypatch.setattr("argus.structured_output.time.sleep", lambda s: None)
+
+    market_data = _StubMarketData(news=[])
+    llm = _RecordingLLMClient("not json")
+    agent = SentimentAgent(llm_client=llm, market_data=market_data)
+
+    errors: list[str] = []
+    signal = agent.analyze("AAPL", errors=errors)
+
+    assert signal is None
+    assert len(errors) == 1
+    assert "Your previous response was invalid" not in llm.last_user_prompt
 
 
 def test_analyze_flags_unavailable_news_in_the_llm_prompt(monkeypatch):

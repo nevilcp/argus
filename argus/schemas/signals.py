@@ -335,6 +335,27 @@ class FundamentalSignal(BaseModel):
         return _clamp_conviction(v)
 
 
+class SentimentVerdict(BaseModel):
+    """What the LLM itself returns for a sentiment synthesis — judgement only.
+
+    Never carries the FinBERT metrics: those are computed locally and merged
+    in by the agent to build a SentimentSignal. See GLOSSARY.md's Verdict entry.
+    """
+
+    signal: Signal = Field(..., description="Directional label")
+    conviction: float = Field(..., ge=0.0, le=_CONVICTION_MAX)
+    sentiment_decay_risk: Literal["LOW", "MEDIUM", "HIGH"] = Field(
+        ..., description="Estimated speed at which the sentiment signal will decay"
+    )
+    reasoning: str = Field(..., description="LLM rationale for the signal")
+
+    @field_validator("conviction", mode="before")
+    @classmethod
+    def cap_conviction(cls, v: float) -> float:
+        """Silently clamps conviction to the 0.95 maximum."""
+        return _clamp_conviction(v)
+
+
 class SentimentSignal(BaseModel):
     """News sentiment features with associated signal conviction scores."""
 
@@ -659,6 +680,7 @@ __all__ = [
     "TechnicalSignal",
     "FundamentalVerdict",
     "FundamentalSignal",
+    "SentimentVerdict",
     "SentimentSignal",
     "RiskAssessment",
     "AggregatedSignal",
