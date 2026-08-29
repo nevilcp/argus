@@ -22,20 +22,19 @@ Dependencies:
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from datetime import datetime
 from typing import Optional
 
 import numpy as np
-from pydantic import ValidationError
 
 from argus.config import settings
 from argus.data import fetchers
 from argus.orchestration.governor import RateLimitExceeded, UnregisteredModel
-from argus.schemas.signals import SentimentSignal
+from argus.schemas.signals import SentimentSignal, SentimentVerdict
 from argus.seams import GroqLLMClient, LiveMarketDataProvider, LLMClient, MarketDataProvider
+from argus.structured_output import StructuredOutputError, decode
 
 logger = logging.getLogger("argus.sentiment")
 
@@ -284,6 +283,23 @@ _SENTIMENT_METRIC_LABELS: dict[str, str] = {
 }
 
 
+# Field descriptions for the prompt's declared output schema, keyed by the same
+# names as SentimentVerdict's schema — a drift test (test_sentiment.py) asserts
+# the two stay equal, so a schema change that isn't mirrored here fails loudly
+# instead of leaving the prompt asking for fields the model can't supply. Shared
+# between _build_synthesis_prompt and SYSTEM_PROMPT so their two schema restatements
+# can't drift apart from each other either.
+_VERDICT_FIELD_DESCRIPTIONS: dict[str, str] = {
+    "signal": '"BULLISH|BEARISH|NEUTRAL"',
+    "conviction": "<float 0.0–1.0>",
+    "sentiment_decay_risk": '"LOW|MEDIUM|HIGH"',
+    "reasoning": '"<≤60 words citing the primary driver>"',
+}
+_VERDICT_SCHEMA_JSON = (
+    "{" + ", ".join(f'"{k}": {v}' for k, v in _VERDICT_FIELD_DESCRIPTIONS.items()) + "}"
+)
+
+
 def _build_synthesis_prompt(ticker: str, metrics: dict) -> str:
     """Constructs the human-turn message for LLM sentiment synthesis.
 
@@ -319,8 +335,7 @@ def _build_synthesis_prompt(ticker: str, metrics: dict) -> str:
         "Step 4 — Set sentiment_decay_risk (LOW | MEDIUM | HIGH) and state the mechanism.\n"
         "\n"
         "Output ONLY valid JSON matching this exact schema — no preamble, no trailing text:\n"
-        '{"signal": "<BULLISH|BEARISH|NEUTRAL>", "conviction": <float 0.0–1.0>, '
-        '"sentiment_decay_risk": "<LOW|MEDIUM|HIGH>", "reasoning": "<≤60 words citing key driver>"}'
+        f"{_VERDICT_SCHEMA_JSON}"
     )
     return prompt.strip()
 
@@ -355,8 +370,7 @@ SYSTEM_PROMPT = (
     "  4. upcoming_catalyst=True → sentiment_decay_risk must be MEDIUM or HIGH.\n"
     "\n"
     "OUTPUT: Return ONLY a valid JSON object — no markdown, no preamble, no trailing text.\n"
-    'Schema: {"signal": "BULLISH|BEARISH|NEUTRAL", "conviction": <float 0.0–1.0>, '
-    '"sentiment_decay_risk": "LOW|MEDIUM|HIGH", "reasoning": "<≤60 words citing the primary driver>"}'
+    "Schema: " + _VERDICT_SCHEMA_JSON
 )
 
 
@@ -365,8 +379,8 @@ class SentimentAgent:
     LLM synthesis.
 
     Uses a daily cache to prevent redundant inference for the same ticker within a
-    trading session. Retries the LLM call up to 3 times with exponential back-off
-    on parse or validation failures.
+    trading session. Obtains its verdict via the shared structured-output decoder
+    with repair disabled — see analyze()'s docstring for why.
     """
 
     def __init__(
@@ -415,8 +429,15 @@ class SentimentAgent:
                 returns None, so callers can surface the failure instead of
                 only logging it.
 
+        Decodes a SentimentVerdict from the LLM via argus.structured_output.decode
+        with repair disabled: a failed decode degrades this ticker rather than
+        re-prompting with the failure appended, since repair would roughly double
+        token spend for a ticker whose measured completion peak already sits close
+        to its budget, against a governor that is the binding constraint on the
+        whole system (see #71).
+
         Returns:
-            A validated SentimentSignal, or None if all retry attempts fail.
+            A validated SentimentSignal, or None if decoding ultimately fails.
         """
         if not self.cache.is_stale(ticker):
             cached = self.cache.get(ticker)
@@ -452,69 +473,47 @@ class SentimentAgent:
 
         prompt = _build_synthesis_prompt(ticker, metrics)
 
-        for attempt in range(3):
-            try:
-                raw = self.llm_client.complete(SYSTEM_PROMPT, prompt).strip()
-                if raw.startswith("```"):
-                    parts = raw.split("```")
-                    if len(parts) >= 3:
-                        raw = parts[1]
-                    else:
-                        raw = parts[-1]
-                    raw = raw.strip()
-                    if raw.startswith("json"):
-                        raw = raw[4:].strip()
+        try:
+            verdict = decode(self.llm_client, SYSTEM_PROMPT, prompt, SentimentVerdict, repair=False)
+        except StructuredOutputError as e:
+            logger.warning("[Sentiment] Decode failed for %s: %s", ticker, e)
+            if errors is not None:
+                errors.append(f"sentiment_analysis[{ticker}]: {e}")
+            return None
+        except (RateLimitExceeded, UnregisteredModel) as e:
+            # The governor already exhausted its own bounded wait before raising
+            # either of these — degrade this ticker immediately rather than
+            # retrying into the same wall.
+            logger.warning("[Sentiment] Governor rejected call for %s: %s", ticker, e)
+            if errors is not None:
+                errors.append(f"sentiment_analysis[{ticker}]: rate limited: {e}")
+            return None
+        except Exception as e:
+            logger.error("[Sentiment] API error for %s: %s", ticker, e)
+            if errors is not None:
+                errors.append(f"sentiment_analysis[{ticker}]: API error: {e}")
+            return None
 
-                data = json.loads(raw)
-
-                signal = SentimentSignal(
-                    ticker=ticker,
-                    # A failed fetch's 0.0 is indistinguishable from a real neutral
-                    # read; persist None rather than fabricate a measured score
-                    finbert_net_score=metrics["net_finbert_score"] if news_available else None,
-                    pct_positive=metrics["pct_positive"],
-                    pct_negative=metrics["pct_negative"],
-                    news_volume_7d=metrics["news_volume_7d"],
-                    news_scored_count=metrics["news_scored_count"],
-                    news_data_available=metrics["news_data_available"],
-                    upcoming_catalyst=metrics["upcoming_catalyst"],
-                    signal=data["signal"],
-                    conviction=float(data["conviction"]),
-                    sentiment_decay_risk=data.get("sentiment_decay_risk", "MEDIUM"),
-                    reasoning=data.get("reasoning", "")[:400],
-                    timestamp=datetime.now(),  # noqa: DTZ005
-                    api_calls_used=1,
-                )
-                self.cache.set(ticker, signal)
-                return signal
-
-            except (json.JSONDecodeError, ValidationError) as e:
-                logger.warning("[Sentiment] Attempt %d parse error: %s", attempt + 1, e)
-                if attempt == 2:
-                    if errors is not None:
-                        errors.append(
-                            f"sentiment_analysis[{ticker}]: parse error after 3 attempts: {e}"
-                        )
-                    return None
-                time.sleep(2**attempt)
-            except (RateLimitExceeded, UnregisteredModel) as e:
-                # The governor already exhausted its own bounded wait before raising
-                # either of these — retrying here would just re-run into the same
-                # wall, not recover from it. Degrade this ticker immediately instead
-                # of burning three more rounds of governor waits.
-                logger.warning("[Sentiment] Governor rejected call for %s: %s", ticker, e)
-                if errors is not None:
-                    errors.append(f"sentiment_analysis[{ticker}]: rate limited: {e}")
-                return None
-            except Exception as e:
-                logger.warning("[Sentiment] Attempt %d failed: %s", attempt + 1, e)
-                if attempt == 2:
-                    if errors is not None:
-                        errors.append(f"sentiment_analysis[{ticker}]: failed after 3 attempts: {e}")
-                    return None
-                time.sleep(2**attempt)
-
-        return None
+        signal = SentimentSignal(
+            ticker=ticker,
+            # A failed fetch's 0.0 is indistinguishable from a real neutral
+            # read; persist None rather than fabricate a measured score
+            finbert_net_score=metrics["net_finbert_score"] if news_available else None,
+            pct_positive=metrics["pct_positive"],
+            pct_negative=metrics["pct_negative"],
+            news_volume_7d=metrics["news_volume_7d"],
+            news_scored_count=metrics["news_scored_count"],
+            news_data_available=metrics["news_data_available"],
+            upcoming_catalyst=metrics["upcoming_catalyst"],
+            signal=verdict.signal,
+            conviction=verdict.conviction,
+            sentiment_decay_risk=verdict.sentiment_decay_risk,
+            reasoning=verdict.reasoning[:400],
+            timestamp=datetime.now(),  # noqa: DTZ005
+            api_calls_used=1,
+        )
+        self.cache.set(ticker, signal)
+        return signal
 
     def batch_analyze(self, tickers: list[str]) -> tuple[dict[str, SentimentSignal], list[str]]:
         """Generates SentimentSignals sequentially for a list of tickers.

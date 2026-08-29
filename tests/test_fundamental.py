@@ -16,7 +16,7 @@ from argus.agents.fundamental import (
     build_compact_prompt,
 )
 from argus.orchestration.governor import BOOTSTRAP_LIMITS, RateLimitGovernor
-from argus.schemas.signals import FundamentalSignal, Signal
+from argus.schemas.signals import FundamentalSignal, FundamentalVerdict, Signal
 from argus.seams import FixtureLLMClient
 
 
@@ -40,6 +40,15 @@ class _RecordingLLMClient:
     def complete(self, system_prompt: str, user_prompt: str) -> str:
         self.last_user_prompt = user_prompt
         return self._response_text
+
+def test_prompt_declared_fields_match_the_verdict_schema():
+    """The prompt's declared output fields and FundamentalVerdict's fields must never drift apart.
+
+    The prompt used to also declare six measured ratios the agent unconditionally
+    overwrote after parsing; this asserts none of those field names sneak back in.
+    """
+    assert set(fundamental_module._VERDICT_FIELD_DESCRIPTIONS) == set(FundamentalVerdict.model_fields)
+
 
 def test_anonymize_ticker():
     """Anonymized IDs are deterministic per (ticker, seed) and vary if either input changes."""
@@ -222,6 +231,52 @@ def test_analyze_retries_with_the_prior_validation_error_in_the_prompt():
     assert signal is not None
     assert len(prompts) == 2
     assert "Your previous response was invalid" in prompts[1]
+
+
+def test_analyze_degrades_the_ticker_on_governor_exhaustion_without_retrying():
+    """A RateLimitExceeded from the LLM client fails that ticker immediately, once, into errors."""
+    market_data = _StubMarketData({"sector": "Technology", "industry": "Consumer Electronics"})
+
+    class _RateLimitedLLMClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(self, system_prompt: str, user_prompt: str) -> str:
+            self.calls += 1
+            raise fundamental_module.RateLimitExceeded("gpt-oss-120b quota exhausted")
+
+    llm = _RateLimitedLLMClient()
+    agent = FundamentalAgent(llm_client=llm, market_data=market_data)
+
+    errors: list[str] = []
+    signal = agent.analyze("AAPL", errors=errors)
+
+    assert signal is None
+    assert llm.calls == 1
+    assert len(errors) == 1
+    assert "rate limited" in errors[0]
+
+
+def test_analyze_degrades_the_ticker_when_measured_data_fails_signal_validation():
+    """A schema violation in the merged-in measured data (not the verdict) must not crash the batch."""
+    market_data = _StubMarketData(
+        {
+            "sector": "Technology",
+            "industry": "Consumer Electronics",
+            "debt_to_equity": -1.5,  # FundamentalSignal requires ge=0.0
+        }
+    )
+    llm = _RecordingLLMClient(
+        json.dumps({"signal": "NEUTRAL", "conviction": 0.5, "moat_score": 5, "reasoning": "r"})
+    )
+    agent = FundamentalAgent(llm_client=llm, market_data=market_data)
+
+    errors: list[str] = []
+    signal = agent.analyze("AAPL", errors=errors)
+
+    assert signal is None
+    assert len(errors) == 1
+    assert "failed validation" in errors[0]
 
 
 def test_analyze_does_not_skip_every_ticker_at_a_low_configured_rpm(monkeypatch):
