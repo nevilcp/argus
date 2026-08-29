@@ -535,6 +535,10 @@ class ReconciliationReport:
 
     decisions_loaded: int = 0
     outcomes_stored: int = 0
+    paper_book_updated: bool = False
+    """False if the paper-book step raised — equity/drawdown are then still
+    their unset defaults, not a real (zeroed-out) portfolio value, so a
+    caller syncing a kill switch off `equity` must gate on this first."""
     equity: float = 0.0
     drawdown: float = 0.0
     runs_applied_pruned: int = 0
@@ -637,6 +641,7 @@ def run_reconciliation_pass(
         paper_book.save(book, paper_book_path)
         report.equity = book.equity
         report.drawdown = book.drawdown_from_peak()
+        report.paper_book_updated = True
         logger.info(
             "[Reconcile] paper equity=$%.2f (drawdown=%.1f%%)",
             report.equity,

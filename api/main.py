@@ -62,14 +62,9 @@ from argus.orchestration.collector import (
 )
 from argus.orchestration.governor import REGISTERED_MODELS, RateLimitExceeded, UnregisteredModel, governor
 from argus.orchestration.graph import build_graph
-from argus.orchestration.reconciliation import (
-    compact_decisions_jsonl,
-    load_decisions_from_jsonl,
-    prune_checkpoints,
-    reconcile_decisions,
-)
+from argus.orchestration.reconciliation import run_reconciliation_pass
 from argus.orchestration.state import ARGUSState
-from argus.params import RECONCILIATION, SYSTEM
+from argus.params import SYSTEM
 from argus.risk import paper_book
 from argus.risk.kill_switch import get_kill_switch, initialize_kill_switch
 from argus.seams import LiveMarketDataProvider
@@ -203,84 +198,38 @@ async def _collector_loop(pipeline: MFTDataPipeline, compiled_graph) -> None:
         await asyncio.sleep(settings.ARGUS_COLLECTOR_INTERVAL_SECONDS)
 
 
-def _prune_growing_stores(decisions_log: str) -> None:
-    """Bounds the decision/checkpoint/PENDING-snapshot stores, all on one horizon-plus-margin cutoff (PR 6).
-
-    Runs after reconcile_decisions has already had its chance at every session
-    up to the same cutoff, so nothing pruned here was still reconcilable.
-    Failures are logged and swallowed independently per store — a checkpoint
-    DB VACUUM failing must not skip compacting decisions.jsonl, or vice versa.
-
-    Args:
-        decisions_log: Same decisions.jsonl path the caller just reconciled.
-    """
-    cutoff = datetime.now() - timedelta(  # noqa: DTZ005
-        days=RECONCILIATION.horizon_days + RECONCILIATION.retention_margin_days
-    )
-
-    try:
-        kept = compact_decisions_jsonl(decisions_log, cutoff)
-        logger.info("[Reconcile] compacted decisions.jsonl to %d retained decision(s)", kept)
-    except Exception:
-        logger.exception("[Reconcile] decisions.jsonl compaction failed")
-
-    try:
-        checkpoint_db = f"{settings.ARGUS_DATA_DIR}/argus_graph.db"
-        pruned = prune_checkpoints(checkpoint_db, cutoff)
-        logger.info("[Reconcile] pruned %d stale checkpoint thread(s)", pruned)
-    except Exception:
-        logger.exception("[Reconcile] checkpoint pruning failed")
-
-    try:
-        expired = get_cultural_memory().expire_pending_snapshots(cutoff)
-        logger.info("[Reconcile] expired %d stale PENDING snapshot(s)", expired)
-    except Exception:
-        logger.exception("[Reconcile] PENDING snapshot expiry failed")
-
-
 def _reconcile_once() -> None:
-    """Runs one reconciliation pass: outcome backfill, paper-book update, kill-switch sync, store pruning.
+    """Runs one reconciliation pass, then syncs the kill switch off its resulting equity.
 
     Synchronous by design — `_reconcile_loop` runs this via `asyncio.to_thread`
     since it performs per-ticker yfinance fetches directly, which would
     otherwise block the event loop for the whole app for the duration of a run.
+    Kill-switch sync stays here rather than in run_reconciliation_pass: this is
+    the caller with a daemon to sync to, and it's skipped when the paper-book
+    step itself failed — syncing a fresh report's zeroed-out default equity
+    would read as a total portfolio loss (issue #77).
     """
-    decisions_log = f"{settings.ARGUS_DATA_DIR}/decisions.jsonl"
-    decisions = load_decisions_from_jsonl(decisions_log)
-    market_data = LiveMarketDataProvider()
-    stored = reconcile_decisions(
-        decisions,
-        market_data=market_data,
-        cultural=get_cultural_memory(),
-        horizon_days=RECONCILIATION.horizon_days,
+    report = run_reconciliation_pass(
+        LiveMarketDataProvider(),
+        get_cultural_memory(),
+        f"{settings.ARGUS_DATA_DIR}/paper_equity.json",
+        decisions_log_path=f"{settings.ARGUS_DATA_DIR}/decisions.jsonl",
+        checkpoint_db_path=f"{settings.ARGUS_DATA_DIR}/argus_graph.db",
     )
-    logger.info("[Reconcile] stored %d/%d outcome(s)", stored, len(decisions))
+    logger.info(
+        "[Reconcile] stored %d/%d outcome(s), equity=$%.2f (drawdown=%.1f%%)",
+        report.outcomes_stored,
+        report.decisions_loaded,
+        report.equity,
+        report.drawdown * 100,
+    )
+    for error in report.errors:
+        logger.error("[Reconcile] %s", error)
 
-    try:
-        book_path = f"{settings.ARGUS_DATA_DIR}/paper_equity.json"
-        book = paper_book.load(book_path)
-        for run_timestamp, run_return in paper_book.compute_run_returns(
-            decisions, market_data, RECONCILIATION.horizon_days
-        ):
-            book.apply_run(run_timestamp, run_return)
-        book.prune_runs_applied(
-            datetime.now()  # noqa: DTZ005
-            - timedelta(days=RECONCILIATION.horizon_days + RECONCILIATION.retention_margin_days)
-        )
-        paper_book.save(book, book_path)
-
+    if report.paper_book_updated:
         ks = get_kill_switch()
         if ks is not None:
-            ks.update_portfolio_value(book.equity)
-        logger.info(
-            "[Reconcile] paper equity=$%.2f (drawdown=%.1f%%)",
-            book.equity,
-            book.drawdown_from_peak() * 100,
-        )
-    except Exception:
-        logger.exception("[Reconcile] paper-book update failed")
-
-    _prune_growing_stores(decisions_log)
+            ks.update_portfolio_value(report.equity)
 
 
 def _seconds_until_next_reconcile(now_et: datetime, hour: int) -> float:
@@ -306,7 +255,7 @@ def _seconds_until_next_reconcile(now_et: datetime, hour: int) -> float:
 
 
 async def _reconcile_loop() -> None:
-    """Runs reconcile_decisions once a day at settings.ARGUS_RECONCILE_HOUR_ET."""
+    """Runs the reconciliation pass once a day at settings.ARGUS_RECONCILE_HOUR_ET."""
     while True:
         now_et = datetime.now(_ET)
         await asyncio.sleep(_seconds_until_next_reconcile(now_et, settings.ARGUS_RECONCILE_HOUR_ET))

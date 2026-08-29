@@ -782,6 +782,7 @@ def test_run_reconciliation_pass_over_matured_decisions_produces_outcome_and_equ
     assert isinstance(report, ReconciliationReport)
     assert report.decisions_loaded == 1
     assert report.outcomes_stored == 1
+    assert report.paper_book_updated is True
     assert report.equity == pytest.approx(105_000.0)
     assert report.drawdown == pytest.approx(0.0)
     assert report.decisions_compacted is not None
@@ -917,6 +918,7 @@ def test_run_reconciliation_pass_paper_book_not_partially_applied_when_its_step_
         horizon_days=5,
     )
 
+    assert report.paper_book_updated is False
     assert report.equity == 0.0
     assert len(report.errors) == 1
     assert "paper-book update failed" in report.errors[0]
