@@ -537,6 +537,43 @@ class AggregatedSignal(BaseModel):
     )
 
 
+class ProposedPosition(BaseModel):
+    """A single position as the LLM itself proposes it — advisory, not yet risk-enforced.
+
+    Never carries allocation_usd or a risk-approved stop_loss: the agent computes
+    the former from allocation_pct and overrides the latter with the risk engine's
+    own figure when one exists. See GLOSSARY.md's Proposal entry.
+    """
+
+    ticker: str = Field(..., description="Equity ticker symbol")
+    allocation_pct: float = Field(0.0, description="Proposed target portfolio weight")
+    stop_loss: float | None = Field(None, description="Model's own stop-loss estimate")
+    target_price: float | None = Field(None, description="12-month price target (optional)")
+    thesis: str = Field(..., description="One-sentence position thesis")
+    advisor_note: str | None = Field(
+        None, description="Professional multi-sentence advisory rationale (optional)"
+    )
+    composite_conviction: float = Field(
+        ..., ge=0.0, le=1.0, description="Aggregated conviction across all agents"
+    )
+    time_horizon: str = Field(..., description="Expected holding period, e.g. '30 days'")
+
+
+class PortfolioProposal(BaseModel):
+    """What the LLM itself returns for portfolio allocation — judgement only.
+
+    Advisory until the risk engine has enforced against it: caps, vetoes, and the
+    cash residual are all applied by the agent afterwards, never trusted from this
+    object directly. See GLOSSARY.md's Proposal entry.
+    """
+
+    portfolio: list[ProposedPosition] = Field(default_factory=list)
+    cash_reserve_pct: float = Field(..., description="Model's own residual estimate")
+    rebalance_trigger: str = Field(
+        ..., description="Condition that will next trigger rebalancing, e.g. 'VIX > 35'"
+    )
+
+
 class PositionAllocation(BaseModel):
     """Target allocation weight, pricing levels, and thesis for a single asset."""
 
@@ -684,6 +721,8 @@ __all__ = [
     "SentimentSignal",
     "RiskAssessment",
     "AggregatedSignal",
+    "ProposedPosition",
+    "PortfolioProposal",
     "PositionAllocation",
     "PortfolioAllocation",
     "ARGUSDecision",

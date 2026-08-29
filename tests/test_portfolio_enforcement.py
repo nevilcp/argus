@@ -6,17 +6,28 @@ verdicts and caps in code, not merely display them in the prompt. Reproduces
 the audit's finding that an over-cap allocation, a VETO'd ticker, and a
 fabricated ticker all validated cleanly.
 
-Also covers PA-6: when all 3 retry attempts fail, allocate() must say which
-of its three stages (LLM call, JSON parse, schema validation) was failing,
+Also covers PA-6: when the structured-output decoder exhausts its retries,
+allocate() must say which stage was failing (JSON parse or schema validation),
 not a single generic message regardless of cause.
 """
 
 import json
 from datetime import datetime
 
+import pytest
+
+import argus.agents.portfolio as portfolio_module
 from argus.agents.portfolio import PortfolioManagerAgent
+from argus.orchestration.governor import RateLimitExceeded
 from argus.params import PORTFOLIO, SYSTEM
-from argus.schemas.signals import PortfolioAllocation, PositionAllocation, RiskAssessment, RiskVerdict
+from argus.schemas.signals import (
+    PortfolioAllocation,
+    PortfolioProposal,
+    PositionAllocation,
+    ProposedPosition,
+    RiskAssessment,
+    RiskVerdict,
+)
 from argus.seams import FixtureLLMClient
 
 TIMESTAMP = datetime(2026, 1, 1)
@@ -36,6 +47,59 @@ class _CapturingLLMClient:
     def complete(self, system_prompt: str, user_prompt: str) -> str:
         self.last_prompt = user_prompt
         return json.dumps(self._response_json)
+
+
+def test_prompt_declared_fields_match_the_proposal_schema():
+    """The prompt's declared output fields and the proposal schemas' fields must never drift apart."""
+    assert set(portfolio_module._POSITION_FIELD_DESCRIPTIONS) == set(ProposedPosition.model_fields)
+    assert set(portfolio_module._PROPOSAL_FIELD_DESCRIPTIONS) == (
+        set(PortfolioProposal.model_fields) - {"portfolio"}
+    )
+
+
+def test_allocate_reraises_on_governor_exhaustion_without_retrying():
+    """A RateLimitExceeded from the LLM client propagates immediately, unlike fundamental/sentiment.
+
+    There is no per-ticker fallback for a whole-portfolio call: a session either
+    produces the entire allocation or none of it, so the caller needs the
+    rate-limit signal itself rather than a swallowed None.
+    """
+
+    class _RateLimitedLLMClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(self, system_prompt: str, user_prompt: str) -> str:
+            self.calls += 1
+            raise RateLimitExceeded("gpt-oss-120b quota exhausted")
+
+    llm = _RateLimitedLLMClient()
+    agent = PortfolioManagerAgent(llm_client=llm)
+
+    with pytest.raises(RateLimitExceeded):
+        agent.allocate(
+            user_profile={"total_wealth": 100_000.0, "invest_pct": 0.5, "risk_tolerance": "MODERATE"},
+            all_signals={"AAPL": {"risk": _risk(RiskVerdict.APPROVE, approved_weight=0.10, proposed_weight=0.10)}},
+            macro=None,
+        )
+
+    assert llm.calls == 1
+
+
+def test_allocate_does_not_repair_a_bad_response(monkeypatch):
+    """Repair stays disabled: an invalid response is not re-prompted with the failure appended."""
+    monkeypatch.setattr("argus.structured_output.time.sleep", lambda *_: None)
+    llm_client = _CapturingLLMClient({"cash_reserve_pct": 0.5})
+
+    agent = PortfolioManagerAgent(llm_client=llm_client)
+    alloc = agent.allocate(
+        user_profile={"total_wealth": 100_000.0, "invest_pct": 0.5, "risk_tolerance": "MODERATE"},
+        all_signals={"AAPL": {"risk": _risk(RiskVerdict.APPROVE, approved_weight=0.10, proposed_weight=0.10)}},
+        macro=None,
+    )
+
+    assert alloc is None
+    assert "Your previous response was invalid" not in llm_client.last_prompt
 
 
 def _risk(verdict: RiskVerdict, approved_weight: float, proposed_weight: float) -> RiskAssessment:
@@ -123,7 +187,7 @@ def test_allocate_enforces_caps_vetoes_and_fabrications_in_code():
 
 def test_allocate_names_the_json_parse_stage_on_exhausted_retries(monkeypatch):
     """A response that never parses as JSON is reported as a json_parse failure, not a generic one."""
-    monkeypatch.setattr("argus.agents.portfolio.time.sleep", lambda *_: None)
+    monkeypatch.setattr("argus.structured_output.time.sleep", lambda *_: None)
     llm_client = FixtureLLMClient({"only": "not valid json"}, key_fn=lambda _prompt: "only")
 
     agent = PortfolioManagerAgent(llm_client=llm_client)
@@ -140,9 +204,9 @@ def test_allocate_names_the_json_parse_stage_on_exhausted_retries(monkeypatch):
 
 
 def test_allocate_names_the_schema_validation_stage_on_exhausted_retries(monkeypatch):
-    """Valid JSON that fails PortfolioAllocation's schema is reported as schema_validation, not json_parse."""
-    monkeypatch.setattr("argus.agents.portfolio.time.sleep", lambda *_: None)
-    # Missing the required "portfolio" list entirely -> model_validate raises, json.loads does not
+    """Valid JSON that fails PortfolioProposal's schema is reported as schema_validation, not json_parse."""
+    monkeypatch.setattr("argus.structured_output.time.sleep", lambda *_: None)
+    # Missing the required "rebalance_trigger" field -> model_validate raises, json.loads does not
     llm_client = FixtureLLMClient(
         {"only": json.dumps({"cash_reserve_pct": "not_a_number"})}, key_fn=lambda _prompt: "only"
     )
