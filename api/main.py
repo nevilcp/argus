@@ -52,7 +52,8 @@ from pydantic import BaseModel, Field, field_validator
 import argus
 from argus.agents.macro import MacroStatisticalAgent
 from argus.config import settings
-from argus.data.pipeline import MFTDataPipeline, max_bar_age_seconds, session_state_ttl_seconds
+from argus.data.live_session_cache import max_bar_age_seconds, session_state_ttl_seconds
+from argus.data.pipeline import MFTDataPipeline
 from argus.data.tickers import TICKER_PATTERN
 from argus.memory.cultural import get_cultural_memory
 from argus.orchestration.collector import (
