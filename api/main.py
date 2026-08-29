@@ -52,7 +52,7 @@ from pydantic import BaseModel, Field, field_validator
 import argus
 from argus.agents.macro import MacroStatisticalAgent
 from argus.config import settings
-from argus.data.live_session_cache import max_bar_age_seconds, session_state_ttl_seconds
+from argus.data.live_session_cache import LiveSessionCache
 from argus.data.pipeline import MFTDataPipeline
 from argus.data.tickers import TICKER_PATTERN
 from argus.memory.cultural import get_cultural_memory
@@ -74,7 +74,7 @@ logger = logging.getLogger("argus.api")
 
 _ET = ZoneInfo("America/New_York")
 
-_live_session_cache: dict[str, tuple[dict, datetime]] = {}
+_live_cache: LiveSessionCache | None = None
 
 # Initialized during lifespan startup; tickers are registered dynamically per
 # /analyze request in addition to the ARGUS_UNIVERSE seed
@@ -109,46 +109,21 @@ _macro_status_agent: MacroStatisticalAgent | None = None
 async def _mft_session_callback(session_states: dict) -> None:
     """Receives compressed technical feature dicts from the MFT pipeline on every sweep.
 
-    Updates the module-level live cache so the next /analyze call picks up
-    fresh intraday indicators without re-fetching historical data. Each entry
-    stores a (state_dict, updated_at) tuple for TTL-based staleness detection.
+    Publishes them into the module-level live cache so the next /analyze call
+    picks up fresh intraday indicators without re-fetching historical data.
+    Eviction of tickers no longer tracked (API-9) happens inside
+    LiveSessionCache.publish, keyed off the pipeline's current tracked
+    universe.
 
     Args:
         session_states: Mapping of ticker → technical feature dict from MFTDataPipeline.
     """
-    now = datetime.now()  # noqa: DTZ005
-    for ticker, state in session_states.items():
-        _live_session_cache[ticker] = (state, now)
+    if _live_cache is not None and _mft_pipeline is not None:
+        _live_cache.publish(session_states, _mft_pipeline.tickers)
 
-    # Drops entries for tickers no longer tracked (API-9) — without this the
-    # cache only ever grows, holding a stale allocation-eligible entry for any
-    # ticker that was ever registered even after it stops being tracked
-    if _mft_pipeline is not None:
-        tracked = set(_mft_pipeline.tickers)
-        for ticker in list(_live_session_cache):
-            if ticker not in tracked:
-                del _live_session_cache[ticker]
-
-    logger.info("[MFT] Live session cache updated: %d ticker(s)", len(_live_session_cache))
-
-
-def _bar_age_seconds(state: dict, now_et: datetime) -> Optional[float]:
-    """Computes a session state's bar age in seconds, failing closed on a bad timestamp (API-11).
-
-    A missing, malformed, or naive ``timestamp`` must not raise out of
-    /analyze or /pipeline/status — it's treated as staleness instead.
-
-    Args:
-        state: A compressed technical feature dict from the live cache.
-        now_et: Current time, ET-aware, to measure age against.
-
-    Returns:
-        Age in seconds, or None if ``timestamp`` can't be parsed against `now_et`.
-    """
-    try:
-        return (now_et - datetime.fromisoformat(state["timestamp"])).total_seconds()
-    except (KeyError, TypeError, ValueError):
-        return None
+    logger.info(
+        "[MFT] Live session cache updated: %d ticker(s)", len(_live_cache) if _live_cache else 0
+    )
 
 
 def _log_task_exception(task: asyncio.Task, name: str) -> None:
@@ -412,7 +387,7 @@ def _assert_registered_models() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Starts background tasks on startup and stops them cleanly on shutdown."""
-    global _mft_pipeline, _pipeline_task, _collector_task, _reconcile_task, _graph, _macro_status_agent
+    global _mft_pipeline, _pipeline_task, _collector_task, _reconcile_task, _graph, _macro_status_agent, _live_cache
 
     _configure_logging()
     _warn_on_permissive_security_defaults()
@@ -433,6 +408,7 @@ async def lifespan(app: FastAPI):
     # Seeded from ARGUS_UNIVERSE so the pipeline starts collecting immediately
     # rather than waiting for a first /analyze call to register any tickers
     _mft_pipeline = MFTDataPipeline(tickers=list(settings.ARGUS_UNIVERSE))
+    _live_cache = LiveSessionCache(interval_minutes=_mft_pipeline.interval_minutes)
     _pipeline_task = asyncio.create_task(_mft_pipeline.start(on_session_ready=_mft_session_callback))
     _pipeline_task.add_done_callback(lambda t: _log_task_exception(t, "MFTDataPipeline"))
     logger.info(
@@ -631,11 +607,10 @@ async def health():
     ks = get_kill_switch()
 
     newest_cache_entry_age_seconds = None
-    if _mft_pipeline is not None and _mft_pipeline.is_market_hours() and _live_session_cache:
-        now = datetime.now()  # noqa: DTZ005
-        newest_cache_entry_age_seconds = min(
-            (now - updated_at).total_seconds() for _, updated_at in _live_session_cache.values()
-        )
+    if _mft_pipeline is not None and _mft_pipeline.is_market_hours() and _live_cache is not None:
+        cache_age_seconds, _ = _live_cache.ages(datetime.now(), datetime.now(_ET))  # noqa: DTZ005
+        if cache_age_seconds:
+            newest_cache_entry_age_seconds = min(cache_age_seconds.values())
 
     body = {
         "status": "ok" if not dead_tasks else "degraded",
@@ -675,13 +650,9 @@ async def pipeline_status():
 
     now = datetime.now()  # noqa: DTZ005
     now_et = datetime.now(_ET)
-    cache_age_seconds = {
-        ticker: (now - updated_at).total_seconds()
-        for ticker, (_, updated_at) in _live_session_cache.items()
-    }
-    bar_age_seconds = {
-        ticker: _bar_age_seconds(state, now_et) for ticker, (state, _) in _live_session_cache.items()
-    }
+    cache_age_seconds, bar_age_seconds = (
+        _live_cache.ages(now, now_et) if _live_cache is not None else ({}, {})
+    )
 
     return {
         "tracked_tickers": list(_mft_pipeline.tickers),
@@ -763,43 +734,34 @@ async def analyze(req: AnalysisRequest):
     # tracked-universe cap
     _mft_pipeline.register_tickers(req.tickers)
 
-    absent = [t for t in req.tickers if t not in _live_session_cache]
-    if absent:
+    if _live_cache is None:
+        raise HTTPException(503, "Live session cache not yet initialized.")
+
+    # Admission answers only "how old is this" for each ticker; the ordering
+    # against market hours above is what decides whether that age matters
+    # right now (issue #78).
+    admission = _live_cache.admit(req.tickers, datetime.now(), datetime.now(_ET))  # noqa: DTZ005
+
+    if admission.absent:
         raise HTTPException(
             503,
-            f"MFT live cache not yet populated for: {absent}. "
+            f"MFT live cache not yet populated for: {admission.absent}. "
             "The pipeline is warming up — retry after the next sweep (~5 min).",
         )
-
-    now = datetime.now()  # noqa: DTZ005
-    stalled = [
-        t for t in req.tickers
-        if (now - _live_session_cache[t][1]).total_seconds() > session_state_ttl_seconds()
-    ]
-    if stalled:
+    if admission.stalled:
         raise HTTPException(
             503,
-            f"MFT pipeline appears stalled for: {stalled}. "
+            f"MFT pipeline appears stalled for: {admission.stalled}. "
             "The live cache hasn't been refreshed recently — check /pipeline/status.",
         )
-
-    # Catches what a write-time TTL can't: a restart that republishes old candles
-    # under a fresh write timestamp (MFT-1). A timestamp that fails to parse
-    # fails closed as stale rather than raising (API-11).
-    now_et = datetime.now(_ET)
-    max_bar_age = max_bar_age_seconds(_mft_pipeline.interval_minutes)
-    stale = [
-        t for t in req.tickers
-        if (age := _bar_age_seconds(_live_session_cache[t][0], now_et)) is None or age > max_bar_age
-    ]
-    if stale:
+    if admission.stale:
         raise HTTPException(
             503,
-            f"MFT cache data is stale for: {stale}. "
+            f"MFT cache data is stale for: {admission.stale}. "
             "The underlying candles are older than expected — check /pipeline/status.",
         )
 
-    live_states = {t: _live_session_cache[t][0] for t in req.tickers}
+    live_states = admission.admitted
     logger.info("[API] MFT cache hit for all %d tickers", len(live_states))
 
     state = ARGUSState(
