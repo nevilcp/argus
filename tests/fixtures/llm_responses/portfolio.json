@@ -44,6 +44,5 @@
     }
   ],
   "cash_reserve_pct": 0.575,
-  "expected_sharpe": null,
   "rebalance_trigger": "MONTHLY"
 }
