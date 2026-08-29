@@ -558,18 +558,29 @@ class ProposedPosition(BaseModel):
     own figure when one exists. See GLOSSARY.md's Proposal entry.
     """
 
-    ticker: str = Field(..., description="Equity ticker symbol")
-    allocation_pct: float = Field(0.0, description="Proposed target portfolio weight")
-    stop_loss: float | None = Field(None, description="Model's own stop-loss estimate")
-    target_price: float | None = Field(None, description="12-month price target (optional)")
-    thesis: str = Field(..., description="One-sentence position thesis")
-    advisor_note: str | None = Field(
-        None, description="Professional multi-sentence advisory rationale (optional)"
+    ticker: Annotated[str, PromptText('""')] = Field(..., description="Equity ticker symbol")
+    allocation_pct: Annotated[float, PromptText("0.0")] = Field(
+        0.0, description="Proposed target portfolio weight"
     )
-    composite_conviction: float = Field(
+    stop_loss: Annotated[float | None, PromptText("0.0")] = Field(
+        None, description="Model's own stop-loss estimate"
+    )
+    target_price: Annotated[float | None, PromptText("null")] = Field(
+        None, description="12-month price target (optional)"
+    )
+    thesis: Annotated[str, PromptText('"<≤20 words>"')] = Field(
+        ..., description="One-sentence position thesis"
+    )
+    advisor_note: Annotated[
+        str | None,
+        PromptText('"2–4 professional sentences: rationale, key risks, what to monitor"'),
+    ] = Field(None, description="Professional multi-sentence advisory rationale (optional)")
+    composite_conviction: Annotated[float, PromptText("0.0")] = Field(
         ..., ge=0.0, le=1.0, description="Aggregated conviction across all agents"
     )
-    time_horizon: str = Field(..., description="Expected holding period, e.g. '30 days'")
+    time_horizon: Annotated[str, PromptText('"3-6 months"')] = Field(
+        ..., description="Expected holding period, e.g. '30 days'"
+    )
 
 
 class PortfolioProposal(BaseModel):
@@ -581,8 +592,10 @@ class PortfolioProposal(BaseModel):
     """
 
     portfolio: list[ProposedPosition] = Field(default_factory=list)
-    cash_reserve_pct: float = Field(..., description="Model's own residual estimate")
-    rebalance_trigger: str = Field(
+    cash_reserve_pct: Annotated[float, PromptText("0.0")] = Field(
+        ..., description="Model's own residual estimate"
+    )
+    rebalance_trigger: Annotated[str, PromptText('"MONTHLY"')] = Field(
         ..., description="Condition that will next trigger rebalancing, e.g. 'VIX > 35'"
     )
 
