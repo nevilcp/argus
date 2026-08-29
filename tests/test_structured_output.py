@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from argus.orchestration.governor import RateLimitExceeded, UnregisteredModel
 from argus.params import STRUCTURED_OUTPUT
+from argus.seams import RetryableTransportError
 from argus.structured_output import StructuredOutputError, _strip_markdown_fence, decode
 
 
@@ -133,6 +134,111 @@ def test_decode_retries_schema_violation_then_succeeds():
 
     assert result == _Verdict(signal="NEUTRAL", conviction=0.3)
     assert llm.complete.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# decode(): retryable transport failures
+# ---------------------------------------------------------------------------
+
+
+def test_decode_retries_retryable_transport_error_then_succeeds():
+    """A RetryableTransportError from the transport is retried and the eventual success is returned."""
+    llm = mock.Mock()
+    llm.complete.side_effect = [
+        RetryableTransportError(RuntimeError("connection reset")),
+        '{"signal": "NEUTRAL", "conviction": 0.3}',
+    ]
+
+    with mock.patch("argus.structured_output.time.sleep"):
+        result = decode(llm, "system", "user", _Verdict, repair=False)
+
+    assert result == _Verdict(signal="NEUTRAL", conviction=0.3)
+    assert llm.complete.call_count == 2
+
+
+def test_decode_exhausts_attempts_on_retryable_transport_error_raises_transport_stage():
+    """A persistent transport failure costs the declared attempt cap, then raises stage=transport."""
+    llm = mock.Mock()
+    llm.complete.side_effect = [
+        RetryableTransportError(RuntimeError("connection reset"))
+        for _ in range(STRUCTURED_OUTPUT.max_attempts)
+    ]
+
+    with mock.patch("argus.structured_output.time.sleep"):
+        with pytest.raises(StructuredOutputError) as exc_info:
+            decode(llm, "system", "user", _Verdict, repair=False)
+
+    assert exc_info.value.stage == "transport"
+    assert exc_info.value.attempts == STRUCTURED_OUTPUT.max_attempts
+    assert llm.complete.call_count == STRUCTURED_OUTPUT.max_attempts
+
+
+def test_decode_honors_transport_retry_after_hint():
+    """A RetryableTransportError's retry_after hint is used as the sleep delay verbatim."""
+    llm = mock.Mock()
+    llm.complete.side_effect = [
+        RetryableTransportError(RuntimeError("rate limited"), retry_after=7.5),
+        '{"signal": "NEUTRAL", "conviction": 0.3}',
+    ]
+
+    with mock.patch("argus.structured_output.time.sleep") as mock_sleep:
+        decode(llm, "system", "user", _Verdict, repair=False)
+
+    mock_sleep.assert_called_once_with(7.5)
+
+
+def test_decode_transport_retry_without_hint_uses_jittered_backoff():
+    """Without a retry_after hint, a transport retry uses full-jitter back-off, not a fixed delay.
+
+    The adapter's deleted internal loop used full jitter specifically to
+    desynchronize retries across the parallel agents during a shared
+    provider outage; decode() must preserve that for the unhinted case.
+    """
+    llm = mock.Mock()
+    llm.complete.side_effect = [
+        RetryableTransportError(RuntimeError("connection reset")),
+        '{"signal": "NEUTRAL", "conviction": 0.3}',
+    ]
+
+    with mock.patch("argus.structured_output.time.sleep") as mock_sleep:
+        decode(llm, "system", "user", _Verdict, repair=False)
+
+    delay = mock_sleep.call_args.args[0]
+    assert 0.0 <= delay <= STRUCTURED_OUTPUT.backoff_base_seconds
+
+
+def test_decode_transport_retry_preserves_repair_context_from_earlier_content_failure():
+    """A transport hiccup between two content failures does not discard the pending repair text."""
+    llm = mock.Mock()
+    llm.complete.side_effect = [
+        '{"signal": "NEUTRAL"}',  # missing required "conviction" -> schema_validation failure
+        RetryableTransportError(RuntimeError("connection reset")),  # transport hiccup
+        '{"signal": "NEUTRAL"}',  # still missing "conviction" -> exhausts attempts
+    ]
+
+    with mock.patch("argus.structured_output.time.sleep"):
+        with pytest.raises(StructuredOutputError):
+            decode(llm, "system", "original user prompt", _Verdict, repair=True)
+
+    assert llm.complete.call_count == 3
+    third_call_user_prompt = llm.complete.call_args_list[2].args[1]
+    assert "original user prompt" in third_call_user_prompt
+    assert "Your previous response was invalid" in third_call_user_prompt
+
+
+def test_decode_transport_retry_does_not_append_repair_text():
+    """A transport retry resends the original prompt — repair only makes sense for content failures."""
+    llm = mock.Mock()
+    llm.complete.side_effect = [
+        RetryableTransportError(RuntimeError("connection reset")),
+        '{"signal": "NEUTRAL", "conviction": 0.3}',
+    ]
+
+    with mock.patch("argus.structured_output.time.sleep"):
+        decode(llm, "system", "original user prompt", _Verdict, repair=True)
+
+    second_call_user_prompt = llm.complete.call_args_list[1].args[1]
+    assert second_call_user_prompt == "original user prompt"
 
 
 # ---------------------------------------------------------------------------
