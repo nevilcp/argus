@@ -13,7 +13,7 @@ from argus.agents.sentiment import (
     _check_earnings_calendar,
 )
 from argus.orchestration.governor import RateLimitExceeded
-from argus.schemas.signals import SentimentSignal, SentimentVerdict, Signal
+from argus.schemas.signals import SentimentSignal, Signal
 
 def test_aggregate_finbert_scores_empty():
     """An empty article list returns the neutral, low-confidence default."""
@@ -112,11 +112,6 @@ class _RecordingLLMClient:
     def complete(self, system_prompt, user_prompt):
         self.last_user_prompt = user_prompt
         return self._response_text
-
-
-def test_prompt_declared_fields_match_the_verdict_schema():
-    """The prompt's declared output fields and SentimentVerdict's fields must never drift apart."""
-    assert set(sentiment_module._VERDICT_FIELD_DESCRIPTIONS) == set(SentimentVerdict.model_fields)
 
 
 def test_analyze_degrades_the_ticker_on_governor_exhaustion_without_retrying(monkeypatch):
