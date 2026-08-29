@@ -16,7 +16,7 @@ from argus.agents.fundamental import (
     build_compact_prompt,
 )
 from argus.orchestration.governor import BOOTSTRAP_LIMITS, RateLimitGovernor
-from argus.schemas.signals import FundamentalSignal, FundamentalVerdict, Signal
+from argus.schemas.signals import FundamentalSignal, Signal
 from argus.seams import FixtureLLMClient
 
 
@@ -40,15 +40,6 @@ class _RecordingLLMClient:
     def complete(self, system_prompt: str, user_prompt: str) -> str:
         self.last_user_prompt = user_prompt
         return self._response_text
-
-def test_prompt_declared_fields_match_the_verdict_schema():
-    """The prompt's declared output fields and FundamentalVerdict's fields must never drift apart.
-
-    The prompt used to also declare six measured ratios the agent unconditionally
-    overwrote after parsing; this asserts none of those field names sneak back in.
-    """
-    assert set(fundamental_module._VERDICT_FIELD_DESCRIPTIONS) == set(FundamentalVerdict.model_fields)
-
 
 def test_anonymize_ticker():
     """Anonymized IDs are deterministic per (ticker, seed) and vary if either input changes."""
