@@ -349,12 +349,18 @@ class SentimentVerdict(BaseModel):
     in by the agent to build a SentimentSignal. See GLOSSARY.md's Verdict entry.
     """
 
-    signal: Signal = Field(..., description="Directional label")
-    conviction: float = Field(..., ge=0.0, le=_CONVICTION_MAX)
-    sentiment_decay_risk: Literal["LOW", "MEDIUM", "HIGH"] = Field(
-        ..., description="Estimated speed at which the sentiment signal will decay"
+    signal: Annotated[Signal, PromptText('"BULLISH|BEARISH|NEUTRAL"')] = Field(
+        ..., description="Directional label"
     )
-    reasoning: str = Field(..., description="LLM rationale for the signal")
+    conviction: Annotated[float, PromptText("<float 0.0–1.0>")] = Field(
+        ..., ge=0.0, le=_CONVICTION_MAX
+    )
+    sentiment_decay_risk: Annotated[
+        Literal["LOW", "MEDIUM", "HIGH"], PromptText('"LOW|MEDIUM|HIGH"')
+    ] = Field(..., description="Estimated speed at which the sentiment signal will decay")
+    reasoning: Annotated[str, PromptText('"<≤60 words citing the primary driver>"')] = Field(
+        ..., description="LLM rationale for the signal"
+    )
 
     @field_validator("conviction", mode="before")
     @classmethod
