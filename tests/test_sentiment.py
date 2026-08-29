@@ -5,7 +5,6 @@ Tests for the Sentiment Agent and its pure-Python helpers.
 from datetime import datetime, timedelta
 
 
-import argus.agents.sentiment as sentiment_module
 from argus.agents.sentiment import (
     SentimentAgent,
     aggregate_finbert_scores,

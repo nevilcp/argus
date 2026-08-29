@@ -16,15 +16,12 @@ from datetime import datetime
 
 import pytest
 
-import argus.agents.portfolio as portfolio_module
 from argus.agents.portfolio import PortfolioManagerAgent
 from argus.orchestration.governor import RateLimitExceeded
 from argus.params import PORTFOLIO, SYSTEM
 from argus.schemas.signals import (
     PortfolioAllocation,
-    PortfolioProposal,
     PositionAllocation,
-    ProposedPosition,
     RiskAssessment,
     RiskVerdict,
 )
@@ -47,14 +44,6 @@ class _CapturingLLMClient:
     def complete(self, system_prompt: str, user_prompt: str) -> str:
         self.last_prompt = user_prompt
         return json.dumps(self._response_json)
-
-
-def test_prompt_declared_fields_match_the_proposal_schema():
-    """The prompt's declared output fields and the proposal schemas' fields must never drift apart."""
-    assert set(portfolio_module._POSITION_FIELD_DESCRIPTIONS) == set(ProposedPosition.model_fields)
-    assert set(portfolio_module._PROPOSAL_FIELD_DESCRIPTIONS) == (
-        set(PortfolioProposal.model_fields) - {"portfolio"}
-    )
 
 
 def test_allocate_reraises_on_governor_exhaustion_without_retrying():

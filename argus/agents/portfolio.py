@@ -31,6 +31,7 @@ import numpy as np
 from argus.config import settings
 from argus.orchestration.governor import RateLimitExceeded, UnregisteredModel
 from argus.params import PORTFOLIO
+from argus.schemas.prompting import schema_block
 from argus.schemas.signals import (
     MacroContext,
     PortfolioAllocation,
@@ -143,33 +144,9 @@ def build_signal_table(all_signals: dict[str, dict], macro: Optional[MacroContex
     return "\n".join(lines)
 
 
-# Field descriptions for the prompt's declared output schema, keyed by the same
-# names as ProposedPosition's and PortfolioProposal's schemas — a drift test
-# (test_portfolio_enforcement.py) asserts the two stay equal, so a schema change
-# that isn't mirrored here fails loudly instead of leaving the prompt asking for
-# fields the model can't supply.
-_POSITION_FIELD_DESCRIPTIONS: dict[str, str] = {
-    "ticker": '""',
-    "allocation_pct": "0.0",
-    "stop_loss": "0.0",
-    "target_price": "null",
-    "thesis": '"<≤20 words>"',
-    "advisor_note": '"2–4 professional sentences: rationale, key risks, what to monitor"',
-    "composite_conviction": "0.0",
-    "time_horizon": '"3-6 months"',
-}
-_PROPOSAL_FIELD_DESCRIPTIONS: dict[str, str] = {
-    "cash_reserve_pct": "0.0",
-    "rebalance_trigger": '"MONTHLY"',
-}
-_POSITION_SCHEMA_JSON = (
-    "{" + ",".join(f'"{k}":{v}' for k, v in _POSITION_FIELD_DESCRIPTIONS.items()) + "}"
-)
-_PROPOSAL_SCHEMA_JSON = (
-    '{"portfolio":[' + _POSITION_SCHEMA_JSON + "],"
-    + ",".join(f'"{k}":{v}' for k, v in _PROPOSAL_FIELD_DESCRIPTIONS.items())
-    + "}"
-)
+# Rendered from PortfolioProposal's own PromptText markers, recursing into
+# ProposedPosition for the nested "portfolio" list.
+_PROPOSAL_SCHEMA_JSON = schema_block(PortfolioProposal)
 
 
 SYSTEM_PROMPT = (
