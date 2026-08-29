@@ -17,7 +17,13 @@ import pytest
 from argus.agents.fundamental import FundamentalAgent
 from argus.agents.sentiment import SentimentAgent
 from argus.schemas.signals import FundamentalSignal, SentimentSignal
-from argus.seams import FixtureLLMClient, FixtureMarketDataProvider, GroqLLMClient, _groq_retry_delay
+from argus.seams import (
+    FixtureLLMClient,
+    FixtureMarketDataProvider,
+    GroqLLMClient,
+    RetryableTransportError,
+    _groq_retry_delay,
+)
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
@@ -105,17 +111,22 @@ def _synthetic_rate_limit_error(retry_after: str | None) -> groq.RateLimitError:
 
 
 def test_groq_retry_delay_honors_retry_after():
-    """A RateLimitError's Retry-After header is honored verbatim, not re-jittered."""
+    """A RateLimitError's Retry-After header is honored verbatim."""
     exc = _synthetic_rate_limit_error(retry_after="12.5")
-    assert _groq_retry_delay(exc, attempt=0) == 12.5
+    assert _groq_retry_delay(exc) == 12.5
 
 
-def test_groq_retry_delay_falls_back_to_jittered_backoff_without_header():
-    """Without a Retry-After header, delay is jittered exponential back-off capped at 30s."""
+def test_groq_retry_delay_returns_none_without_header():
+    """Without a Retry-After header, the adapter gives no hint — the caller decides its own back-off."""
     exc = _synthetic_rate_limit_error(retry_after=None)
-    for attempt in range(6):
-        delay = _groq_retry_delay(exc, attempt)
-        assert 0.0 <= delay <= 30.0
+    assert _groq_retry_delay(exc) is None
+
+
+def test_groq_retry_delay_returns_none_for_non_rate_limit_errors():
+    """A retryable error other than RateLimitError carries no provider retry hint."""
+    request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+    exc = groq.APIConnectionError(request=request)
+    assert _groq_retry_delay(exc) is None
 
 
 def _fake_success_response(prompt_tokens: int = 10, completion_tokens: int = 5):
@@ -162,20 +173,29 @@ def test_groq_llm_client_sets_reasoning_effort_low():
     assert client._llm.reasoning_effort == "low"
 
 
-def test_groq_llm_client_retries_retryable_error_then_succeeds():
-    """A transient APIConnectionError is retried and the eventual success is returned."""
+def test_groq_llm_client_retryable_error_raises_retryable_transport_error():
+    """A transient APIConnectionError becomes RetryableTransportError after a single invocation."""
     client = _client_with_mocked_llm()
     request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
-    client._llm.invoke.side_effect = [
-        groq.APIConnectionError(request=request),
-        _fake_success_response(),
-    ]
+    exc = groq.APIConnectionError(request=request)
+    client._llm.invoke.side_effect = exc
 
-    with mock.patch("argus.seams.time.sleep"):
-        result = client.complete("system", "user")
+    with pytest.raises(RetryableTransportError) as exc_info:
+        client.complete("system", "user")
 
-    assert result == "synthetic response"
-    assert client._llm.invoke.call_count == 2
+    assert exc_info.value.cause is exc
+    assert client._llm.invoke.call_count == 1
+
+
+def test_groq_llm_client_retryable_error_carries_retry_after_hint():
+    """A RateLimitError's Retry-After header rides along on the RetryableTransportError."""
+    client = _client_with_mocked_llm()
+    client._llm.invoke.side_effect = _synthetic_rate_limit_error(retry_after="12.5")
+
+    with pytest.raises(RetryableTransportError) as exc_info:
+        client.complete("system", "user")
+
+    assert exc_info.value.retry_after == 12.5
 
 
 def test_groq_llm_client_terminal_error_raises_without_retry():
@@ -187,27 +207,10 @@ def test_groq_llm_client_terminal_error_raises_without_retry():
         "bad key", response=response, body=None
     )
 
-    with mock.patch("argus.seams.time.sleep") as mock_sleep:
-        with pytest.raises(groq.AuthenticationError):
-            client.complete("system", "user")
+    with pytest.raises(groq.AuthenticationError):
+        client.complete("system", "user")
 
     assert client._llm.invoke.call_count == 1
-    assert mock_sleep.call_count == 0
-
-
-def test_groq_llm_client_exhausts_retries_and_raises():
-    """A persistently retryable error is retried up to the attempt cap, then propagates."""
-    client = _client_with_mocked_llm()
-    request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
-    client._llm.invoke.side_effect = groq.APIConnectionError(request=request)
-
-    with mock.patch("argus.seams.time.sleep"):
-        with pytest.raises(groq.APIConnectionError):
-            client.complete("system", "user")
-
-    from argus.seams import _MAX_COMPLETE_ATTEMPTS
-
-    assert client._llm.invoke.call_count == _MAX_COMPLETE_ATTEMPTS
 
 
 def test_groq_llm_client_releases_reservation_on_terminal_error():
@@ -219,9 +222,7 @@ def test_groq_llm_client_releases_reservation_on_terminal_error():
         "bad key", response=response, body=None
     )
 
-    with mock.patch("argus.seams.time.sleep"), mock.patch(
-        "argus.seams.governor.release_reservation"
-    ) as mock_release:
+    with mock.patch("argus.seams.governor.release_reservation") as mock_release:
         with pytest.raises(groq.AuthenticationError):
             client.complete("system", "user")
 
@@ -229,19 +230,18 @@ def test_groq_llm_client_releases_reservation_on_terminal_error():
     assert mock_release.call_args.args[0] == client._model
 
 
-def test_groq_llm_client_releases_reservation_after_exhausting_retries():
-    """Retries-exhausted also releases the reservation instead of leaking it (GOV-1)."""
+def test_groq_llm_client_releases_reservation_on_retryable_error():
+    """A retryable error also releases the reservation instead of leaking it (GOV-1)."""
     client = _client_with_mocked_llm()
     request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
     client._llm.invoke.side_effect = groq.APIConnectionError(request=request)
 
-    with mock.patch("argus.seams.time.sleep"), mock.patch(
-        "argus.seams.governor.release_reservation"
-    ) as mock_release:
-        with pytest.raises(groq.APIConnectionError):
+    with mock.patch("argus.seams.governor.release_reservation") as mock_release:
+        with pytest.raises(RetryableTransportError):
             client.complete("system", "user")
 
     mock_release.assert_called_once()
+    assert mock_release.call_args.args[0] == client._model
 
 
 def test_groq_llm_client_success_does_not_release_reservation():
