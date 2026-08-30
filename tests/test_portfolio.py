@@ -7,6 +7,7 @@ from datetime import datetime
 import pytest
 
 from argus.agents.portfolio import half_kelly_weight, build_signal_table
+from argus.orchestration.state import TickerSnapshot
 from argus.schemas.signals import RiskAssessment, RiskVerdict, Signal, MacroContext, Regime
 
 def test_half_kelly_weight_bullish():
@@ -62,24 +63,24 @@ def test_build_signal_table():
         timestamp=datetime.now(),
     )
 
-    all_signals = {
-        "AAPL": {
-            "fundamental": MockSignal(Signal.BULLISH, 0.8),
-            "technical": MockSignal(Signal.NEUTRAL, 0.5),
-            "sentiment": MockSignal(Signal.BULLISH, 0.7),
-            "aggregated": MockSignal(Signal.BULLISH, 0.85, agents_present=["fundamental", "technical", "sentiment"]),
-            "risk": RiskAssessment(verdict=RiskVerdict.APPROVE, proposed_weight=0.15, approved_weight=0.15, var_99=0.02, stop_loss=150.0, portfolio_beta=1.1, api_calls_used=0, timestamp=datetime.now()),
-        },
-        "TSLA": {
-            "risk": RiskAssessment(verdict=RiskVerdict.VETO, proposed_weight=0.15, approved_weight=0.0, var_99=0.08, stop_loss=None, portfolio_beta=2.0, veto_reasons=["Too risky"], api_calls_used=0, timestamp=datetime.now()),
-        },
-        "MSFT": {
-            "fundamental": MockSignal(Signal.BEARISH, 0.9),
-            "risk": RiskAssessment(verdict=RiskVerdict.REDUCE, proposed_weight=0.15, approved_weight=0.05, var_99=0.05, stop_loss=280.0, portfolio_beta=0.9, api_calls_used=0, timestamp=datetime.now()),
-        }
+    snapshots = {
+        "AAPL": TickerSnapshot(
+            fundamental=MockSignal(Signal.BULLISH, 0.8),
+            technical=MockSignal(Signal.NEUTRAL, 0.5),
+            sentiment=MockSignal(Signal.BULLISH, 0.7),
+            aggregated=MockSignal(Signal.BULLISH, 0.85, agents_present=["fundamental", "technical", "sentiment"]),
+            risk=RiskAssessment(verdict=RiskVerdict.APPROVE, proposed_weight=0.15, approved_weight=0.15, var_99=0.02, stop_loss=150.0, portfolio_beta=1.1, api_calls_used=0, timestamp=datetime.now()),
+        ),
+        "TSLA": TickerSnapshot(
+            risk=RiskAssessment(verdict=RiskVerdict.VETO, proposed_weight=0.15, approved_weight=0.0, var_99=0.08, stop_loss=None, portfolio_beta=2.0, veto_reasons=["Too risky"], api_calls_used=0, timestamp=datetime.now()),
+        ),
+        "MSFT": TickerSnapshot(
+            fundamental=MockSignal(Signal.BEARISH, 0.9),
+            risk=RiskAssessment(verdict=RiskVerdict.REDUCE, proposed_weight=0.15, approved_weight=0.05, var_99=0.05, stop_loss=280.0, portfolio_beta=0.9, api_calls_used=0, timestamp=datetime.now()),
+        ),
     }
 
-    table = build_signal_table(all_signals, macro)
+    table = build_signal_table(snapshots, macro)
 
     assert "AAPL:" in table
     assert "MSFT:" in table

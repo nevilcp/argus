@@ -51,7 +51,13 @@ see the notes under each entry.
   callers compress the buffer into session states afterward, via `compress_all`.
 
 - **Decision** — an `ARGUSDecision` (`argus/schemas/signals.py`): a per-ticker snapshot
-  of every agent's output plus the resulting allocation, logged once per session.
+  of every agent's output plus the resulting allocation, logged once per session. A
+  decision is a `TickerSnapshot` plus its allocation and the session's timestamp.
+
+- **TickerSnapshot** (`argus/orchestration/state.py`) — the per-ticker join of every
+  agent's output before an allocation exists: technical, fundamental, sentiment, risk,
+  and aggregated signals. Built on demand from `ARGUSState` by `build_ticker_snapshots`,
+  never stored in state or the checkpoint. What a decision is built from.
 
 - **Allocation** — a `PositionAllocation` or `PortfolioAllocation`
   (`argus/schemas/signals.py`): the risk-enforced target weight(s) a session
