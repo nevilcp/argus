@@ -1,17 +1,19 @@
 """
 Tests for argus/data/cache.py: DailyBarCache, the per-(ticker, trading_date)
 disk cache that lets fetch_multiple_daily skip the network on same-day
-re-runs, and OHLCVBuffer, the rolling intraday candle buffer.
+re-runs, OHLCVBuffer, the rolling intraday candle buffer, and TTLCache, the
+generic in-memory cache shared by the fundamental and sentiment agents.
 """
 
 import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 import pandas as pd
 import pytest
 
-from argus.data.cache import DailyBarCache, OHLCVBuffer
+from argus.data.cache import DailyBarCache, OHLCVBuffer, TTLCache
 from tests.helpers.candles import dst_straddling_candles
 
 
@@ -300,3 +302,72 @@ def test_interval_change_logs_the_discarded_count(tmp_path, caplog):
         OHLCVBuffer(db_path=db_path, buffer_size=20, interval="5m")
 
     assert any("discarded 3" in record.message for record in caplog.records)
+
+
+class _FakeClock:
+    """A settable clock for driving TTLCache expiry without waiting on wall time."""
+
+    def __init__(self, now: datetime) -> None:
+        self.now = now
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
+def test_ttl_cache_returns_a_value_stored_within_the_window():
+    """A value stored and read back before the TTL elapses is returned."""
+    clock = _FakeClock(datetime(2026, 1, 1, 12, 0, 0))
+    cache: TTLCache[str, str] = TTLCache(ttl=timedelta(days=1), clock=clock)
+
+    cache.set("AAPL", "bullish")
+    clock.now += timedelta(hours=23)
+
+    assert cache.get("AAPL") == "bullish"
+
+
+def test_ttl_cache_does_not_return_a_value_once_the_window_has_passed():
+    """The same value is no longer returned once the clock passes the TTL."""
+    clock = _FakeClock(datetime(2026, 1, 1, 12, 0, 0))
+    cache: TTLCache[str, str] = TTLCache(ttl=timedelta(days=1), clock=clock)
+
+    cache.set("AAPL", "bullish")
+    clock.now += timedelta(days=1)
+
+    assert cache.get("AAPL") is None
+
+
+def test_ttl_cache_returns_none_for_a_key_that_was_never_stored():
+    """A key with no prior `set` call returns nothing rather than raising."""
+    cache: TTLCache[str, str] = TTLCache(ttl=timedelta(days=1))
+
+    assert cache.get("AAPL") is None
+
+
+def test_ttl_cache_keys_differing_only_in_one_component_do_not_share_a_value():
+    """Two tuple keys differing only in their second element don't serve each other's value.
+
+    Mirrors FundamentalCache's (ticker, session_seed) key: two backtest
+    sessions replaying the same ticker must not share a cached value, and a
+    live call (session_seed=None) must not be conflated with either.
+    """
+    cache: TTLCache[tuple[str, Optional[int]], str] = TTLCache(ttl=timedelta(days=7))
+
+    cache.set(("AAPL", 20240101), "session 1")
+    cache.set(("AAPL", 20240102), "session 2")
+
+    assert cache.get(("AAPL", 20240101)) == "session 1"
+    assert cache.get(("AAPL", 20240102)) == "session 2"
+    assert cache.get(("AAPL", None)) is None
+
+
+def test_ttl_cache_set_refreshes_the_stored_timestamp():
+    """Storing a key again resets its expiry clock rather than keeping the original timestamp."""
+    clock = _FakeClock(datetime(2026, 1, 1, 12, 0, 0))
+    cache: TTLCache[str, str] = TTLCache(ttl=timedelta(days=1), clock=clock)
+
+    cache.set("AAPL", "bullish")
+    clock.now += timedelta(hours=23)
+    cache.set("AAPL", "neutral")
+    clock.now += timedelta(hours=23)
+
+    assert cache.get("AAPL") == "neutral"
