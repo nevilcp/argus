@@ -194,12 +194,19 @@ def _reconcile_once() -> None:
         checkpoint_db_path=f"{settings.ARGUS_DATA_DIR}/argus_graph.db",
     )
     logger.info(
-        "[Reconcile] stored %d/%d outcome(s), equity=$%.2f (drawdown=%.1f%%)",
-        report.outcomes_stored,
-        report.decisions_loaded,
-        report.equity,
-        report.drawdown * 100,
+        "[Reconcile] stored %d/%d outcome(s)", report.outcomes_stored, report.decisions_loaded
     )
+    # Only meaningful once the paper-book step actually ran (see docstring) —
+    # otherwise these are still their zeroed-out defaults, not a real value
+    if report.paper_book_updated:
+        logger.info(
+            "[Reconcile] equity=$%.2f (drawdown=%.1f%%)", report.equity, report.drawdown * 100
+        )
+    if report.decisions_compacted is not None:
+        logger.info("[Reconcile] decisions.jsonl compacted: %d retained", report.decisions_compacted)
+    if report.checkpoints_pruned is not None:
+        logger.info("[Reconcile] checkpoint threads pruned: %d", report.checkpoints_pruned)
+    logger.info("[Reconcile] PENDING snapshots expired: %d", report.pending_snapshots_expired)
     for error in report.errors:
         logger.error("[Reconcile] %s", error)
 
