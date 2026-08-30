@@ -23,21 +23,20 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Optional, TypeGuard
+from typing import Optional
 from uuid import uuid4
 
 import numpy as np
 
 from argus.config import settings
 from argus.orchestration.governor import RateLimitExceeded, UnregisteredModel
+from argus.orchestration.state import TickerSnapshot
 from argus.params import PORTFOLIO
 from argus.schemas.prompting import schema_block
 from argus.schemas.signals import (
     MacroContext,
     PortfolioAllocation,
     PortfolioProposal,
-    RiskAssessment,
-    RiskVerdict,
     Signal,
 )
 from argus.seams import GroqLLMClient, LLMClient
@@ -77,20 +76,7 @@ def half_kelly_weight(
     return float(np.clip(half_kelly, 0.0, max_position))
 
 
-def _is_risk_approved(risk: Optional[RiskAssessment]) -> TypeGuard[RiskAssessment]:
-    """Whether a ticker's risk verdict permits an equity allocation.
-
-    Args:
-        risk: The ticker's RiskAssessment, or None if the risk node never evaluated it.
-
-    Returns:
-        True for APPROVE or REDUCE; False for VETO or a missing assessment. Shared
-        by the prompt table and post-LLM enforcement so the two cannot drift.
-    """
-    return risk is not None and risk.verdict in (RiskVerdict.APPROVE, RiskVerdict.REDUCE)
-
-
-def build_signal_table(all_signals: dict[str, dict], macro: Optional[MacroContext]) -> str:
+def build_signal_table(snapshots: dict[str, TickerSnapshot], macro: Optional[MacroContext]) -> str:
     """Constructs a consolidated prompt table mapping approved specialist signal values.
 
     Only includes tickers with APPROVE or REDUCE risk verdicts. Signal values are
@@ -98,10 +84,10 @@ def build_signal_table(all_signals: dict[str, dict], macro: Optional[MacroContex
     hallucination on missing or None data fields.
 
     Args:
-        all_signals: Mapping of ticker → dict of signal objects keyed by agent name.
+        snapshots: Mapping of ticker → TickerSnapshot.
         macro: Current macroeconomic context used for the table header, or None
             when MacroStatisticalAgent's data source was unavailable this session —
-            the specialist signals in all_signals don't depend on it (see
+            the specialist signals in snapshots don't depend on it (see
             orchestration/graph.py's topology).
 
     Returns:
@@ -118,15 +104,16 @@ def build_signal_table(all_signals: dict[str, dict], macro: Optional[MacroContex
         lines.append("MACRO: unavailable this session (data source failure) — allocate on specialist signals alone")
     lines.append("")
 
-    for ticker, sigs in all_signals.items():
-        risk = sigs.get("risk")
-        if not _is_risk_approved(risk):
+    for ticker, snap in snapshots.items():
+        if not snap.risk_approved:
             continue
+        risk = snap.risk
+        assert risk is not None  # risk_approved guarantees this
 
-        f = sigs.get("fundamental")
-        t = sigs.get("technical")
-        s = sigs.get("sentiment")
-        agg = sigs.get("aggregated")
+        f = snap.fundamental
+        t = snap.technical
+        s = snap.sentiment
+        agg = snap.aggregated
 
         fsig = f"{f.signal.value}({f.conviction:.2f})" if f else "N/A"
         tsig = f"{t.signal.value}({t.conviction:.2f})" if t else "N/A"
@@ -228,7 +215,7 @@ class PortfolioManagerAgent:
     def allocate(
         self,
         user_profile: dict,
-        all_signals: dict[str, dict],
+        snapshots: dict[str, TickerSnapshot],
         macro: Optional[MacroContext],
         cultural_wisdom: Optional[list[str]] = None,
         cultural_warnings: Optional[list[str]] = None,
@@ -244,7 +231,7 @@ class PortfolioManagerAgent:
 
         Args:
             user_profile: Dict with keys ``total_wealth``, ``invest_pct``, ``risk_tolerance``.
-            all_signals: Mapping of ticker → dict of signal objects keyed by agent name.
+            snapshots: Mapping of ticker → TickerSnapshot.
             macro: Current macroeconomic context, or None when it was unavailable
                 this session — allocation proceeds on the specialist signals alone.
             cultural_wisdom: Optional list of historical wisdom strings from cultural memory.
@@ -276,7 +263,7 @@ class PortfolioManagerAgent:
         # LLM against this base, not twice
         investable = float(total_wealth) if total_wealth is not None else 0.0
 
-        approved_tickers = [t for t, s in all_signals.items() if _is_risk_approved(s.get("risk"))]
+        approved_tickers = [t for t, s in snapshots.items() if s.risk_approved]
 
         if not approved_tickers:
             logger.debug("[Portfolio] No approved tickers. Reverting to all-cash.")
@@ -287,11 +274,11 @@ class PortfolioManagerAgent:
         # ceiling (rather than raw invest_pct) in the prompt keeps ALLOCATION RULE 3's target
         # reachable instead of silently unmeetable for a small approved universe.
         invest_pct = float(user_profile.get("invest_pct", 1.0))
-        approved_cap_sum = sum(
-            all_signals[t]["risk"].approved_weight
-            for t in approved_tickers
-            if all_signals[t].get("risk")
-        )
+        approved_cap_sum = 0.0
+        for t in approved_tickers:
+            risk = snapshots[t].risk
+            assert risk is not None  # approved_tickers is filtered by risk_approved
+            approved_cap_sum += risk.approved_weight
         deployment_ceiling = min(invest_pct, approved_cap_sum)
 
         # Compute Half-Kelly baselines to anchor the LLM's sizing distribution, using
@@ -304,7 +291,7 @@ class PortfolioManagerAgent:
         # all without re-querying cultural memory.
         reliability_n: dict[str, int] = {}
         for ticker in approved_tickers:
-            agg = all_signals[ticker].get("aggregated")
+            agg = snapshots[ticker].aggregated
             if agg and agg.reliability_n:
                 reliability_n = agg.reliability_n
                 break
@@ -313,19 +300,19 @@ class PortfolioManagerAgent:
         kelly_suggestions = {}
         if have_accuracy_data:
             for ticker in approved_tickers:
-                agg = all_signals[ticker].get("aggregated")
-                risk_signal = all_signals[ticker].get("risk")
+                agg = snapshots[ticker].aggregated
+                risk_signal = snapshots[ticker].risk
                 max_pos = risk_signal.approved_weight if risk_signal else self.max_position_pct
                 # Anchors are for NEUTRAL/BULLISH sizing only (matches the prompt text below)
                 if not agg or agg.signal == Signal.BEARISH or not agg.weighted_votes:
                     continue
-                driver = max(agg.weighted_votes, key=agg.weighted_votes.get)
+                driver = max(agg.weighted_votes, key=lambda k: agg.weighted_votes[k])
                 win_prob = agg.reliability.get(driver, 0.5)
                 kelly_suggestions[ticker] = half_kelly_weight(
                     win_probability=win_prob, max_position=max_pos
                 )
 
-        signal_table = build_signal_table(all_signals, macro)
+        signal_table = build_signal_table(snapshots, macro)
         wisdom_text = "\n".join(f"- {w}" for w in (cultural_wisdom or [])[:3])
         warnings_text = "\n".join(f"- {w}" for w in (cultural_warnings or [])[:3])
         if kelly_suggestions:
@@ -417,7 +404,7 @@ class PortfolioManagerAgent:
             enforced_portfolio = []
             for pos in proposal.portfolio:
                 ticker = pos.ticker
-                if ticker not in all_signals:
+                if ticker not in snapshots:
                     msg = (
                         f"portfolio_allocation: dropped {ticker} "
                         "(not in this session's signal universe)"
@@ -427,10 +414,11 @@ class PortfolioManagerAgent:
                         adjustments.append(msg)
                     continue
 
-                risk = all_signals[ticker].get("risk")
+                snap = snapshots[ticker]
+                risk = snap.risk
                 proposed_pct = pos.allocation_pct
                 pos_data = pos.model_dump()
-                if not _is_risk_approved(risk):
+                if not snap.risk_approved:
                     if proposed_pct:
                         verdict = risk.verdict.value if risk else "MISSING"
                         msg = (
@@ -442,6 +430,7 @@ class PortfolioManagerAgent:
                             adjustments.append(msg)
                     pos_data["allocation_pct"] = 0.0
                 else:
+                    assert risk is not None  # snap.risk_approved guarantees this
                     cap = risk.approved_weight
                     if proposed_pct > cap + 1e-9:
                         msg = (
