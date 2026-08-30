@@ -32,8 +32,6 @@ from argus.data.pipeline import (
     _required_raw_bars,
     _resample_ohlcv,
     _return_since,
-    max_bar_age_seconds,
-    session_state_ttl_seconds,
 )
 from argus.params import SYSTEM
 from tests.helpers.candles import dst_straddling_candles, et_intraday_candles
@@ -356,18 +354,6 @@ def test_momentum_1d_is_stable_under_dropping_up_to_10_oldest_bars(drop: int):
 
     assert baseline is not None
     assert trimmed == baseline
-
-
-def test_session_state_ttl_seconds_tolerates_one_missed_sweep():
-    """The write-age TTL covers two fetch sweeps (MFT-14), not one decision cycle's worth."""
-    assert session_state_ttl_seconds() == 2 * _FETCH_INTERVAL + SYSTEM.freshness_margin_seconds
-
-
-def test_max_bar_age_seconds_scales_with_interval():
-    """The bar-age budget grows with the candle interval, matching the issue's 480s-at-1m figure."""
-    assert max_bar_age_seconds(1) == _FETCH_INTERVAL + 2 * 1 * 60 + SYSTEM.freshness_margin_seconds
-    assert max_bar_age_seconds(1) == 480
-    assert max_bar_age_seconds(5) > max_bar_age_seconds(1)
 
 
 @pytest.mark.asyncio

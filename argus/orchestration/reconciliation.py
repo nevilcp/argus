@@ -21,6 +21,9 @@ Responsibilities:
     decisions.jsonl log (the unattended collector's lighter-weight alternative)
   - prune_checkpoints / compact_decisions_jsonl: bound the two decision
     stores above so neither grows forever (PR 6)
+  - run_reconciliation_pass: compose the above plus the paper-book update
+    into the one reconciliation sequence both api/main.py and
+    scripts/reconcile_outcomes.py run (issue #77)
 
 Not responsible for:
   - Deciding what a "good" outcome is, or evaluation metrics (see
@@ -32,6 +35,8 @@ Dependencies:
   - argus.orchestration.graph (build_checkpoint_serde)
   - argus.memory.cultural (CulturalMemoryManager)
   - argus.seams (MarketDataProvider)
+  - argus.risk.paper_book (PaperBook; imported inside run_reconciliation_pass
+    to break the cycle, since paper_book imports back into this module)
   - langgraph (SqliteSaver, to read argus_graph.db)
 """
 
@@ -39,6 +44,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -521,3 +527,142 @@ def prune_checkpoints(db_path: str, cutoff: datetime) -> int:
         cutoff_naive.isoformat(),
     )
     return len(stale_threads)
+
+
+@dataclass
+class ReconciliationReport:
+    """Outcome of one run_reconciliation_pass() call."""
+
+    decisions_loaded: int = 0
+    outcomes_stored: int = 0
+    paper_book_updated: bool = False
+    """False if the paper-book step raised — equity/drawdown are then still
+    their unset defaults, not a real (zeroed-out) portfolio value, so a
+    caller syncing a kill switch off `equity` must gate on this first."""
+    equity: float = 0.0
+    drawdown: float = 0.0
+    runs_applied_pruned: int = 0
+    pending_snapshots_expired: int = 0
+    decisions_compacted: Optional[int] = None
+    """Retained decisions.jsonl count, or None if decisions_log_path wasn't given."""
+    checkpoints_pruned: Optional[int] = None
+    """Deleted checkpoint-thread count, or None if checkpoint_db_path wasn't given."""
+    errors: list[str] = field(default_factory=list)
+    """One entry per independent step that failed; every other step still ran."""
+
+
+def run_reconciliation_pass(
+    market_data: MarketDataProvider,
+    cultural: CulturalMemoryManager,
+    paper_book_path: str,
+    *,
+    decisions_log_path: Optional[str] = None,
+    checkpoint_db_path: Optional[str] = None,
+    horizon_days: int = RECONCILIATION.horizon_days,
+) -> ReconciliationReport:
+    """Runs the one reconciliation sequence shared by api/main.py and scripts/reconcile_outcomes.py (issue #77).
+
+    Loads decisions, reconciles the matured ones against market_data, updates
+    the paper book, and bounds every growing store whose path was supplied.
+    Kill-switch sync is deliberately not part of this: it stays at the API's
+    call site, fed by the returned report's equity, so a scheduled runner
+    with no daemon to sync simply doesn't call it — that difference is one
+    line at the call site rather than an argument silently omitted here.
+
+    The decisions log wins as the read source when decisions_log_path is
+    given; the checkpoint database otherwise. Every store whose path is
+    known is bounded regardless of which one was the read source, so a
+    caller supplying both (api/main.py) gets both bounded and a caller
+    supplying only one (a collector-only deployment) gets exactly that one.
+
+    Args:
+        market_data: Source of each ticker's daily close price series.
+        cultural: CulturalMemoryManager to persist outcomes to and expire
+            PENDING snapshots from.
+        paper_book_path: Path the paper equity curve is loaded from and
+            saved to.
+        decisions_log_path: Path to a decisions.jsonl log. Read source when
+            given, and compacted at the end of the pass. Omit for a
+            deployment with no jsonl log.
+        checkpoint_db_path: Path to the LangGraph checkpoint database. Read
+            source when decisions_log_path is omitted; pruned at the end of
+            the pass whenever given. Omit for a deployment with no
+            checkpoint database.
+        horizon_days: Calendar days after session_timestamp defining each
+            decision's target exit date.
+
+    Returns:
+        A ReconciliationReport describing what happened. Failures in the
+        paper-book update and in each independently-bounded store
+        (decisions.jsonl compaction, checkpoint pruning, PENDING snapshot
+        expiry) are caught, logged, and recorded in `errors` — one store
+        failing never skips another. The paper-book update is one atomic
+        load/compute/apply/prune/save step: on failure nothing from it is
+        saved, so the persisted book is never left partially applied.
+
+    Raises:
+        ValueError: Neither decisions_log_path nor checkpoint_db_path was
+            given, so there is no decision source to read.
+        Exception: Whatever loading decisions or reconcile_decisions raises —
+            unlike the bounded stores below, these aren't independent of the
+            rest of the pass, so a failure here is the caller's to handle.
+    """
+    # Deferred: argus.risk.paper_book imports this module for
+    # _needs_reconciliation/compute_realized_return, so importing it at
+    # module level here would be circular
+    from argus.risk import paper_book
+
+    if decisions_log_path:
+        decisions = load_decisions_from_jsonl(decisions_log_path)
+    elif checkpoint_db_path:
+        decisions = load_decisions_from_checkpoints(checkpoint_db_path)
+    else:
+        raise ValueError(
+            "run_reconciliation_pass requires decisions_log_path or checkpoint_db_path"
+        )
+
+    report = ReconciliationReport(decisions_loaded=len(decisions))
+    report.outcomes_stored = reconcile_decisions(
+        decisions, market_data=market_data, cultural=cultural, horizon_days=horizon_days
+    )
+
+    cutoff = datetime.now() - timedelta(  # noqa: DTZ005
+        days=horizon_days + RECONCILIATION.retention_margin_days
+    )
+
+    try:
+        book = paper_book.load(paper_book_path)
+        for run_timestamp, run_return in paper_book.compute_run_returns(
+            decisions, market_data, horizon_days
+        ):
+            book.apply_run(run_timestamp, run_return)
+        report.runs_applied_pruned = book.prune_runs_applied(cutoff)
+        paper_book.save(book, paper_book_path)
+        report.equity = book.equity
+        report.drawdown = book.drawdown_from_peak()
+        report.paper_book_updated = True
+    except Exception as exc:
+        logger.exception("[Reconcile] paper-book update failed")
+        report.errors.append(f"paper-book update failed: {exc}")
+
+    if decisions_log_path:
+        try:
+            report.decisions_compacted = compact_decisions_jsonl(decisions_log_path, cutoff)
+        except Exception as exc:
+            logger.exception("[Reconcile] decisions.jsonl compaction failed")
+            report.errors.append(f"decisions.jsonl compaction failed: {exc}")
+
+    if checkpoint_db_path:
+        try:
+            report.checkpoints_pruned = prune_checkpoints(checkpoint_db_path, cutoff)
+        except Exception as exc:
+            logger.exception("[Reconcile] checkpoint pruning failed")
+            report.errors.append(f"checkpoint pruning failed: {exc}")
+
+    try:
+        report.pending_snapshots_expired = cultural.expire_pending_snapshots(cutoff)
+    except Exception as exc:
+        logger.exception("[Reconcile] PENDING snapshot expiry failed")
+        report.errors.append(f"PENDING snapshot expiry failed: {exc}")
+
+    return report
