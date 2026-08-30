@@ -27,11 +27,11 @@ Not responsible for:
     argus.schemas.signals.missing_session_state_keys)
 
 Publication and admission both measure age against one timezone-aware
-America/New_York clock. Publication used to stamp entries with naive local
-time while admission measured bar age against ET — two clocks that happened
-to agree only because this deployment already ran in ET, the same class of
-latent bug GLOSSARY.md and this module's sibling docs already call out
-elsewhere in the freshness path.
+America/New_York clock, via `datetime.timestamp()` rather than plain
+subtraction — two aware datetimes sharing the same ZoneInfo instance (as
+every clock read here does) compare their naive wall-clock fields instead of
+real elapsed time, which is wrong by exactly the DST offset across a
+transition.
 
 Dependencies:
   - argus.data.pipeline (_FETCH_INTERVAL, the sweep cadence both thresholds
@@ -191,7 +191,10 @@ class LiveSessionCache:
                 continue
 
             state, published_at = entry
-            if (now - published_at).total_seconds() > ttl:
+            # now and published_at share the same ZoneInfo instance, so plain
+            # subtraction would compare wall-clock fields and drift by an hour
+            # across a DST transition; timestamp() avoids that
+            if (now.timestamp() - published_at.timestamp()) > ttl:
                 result.stalled.append(ticker)
                 continue
 
@@ -221,8 +224,9 @@ class LiveSessionCache:
             ticker -> seconds; bar_age_seconds values are None where the
             entry's timestamp can't be parsed.
         """
+        # timestamp(), not subtraction — see admit()
         cache_age_seconds = {
-            ticker: (now - published_at).total_seconds()
+            ticker: now.timestamp() - published_at.timestamp()
             for ticker, (_, published_at) in self._states.items()
         }
         bar_age_seconds = {

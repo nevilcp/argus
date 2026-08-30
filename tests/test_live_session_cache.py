@@ -159,13 +159,7 @@ def test_ages_reports_publication_and_bar_age_for_everything_held():
 
 
 def test_publish_defaults_to_the_same_clock_admit_measures_against():
-    """publish()'s default `now` and admit()'s ET-aware clock are the same clock (issue #78).
-
-    Before clock unification these could silently drift: publication was
-    stamped with naive local time while bar age was measured in ET. A
-    just-published entry with a fresh bar must clear both checks using only
-    the default clocks on each side.
-    """
+    """A just-published entry with a fresh bar clears admit() using only each side's default clock."""
     cache = LiveSessionCache(interval_minutes=1)
     now = datetime.now(_ET)
     cache.publish({"AAPL": {"timestamp": now.isoformat()}}, ["AAPL"])
@@ -173,3 +167,23 @@ def test_publish_defaults_to_the_same_clock_admit_measures_against():
     result = cache.admit(["AAPL"], datetime.now(_ET))
 
     assert "AAPL" in result.admitted
+
+
+def test_ages_measures_publication_age_correctly_across_a_dst_transition():
+    """Two aware datetimes sharing one ZoneInfo instance must still yield real elapsed seconds.
+
+    Plain `datetime` subtraction between operands with the same tzinfo
+    object ignores tzinfo and compares wall-clock fields directly, which is
+    wrong by one hour across a DST transition; ages()/admit() must use
+    timestamp()-based arithmetic instead.
+    """
+    cache = LiveSessionCache(interval_minutes=1)
+    published_at = datetime(2024, 3, 9, 12, 0, tzinfo=_ET)  # EST, before spring-forward
+    now = datetime(2024, 3, 11, 12, 0, tzinfo=_ET)  # 2 wall-clock days later, after it
+    cache.publish({"AAPL": {"timestamp": now.isoformat()}}, ["AAPL"], now=published_at)
+
+    cache_age_seconds, _ = cache.ages(now)
+
+    # Real elapsed time is 47h (one DST hour was skipped), not the 48h a
+    # same-tzinfo subtraction would report
+    assert cache_age_seconds["AAPL"] == pytest.approx(47 * 3600)
