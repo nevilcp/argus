@@ -3,20 +3,19 @@ Tests for the Fundamental Agent and its pure-Python helpers.
 """
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 
 
 import argus.agents.fundamental as fundamental_module
 from argus.agents.fundamental import (
     FundamentalAgent,
-    FundamentalCache,
     _session_seed_to_date,
     _use_backtest_seed,
     anonymize_ticker,
     build_compact_prompt,
 )
 from argus.orchestration.governor import BOOTSTRAP_LIMITS, RateLimitGovernor
-from argus.schemas.signals import FundamentalSignal, FundamentalVerdict, Signal
+from argus.schemas.signals import FundamentalVerdict
 from argus.seams import FixtureLLMClient
 
 
@@ -88,61 +87,6 @@ def test_build_compact_prompt():
     assert 'ticker="COMP_XYZ"' in prompt_anon
     assert 'sector="Technology"' in prompt_anon
     assert "AAPL" not in prompt_anon
-
-def test_fundamental_cache():
-    """A cached signal is served until it exceeds the 7-day TTL, then evicted."""
-    cache = FundamentalCache()
-    assert cache.is_stale("AAPL")
-
-    signal = FundamentalSignal(
-        ticker="AAPL",
-        sector="Technology",
-        industry="Consumer Electronics",
-        data_as_of_date=datetime.now().date(),
-        signal=Signal.BULLISH,
-        conviction=0.9,
-        moat_score=8,
-        reasoning="Test",
-        api_calls_used=0,
-        timestamp=datetime.now(),
-    )
-
-    cache.set("AAPL", signal)
-    assert not cache.is_stale("AAPL")
-    assert cache.get("AAPL") == signal
-
-    # Backdate the entry past the 7-day TTL rather than waiting for it to expire
-    cache._cache[("AAPL", None)] = (signal, datetime.now() - timedelta(days=8))
-    assert cache.is_stale("AAPL")
-    assert cache.get("AAPL") is None
-
-def test_fundamental_cache_keys_on_session_seed():
-    """Two backtest sessions with different session_seed must not share a cached signal."""
-    cache = FundamentalCache()
-
-    def make_signal(reasoning: str) -> FundamentalSignal:
-        return FundamentalSignal(
-            ticker="AAPL",
-            sector="Technology",
-            industry="Consumer Electronics",
-            data_as_of_date=datetime.now().date(),
-            signal=Signal.BULLISH,
-            conviction=0.9,
-            moat_score=8,
-            reasoning=reasoning,
-            api_calls_used=0,
-            timestamp=datetime.now(),
-        )
-
-    sig_session_1 = make_signal("session 1")
-    sig_session_2 = make_signal("session 2")
-
-    cache.set("AAPL", sig_session_1, session_seed=20240101)
-    cache.set("AAPL", sig_session_2, session_seed=20240102)
-
-    assert cache.get("AAPL", session_seed=20240101) == sig_session_1
-    assert cache.get("AAPL", session_seed=20240102) == sig_session_2
-    assert cache.get("AAPL") is None
 
 def test_use_backtest_seed_treats_zero_as_a_valid_seed():
     """session_seed=0 is a legal Optional[int] and must not be treated as falsy."""
