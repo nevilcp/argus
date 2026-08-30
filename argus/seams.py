@@ -14,9 +14,12 @@ Each boundary gets one Protocol and two implementations:
     and is the sole choke point for governor rate-limiting and header-driven
     limit observation; classifies which failures are worth retrying and
     raises RetryableTransportError for those, but the retry loop itself
-    lives in argus/structured_output.py's decode() — see its own docstring)
+    lives in argus/structured_output.py's decode() — see its own docstring;
+    also answers `remaining_capacity()` by delegating to the governor, so a
+    caller can back off before spending a call it would only lose)
     / `FixtureLLMClient` (serves pre-captured response text from
-    tests/fixtures/llm_responses/, never touches the governor or the network).
+    tests/fixtures/llm_responses/, never touches the governor or the network,
+    and answers `remaining_capacity()` from a value fixed at construction).
 
 Agents accept these via constructor injection with a real default, so
 production wiring (graph.py's `build_graph()`) is unchanged unless a
@@ -183,11 +186,13 @@ class FixtureMarketDataProvider:
 
 
 class LLMClient(Protocol):
-    """A single structured-text call: system + user prompt in, raw response text out.
+    """A structured-text call plus the back-pressure a caller needs to schedule it.
 
     Callers keep owning response parsing (JSON extraction, markdown-fence
     stripping, schema validation) — this seam only replaces "how do I get an
-    LLM to answer this prompt," not "what does the answer mean."
+    LLM to answer this prompt," not "what does the answer mean." Back-pressure
+    is part of the same contract: an agent deciding whether a call is worth
+    making asks its own port, not a global.
 
     An implementation makes exactly one invocation per call — it does not
     loop. A transient failure worth a caller-side retry (see
@@ -198,6 +203,10 @@ class LLMClient(Protocol):
 
     def complete(self, system_prompt: str, user_prompt: str) -> str:
         """Sends a system + user prompt to the LLM and returns the raw response text."""
+        ...
+
+    def remaining_capacity(self) -> int:
+        """Returns how many more calls this client can make right now without waiting."""
         ...
 
 
@@ -315,6 +324,10 @@ class GroqLLMClient:
         """
         governor.observe_headers(self._model, response.headers)
 
+    def remaining_capacity(self) -> int:
+        """Returns the governor's remaining rolling-window request capacity for this model."""
+        return governor.get_remaining_capacity(self._model)
+
     def complete(self, system_prompt: str, user_prompt: str) -> str:
         """Invokes the Groq model once and returns its response as plain text.
 
@@ -382,16 +395,27 @@ class FixtureLLMClient:
     guess call order.
     """
 
-    def __init__(self, responses: dict[str, str], key_fn: Optional[Any] = None) -> None:
+    _UNLIMITED_CAPACITY = 1_000_000
+
+    def __init__(
+        self,
+        responses: dict[str, str],
+        key_fn: Optional[Any] = None,
+        capacity: int = _UNLIMITED_CAPACITY,
+    ) -> None:
         """Stores the response map and the key function used to look up responses.
 
         Args:
             responses: Mapping of key → pre-captured raw response text.
             key_fn: Function deriving a lookup key from the user prompt. Defaults
                 to using the user prompt itself as the key.
+            capacity: Fixed value `remaining_capacity()` reports. Defaults to
+                effectively unlimited, so a fixture-backed test only sees
+                back-pressure when it deliberately asks for a low value.
         """
         self._responses = responses
         self._key_fn = key_fn or (lambda user_prompt: user_prompt)
+        self._capacity = capacity
 
     def complete(self, system_prompt: str, user_prompt: str) -> str:
         """Returns the pre-captured response text keyed by ``key_fn(user_prompt)``.
@@ -403,6 +427,10 @@ class FixtureLLMClient:
         if key not in self._responses:
             raise KeyError(f"FixtureLLMClient has no recorded response for key {key!r}")
         return self._responses[key]
+
+    def remaining_capacity(self) -> int:
+        """Returns the fixed capacity value supplied at construction."""
+        return self._capacity
 
     @classmethod
     def from_fixture_file(cls, path: Path, key_fn: Optional[Any] = None) -> "FixtureLLMClient":
