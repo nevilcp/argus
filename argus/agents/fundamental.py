@@ -23,12 +23,13 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Optional
 
 from pydantic import ValidationError
 
 from argus.config import settings
+from argus.data.cache import TTLCache
 from argus.orchestration.governor import RateLimitExceeded, UnregisteredModel, governor
 from argus.schemas.signals import FundamentalSignal, FundamentalVerdict
 from argus.seams import GroqLLMClient, LiveMarketDataProvider, LLMClient, MarketDataProvider
@@ -250,60 +251,6 @@ SYSTEM_PROMPT = (
 )
 
 
-class FundamentalCache:
-    """In-memory cache for fundamental signals with a 7-day expiration (TTL).
-
-    Fundamental data changes infrequently; caching avoids redundant LLM calls
-    within a week-long window without meaningfully degrading signal quality.
-
-    Keyed on (ticker, session_seed) rather than ticker alone: two backtest
-    sessions replaying the same ticker on different simulated dates must not
-    serve each other's cached signal, and a live call (session_seed=None)
-    must not be conflated with either.
-    """
-
-    def __init__(self) -> None:
-        """Initializes an empty per-(ticker, session_seed) cache."""
-        self._cache: dict[tuple[str, Optional[int]], tuple[FundamentalSignal, datetime]] = {}
-        self._ttl_days = 7
-
-    def get(self, ticker: str, session_seed: Optional[int] = None) -> Optional[FundamentalSignal]:
-        """Returns a cached signal if it exists and has not exceeded the TTL.
-
-        Args:
-            ticker: Equity ticker symbol.
-            session_seed: Session scope the signal was cached under.
-
-        Returns:
-            Cached FundamentalSignal, or None if absent or expired.
-        """
-        key = (ticker, session_seed)
-        if key in self._cache:
-            signal, cached_at = self._cache[key]
-            if (datetime.now() - cached_at).days < self._ttl_days:  # noqa: DTZ005
-                return signal
-        return None
-
-    def set(self, ticker: str, signal: FundamentalSignal, session_seed: Optional[int] = None) -> None:
-        """Stores a fundamental signal coupled with the current timestamp.
-
-        Args:
-            ticker: Equity ticker symbol.
-            signal: Validated FundamentalSignal to cache.
-            session_seed: Session scope to cache the signal under.
-        """
-        self._cache[(ticker, session_seed)] = (signal, datetime.now())  # noqa: DTZ005
-
-    def is_stale(self, ticker: str, session_seed: Optional[int] = None) -> bool:
-        """Returns True if the (ticker, session_seed) has no valid cached signal.
-
-        Args:
-            ticker: Equity ticker symbol.
-            session_seed: Session scope to check.
-        """
-        return self.get(ticker, session_seed) is None
-
-
 class FundamentalAgent:
     """Agent coordinating LLM valuation and economic moat auditing.
 
@@ -342,7 +289,12 @@ class FundamentalAgent:
             )
         self.llm_client = llm_client
         self.market_data = market_data or LiveMarketDataProvider()
-        self.cache = FundamentalCache()
+        # Keyed on (ticker, session_seed): two backtest sessions replaying the same
+        # ticker on different simulated dates must not serve each other's cached
+        # signal, and a live call (session_seed=None) must not be conflated with either
+        self.cache: TTLCache[tuple[str, Optional[int]], FundamentalSignal] = TTLCache(
+            ttl=timedelta(days=7)
+        )
 
     def analyze(
         self,
@@ -369,11 +321,10 @@ class FundamentalAgent:
         Returns:
             A validated FundamentalSignal, or None if decoding ultimately fails.
         """
-        if not self.cache.is_stale(ticker, session_seed):
-            cached = self.cache.get(ticker, session_seed)
-            if cached:
-                logger.debug("FundamentalAgent.analyze: Cache hit for %s", ticker)
-                return cached
+        cached = self.cache.get((ticker, session_seed))
+        if cached:
+            logger.debug("FundamentalAgent.analyze: Cache hit for %s", ticker)
+            return cached
 
         capacity_reserve = max(1, int(settings.ARGUS_GROQ_RPM * _CAPACITY_RESERVE_FRACTION))
         if governor.get_remaining_capacity(settings.ARGUS_FUNDAMENTAL_MODEL) < capacity_reserve:
@@ -453,7 +404,7 @@ class FundamentalAgent:
                 errors.append(f"fundamental_analysis[{ticker}]: measured data failed validation: {e}")
             return None
 
-        self.cache.set(ticker, signal, session_seed)
+        self.cache.set((ticker, session_seed), signal)
         logger.debug(
             "[Fundamental] Analysis complete for %s -> %s", ticker, signal.signal.value
         )
