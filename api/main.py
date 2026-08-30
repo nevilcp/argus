@@ -122,7 +122,8 @@ async def _mft_session_callback(session_states: dict) -> None:
         _live_cache.publish(session_states, _mft_pipeline.tickers)
 
     logger.info(
-        "[MFT] Live session cache updated: %d ticker(s)", len(_live_cache) if _live_cache else 0
+        "[MFT] Live session cache updated: %d ticker(s)",
+        len(_live_cache) if _live_cache is not None else 0,
     )
 
 
@@ -737,7 +738,7 @@ async def analyze(req: AnalysisRequest):
 
     # Admission answers only "how old is this" for each ticker; the ordering
     # against market hours above is what decides whether that age matters
-    # right now (issue #78).
+    # right now (issue #78)
     admission = _live_cache.admit(req.tickers, datetime.now(_ET))
 
     if admission.absent:
