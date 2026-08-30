@@ -50,7 +50,7 @@ from argus.agents.technical import TechnicalStatisticalAgent
 from argus.config import settings
 from argus.memory.cultural import get_cultural_memory
 from argus.orchestration.aggregator import HybridSignalAggregator
-from argus.orchestration.state import ARGUSState
+from argus.orchestration.state import ARGUSState, build_ticker_snapshots
 from argus.params import RISK
 from argus.schemas.signals import AggregatedSignal, ARGUSDecision, RiskAssessment, RiskVerdict, Signal
 from argus.seams import LiveMarketDataProvider, LLMClient, MarketDataProvider
@@ -577,19 +577,12 @@ def build_graph(
             Partial state update with ``portfolio_allocation``.
         """
         # Scoped to tickers with an aggregated signal, not the whole universe: a
-        # ticker every specialist failed on has nothing to allocate against, and
-        # an all-None entry would still pass build_signal_table's is-approved
-        # filter through to _is_risk_approved(None) -> False silently rather than
-        # never appearing in all_signals at all
-        signals_dict = {}
-        for ticker in state.get("aggregated_signals", {}):
-            signals_dict[ticker] = {
-                "technical": state.get("technical_signals", {}).get(ticker),
-                "fundamental": state.get("fundamental_signals", {}).get(ticker),
-                "sentiment": state.get("sentiment_signals", {}).get(ticker),
-                "risk": state.get("risk_assessments", {}).get(ticker),
-                "aggregated": state.get("aggregated_signals", {}).get(ticker),
-            }
+        # ticker every specialist failed on has nothing to allocate against.
+        snapshots = {
+            ticker: snap
+            for ticker, snap in build_ticker_snapshots(state).items()
+            if snap.aggregated is not None
+        }
 
         profile = {
             "total_wealth": state.get("total_wealth"),
@@ -610,7 +603,7 @@ def build_graph(
         warnings = mem.get("warnings", [])
 
         alloc = portfolio_agent.allocate(
-            profile, signals_dict, macro, wisdom, warnings, adjustments=errors
+            profile, snapshots, macro, wisdom, warnings, adjustments=errors
         )
         if alloc is None:
             # allocate() has already appended the specific failing stage (LLM call,
@@ -651,25 +644,27 @@ def build_graph(
             logger.warning("node_log_decisions: cultural memory unavailable: %s", exc)
             memory = None
 
-        snapshots_stored = 0
+        ticker_snapshots = build_ticker_snapshots(state)
+        stored_count = 0
         for ticker in state.get("universe", []):
             try:
+                snap = ticker_snapshots[ticker]
                 decision = ARGUSDecision(
                     ticker=ticker,
                     session_timestamp=now,
-                    technical=state.get("technical_signals", {}).get(ticker),
+                    technical=snap.technical,
                     macro=state.get("macro_context"),
-                    fundamental=state.get("fundamental_signals", {}).get(ticker),
-                    sentiment=state.get("sentiment_signals", {}).get(ticker),
-                    risk=state.get("risk_assessments", {}).get(ticker),
-                    aggregated=state.get("aggregated_signals", {}).get(ticker),
+                    fundamental=snap.fundamental,
+                    sentiment=snap.sentiment,
+                    risk=snap.risk,
+                    aggregated=snap.aggregated,
                     allocation=positions.get(ticker),
                 )
                 decisions.append(decision)
 
                 # Snapshot stored pre-confirmation to enable pre-settlement similarity retrieval
                 if memory is not None and memory.store_decision_snapshot(decision):
-                    snapshots_stored += 1
+                    stored_count += 1
 
             except Exception as exc:
                 msg = f"log_decisions: failed to build decision for {ticker}: {exc}"
@@ -678,7 +673,7 @@ def build_graph(
 
         logger.info(
             "[log_decisions] Logged %d/%d decisions to cultural memory.",
-            snapshots_stored,
+            stored_count,
             len(state.get("universe", [])),
         )
         return {"decisions": decisions, "errors": errors}

@@ -11,6 +11,7 @@ import json
 from datetime import datetime
 
 from argus.agents.portfolio import PortfolioManagerAgent
+from argus.orchestration.state import TickerSnapshot
 from argus.schemas.signals import AggregatedSignal, RiskAssessment, RiskVerdict, Signal
 from argus.seams import FixtureLLMClient
 
@@ -60,27 +61,27 @@ def _agent_with_capture(body: dict) -> tuple[PortfolioManagerAgent, list[str]]:
 
 def test_bearish_ticker_receives_no_kelly_anchor():
     """A BEARISH ticker is never listed under HALF-KELLY ANCHORS, even with outcome data."""
-    all_signals = {
-        "BULL": {
-            "risk": _risk(),
-            "aggregated": _agg(
+    snapshots = {
+        "BULL": TickerSnapshot(
+            risk=_risk(),
+            aggregated=_agg(
                 "BULL",
                 Signal.BULLISH,
                 {"technical": 0.5},
                 reliability={"technical": 0.65},
                 reliability_n={"technical": 20},
             ),
-        },
-        "BEAR": {
-            "risk": _risk(),
-            "aggregated": _agg(
+        ),
+        "BEAR": TickerSnapshot(
+            risk=_risk(),
+            aggregated=_agg(
                 "BEAR",
                 Signal.BEARISH,
                 {"technical": 0.5},
                 reliability={"technical": 0.65},
                 reliability_n={"technical": 20},
             ),
-        },
+        ),
     }
     body = {
         "portfolio": [],
@@ -91,7 +92,7 @@ def test_bearish_ticker_receives_no_kelly_anchor():
     agent, prompts = _agent_with_capture(body)
     agent.allocate(
         user_profile={"total_wealth": 100_000.0, "invest_pct": 0.5, "risk_tolerance": "MODERATE"},
-        all_signals=all_signals,
+        snapshots=snapshots,
         macro=None,
     )
 
@@ -102,17 +103,17 @@ def test_bearish_ticker_receives_no_kelly_anchor():
 
 def test_kelly_anchor_block_omitted_when_no_agent_has_data():
     """The whole HALF-KELLY ANCHORS block is omitted, with an explanation, when n == 0 for every agent."""
-    all_signals = {
-        "AAPL": {
-            "risk": _risk(),
-            "aggregated": _agg(
+    snapshots = {
+        "AAPL": TickerSnapshot(
+            risk=_risk(),
+            aggregated=_agg(
                 "AAPL",
                 Signal.BULLISH,
                 {"technical": 0.5},
                 reliability={"technical": 0.5, "fundamental": 0.5, "sentiment": 0.5},
                 reliability_n={"technical": 0, "fundamental": 0, "sentiment": 0},
             ),
-        },
+        ),
     }
     body = {
         "portfolio": [],
@@ -123,7 +124,7 @@ def test_kelly_anchor_block_omitted_when_no_agent_has_data():
     agent, prompts = _agent_with_capture(body)
     agent.allocate(
         user_profile={"total_wealth": 100_000.0, "invest_pct": 0.5, "risk_tolerance": "MODERATE"},
-        all_signals=all_signals,
+        snapshots=snapshots,
         macro=None,
     )
 
@@ -134,17 +135,17 @@ def test_kelly_anchor_block_omitted_when_no_agent_has_data():
 
 def test_kelly_anchor_uses_primary_drivers_measured_win_rate_not_conviction():
     """The anchor is derived from the argmax(weighted_votes) agent's reliability rate."""
-    all_signals = {
-        "AAPL": {
-            "risk": _risk(),
-            "aggregated": _agg(
+    snapshots = {
+        "AAPL": TickerSnapshot(
+            risk=_risk(),
+            aggregated=_agg(
                 "AAPL",
                 Signal.BULLISH,
                 {"technical": 0.9, "fundamental": 0.1},
                 reliability={"technical": 0.7, "fundamental": 0.5},
                 reliability_n={"technical": 30, "fundamental": 0},
             ),
-        },
+        ),
     }
     body = {
         "portfolio": [],
@@ -155,7 +156,7 @@ def test_kelly_anchor_uses_primary_drivers_measured_win_rate_not_conviction():
     agent, prompts = _agent_with_capture(body)
     agent.allocate(
         user_profile={"total_wealth": 100_000.0, "invest_pct": 0.5, "risk_tolerance": "MODERATE"},
-        all_signals=all_signals,
+        snapshots=snapshots,
         macro=None,
     )
 
@@ -170,8 +171,8 @@ def test_capital_base_is_total_wealth_not_wealth_times_invest_pct():
     capital base and again by the LLM's deployment target, so requesting 80%
     deployment produced roughly invest_pct^2 (64%) of true total wealth.
     """
-    all_signals = {
-        "AAPL": {"risk": _risk()},
+    snapshots = {
+        "AAPL": TickerSnapshot(risk=_risk()),
     }
     body = {
         "portfolio": [
@@ -191,7 +192,7 @@ def test_capital_base_is_total_wealth_not_wealth_times_invest_pct():
     agent, prompts = _agent_with_capture(body)
     alloc = agent.allocate(
         user_profile={"total_wealth": 100_000.0, "invest_pct": 0.8, "risk_tolerance": "MODERATE"},
-        all_signals=all_signals,
+        snapshots=snapshots,
         macro=None,
     )
 

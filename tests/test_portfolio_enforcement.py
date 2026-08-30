@@ -18,6 +18,7 @@ import pytest
 
 from argus.agents.portfolio import PortfolioManagerAgent
 from argus.orchestration.governor import RateLimitExceeded
+from argus.orchestration.state import TickerSnapshot
 from argus.params import PORTFOLIO, SYSTEM
 from argus.schemas.signals import (
     PortfolioAllocation,
@@ -68,7 +69,7 @@ def test_allocate_reraises_on_governor_exhaustion_without_retrying():
     with pytest.raises(RateLimitExceeded):
         agent.allocate(
             user_profile={"total_wealth": 100_000.0, "invest_pct": 0.5, "risk_tolerance": "MODERATE"},
-            all_signals={"AAPL": {"risk": _risk(RiskVerdict.APPROVE, approved_weight=0.10, proposed_weight=0.10)}},
+            snapshots={"AAPL": TickerSnapshot(risk=_risk(RiskVerdict.APPROVE, approved_weight=0.10, proposed_weight=0.10))},
             macro=None,
         )
 
@@ -83,7 +84,7 @@ def test_allocate_does_not_repair_a_bad_response(monkeypatch):
     agent = PortfolioManagerAgent(llm_client=llm_client)
     alloc = agent.allocate(
         user_profile={"total_wealth": 100_000.0, "invest_pct": 0.5, "risk_tolerance": "MODERATE"},
-        all_signals={"AAPL": {"risk": _risk(RiskVerdict.APPROVE, approved_weight=0.10, proposed_weight=0.10)}},
+        snapshots={"AAPL": TickerSnapshot(risk=_risk(RiskVerdict.APPROVE, approved_weight=0.10, proposed_weight=0.10))},
         macro=None,
     )
 
@@ -115,12 +116,12 @@ def _llm_response(portfolio: list[dict]) -> FixtureLLMClient:
 def test_allocate_enforces_caps_vetoes_and_fabrications_in_code():
     """An over-cap allocation is clamped, a VETO'd ticker is zeroed-not-dropped,
 
-    and a fabricated ticker absent from all_signals is dropped — each producing
+    and a fabricated ticker absent from snapshots is dropped — each producing
     an adjustments entry rather than validating silently.
     """
-    all_signals = {
-        "OVER_CAP": {"risk": _risk(RiskVerdict.APPROVE, approved_weight=0.10, proposed_weight=0.10)},
-        "VETOED": {"risk": _risk(RiskVerdict.VETO, approved_weight=0.0, proposed_weight=0.10)},
+    snapshots = {
+        "OVER_CAP": TickerSnapshot(risk=_risk(RiskVerdict.APPROVE, approved_weight=0.10, proposed_weight=0.10)),
+        "VETOED": TickerSnapshot(risk=_risk(RiskVerdict.VETO, approved_weight=0.0, proposed_weight=0.10)),
     }
 
     llm_client = _llm_response(
@@ -156,7 +157,7 @@ def test_allocate_enforces_caps_vetoes_and_fabrications_in_code():
     adjustments: list[str] = []
     alloc = agent.allocate(
         user_profile={"total_wealth": 100_000.0, "invest_pct": 0.5, "risk_tolerance": "MODERATE"},
-        all_signals=all_signals,
+        snapshots=snapshots,
         macro=None,
         adjustments=adjustments,
     )
@@ -183,7 +184,7 @@ def test_allocate_names_the_json_parse_stage_on_exhausted_retries(monkeypatch):
     adjustments: list[str] = []
     alloc = agent.allocate(
         user_profile={"total_wealth": 100_000.0, "invest_pct": 0.5, "risk_tolerance": "MODERATE"},
-        all_signals={"OVER_CAP": {"risk": _risk(RiskVerdict.APPROVE, approved_weight=0.10, proposed_weight=0.10)}},
+        snapshots={"OVER_CAP": TickerSnapshot(risk=_risk(RiskVerdict.APPROVE, approved_weight=0.10, proposed_weight=0.10))},
         macro=None,
         adjustments=adjustments,
     )
@@ -204,7 +205,7 @@ def test_allocate_names_the_schema_validation_stage_on_exhausted_retries(monkeyp
     adjustments: list[str] = []
     alloc = agent.allocate(
         user_profile={"total_wealth": 100_000.0, "invest_pct": 0.5, "risk_tolerance": "MODERATE"},
-        all_signals={"OVER_CAP": {"risk": _risk(RiskVerdict.APPROVE, approved_weight=0.10, proposed_weight=0.10)}},
+        snapshots={"OVER_CAP": TickerSnapshot(risk=_risk(RiskVerdict.APPROVE, approved_weight=0.10, proposed_weight=0.10))},
         macro=None,
         adjustments=adjustments,
     )
@@ -243,8 +244,8 @@ def test_allocate_clamps_cash_reserve_to_schema_floor_at_high_deployment():
     caps["T6"] = 0.051
     tickers.append("T6")
 
-    all_signals = {
-        t: {"risk": _risk(RiskVerdict.APPROVE, approved_weight=caps[t], proposed_weight=caps[t])}
+    snapshots = {
+        t: TickerSnapshot(risk=_risk(RiskVerdict.APPROVE, approved_weight=caps[t], proposed_weight=caps[t]))
         for t in tickers
     }
     portfolio = [
@@ -263,7 +264,7 @@ def test_allocate_clamps_cash_reserve_to_schema_floor_at_high_deployment():
     agent = PortfolioManagerAgent(llm_client=llm_client)
     alloc = agent.allocate(
         user_profile={"total_wealth": 100_000.0, "invest_pct": 0.95, "risk_tolerance": "MODERATE"},
-        all_signals=all_signals,
+        snapshots=snapshots,
         macro=None,
     )
 
@@ -276,8 +277,8 @@ def test_allocate_states_achievable_deployment_ceiling_not_raw_invest_pct():
     (min(invest_pct, sum of approved Caps)), not raw invest_pct, so ALLOCATION RULE 3's
     target is reachable for a small approved universe under per-position caps.
     """
-    all_signals = {
-        t: {"risk": _risk(RiskVerdict.APPROVE, approved_weight=0.15, proposed_weight=0.15)}
+    snapshots = {
+        t: TickerSnapshot(risk=_risk(RiskVerdict.APPROVE, approved_weight=0.15, proposed_weight=0.15))
         for t in ("A", "B", "C")
     }
     llm_client = _CapturingLLMClient(
@@ -287,7 +288,7 @@ def test_allocate_states_achievable_deployment_ceiling_not_raw_invest_pct():
     agent = PortfolioManagerAgent(llm_client=llm_client)
     agent.allocate(
         user_profile={"total_wealth": 100_000.0, "invest_pct": 0.95, "risk_tolerance": "MODERATE"},
-        all_signals=all_signals,
+        snapshots=snapshots,
         macro=None,
     )
 
