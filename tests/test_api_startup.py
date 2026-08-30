@@ -22,7 +22,6 @@ import asyncio
 import contextlib
 import fcntl
 import logging
-from datetime import datetime
 from unittest import mock
 
 import pytest
@@ -31,6 +30,7 @@ from fastapi.testclient import TestClient
 
 import api.main as api_main
 import argus.risk.kill_switch as kill_switch_module
+from argus.data.live_session_cache import LiveSessionCache
 from argus.risk.kill_switch import KillSwitch
 
 
@@ -197,7 +197,7 @@ def _reset_health_globals(monkeypatch):
     monkeypatch.setattr(api_main, "_collector_task", None)
     monkeypatch.setattr(api_main, "_reconcile_task", None)
     monkeypatch.setattr(api_main, "_mft_pipeline", None)
-    monkeypatch.setattr(api_main, "_live_session_cache", {})
+    monkeypatch.setattr(api_main, "_live_cache", LiveSessionCache(interval_minutes=1))
     kill_switch_module._kill_switch = None
     yield
     kill_switch_module._kill_switch = None
@@ -279,11 +279,9 @@ def test_health_reports_newest_cache_entry_age_during_market_hours(monkeypatch, 
     fake_pipeline = mock.Mock()
     fake_pipeline.is_market_hours.return_value = True
     monkeypatch.setattr(api_main, "_mft_pipeline", fake_pipeline)
-    monkeypatch.setattr(
-        api_main,
-        "_live_session_cache",
-        {"AAPL": ({}, datetime.now())},
-    )
+    cache = LiveSessionCache(interval_minutes=1)
+    cache.publish({"AAPL": {}}, ["AAPL"])
+    monkeypatch.setattr(api_main, "_live_cache", cache)
 
     response = health_client.get("/health")
 

@@ -50,6 +50,13 @@ see the notes under each entry.
   fetching the latest intraday candles for every tracked ticker in the universe. Its
   callers compress the buffer into session states afterward, via `compress_all`.
 
+- **Live session cache** — the `LiveSessionCache` (`argus/data/live_session_cache.py`)
+  holding the session state each tracked ticker was last published with between
+  sweeps. Owns publication, eviction, and the admission rule that decides whether a
+  cached session state is fresh enough to allocate against; the API gateway holds one
+  instance and gates `/analyze` on its `admit()` result rather than reading session
+  states off the pipeline directly.
+
 - **Decision** — an `ARGUSDecision` (`argus/schemas/signals.py`): a per-ticker snapshot
   of every agent's output plus the resulting allocation, logged once per session.
 
