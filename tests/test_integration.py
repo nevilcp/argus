@@ -176,7 +176,7 @@ class TestEndToEnd:
 
         def portfolio_side_effect(
             user_profile,
-            all_signals,
+            snapshots,
             macro,
             cultural_wisdom=None,
             cultural_warnings=None,
@@ -186,7 +186,7 @@ class TestEndToEnd:
 
             Args:
                 user_profile: Dict with total_wealth/invest_pct/risk_tolerance.
-                all_signals: Mapping of ticker -> dict of signal objects; unused.
+                snapshots: Mapping of ticker -> TickerSnapshot; unused.
                 macro: Current macroeconomic context; unused.
                 cultural_wisdom: Unused; accepted to match the real signature.
                 cultural_warnings: Unused; accepted to match the real signature.
