@@ -29,7 +29,7 @@ from typing import Any, Optional
 from pydantic import ValidationError
 
 from argus.config import settings
-from argus.orchestration.governor import RateLimitExceeded, UnregisteredModel, governor
+from argus.orchestration.governor import RateLimitExceeded, UnregisteredModel
 from argus.schemas.signals import FundamentalSignal, FundamentalVerdict
 from argus.seams import GroqLLMClient, LiveMarketDataProvider, LLMClient, MarketDataProvider
 from argus.structured_output import StructuredOutputError, decode
@@ -309,8 +309,9 @@ class FundamentalAgent:
 
     Uses an injected LLMClient (Groq by default) to construct structured
     investment theses from ratio payloads fetched via an injected
-    MarketDataProvider, applying local caches, governor rate limits, and the
-    shared structured-output decoder's parse/validate/retry (with repair).
+    MarketDataProvider, applying local caches, the client's remaining-capacity
+    reserve, and the shared structured-output decoder's parse/validate/retry
+    (with repair).
     """
 
     def __init__(
@@ -353,9 +354,10 @@ class FundamentalAgent:
     ) -> Optional[FundamentalSignal]:
         """Audits fundamentals for a single ticker and returns a validated Pydantic signal.
 
-        Checks the local cache first, enforces governor capacity, fetches current
-        financial ratios, and decodes a FundamentalVerdict from the LLM via
-        argus.structured_output.decode (with repair enabled).
+        Checks the local cache first, enforces the injected LLM client's
+        remaining capacity, fetches current financial ratios, and decodes a
+        FundamentalVerdict from the LLM via argus.structured_output.decode
+        (with repair enabled).
 
         Args:
             ticker: Equity ticker symbol.
@@ -376,12 +378,12 @@ class FundamentalAgent:
                 return cached
 
         capacity_reserve = max(1, int(settings.ARGUS_GROQ_RPM * _CAPACITY_RESERVE_FRACTION))
-        if governor.get_remaining_capacity(settings.ARGUS_FUNDAMENTAL_MODEL) < capacity_reserve:
+        if self.llm_client.remaining_capacity() < capacity_reserve:
             logger.warning(
                 "[Fundamental] Low capacity for %s, skipping %s", settings.ARGUS_FUNDAMENTAL_MODEL, ticker
             )
             if errors is not None:
-                errors.append(f"fundamental_analysis[{ticker}]: governor capacity too low, skipped")
+                errors.append(f"fundamental_analysis[{ticker}]: LLM capacity too low, skipped")
             return None
 
         try:
