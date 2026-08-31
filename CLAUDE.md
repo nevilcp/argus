@@ -70,7 +70,3 @@ mention of Claude, Anthropic, or AI assistance.
   features, fit protocol, validation gate, retraining.
 - [`README.md`](README.md) — install, deployment, and how to read an `/analyze`
   response and the evaluation metrics.
-- [`.agents/rules/`](.agents/rules/) — standing rules for comments
-  (`commenting-standards.md`), code review (`code-review.md`), LLM prompt design
-  for the quant agents (`quant-prompt-engineering.md`), and the README
-  (`readme-generation.md`).
