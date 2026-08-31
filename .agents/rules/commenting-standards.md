@@ -161,6 +161,31 @@ Dependencies:
 - No trailing periods on single-line inline comments; full sentences get periods in docstrings
 - Line length for comments matches the project's code line limit (default: 88 chars for Python, 100 for TS)
 
+## ARGUS-specific rules
+
+These override the defaults above in this repository.
+
+- **Line length is 100**, matching `line-length = 100` in `pyproject.toml`.
+- **Module docstrings**: `argus/orchestration/governor.py` is the canonical
+  shape — path line, one-line purpose, then `Responsibilities:` and
+  `Not responsible for:` bullet lists. Every `.py` file opens with one.
+- **Function and class docstrings**: Google style, required on every public
+  (non-underscore) `def` and `class`. A private `_helper` gets one only when the
+  name and signature don't already make the behavior obvious.
+- **Test functions**: a one-line docstring stating the property under test, not
+  a restatement of the test's name.
+- **Inline `#` comments**: sentence case, no trailing period, condensed to the
+  load-bearing sentence rather than a multi-line restatement of the code:
+
+  ```python
+  # Daily bars would mismatch the resolution the technical agent expects
+  ```
+
+- **References are code-local only**. Pointing at a sibling module is fine (`see
+  argus/data/fetchers.py`). Don't cite ADRs or narrate incident history from
+  source comments — that belongs in `docs/` and PR descriptions, which can carry
+  it without going stale independently of the code around them.
+
 ## Anti-Patterns to Reject
 | Anti-Pattern | Why It's Harmful | Fix |
 |---|---|---|
