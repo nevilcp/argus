@@ -204,21 +204,17 @@ def decode(
             assert last_error is not None
             raise StructuredOutputError(stage, attempt + 1, last_error)
 
+        capped_backoff = min(
+            STRUCTURED_OUTPUT.backoff_max_seconds,
+            STRUCTURED_OUTPUT.backoff_base_seconds * 2**attempt,
+        )
         if retry_after is not None:
             delay = retry_after
         elif stage == "transport":
-            delay = random.uniform(
-                0.0,
-                min(
-                    STRUCTURED_OUTPUT.backoff_max_seconds,
-                    STRUCTURED_OUTPUT.backoff_base_seconds * 2**attempt,
-                ),
-            )
+            # Full jitter, so parallel agents don't thundering-herd a shared outage.
+            delay = random.uniform(0.0, capped_backoff)
         else:
-            delay = min(
-                STRUCTURED_OUTPUT.backoff_max_seconds,
-                STRUCTURED_OUTPUT.backoff_base_seconds * 2**attempt,
-            )
+            delay = capped_backoff
         logger.warning(
             "[StructuredOutput] Attempt %d %s failed: %s", attempt + 1, stage, last_error
         )
