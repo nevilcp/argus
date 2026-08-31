@@ -21,7 +21,7 @@ Not responsible for:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated, Dict, List, Literal, Optional
+from typing import Annotated, Literal, Optional
 
 from dotenv import load_dotenv
 from pydantic import Field, field_validator
@@ -87,7 +87,7 @@ class Settings(BaseSettings):
     newsapi_key: str = Field(default="", description="NewsAPI.org key")
 
     # Broadened to 20 tickers across 7 GICS sectors to reduce sector concentration risk
-    ARGUS_UNIVERSE: Annotated[List[str], NoDecode] = Field(
+    ARGUS_UNIVERSE: Annotated[list[str], NoDecode] = Field(
         default=[
             "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN",
             "META", "TSLA", "JPM", "V", "UNH",
@@ -144,7 +144,7 @@ class Settings(BaseSettings):
     ARGUS_RISK_TOLERANCE: Literal["CONSERVATIVE", "MODERATE", "AGGRESSIVE"] = Field(
         default="MODERATE", description="Risk tolerance used by unattended collection cycles"
     )
-    ARGUS_CORS_ORIGINS: Annotated[List[str], NoDecode] = Field(
+    ARGUS_CORS_ORIGINS: Annotated[list[str], NoDecode] = Field(
         default=["*"], description="Allowed CORS origins for the FastAPI gateway"
     )
     ARGUS_API_KEY: str = Field(
@@ -197,7 +197,7 @@ class Settings(BaseSettings):
         """Applies :func:`_split_csv` to comma-separated list fields."""
         return _split_csv(value)
 
-    TECHNICAL_INDICATOR_WEIGHTS: Dict[str, float] = {
+    TECHNICAL_INDICATOR_WEIGHTS: dict[str, float] = {
         "rsi": _TECHNICAL_WEIGHTS.rsi,
         "macd": _TECHNICAL_WEIGHTS.macd,
         "bb": _TECHNICAL_WEIGHTS.bb,

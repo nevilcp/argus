@@ -40,7 +40,7 @@ from argus.structured_output import StructuredOutputError, decode
 
 logger = logging.getLogger("argus.sentiment")
 
-# Rough estimate of one fundamental_analysis Groq 70B round-trip, used only to
+# Rough estimate of one fundamental_analysis Groq round-trip, used only to
 # pace batch_analyze's scraper calls against a live provider — see its docstring.
 # Not tuned against real latency measurements; revisit if fundamental_analysis's
 # actual per-ticker duration diverges enough to reintroduce burst risk.
