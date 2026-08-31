@@ -132,8 +132,7 @@ def build_signal_table(snapshots: dict[str, TickerSnapshot], macro: Optional[Mac
     return "\n".join(lines)
 
 
-# Rendered from PortfolioProposal's own PromptText markers, recursing into
-# ProposedPosition for the nested "portfolio" list.
+# Rendered from PortfolioProposal's PromptText, recursing into ProposedPosition's portfolio list.
 _PROPOSAL_SCHEMA_JSON = schema_block(PortfolioProposal)
 
 
@@ -259,9 +258,7 @@ class PortfolioManagerAgent:
             UnregisteredModel: If the configured model has no rate-limit profile.
         """
         total_wealth = user_profile.get("total_wealth")
-        # Capital base is total wealth, not wealth pre-scaled by invest_pct — invest_pct
-        # is the equity deployment target (ALLOCATION RULE 3 below), applied once by the
-        # LLM against this base, not twice
+        # Capital base is total wealth; invest_pct (RULE 3) is applied once by the LLM, not pre-scaled here.
         investable = float(total_wealth) if total_wealth is not None else 0.0
 
         approved_tickers = [t for t, s in snapshots.items() if s.risk_approved]
@@ -285,10 +282,7 @@ class PortfolioManagerAgent:
             if adjustments is not None:
                 adjustments.append(msg)
 
-        # PA-4: invest_pct alone can be unreachable — a 3-ticker universe capped at 15% each
-        # can absorb at most 45%, regardless of what invest_pct requests. Stating the achievable
-        # ceiling (rather than raw invest_pct) in the prompt keeps ALLOCATION RULE 3's target
-        # reachable instead of silently unmeetable for a small approved universe.
+        # PA-4: invest_pct can be unreachable for a small universe; state the achievable ceiling instead.
         invest_pct = float(user_profile.get("invest_pct", 1.0))
         approved_cap_sum = 0.0
         for t in approved_tickers:
@@ -314,12 +308,7 @@ class PortfolioManagerAgent:
             record(f"portfolio_allocation: {e}", "error")
             return None
         except (RateLimitExceeded, UnregisteredModel):
-            # There is no per-ticker fallback here the way fundamental/sentiment
-            # have one — a single allocate() call either produces the whole
-            # portfolio or nothing does. The governor has already exhausted its
-            # own bounded wait before raising either of these, so propagate
-            # immediately and let the caller (node_portfolio_allocation -> the
-            # API layer) surface it as a 429/503 instead of a generic 500.
+            # No per-ticker fallback here; propagate so the API layer surfaces a 429/503, not a generic 500.
             raise
         except Exception as e:
             record(f"portfolio_allocation: PortfolioManagerAgent API error: {e}", "error")
@@ -329,10 +318,7 @@ class PortfolioManagerAgent:
         try:
             enforced_portfolio = self._enforce_risk(proposal, snapshots, investable, record)
 
-            # Force residual exact; LLM may set cash_reserve_pct independently, not as 1-equity.
-            # Clamped to the schema floor (PA-4) rather than left to fail model_validate on a
-            # near-fully-deployed session (e.g. invest_pct=0.95), which surfaced as a 500
-            # instead of the achievable allocation this session actually produced
+            # Force residual exact and clamp to the schema floor (PA-4) rather than let model_validate 500.
             total_equity = sum(p["allocation_pct"] for p in enforced_portfolio)
             cash_reserve_pct = round(
                 max(PORTFOLIO.cash_reserve_floor_pct, 1.0 - total_equity), 6
@@ -369,14 +355,7 @@ class PortfolioManagerAgent:
             Mapping of ticker → Half-Kelly weight, empty when no agent has recorded
             outcome history yet or every approved ticker is BEARISH.
         """
-        # Compute Half-Kelly baselines to anchor the LLM's sizing distribution, using
-        # each ticker's would-be primary_driver's measured win rate (see
-        # reconciliation.credit_primary_driver's argmax(weighted_votes) heuristic) as
-        # the win probability Kelly actually wants. Direction-blind conviction is not
-        # a probability of profit (see README) — using it here was PA-2/PA-3's bug.
-        # reliability/reliability_n are session-level, identical on every ticker's
-        # AggregatedSignal, so any one of them tells us whether outcome data exists at
-        # all without re-querying cultural memory.
+        # Uses primary_driver's win rate as Kelly's probability, not direction-blind conviction (PA-2/PA-3).
         reliability_n: dict[str, int] = {}
         for ticker in approved_tickers:
             agg = snapshots[ticker].aggregated
@@ -508,9 +487,7 @@ class PortfolioManagerAgent:
             One position dict per surviving proposed ticker, ready for
             PortfolioAllocation validation.
         """
-        # Enforce risk verdicts in code: the LLM's proposal is advisory input,
-        # not a binding allocation, so it cannot be trusted to respect caps it
-        # was merely shown in the prompt.
+        # Enforce risk verdicts in code: the LLM's proposal is advisory, not a binding allocation.
         enforced_portfolio = []
         for pos in proposal.portfolio:
             ticker = pos.ticker

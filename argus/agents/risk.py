@@ -36,8 +36,7 @@ from argus.seams import LiveMarketDataProvider, MarketDataProvider
 
 logger = logging.getLogger("argus.risk")
 
-# Stores (sector_string, cached_at) per ticker; 24h TTL reflects corporate reclassifications
-# (M&A, spin-offs) without a restart
+# Stores (sector, cached_at) per ticker; 24h TTL reflects M&A/spin-off reclassification.
 _SECTOR_CACHE: dict[str, tuple[str, datetime]] = {}
 _SECTOR_CACHE_TTL_SECONDS = RISK.sector_cache_ttl_seconds  # 24 hours
 
@@ -124,9 +123,7 @@ def compute_portfolio_returns(
         DataFrame of weighted daily returns per ticker, with NaN rows dropped.
     """
     asset_returns = compute_asset_returns(positions, price_history, lookback)
-    # Reindexed to asset_returns' own columns: a ticker compute_asset_returns dropped
-    # for insufficient history must not reappear here as an all-NaN column via .mul()'s
-    # column-union alignment
+    # Reindexed to asset_returns' columns so a dropped ticker doesn't reappear as all-NaN via .mul().
     weights = pd.Series({pos["ticker"]: pos["weight"] for pos in positions}).reindex(
         asset_returns.columns
     )
@@ -267,8 +264,7 @@ def atr_stop_losses(
         if ticker in price_history:
             series = price_history[ticker]
             if len(series) > RISK.atr_period:
-                # NOTE: true_range is close-to-close diff, not H-L-Cprev — understates ATR for
-                # volatile stocks with large intraday gaps; pass OHLCV data here for precision
+                # NOTE: true_range is close-to-close, not H-L-Cprev — understates ATR on large intraday gaps.
                 true_range = series.diff().abs().dropna()
                 atr_14 = true_range.tail(RISK.atr_period).mean()
                 latest_close = float(series.iloc[-1])
@@ -347,9 +343,7 @@ class RiskStatisticalEngine:
                     f"{pos['ticker']} weight {pos['weight']:.1%} > limit {self.max_position_pct:.1%}"
                 )
 
-        # Below-floor diversification is informational (folded into veto_reasons below on
-        # whichever verdict is reached), not a `violations` entry — a 2-4 ticker universe is
-        # a normal small-book session, not a structural fault worth an all-cash VETO
+        # Below-floor diversification is informational, not a violation — small books aren't a VETO fault.
         diversification_note: Optional[str] = None
         if (
             len(proposed_positions) > 1
@@ -362,8 +356,7 @@ class RiskStatisticalEngine:
             )
 
         if len(proposed_positions) > RISK.max_positions:
-            # api/main.py's AnalyzeRequest.tickers caps max_length at the same 20, so this
-            # branch is currently unreachable through the API — kept for direct callers
+            # Unreachable via the API (tickers capped at 20 there too); kept for direct callers.
             violations.append(
                 f"Over-diversification: {len(proposed_positions)} positions (max {RISK.max_positions})"
             )
@@ -402,8 +395,7 @@ class RiskStatisticalEngine:
         if len(proposed_positions) <= 1:
             return {}, None, optimizer_notes
 
-        # Raw per-asset returns: the objective applies w itself, so cov must not
-        # already be weighted or w^T*cov*w double-applies it
+        # Raw per-asset returns: cov must not be pre-weighted or w^T*cov*w double-applies it.
         dropped_tickers: list[str] = []
         returns_df = compute_asset_returns(
             proposed_positions, price_history, dropped=dropped_tickers
@@ -418,8 +410,7 @@ class RiskStatisticalEngine:
 
         cov = returns_df.cov() * 252
         if not np.isfinite(cov.to_numpy()).all():
-            # A too-thin overlap can still leave a degenerate (non-finite) matrix
-            # even after the per-ticker drop above; SLSQP has no recovery from that
+            # Thin overlap can still leave a non-finite matrix even after the drop; SLSQP can't recover.
             optimizer_notes.append(
                 "Covariance: non-finite values in the covariance matrix — "
                 "SLSQP optimization skipped"
@@ -588,10 +579,7 @@ class RiskStatisticalEngine:
         returns = compute_portfolio_returns(proposed_positions, price_history)
         port_returns = returns.sum(axis=1) if not returns.empty else pd.Series(dtype=float)
 
-        # Normalize to a full (weight=1.0) book before comparing to var_limit/cvar_limit, so
-        # the same threshold means the same thing for the portfolio call (sum(w)~1.0) and a
-        # single-ticker call (w=0.15) — unnormalized, the per-ticker call was diluted 1/0.15x
-        # and under-detected exactly the volatility the gate exists to catch
+        # Normalize to a full book (w=1.0) before VaR/CVaR so per-ticker calls aren't diluted.
         normalized_returns = port_returns / total_weight if total_weight > 0 else port_returns
         var99 = historical_var(normalized_returns)
         cvar = conditional_var(normalized_returns)

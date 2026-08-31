@@ -51,10 +51,7 @@ from argus.seams import LiveMarketDataProvider, MarketDataProvider
 
 logger = logging.getLogger("argus.macro")
 
-# Column order the fit/predict paths always pass to the scaler and HMM; persisted
-# in the artifact's metadata so a load-time mismatch is detectable rather than a
-# silent feature misalignment. All five are stationary (diffs, a percentile rank,
-# or a mean-reverting spread) — see data/macro_features.py for their derivation.
+# Scaler/HMM column order; persisted in metadata to catch mismatches. See data/macro_features.py.
 FEATURE_COLUMNS = ["d_fed_funds_6m", "d_unemp_12m", "cpi_yoy", "t10y2y", "vix_pctile"]
 
 _FEATURE_DEFAULTS = {
@@ -65,10 +62,7 @@ _FEATURE_DEFAULTS = {
     "vix_pctile": 50.0,
 }
 
-# Canned scenarios for scripts/train_macro_hmm.py's discrimination gate (and
-# tested directly against it): a trained model that maps every one of these to
-# the same label cannot be a function of the macro data. Values are on
-# FEATURE_COLUMNS' scale, not raw indicator levels.
+# Discrimination-gate scenarios (scripts/train_macro_hmm.py); values on FEATURE_COLUMNS' scale.
 DISCRIMINATION_SCENARIOS: dict[str, dict[str, float]] = {
     "goldilocks_boom": {
         "d_fed_funds_6m": -0.1,
@@ -183,8 +177,7 @@ def _check_artifact_compatibility(metadata: dict) -> None:
             f"feature column mismatch: artifact trained on "
             f"{metadata.get('feature_columns')!r}, code expects {FEATURE_COLUMNS!r}"
         )
-    # Major.minor only: a patch-level `pip install -U scikit-learn` shouldn't
-    # silently drop production to the rule-based path
+    # Major.minor only: a patch-level scikit-learn upgrade shouldn't force the rule-based path.
     artifact_hmmlearn = metadata.get("hmmlearn_version", "")
     if _major_minor(artifact_hmmlearn) != _major_minor(hmmlearn.__version__):
         raise ValueError(
@@ -223,14 +216,9 @@ class RegimeClassifier:
         self.is_fitted = False
         self.state_to_regime: dict[int, str] = {}
         self.n_train_observations = 0
-        # Diagnostic-only: per-state feature means from the last fit, keyed by
-        # state index. Not persisted by save() — populated fresh by _map_states
-        # so scripts/train_macro_hmm.py can print the human check on _map_states'
-        # labeling immediately after fitting.
+        # Diagnostic-only per-state means from the last fit; not persisted, refreshed by _map_states.
         self.state_means: dict[int, dict[str, float]] = {}
-        # Populated by fit(): separation/occupancy/dwell/enrichment/recall evidence
-        # for this fit, persisted into the artifact's metadata by save() and
-        # checked by validation_failures().
+        # Populated by fit(): validation evidence, persisted by save(), checked by validation_failures().
         self.validation_metrics: dict = {}
 
     def fit(
@@ -310,11 +298,7 @@ class RegimeClassifier:
             )
 
         self.hmm = best_hmm
-        # Apply now, not just on the load() round-trip: validation_failures()'s
-        # discrimination check calls predict() on this in-memory classifier before
-        # it is ever saved, and a raw EM startprob_ (a one-hot artifact of wherever
-        # the training sequence began) would dominate every single-observation
-        # scenario regardless of its features.
+        # Apply now: validation_failures() calls predict() pre-save, and raw EM startprob_ would dominate.
         self.hmm.startprob_ = self._stationary_startprob(self.hmm.transmat_)
         self.scaler = scaler
         hidden_states = best_hmm.predict(scaled_features)
@@ -559,10 +543,7 @@ class RegimeClassifier:
         if isinstance(current, pd.DataFrame):
             arr = current[FEATURE_COLUMNS].values
         else:
-            # current may be a macro_bundle() dict, whose "t10y2y"/"cpi_yoy" keys overlap
-            # FEATURE_COLUMNS and are present-but-None on a failed FRED fetch — .get(col,
-            # default) only substitutes on a missing key, not an explicit None, and a bare
-            # `or` would also wrongly substitute a genuine 0.0
+            # macro_bundle() keys can be present-but-None; .get(col, default) won't catch that, nor would `or`.
             def _value(col: str) -> float:
                 v = current.get(col)
                 return v if v is not None else _FEATURE_DEFAULTS[col]
@@ -665,9 +646,7 @@ class RegimeClassifier:
             classifier.validation_metrics = metadata.get("validation_metrics", {})
 
             if classifier.is_fitted:
-                # fit() already applies this, but re-derive it here too so an
-                # artifact saved before this fix still gets a reachable CONTRACTION
-                # state from a cold start
+                # fit() already applies this; re-derived here so old artifacts reach CONTRACTION from cold start.
                 classifier.hmm.startprob_ = cls._stationary_startprob(classifier.hmm.transmat_)
 
             logger.info(
@@ -834,8 +813,6 @@ class MacroStatisticalAgent:
         fed_funds_raw = current.get("fed_funds")
         t10y2y_raw = current.get("t10y2y")
 
-        # All three primary fields being None indicates a complete data feed failure.
-        # Return None rather than building a MacroContext from fabricated zero-defaults.
         if vix is None and fed_funds_raw is None and t10y2y_raw is None:
             logger.error(
                 "analyze: FRED bundle returned no usable data (vix, fed_funds, t10y2y all None). "
@@ -847,9 +824,7 @@ class MacroStatisticalAgent:
             logger.warning("analyze: vix is None from FRED bundle; proceeding with regime classification only.")
             vix = 20.0
 
-        # window_final carries the monthly feature frame's last row so the regime-driving
-        # fields below reflect the same data the classifier actually scored, instead of a
-        # second, independently-fetched macro_bundle() that can disagree with it
+        # window_final holds the classifier's actual scored row, avoiding a disagreeing second fetch.
         window_final: pd.Series | None = None
         try:
             history_start = (
@@ -880,10 +855,7 @@ class MacroStatisticalAgent:
         except Exception as exc:
             logger.warning("Failed to fetch VIX history for percentile: %s", exc)
 
-        # Bucketed from the absolute VIX level per VixRegime's own thresholds, not
-        # vix_percentile — a low-VIX regime can still sit at a high trailing
-        # percentile (e.g. VIX 11 at its 85th percentile), and EXTREME is the
-        # governor's kill-switch zone, which only the absolute level defines
+        # Buckets on absolute VIX, not percentile — EXTREME is the governor's kill-switch zone by level.
         if vix < 15:
             vix_regime = VixRegime.LOW
         elif vix < 25:
