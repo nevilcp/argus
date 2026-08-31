@@ -27,6 +27,29 @@ from argus.params import MACRO
 from argus.seams import MarketDataProvider
 
 
+def _lagged_fred_series(
+    provider: MarketDataProvider, series_id: str, start: str, lag_days: int
+) -> pd.Series:
+    """Fetches a monthly FRED series and shifts it forward by its publication lag.
+
+    FRED indexes monthly series by *reference* date, not publication date; shifting
+    by the release lag makes each row reflect only what a real-time observer
+    actually knew as of that date.
+
+    Args:
+        provider: Source for FRED series.
+        series_id: FRED series identifier.
+        start: ISO date string for the beginning of the fetched history.
+        lag_days: Days between the series' reference date and its release.
+
+    Returns:
+        A copy of the series, re-indexed by publication date.
+    """
+    series = provider.fred_series(series_id, start=start).copy()
+    series.index = series.index + pd.Timedelta(days=lag_days)
+    return series
+
+
 def build_macro_feature_frame(provider: MarketDataProvider, start: str) -> pd.DataFrame:
     """Builds the shared monthly macro feature frame for fitting and inference.
 
@@ -41,23 +64,17 @@ def build_macro_feature_frame(provider: MarketDataProvider, start: str) -> pd.Da
         cpi_yoy, t10y2y, vix_pctile — see agents.macro.FEATURE_COLUMNS).
         Rows with any NaN after a bounded 2-month forward-fill are dropped.
     """
-    fed_funds = provider.fred_series("FEDFUNDS", start=start).copy()
-    unemployment = provider.fred_series("UNRATE", start=start).copy()
-    cpi = provider.fred_series("CPIAUCSL", start=start).copy()
-    t10y2y = provider.fred_series("T10Y2Y", start=start)
-    # "max", not a caller-supplied period, so training and inference always draw
-    # identical VIX history for the same provider — the 5-year percentile rolling
-    # window needs ~1260 trading days of warmup regardless of caller
-    vix = provider.ohlcv_daily("^VIX", period="max")["close"]
-
-    # FRED indexes monthly series by *reference* date, not publication date;
-    # shifting by the release lag makes each row reflect only what a real-time
-    # observer actually knew as of that date
-    fed_funds.index = fed_funds.index + pd.Timedelta(days=MACRO.fed_funds_publication_lag_days)
-    unemployment.index = unemployment.index + pd.Timedelta(
-        days=MACRO.unemployment_publication_lag_days
+    fed_funds = _lagged_fred_series(
+        provider, "FEDFUNDS", start, MACRO.fed_funds_publication_lag_days
     )
-    cpi.index = cpi.index + pd.Timedelta(days=MACRO.cpi_publication_lag_days)
+    unemployment = _lagged_fred_series(
+        provider, "UNRATE", start, MACRO.unemployment_publication_lag_days
+    )
+    cpi = _lagged_fred_series(provider, "CPIAUCSL", start, MACRO.cpi_publication_lag_days)
+    t10y2y = provider.fred_series("T10Y2Y", start=start)
+    # "max", not a caller-supplied period, so training and inference always draw identical
+    # VIX history — the 5-year percentile window needs ~1260 trading days of warmup
+    vix = provider.ohlcv_daily("^VIX", period="max")["close"]
 
     frame = pd.DataFrame(
         {

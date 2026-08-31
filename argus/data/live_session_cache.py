@@ -163,9 +163,7 @@ class LiveSessionCache:
             self._states[ticker] = (state, published_at)
 
         tracked = set(tracked_universe)
-        for ticker in list(self._states):
-            if ticker not in tracked:
-                del self._states[ticker]
+        self._states = {t: entry for t, entry in self._states.items() if t in tracked}
 
     def admit(self, tickers: Iterable[str], now: datetime) -> AdmissionResult:
         """Determines which of the requested tickers may be allocated against right now.

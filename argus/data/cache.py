@@ -16,8 +16,7 @@ Not responsible for:
   - Fetching raw data (see data/fetchers.py)
   - Semantic vector storage or decision archiving — the LangGraph checkpoint
     (argus_graph.db, see orchestration/graph.py) and ChromaDB
-    (memory/cultural.py) cover this; a third, unused archive (formerly
-    DecisionLogger, here) was deleted rather than wired up.
+    (memory/cultural.py) cover this.
 
 Dependencies:
   - sqlite3 (stdlib)
@@ -138,6 +137,9 @@ _SELECT_ROW_COUNTS = """
 SELECT ticker, COUNT(*) FROM ohlcv WHERE interval = ? GROUP BY ticker
 """
 
+# Most indicators need at least this many periods before they produce a meaningful value
+_MIN_CANDLE_ROWS = 14
+
 
 def _canonical_timestamp(ts: object) -> str:
     """Canonicalizes a candle timestamp to UTC ISO-8601 for storage.
@@ -249,13 +251,10 @@ class OHLCVBuffer:
         rows = []
         for candle in candles:
             ts = candle.get("timestamp")
-            if ts is None:
-                ts = datetime.now(timezone.utc)
-            ts = _canonical_timestamp(ts)
             rows.append((
                 ticker,
                 self._interval,
-                ts,
+                _canonical_timestamp(ts if ts is not None else datetime.now(timezone.utc)),
                 candle.get("open"),
                 candle.get("high"),
                 candle.get("low"),
@@ -273,8 +272,7 @@ class OHLCVBuffer:
     def get_candles(self, ticker: str) -> Optional[pd.DataFrame]:
         """Retrieves buffered candles as a pandas DataFrame, tz-converted to ET.
 
-        Returns None when fewer than 14 rows exist, as most indicators require at
-        least that many periods to produce meaningful values.
+        Returns None when fewer than `_MIN_CANDLE_ROWS` rows exist.
 
         Args:
             ticker: Equity ticker symbol; case-insensitive.
@@ -287,9 +285,12 @@ class OHLCVBuffer:
         with self._lock:
             rows = self._conn.execute(_SELECT_CANDLES, (ticker, self._interval)).fetchall()
 
-        if len(rows) < 14:
+        if len(rows) < _MIN_CANDLE_ROWS:
             logger.debug(
-                "OHLCVBuffer.get_candles: %s has only %d rows (min 14)", ticker, len(rows)
+                "OHLCVBuffer.get_candles: %s has only %d rows (min %d)",
+                ticker,
+                len(rows),
+                _MIN_CANDLE_ROWS,
             )
             return None
 
@@ -347,15 +348,15 @@ class OHLCVBuffer:
 
         A `GROUP BY COUNT(*)` rather than one `get_candles()` call per ticker —
         the latter builds and tz-converts a full DataFrame just to call `len()`
-        on it, and its own 14-row floor would report 0 for a ticker holding
-        fewer rows than that even though the row count is real.
+        on it, and its own `_MIN_CANDLE_ROWS` floor would report 0 for a ticker
+        holding fewer rows than that even though the row count is real.
 
         Returns:
             Mapping of ticker → row count, for this buffer's configured interval.
         """
         with self._lock:
             rows = self._conn.execute(_SELECT_ROW_COUNTS, (self._interval,)).fetchall()
-        return {ticker: count for ticker, count in rows}
+        return dict(rows)
 
     def close(self) -> None:
         """Closes the underlying database connection."""
