@@ -153,6 +153,11 @@ async def run_collection_cycle(
         logger.info("run_collection_cycle: skipping graph invocation — %s", reason)
         return CollectionResult(ran=False, reason=reason)
 
+    if analyze_lock is not None and analyze_lock.locked():
+        reason = "analysis already in progress"
+        logger.info("run_collection_cycle: skipping graph invocation — %s", reason)
+        return CollectionResult(ran=False, reason=reason)
+
     state: ARGUSState = ARGUSState(
         ticker=tickers_with_data[0],
         universe=tickers_with_data,
@@ -175,11 +180,6 @@ async def run_collection_cycle(
         decisions=[],
         errors=[],
     )
-
-    if analyze_lock is not None and analyze_lock.locked():
-        reason = "analysis already in progress"
-        logger.info("run_collection_cycle: skipping graph invocation — %s", reason)
-        return CollectionResult(ran=False, reason=reason)
 
     thread_id = f"collector-{datetime.now().strftime('%Y%m%d%H%M%S')}"  # noqa: DTZ005
     config = {"configurable": {"thread_id": thread_id}}

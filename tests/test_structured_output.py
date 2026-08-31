@@ -5,6 +5,8 @@ this decoder yet (issue #69 is expand-only), so these tests exercise it
 directly against a mocked LLMClient rather than through any agent.
 """
 
+import json
+from pathlib import Path
 from unittest import mock
 
 import pytest
@@ -12,8 +14,11 @@ from pydantic import BaseModel
 
 from argus.orchestration.governor import RateLimitExceeded, UnregisteredModel
 from argus.params import STRUCTURED_OUTPUT
-from argus.seams import RetryableTransportError
+from argus.seams import FixtureLLMClient, RetryableTransportError
 from argus.structured_output import StructuredOutputError, _strip_markdown_fence, decode
+
+VALID_JSON = '{"signal": "NEUTRAL", "conviction": 0.3}'
+SCHEMA_INVALID_JSON = '{"signal": "NEUTRAL"}'  # missing required "conviction"
 
 
 class _Verdict(BaseModel):
@@ -23,18 +28,24 @@ class _Verdict(BaseModel):
     conviction: float
 
 
-def _mock_llm(*raw_responses: str) -> mock.Mock:
+def _mock_llm(*responses: str | BaseException) -> mock.Mock:
     """Builds a Mock LLMClient whose complete() yields each response in order.
 
     Args:
-        raw_responses: Raw response text to return on successive calls.
+        responses: Raw response text to return, or an exception to raise, on
+            successive calls.
 
     Returns:
         A Mock exposing complete(system_prompt, user_prompt) -> str.
     """
     client = mock.Mock()
-    client.complete.side_effect = list(raw_responses)
+    client.complete.side_effect = list(responses)
     return client
+
+
+def _transport_error(retry_after: float | None = None) -> RetryableTransportError:
+    """Builds the retryable transport failure the seam raises on a transient outage."""
+    return RetryableTransportError(RuntimeError("connection reset"), retry_after=retry_after)
 
 
 # ---------------------------------------------------------------------------
@@ -82,8 +93,6 @@ def test_strip_markdown_fence_preserves_embedded_backticks_in_string_values():
         '{"signal": "BULLISH", "conviction": 0.8, '
         '"reasoning": "See ```python\\nprint(1)\\n``` for reference"}'
     )
-    import json
-
     assert json.loads(stripped)["reasoning"] == "See ```python\nprint(1)\n``` for reference"
 
 
@@ -113,7 +122,7 @@ def test_decode_strips_fence_before_validating():
 
 def test_decode_retries_invalid_json_then_succeeds():
     """Invalid JSON on the first attempt is retried and a later valid response succeeds."""
-    llm = _mock_llm("not json at all", '{"signal": "NEUTRAL", "conviction": 0.3}')
+    llm = _mock_llm("not json at all", VALID_JSON)
 
     with mock.patch("argus.structured_output.time.sleep"):
         result = decode(llm, "system", "user", _Verdict, repair=False)
@@ -124,10 +133,7 @@ def test_decode_retries_invalid_json_then_succeeds():
 
 def test_decode_retries_schema_violation_then_succeeds():
     """Valid JSON that fails schema validation is retried and a later valid response succeeds."""
-    llm = _mock_llm(
-        '{"signal": "NEUTRAL"}',  # missing required "conviction"
-        '{"signal": "NEUTRAL", "conviction": 0.3}',
-    )
+    llm = _mock_llm(SCHEMA_INVALID_JSON, VALID_JSON)
 
     with mock.patch("argus.structured_output.time.sleep"):
         result = decode(llm, "system", "user", _Verdict, repair=False)
@@ -143,11 +149,7 @@ def test_decode_retries_schema_violation_then_succeeds():
 
 def test_decode_retries_retryable_transport_error_then_succeeds():
     """A RetryableTransportError from the transport is retried and the eventual success is returned."""
-    llm = mock.Mock()
-    llm.complete.side_effect = [
-        RetryableTransportError(RuntimeError("connection reset")),
-        '{"signal": "NEUTRAL", "conviction": 0.3}',
-    ]
+    llm = _mock_llm(_transport_error(), VALID_JSON)
 
     with mock.patch("argus.structured_output.time.sleep"):
         result = decode(llm, "system", "user", _Verdict, repair=False)
@@ -158,11 +160,7 @@ def test_decode_retries_retryable_transport_error_then_succeeds():
 
 def test_decode_exhausts_attempts_on_retryable_transport_error_raises_transport_stage():
     """A persistent transport failure costs the declared attempt cap, then raises stage=transport."""
-    llm = mock.Mock()
-    llm.complete.side_effect = [
-        RetryableTransportError(RuntimeError("connection reset"))
-        for _ in range(STRUCTURED_OUTPUT.max_attempts)
-    ]
+    llm = _mock_llm(*(_transport_error() for _ in range(STRUCTURED_OUTPUT.max_attempts)))
 
     with mock.patch("argus.structured_output.time.sleep"):
         with pytest.raises(StructuredOutputError) as exc_info:
@@ -175,11 +173,7 @@ def test_decode_exhausts_attempts_on_retryable_transport_error_raises_transport_
 
 def test_decode_honors_transport_retry_after_hint():
     """A RetryableTransportError's retry_after hint is used as the sleep delay verbatim."""
-    llm = mock.Mock()
-    llm.complete.side_effect = [
-        RetryableTransportError(RuntimeError("rate limited"), retry_after=7.5),
-        '{"signal": "NEUTRAL", "conviction": 0.3}',
-    ]
+    llm = _mock_llm(_transport_error(retry_after=7.5), VALID_JSON)
 
     with mock.patch("argus.structured_output.time.sleep") as mock_sleep:
         decode(llm, "system", "user", _Verdict, repair=False)
@@ -194,11 +188,7 @@ def test_decode_transport_retry_without_hint_uses_jittered_backoff():
     desynchronize retries across the parallel agents during a shared
     provider outage; decode() must preserve that for the unhinted case.
     """
-    llm = mock.Mock()
-    llm.complete.side_effect = [
-        RetryableTransportError(RuntimeError("connection reset")),
-        '{"signal": "NEUTRAL", "conviction": 0.3}',
-    ]
+    llm = _mock_llm(_transport_error(), VALID_JSON)
 
     with mock.patch("argus.structured_output.time.sleep") as mock_sleep:
         decode(llm, "system", "user", _Verdict, repair=False)
@@ -209,12 +199,11 @@ def test_decode_transport_retry_without_hint_uses_jittered_backoff():
 
 def test_decode_transport_retry_preserves_repair_context_from_earlier_content_failure():
     """A transport hiccup between two content failures does not discard the pending repair text."""
-    llm = mock.Mock()
-    llm.complete.side_effect = [
-        '{"signal": "NEUTRAL"}',  # missing required "conviction" -> schema_validation failure
-        RetryableTransportError(RuntimeError("connection reset")),  # transport hiccup
-        '{"signal": "NEUTRAL"}',  # still missing "conviction" -> exhausts attempts
-    ]
+    llm = _mock_llm(
+        SCHEMA_INVALID_JSON,  # schema_validation failure
+        _transport_error(),  # transport hiccup between the two content failures
+        SCHEMA_INVALID_JSON,  # still invalid -> exhausts attempts
+    )
 
     with mock.patch("argus.structured_output.time.sleep"):
         with pytest.raises(StructuredOutputError):
@@ -228,11 +217,7 @@ def test_decode_transport_retry_preserves_repair_context_from_earlier_content_fa
 
 def test_decode_transport_retry_does_not_append_repair_text():
     """A transport retry resends the original prompt — repair only makes sense for content failures."""
-    llm = mock.Mock()
-    llm.complete.side_effect = [
-        RetryableTransportError(RuntimeError("connection reset")),
-        '{"signal": "NEUTRAL", "conviction": 0.3}',
-    ]
+    llm = _mock_llm(_transport_error(), VALID_JSON)
 
     with mock.patch("argus.structured_output.time.sleep"):
         decode(llm, "system", "original user prompt", _Verdict, repair=True)
@@ -261,7 +246,7 @@ def test_decode_exhausts_attempts_on_invalid_json_raises_json_parse_stage():
 
 def test_decode_exhausts_attempts_on_schema_violation_raises_schema_validation_stage():
     """Persistently schema-invalid JSON is retried up to the cap, then raises stage=schema_validation."""
-    llm = _mock_llm(*(['{"signal": "NEUTRAL"}'] * STRUCTURED_OUTPUT.max_attempts))
+    llm = _mock_llm(*([SCHEMA_INVALID_JSON] * STRUCTURED_OUTPUT.max_attempts))
 
     with mock.patch("argus.structured_output.time.sleep"):
         with pytest.raises(StructuredOutputError) as exc_info:
@@ -278,7 +263,7 @@ def test_decode_exhausts_attempts_on_schema_violation_raises_schema_validation_s
 
 def test_decode_repair_enabled_appends_prior_failure_to_next_prompt():
     """With repair=True, the retry's prompt carries the previous attempt's error."""
-    llm = _mock_llm("not json", '{"signal": "NEUTRAL", "conviction": 0.3}')
+    llm = _mock_llm("not json", VALID_JSON)
 
     with mock.patch("argus.structured_output.time.sleep"):
         decode(llm, "system", "original user prompt", _Verdict, repair=True)
@@ -290,7 +275,7 @@ def test_decode_repair_enabled_appends_prior_failure_to_next_prompt():
 
 def test_decode_repair_disabled_resends_prompt_unchanged():
     """With repair=False, every attempt sends the exact same, unmodified prompt."""
-    llm = _mock_llm("not json", '{"signal": "NEUTRAL", "conviction": 0.3}')
+    llm = _mock_llm("not json", VALID_JSON)
 
     with mock.patch("argus.structured_output.time.sleep"):
         decode(llm, "system", "original user prompt", _Verdict, repair=False)
@@ -308,8 +293,7 @@ def test_decode_repair_disabled_resends_prompt_unchanged():
 
 def test_decode_propagates_rate_limit_exceeded_without_retry():
     """A RateLimitExceeded from the transport propagates immediately, with no retry attempt."""
-    llm = mock.Mock()
-    llm.complete.side_effect = RateLimitExceeded("daily budget exhausted")
+    llm = _mock_llm(RateLimitExceeded("daily budget exhausted"))
 
     with pytest.raises(RateLimitExceeded):
         decode(llm, "system", "user", _Verdict, repair=False)
@@ -319,8 +303,7 @@ def test_decode_propagates_rate_limit_exceeded_without_retry():
 
 def test_decode_propagates_unregistered_model_without_retry():
     """An UnregisteredModel from the transport propagates immediately, with no retry attempt."""
-    llm = mock.Mock()
-    llm.complete.side_effect = UnregisteredModel("no rate-limit profile")
+    llm = _mock_llm(UnregisteredModel("no rate-limit profile"))
 
     with pytest.raises(UnregisteredModel):
         decode(llm, "system", "user", _Verdict, repair=False)
@@ -335,9 +318,6 @@ def test_decode_propagates_unregistered_model_without_retry():
 
 def test_decode_against_fundamental_fixture_response():
     """decode() validates a real, pre-captured LLM response, not just synthetic JSON."""
-    from pathlib import Path
-
-    from argus.seams import FixtureLLMClient
 
     class _FundamentalVerdict(BaseModel):
         signal: str

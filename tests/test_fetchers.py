@@ -1,4 +1,6 @@
 """
+tests/test_fetchers.py
+
 Tests for argus/data/fetchers.py's retry classification, NewsAPI budget
 enforcement, and the "None means unavailable, not neutral" contract for
 NewsAPI.
@@ -10,20 +12,15 @@ from unittest import mock
 import pandas as pd
 import pytest
 import requests
+import yfinance.exceptions as yf_exceptions
+from newsapi.newsapi_exception import NewsAPIException
 
 from argus.data import fetchers
+from argus.data.cache import DailyBarCache
 
 
 def _http_error(status_code: int, headers: dict | None = None) -> requests.exceptions.HTTPError:
-    """Builds an HTTPError carrying a mock response with the given status/headers.
-
-    Args:
-        status_code: Value for response.status_code.
-        headers: Value for response.headers; defaults to empty.
-
-    Returns:
-        An HTTPError whose .response mimics a real requests response.
-    """
+    """Builds an HTTPError whose .response mimics a real requests response."""
     response = mock.Mock(status_code=status_code, headers=headers or {})
     return requests.exceptions.HTTPError(response=response)
 
@@ -35,23 +32,17 @@ def _http_error(status_code: int, headers: dict | None = None) -> requests.excep
 
 def test_is_retryable_yfinance_rate_limit():
     """A yfinance rate-limit error is retryable."""
-    import yfinance.exceptions as yf_exceptions
-
     assert fetchers._is_retryable(yf_exceptions.YFRateLimitError()) is True
 
 
 def test_is_retryable_newsapi_rate_limited_code():
     """A NewsAPIException whose body code is rateLimited is retryable."""
-    from newsapi.newsapi_exception import NewsAPIException
-
     exc = NewsAPIException({"status": "error", "code": "rateLimited", "message": "slow down"})
     assert fetchers._is_retryable(exc) is True
 
 
 def test_is_retryable_newsapi_non_rate_limit_code():
     """A NewsAPIException for any other cause (e.g. a bad key) is terminal."""
-    from newsapi.newsapi_exception import NewsAPIException
-
     exc = NewsAPIException({"status": "error", "code": "apiKeyInvalid", "message": "bad key"})
     assert fetchers._is_retryable(exc) is False
 
@@ -154,7 +145,9 @@ def test_with_retry_honors_retry_after_header(monkeypatch):
 
 def test_with_retry_succeeds_without_sleeping_on_first_attempt(monkeypatch):
     """A call that succeeds immediately never sleeps."""
-    monkeypatch.setattr(fetchers.time, "sleep", mock.Mock(side_effect=AssertionError("should not sleep")))
+    monkeypatch.setattr(
+        fetchers.time, "sleep", mock.Mock(side_effect=AssertionError("should not sleep"))
+    )
 
     @fetchers._with_retry
     def ok():
@@ -186,7 +179,7 @@ def test_newsapi_budget_resets_on_new_day():
     assert budget.try_reserve() is True
 
 
-def test_newsapi_budget_survives_a_fresh_process(monkeypatch):
+def test_newsapi_budget_survives_a_fresh_process():
     """A second _NewsApiBudget instance under the same ARGUS_DATA_DIR resumes today's
     count instead of restarting at zero — the Actions collector's cold-start case (GOV-14)."""
     first = fetchers._NewsApiBudget(daily_limit=2)
@@ -197,7 +190,7 @@ def test_newsapi_budget_survives_a_fresh_process(monkeypatch):
     assert second.try_reserve() is False
 
 
-def test_newsapi_budget_ignores_a_stale_persisted_date(monkeypatch):
+def test_newsapi_budget_ignores_a_stale_persisted_date():
     """A persisted count from a prior UTC day is not carried into a new process's day."""
     stale = fetchers._NewsApiBudget(daily_limit=2)
     assert stale.try_reserve() is True
@@ -249,7 +242,7 @@ def test_fetch_news_returns_articles_at_max_page_size(monkeypatch):
 
 
 def test_fetch_news_returns_none_after_retries_exhausted(monkeypatch):
-    """A retryable failure that never clears returns None, not a fabricated empty list masquerading as success."""
+    """A retryable failure that never clears returns None, not an empty list read as success."""
     monkeypatch.setattr(fetchers.settings, "newsapi_key", "test-key")
     monkeypatch.setattr(fetchers, "_NEWSAPI_BUDGET", fetchers._NewsApiBudget())
     monkeypatch.setattr(fetchers.time, "sleep", lambda _s: None)
@@ -278,8 +271,6 @@ def _stub_daily_frame() -> pd.DataFrame:
 
 def test_fetch_multiple_daily_serves_second_call_from_cache(monkeypatch):
     """A ticker already refreshed today is not refetched on a second call the same day."""
-    from argus.data.cache import DailyBarCache
-
     monkeypatch.setattr(fetchers, "_DAILY_BAR_CACHE", DailyBarCache(db_path=":memory:"))
 
     calls = {"n": 0}

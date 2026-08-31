@@ -110,12 +110,11 @@ def _is_retryable(exc: Exception) -> bool:
         return True
 
     status_code = _status_code_of(exc)
-    if status_code is not None:
-        if status_code in (401, 403, 404):
-            return False
-        return status_code in (429, 423) or status_code >= 500
-
-    return True
+    if status_code is None:
+        return True
+    if status_code in (401, 403, 404):
+        return False
+    return status_code in (429, 423) or status_code >= 500
 
 
 def _retry_after_seconds(exc: Exception) -> Optional[float]:
@@ -528,6 +527,41 @@ def fetch_fred_series(series_id: str, start: str = "2018-01-01") -> pd.Series:
     return raw
 
 
+_MACRO_BUNDLE_SERIES = {
+    "fed_funds": "FEDFUNDS",
+    "unemployment": "UNRATE",
+    "t10y2y": "T10Y2Y",
+    "t10yie": "T10YIE",
+    "consumer_sentiment": "UMCSENT",
+}
+
+
+def _latest_fred_value(
+    key: str,
+    series_id: str,
+    transform: Optional[Callable[[pd.Series], pd.Series]] = None,
+) -> Optional[float]:
+    """Reads the most recent observation of a FRED series, degrading to None on failure.
+
+    Args:
+        key: Bundle field name the value lands under, used only for logging.
+        series_id: FRED series identifier.
+        transform: Applied to the raw series before the last observation is taken,
+            for fields that are a derivative of the published index rather than it.
+
+    Returns:
+        The last non-NaN observation as a float, or None if the fetch failed.
+    """
+    try:
+        series = fetch_fred_series(series_id)
+        if transform is not None:
+            series = transform(series)
+        return float(series.dropna().iloc[-1])
+    except Exception as exc:
+        logger.warning("fetch_macro_bundle: %s (%s) failed — %s", key, series_id, exc)
+        return None
+
+
 def fetch_macro_bundle() -> dict:
     """Gathers a consolidated set of macroeconomic indicators and interest rates.
 
@@ -535,32 +569,11 @@ def fetch_macro_bundle() -> dict:
         Dict with keys: fed_funds, unemployment, t10y2y, t10yie, consumer_sentiment,
         cpi_yoy, vix. Any key that fails to fetch is set to None.
     """
-    bundle: dict[str, float | None] = {}
-
-    _FRED_MAP = {
-        "fed_funds": "FEDFUNDS",
-        "unemployment": "UNRATE",
-        "t10y2y": "T10Y2Y",
-        "t10yie": "T10YIE",
-        "consumer_sentiment": "UMCSENT",
+    bundle: dict[str, float | None] = {
+        key: _latest_fred_value(key, series_id)
+        for key, series_id in _MACRO_BUNDLE_SERIES.items()
     }
-
-    for key, series_id in _FRED_MAP.items():
-        try:
-            s = fetch_fred_series(series_id)
-            bundle[key] = float(s.dropna().iloc[-1])
-        except Exception as exc:
-            logger.warning("fetch_macro_bundle: %s (%s) failed — %s", key, series_id, exc)
-            bundle[key] = None
-
-    # CPI YoY requires a 12-month pct_change transform on the raw CPI index
-    try:
-        cpi_raw = fetch_fred_series("CPIAUCSL")
-        cpi_yoy = cpi_raw.pct_change(12) * 100
-        bundle["cpi_yoy"] = float(cpi_yoy.dropna().iloc[-1])
-    except Exception as exc:
-        logger.warning("fetch_macro_bundle: cpi_yoy (CPIAUCSL) failed — %s", exc)
-        bundle["cpi_yoy"] = None
+    bundle["cpi_yoy"] = _latest_fred_value("cpi_yoy", "CPIAUCSL", lambda s: s.pct_change(12) * 100)
 
     try:
         bundle["vix"] = fetch_vix()
@@ -608,9 +621,7 @@ class _NewsApiBudget:
         self._loaded_from_disk = False
 
     def _persist_path(self) -> Path:
-        """Returns the counter's persistence path, read lazily so it honors
-        whatever ARGUS_DATA_DIR is current when first used rather than at
-        import time (matches _daily_bar_cache's convention above)."""
+        """Returns the counter's path, read lazily so it honors the current ARGUS_DATA_DIR."""
         return Path(settings.ARGUS_DATA_DIR) / "newsapi_budget.json"
 
     def _load_from_disk(self) -> None:
@@ -715,9 +726,7 @@ def fetch_news(
         return None
 
     if not _NEWSAPI_BUDGET.try_reserve():
-        logger.warning(
-            "fetch_news: daily budget of %d requests exhausted", _NEWSAPI_DAILY_LIMIT
-        )
+        logger.warning("fetch_news: daily budget of %d requests exhausted", _NEWSAPI_DAILY_LIMIT)
         return None
 
     try:

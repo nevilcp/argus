@@ -26,6 +26,7 @@ from argus.seams import (
 )
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
+CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 
 def _single_response_llm(fixture_file: str, ticker: str) -> FixtureLLMClient:
@@ -88,11 +89,14 @@ def test_fixture_market_data_provider_ohlcv_daily_matches_fixture():
 def test_fixture_market_data_provider_missing_ticker_raises():
     """A ticker with no fixture data raises KeyError rather than failing silently."""
     market_data = FixtureMarketDataProvider()
-    try:
+    with pytest.raises(KeyError):
         market_data.fundamentals("NOT_A_REAL_TICKER")
-        assert False, "expected KeyError for a ticker with no fixture"
-    except KeyError:
-        pass
+
+
+def _synthetic_response(status_code: int, headers: dict[str, str] | None = None) -> httpx.Response:
+    """Builds an in-memory httpx.Response for the chat-completions endpoint — no network."""
+    request = httpx.Request("POST", CHAT_COMPLETIONS_URL)
+    return httpx.Response(status_code, headers=headers or {}, request=request)
 
 
 def _synthetic_rate_limit_error(retry_after: str | None) -> groq.RateLimitError:
@@ -104,10 +108,19 @@ def _synthetic_rate_limit_error(retry_after: str | None) -> groq.RateLimitError:
     Returns:
         A RateLimitError carrying an in-memory httpx.Response with those headers.
     """
-    request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
     headers = {"retry-after": retry_after} if retry_after is not None else {}
-    response = httpx.Response(429, headers=headers, request=request)
+    response = _synthetic_response(429, headers)
     return groq.RateLimitError("rate limited", response=response, body=None)
+
+
+def _synthetic_connection_error() -> groq.APIConnectionError:
+    """Builds the transient, retryable transport failure the adapter must translate."""
+    return groq.APIConnectionError(request=httpx.Request("POST", CHAT_COMPLETIONS_URL))
+
+
+def _synthetic_auth_error() -> groq.AuthenticationError:
+    """Builds the terminal 401 the adapter must surface without retrying."""
+    return groq.AuthenticationError("bad key", response=_synthetic_response(401), body=None)
 
 
 def test_groq_retry_delay_honors_retry_after():
@@ -124,9 +137,7 @@ def test_groq_retry_delay_returns_none_without_header():
 
 def test_groq_retry_delay_returns_none_for_non_rate_limit_errors():
     """A retryable error other than RateLimitError carries no provider retry hint."""
-    request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
-    exc = groq.APIConnectionError(request=request)
-    assert _groq_retry_delay(exc) is None
+    assert _groq_retry_delay(_synthetic_connection_error()) is None
 
 
 def _fake_success_response(prompt_tokens: int = 10, completion_tokens: int = 5):
@@ -147,37 +158,40 @@ def _fake_success_response(prompt_tokens: int = 10, completion_tokens: int = 5):
     )
 
 
-def _client_with_mocked_llm() -> GroqLLMClient:
-    """Builds a GroqLLMClient with a real (network-free) httpx.Client but a mocked ChatGroq.
+def _groq_client() -> GroqLLMClient:
+    """Builds a GroqLLMClient for a registered model.
 
     Construction alone never touches the network — only ``._llm.invoke()`` would —
-    so swapping in a Mock for that one call is enough to test complete()'s retry
-    and governance logic without a live Groq key.
-
-    Returns:
-        A GroqLLMClient for a registered model, ready to have ``._llm.invoke``
-        given a side_effect.
+    so no live Groq key is needed.
     """
-    client = GroqLLMClient(
+    return GroqLLMClient(
         model="openai/gpt-oss-20b", temperature=0.1, max_tokens=50, api_key="test-key"
     )
+
+
+def _client_with_mocked_llm() -> GroqLLMClient:
+    """Builds a GroqLLMClient whose ChatGroq is a Mock.
+
+    Mocking that one call is enough to test complete()'s retry and governance
+    logic offline.
+
+    Returns:
+        A GroqLLMClient ready to have ``._llm.invoke`` given a side_effect.
+    """
+    client = _groq_client()
     client._llm = mock.Mock()
     return client
 
 
 def test_groq_llm_client_sets_reasoning_effort_low():
     """The registered gpt-oss models are reasoning models; low effort caps their token spend."""
-    client = GroqLLMClient(
-        model="openai/gpt-oss-20b", temperature=0.1, max_tokens=50, api_key="test-key"
-    )
-    assert client._llm.reasoning_effort == "low"
+    assert _groq_client()._llm.reasoning_effort == "low"
 
 
 def test_groq_llm_client_retryable_error_raises_retryable_transport_error():
     """A transient APIConnectionError becomes RetryableTransportError after a single invocation."""
     client = _client_with_mocked_llm()
-    request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
-    exc = groq.APIConnectionError(request=request)
+    exc = _synthetic_connection_error()
     client._llm.invoke.side_effect = exc
 
     with pytest.raises(RetryableTransportError) as exc_info:
@@ -201,11 +215,7 @@ def test_groq_llm_client_retryable_error_carries_retry_after_hint():
 def test_groq_llm_client_terminal_error_raises_without_retry():
     """AuthenticationError propagates on the first attempt — retrying a bad key wastes nothing but time."""
     client = _client_with_mocked_llm()
-    request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
-    response = httpx.Response(401, request=request)
-    client._llm.invoke.side_effect = groq.AuthenticationError(
-        "bad key", response=response, body=None
-    )
+    client._llm.invoke.side_effect = _synthetic_auth_error()
 
     with pytest.raises(groq.AuthenticationError):
         client.complete("system", "user")
@@ -216,11 +226,7 @@ def test_groq_llm_client_terminal_error_raises_without_retry():
 def test_groq_llm_client_releases_reservation_on_terminal_error():
     """A terminal error releases the pre-flight reservation instead of leaking it (GOV-1)."""
     client = _client_with_mocked_llm()
-    request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
-    response = httpx.Response(401, request=request)
-    client._llm.invoke.side_effect = groq.AuthenticationError(
-        "bad key", response=response, body=None
-    )
+    client._llm.invoke.side_effect = _synthetic_auth_error()
 
     with mock.patch("argus.seams.governor.release_reservation") as mock_release:
         with pytest.raises(groq.AuthenticationError):
@@ -233,8 +239,7 @@ def test_groq_llm_client_releases_reservation_on_terminal_error():
 def test_groq_llm_client_releases_reservation_on_retryable_error():
     """A retryable error also releases the reservation instead of leaking it (GOV-1)."""
     client = _client_with_mocked_llm()
-    request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
-    client._llm.invoke.side_effect = groq.APIConnectionError(request=request)
+    client._llm.invoke.side_effect = _synthetic_connection_error()
 
     with mock.patch("argus.seams.governor.release_reservation") as mock_release:
         with pytest.raises(RetryableTransportError):

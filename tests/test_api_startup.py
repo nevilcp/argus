@@ -1,19 +1,19 @@
 """
 tests/test_api_startup.py
 
-Tests for api/main.py's PR3 boot-time assertions: the single-worker invariant
-(GOV-8) and the configured-model registration check (GOV-11). Both run pure
-sys.argv/settings checks, so they're exercised directly rather than through
-the app's lifespan.
+Tests for api/main.py's boot-time guards and liveness reporting:
 
-Also covers PR5b's API-2 additions: `_assert_single_worker`'s extension to
-`--workers=N` and `WEB_CONCURRENCY`, and `_acquire_process_lock`'s real
-cross-process guard (an exclusive flock on `${ARGUS_DATA_DIR}/argus.lock`).
+  - `_assert_single_worker` (GOV-8), across `--workers N`, `--workers=N` and
+    `WEB_CONCURRENCY`
+  - `_assert_registered_models` (GOV-11)
+  - `_acquire_process_lock`'s cross-process guard (an exclusive flock on
+    `${ARGUS_DATA_DIR}/argus.lock`)
+  - `_configure_logging` (OBS-1) and `/health`'s background-task liveness
+    reporting (OBS-2)
+  - `_warn_on_permissive_security_defaults` (DEP-8)
 
-Also covers PR 1 of the release-remediation issue: `_configure_logging`
-(OBS-1) and `/health`'s background-task liveness reporting (OBS-2).
-
-Also covers PR 2's `_warn_on_permissive_security_defaults` (DEP-8).
+The boot-time guards are pure sys.argv/settings checks, so they're exercised
+directly rather than through the app's lifespan.
 """
 
 from __future__ import annotations
@@ -34,26 +34,31 @@ from argus.data.live_session_cache import LiveSessionCache
 from argus.risk.kill_switch import KillSwitch
 
 
+def _set_uvicorn_argv(monkeypatch, *flags: str) -> None:
+    """Points sys.argv at a uvicorn invocation carrying the given extra flags."""
+    monkeypatch.setattr(api_main.sys, "argv", ["uvicorn", "api.main:app", *flags])
+
+
 def test_assert_single_worker_allows_default_argv(monkeypatch):
     """No --workers flag at all (uvicorn's own default of 1) passes."""
-    monkeypatch.setattr(api_main.sys, "argv", ["uvicorn", "api.main:app"])
+    _set_uvicorn_argv(monkeypatch)
     api_main._assert_single_worker()
 
 
 def test_assert_single_worker_allows_explicit_one(monkeypatch):
     """--workers 1 passes, matching Dockerfile.api's CMD."""
-    monkeypatch.setattr(api_main.sys, "argv", ["uvicorn", "api.main:app", "--workers", "1"])
+    _set_uvicorn_argv(monkeypatch, "--workers", "1")
     api_main._assert_single_worker()
 
 
 def test_assert_single_worker_rejects_multiple(monkeypatch):
     """--workers N for N != 1 raises rather than silently running two governor singletons."""
-    monkeypatch.setattr(api_main.sys, "argv", ["uvicorn", "api.main:app", "--workers", "4"])
+    _set_uvicorn_argv(monkeypatch, "--workers", "4")
     with pytest.raises(RuntimeError):
         api_main._assert_single_worker()
 
 
-def test_assert_registered_models_passes_for_defaults(monkeypatch):
+def test_assert_registered_models_passes_for_defaults():
     """The default ARGUS_*_MODEL settings are all registered rate-limit profiles."""
     api_main._assert_registered_models()
 
@@ -67,27 +72,27 @@ def test_assert_registered_models_rejects_unregistered_model(monkeypatch):
 
 def test_assert_single_worker_allows_explicit_one_equals_form(monkeypatch):
     """--workers=1 passes, the equals-sign spelling of the space-separated form."""
-    monkeypatch.setattr(api_main.sys, "argv", ["uvicorn", "api.main:app", "--workers=1"])
+    _set_uvicorn_argv(monkeypatch, "--workers=1")
     api_main._assert_single_worker()
 
 
 def test_assert_single_worker_rejects_multiple_equals_form(monkeypatch):
     """--workers=4 raises just like the space-separated --workers 4 does."""
-    monkeypatch.setattr(api_main.sys, "argv", ["uvicorn", "api.main:app", "--workers=4"])
+    _set_uvicorn_argv(monkeypatch, "--workers=4")
     with pytest.raises(RuntimeError):
         api_main._assert_single_worker()
 
 
 def test_assert_single_worker_allows_web_concurrency_one(monkeypatch):
     """WEB_CONCURRENCY=1 in the environment passes."""
-    monkeypatch.setattr(api_main.sys, "argv", ["uvicorn", "api.main:app"])
+    _set_uvicorn_argv(monkeypatch)
     monkeypatch.setenv("WEB_CONCURRENCY", "1")
     api_main._assert_single_worker()
 
 
 def test_assert_single_worker_rejects_web_concurrency_above_one(monkeypatch):
     """WEB_CONCURRENCY=4 is a fourth bypass of the single-worker invariant argv alone can't see."""
-    monkeypatch.setattr(api_main.sys, "argv", ["uvicorn", "api.main:app"])
+    _set_uvicorn_argv(monkeypatch)
     monkeypatch.setenv("WEB_CONCURRENCY", "4")
     with pytest.raises(RuntimeError):
         api_main._assert_single_worker()

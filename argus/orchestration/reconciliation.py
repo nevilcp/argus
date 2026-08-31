@@ -44,12 +44,15 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+from langgraph.checkpoint.base import Checkpoint
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from argus.memory.cultural import CulturalMemoryManager
@@ -74,26 +77,16 @@ def credit_primary_driver(
     (did the consensus direction flip, how large was this agent's own
     baseline weighted vote) and the largest-scoring removal is credited.
 
-    A single scalar delta on the ablated call's final `conviction` still
-    doesn't work here, though not for the reason it once did: aggregate()'s
-    pools are now normalized against the vote mass all three agents *could*
-    cast (see Design Decision A, issue #24), not the votes actually cast, so
-    a lone remaining agent no longer trivially saturates its ablated
-    conviction near AGGREGATOR.max_conviction — it scales with that agent's
-    own magnitude instead. But the ablated conviction is still the wrong
-    thing to diff: it's the consensus *direction* an ablation settles on
-    that determines whether the resulting trade changes, and an agent whose
-    removal flips that direction has a categorically larger effect than one
-    whose removal only moves the number. Direction-flip-first,
-    magnitude-second captures that ordering directly: an agent whose removal
-    flips the consensus was clearly essential (ranked above any
-    non-flipping removal); among removals that don't flip the outcome, the
-    agent that contributed more raw vote (from the already-computed
-    baseline `weighted_votes` — pools are additive sums of independent
-    per-agent votes, so a removed agent's marginal effect on its pool total
-    is exactly its own vote, no need to re-derive it per ablation) was the
-    bigger contributor. This avoids exact Shapley over the 2^3 - 1
-    coalitions.
+    Direction first, magnitude second, rather than a scalar delta on the
+    ablated call's final `conviction`: it is the consensus *direction* an
+    ablation settles on that decides whether the resulting trade changes, so an
+    agent whose removal flips the direction had a categorically larger effect
+    than one whose removal only moved the number. Among removals that don't
+    flip the outcome, the agent that cast more raw vote was the bigger
+    contributor — read straight off the baseline `weighted_votes`, since the
+    pools are additive sums of independent per-agent votes and a removed
+    agent's marginal effect on its pool is exactly its own vote. This avoids
+    exact Shapley over the 2^3 - 1 coalitions.
 
     Each ablated rerun replays `decision.aggregated.reliability` — the same
     reliability dict the baseline aggregation used — rather than an
@@ -116,12 +109,7 @@ def credit_primary_driver(
         two agents contributed a signal (ablation needs something to compare
         against) or the decision has no aggregated result to ablate from.
     """
-    signals: dict[str, object] = {
-        "technical": decision.technical,
-        "fundamental": decision.fundamental,
-        "sentiment": decision.sentiment,
-    }
-    present = [name for name in _ABLATABLE_AGENTS if signals[name] is not None]
+    present = [name for name in _ABLATABLE_AGENTS if getattr(decision, name) is not None]
 
     if decision.aggregated is None or len(present) < 2:
         return present[0] if len(present) == 1 else "unknown"
@@ -133,13 +121,11 @@ def credit_primary_driver(
     best_name = "unknown"
     best_score = (False, -1.0)
     for name in present:
-        ablated = dict(signals)
-        ablated[name] = None
         result = agg.aggregate(
-            ablated["technical"],  # type: ignore[arg-type]
+            None if name == "technical" else decision.technical,
             decision.macro,
-            ablated["fundamental"],  # type: ignore[arg-type]
-            ablated["sentiment"],  # type: ignore[arg-type]
+            None if name == "fundamental" else decision.fundamental,
+            None if name == "sentiment" else decision.sentiment,
             reliability=decision.aggregated.reliability,
         )
         flipped = result.signal != baseline_signal
@@ -271,11 +257,7 @@ def reconcile_decision(
         docstring). False if the decision had nothing to reconcile or its
         horizon hasn't passed yet.
     """
-    if not _needs_reconciliation(decision):
-        return False
-    if prices is None:
-        prices = market_data.ohlcv_daily(decision.ticker)["close"]
-    outcome = _realized_return_from_prices(decision, prices, horizon_days)
+    outcome = compute_realized_return(decision, market_data, horizon_days, prices=prices)
     if outcome is None:
         return False
 
@@ -351,6 +333,31 @@ def reconcile_decisions(
     return stored
 
 
+@contextmanager
+def _checkpoint_saver(db_path: str) -> Iterator[SqliteSaver]:
+    """Opens a SqliteSaver over the checkpoint database, closing its connection on exit."""
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    try:
+        yield SqliteSaver(conn, serde=build_checkpoint_serde())
+    finally:
+        conn.close()
+
+
+def _newest_checkpoint_per_thread(saver: SqliteSaver) -> Iterator[tuple[str, Checkpoint]]:
+    """Yields each thread's newest checkpoint exactly once, as (thread_id, checkpoint).
+
+    SqliteSaver.list() yields checkpoints newest-first, so a thread's first tuple
+    is its most recent — and so most complete — one.
+    """
+    seen_threads: set[str] = set()
+    for tup in saver.list(None):
+        thread_id = tup.config["configurable"]["thread_id"]
+        if thread_id in seen_threads:
+            continue
+        seen_threads.add(thread_id)
+        yield thread_id, tup.checkpoint
+
+
 def load_decisions_from_checkpoints(db_path: str = "argus_graph.db") -> list[ARGUSDecision]:
     """Reads every session's decisions back out of the LangGraph checkpoint database.
 
@@ -367,21 +374,12 @@ def load_decisions_from_checkpoints(db_path: str = "argus_graph.db") -> list[ARG
         Every ARGUSDecision found across all threads. Empty list if the
         database doesn't exist yet or holds no checkpoints.
     """
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    try:
-        saver = SqliteSaver(conn, serde=build_checkpoint_serde())
-        seen_threads: set[str] = set()
-        decisions: list[ARGUSDecision] = []
-        for tup in saver.list(None):
-            thread_id = tup.config["configurable"]["thread_id"]
-            if thread_id in seen_threads:
-                continue
-            seen_threads.add(thread_id)
-            channel_values = tup.checkpoint.get("channel_values", {})
+    decisions: list[ARGUSDecision] = []
+    with _checkpoint_saver(db_path) as saver:
+        for _thread_id, checkpoint in _newest_checkpoint_per_thread(saver):
+            channel_values = checkpoint.get("channel_values", {})
             decisions.extend(channel_values.get("decisions") or [])
-        return decisions
-    finally:
-        conn.close()
+    return decisions
 
 
 def load_decisions_from_jsonl(path: str) -> list[ARGUSDecision]:
@@ -491,17 +489,10 @@ def prune_checkpoints(db_path: str, cutoff: datetime) -> int:
         return 0
 
     cutoff_naive = _as_naive_timestamp(cutoff)
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    try:
-        saver = SqliteSaver(conn, serde=build_checkpoint_serde())
-        seen_threads: set[str] = set()
+    with _checkpoint_saver(db_path) as saver:
         stale_threads: list[str] = []
-        for tup in saver.list(None):
-            thread_id = tup.config["configurable"]["thread_id"]
-            if thread_id in seen_threads:
-                continue
-            seen_threads.add(thread_id)
-            ts_raw = tup.checkpoint.get("ts")
+        for thread_id, checkpoint in _newest_checkpoint_per_thread(saver):
+            ts_raw = checkpoint.get("ts")
             if ts_raw is None:
                 continue
             if _as_naive_timestamp(datetime.fromisoformat(ts_raw)) < cutoff_naive:
@@ -510,15 +501,13 @@ def prune_checkpoints(db_path: str, cutoff: datetime) -> int:
         if not stale_threads:
             return 0
 
+        params = [(thread_id,) for thread_id in stale_threads]
+        conn = saver.conn
         cur = conn.cursor()
-        cur.executemany(
-            "DELETE FROM checkpoints WHERE thread_id = ?", [(t,) for t in stale_threads]
-        )
-        cur.executemany("DELETE FROM writes WHERE thread_id = ?", [(t,) for t in stale_threads])
+        cur.executemany("DELETE FROM checkpoints WHERE thread_id = ?", params)
+        cur.executemany("DELETE FROM writes WHERE thread_id = ?", params)
         conn.commit()
         conn.execute("VACUUM")
-    finally:
-        conn.close()
 
     logger.info(
         "prune_checkpoints: deleted %d thread(s) from %s (cutoff=%s)",
@@ -549,6 +538,24 @@ class ReconciliationReport:
     """Deleted checkpoint-thread count, or None if checkpoint_db_path wasn't given."""
     errors: list[str] = field(default_factory=list)
     """One entry per independent step that failed; every other step still ran."""
+
+
+@contextmanager
+def _pass_step(report: ReconciliationReport, label: str) -> Iterator[None]:
+    """Runs one independently-failable step of a reconciliation pass.
+
+    A raise is logged and recorded on the report instead of propagating, so one
+    store failing to bound itself never skips the next one.
+
+    Args:
+        report: Report the failure is recorded on.
+        label: Step name, used verbatim in both the log line and the recorded error.
+    """
+    try:
+        yield
+    except Exception as exc:
+        logger.exception("[Reconcile] %s failed", label)
+        report.errors.append(f"{label} failed: {exc}")
 
 
 def run_reconciliation_pass(
@@ -630,7 +637,7 @@ def run_reconciliation_pass(
         days=horizon_days + RECONCILIATION.retention_margin_days
     )
 
-    try:
+    with _pass_step(report, "paper-book update"):
         book = paper_book.load(paper_book_path)
         for run_timestamp, run_return in paper_book.compute_run_returns(
             decisions, market_data, horizon_days
@@ -641,28 +648,16 @@ def run_reconciliation_pass(
         report.equity = book.equity
         report.drawdown = book.drawdown_from_peak()
         report.paper_book_updated = True
-    except Exception as exc:
-        logger.exception("[Reconcile] paper-book update failed")
-        report.errors.append(f"paper-book update failed: {exc}")
 
     if decisions_log_path:
-        try:
+        with _pass_step(report, "decisions.jsonl compaction"):
             report.decisions_compacted = compact_decisions_jsonl(decisions_log_path, cutoff)
-        except Exception as exc:
-            logger.exception("[Reconcile] decisions.jsonl compaction failed")
-            report.errors.append(f"decisions.jsonl compaction failed: {exc}")
 
     if checkpoint_db_path:
-        try:
+        with _pass_step(report, "checkpoint pruning"):
             report.checkpoints_pruned = prune_checkpoints(checkpoint_db_path, cutoff)
-        except Exception as exc:
-            logger.exception("[Reconcile] checkpoint pruning failed")
-            report.errors.append(f"checkpoint pruning failed: {exc}")
 
-    try:
+    with _pass_step(report, "PENDING snapshot expiry"):
         report.pending_snapshots_expired = cultural.expire_pending_snapshots(cutoff)
-    except Exception as exc:
-        logger.exception("[Reconcile] PENDING snapshot expiry failed")
-        report.errors.append(f"PENDING snapshot expiry failed: {exc}")
 
     return report

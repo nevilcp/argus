@@ -139,8 +139,8 @@ def test_aggregated_conviction_never_exceeds_cap(
         fundamental=_fundamental(fund_signal, fund_conv),
         sentiment=_sentiment(sent_signal, sent_conv),
     )
+    assert result.conviction >= 0.0
     assert result.conviction <= AGGREGATOR.max_conviction + 1e-9
-    assert 0.0 <= result.conviction
 
 
 @given(

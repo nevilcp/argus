@@ -436,16 +436,14 @@ def all_params() -> list[dict[str, Any]]:
     Used by tests/test_params.py to assert every field carries provenance
     metadata (i.e. nobody added a bare `float = 0.5` field and skipped `p(...)`).
     """
-    rows: list[dict[str, Any]] = []
-    for group_name, instance in _ALL_GROUPS.items():
-        for f in fields(instance):
-            rows.append(
-                {
-                    "group": group_name,
-                    "field": f.name,
-                    "value": getattr(instance, f.name),
-                    "provenance": f.metadata.get("provenance"),
-                    "note": f.metadata.get("note", ""),
-                }
-            )
-    return rows
+    return [
+        {
+            "group": group_name,
+            "field": f.name,
+            "value": getattr(instance, f.name),
+            "provenance": f.metadata.get("provenance"),
+            "note": f.metadata.get("note", ""),
+        }
+        for group_name, instance in _ALL_GROUPS.items()
+        for f in fields(instance)
+    ]
