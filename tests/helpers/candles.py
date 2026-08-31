@@ -19,6 +19,21 @@ import pandas as pd
 _ET = "America/New_York"
 
 
+def _ohlcv_frame(index: pd.DatetimeIndex) -> pd.DataFrame:
+    """Builds an OHLCV frame over `index` whose closes rise 0, 1, 2, ... bar by bar."""
+    closes = list(range(len(index)))
+    return pd.DataFrame(
+        {
+            "open": closes,
+            "high": [c + 1 for c in closes],
+            "low": closes,
+            "close": closes,
+            "volume": [1000] * len(index),
+        },
+        index=index,
+    )
+
+
 def et_intraday_candles(
     n: int, start: str = "2024-01-02 09:30", freq: str = "1min"
 ) -> pd.DataFrame:
@@ -33,18 +48,7 @@ def et_intraday_candles(
         DataFrame with open/high/low/close/volume columns and a tz-aware
         (America/New_York) DatetimeIndex.
     """
-    dates = pd.date_range(start, periods=n, freq=freq, tz=_ET)
-    closes = list(range(n))
-    return pd.DataFrame(
-        {
-            "open": closes,
-            "high": [c + 1 for c in closes],
-            "low": closes,
-            "close": closes,
-            "volume": [1000] * n,
-        },
-        index=dates,
-    )
+    return _ohlcv_frame(pd.date_range(start, periods=n, freq=freq, tz=_ET))
 
 
 def dst_straddling_candles(n_per_side: int = 6, freq: str = "1min") -> pd.DataFrame:
@@ -66,16 +70,4 @@ def dst_straddling_candles(n_per_side: int = 6, freq: str = "1min") -> pd.DataFr
     pre_utc = pd.date_range("2025-11-02 05:54:00", periods=n_per_side, freq=freq, tz="UTC")
     # 01:00-01:05 EST (UTC-5), the same wall-clock minutes again, one hour later in UTC
     post_utc = pd.date_range("2025-11-02 06:00:00", periods=n_per_side, freq=freq, tz="UTC")
-    dates = pre_utc.append(post_utc).tz_convert(_ET)
-    n = 2 * n_per_side
-    closes = list(range(n))
-    return pd.DataFrame(
-        {
-            "open": closes,
-            "high": [c + 1 for c in closes],
-            "low": closes,
-            "close": closes,
-            "volume": [1000] * n,
-        },
-        index=dates,
-    )
+    return _ohlcv_frame(pre_utc.append(post_utc).tz_convert(_ET))

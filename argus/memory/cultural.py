@@ -44,6 +44,11 @@ def _where(conditions: list[dict[str, Any]]) -> dict[str, Any]:
     return conditions[0] if len(conditions) == 1 else {"$and": conditions}
 
 
+def _signal_or_na(agent_signal: Any) -> str:
+    """Returns an agent signal block's enum value, or "N/A" when the agent didn't run."""
+    return agent_signal.signal.value if agent_signal else "N/A"
+
+
 class CulturalMemoryManager:
     """Manages persistent vector databases, semantic indexing, and similarity lookups.
 
@@ -146,23 +151,22 @@ class CulturalMemoryManager:
         else:
             prefix = "FLAT"
 
+        technical = decision.technical
         macro_regime = decision.macro.macro_regime.value if decision.macro else "unknown"
         vix_regime = decision.macro.vix_regime.value if decision.macro else "unknown"
-        tech_sig = decision.technical.signal.value if decision.technical else "N/A"
-        tech_rsi = getattr(decision.technical, "rsi_14", 0.0) if decision.technical else 0.0
-        tech_macd = (
-            getattr(decision.technical, "macd_histogram", 0.0) if decision.technical else 0.0
-        )
-        fund_sig = decision.fundamental.signal.value if decision.fundamental else "N/A"
+        tech_sig = _signal_or_na(technical)
+        tech_rsi = getattr(technical, "rsi_14", 0.0) if technical else 0.0
+        tech_macd = getattr(technical, "macd_histogram", 0.0) if technical else 0.0
+        fund_sig = _signal_or_na(decision.fundamental)
         fund_moat = decision.fundamental.moat_score if decision.fundamental else "N/A"
-        sent_sig = decision.sentiment.signal.value if decision.sentiment else "N/A"
+        sent_sig = _signal_or_na(decision.sentiment)
         sent_finbert = decision.sentiment.finbert_net_score if decision.sentiment else None
         agg_conv = decision.aggregated.conviction if decision.aggregated else "N/A"
 
         document = f"""{prefix} PATTERN:
 Macro regime: {macro_regime}
 VIX regime: {vix_regime}
-Technical signal: {tech_sig} 
+Technical signal: {tech_sig}
   (RSI={tech_rsi:.0f}, MACD hist={tech_macd:.3f})
 Fundamental signal: {fund_sig}
   (Moat={fund_moat})
@@ -199,6 +203,48 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
 
         logger.info("[Memory] Stored %s trade pattern. Total: %d", prefix, self.collection.count())
 
+    def _retrieve_by_outcome(
+        self,
+        query: str,
+        outcome: str,
+        regime: str,
+        n_results: int,
+        as_of: Optional[datetime],
+        label: str,
+    ) -> list[str]:
+        """Runs one outcome- and regime-filtered similarity query, returning [] on failure.
+
+        Shared by retrieve_wisdom and retrieve_warnings so the two filter identically.
+
+        Args:
+            query: Free-text similarity query.
+            outcome: Stored ``outcome`` metadata value to filter on ("SUCCESSFUL"/"FAILED").
+            regime: Macro regime to scope the lookup to.
+            n_results: Maximum number of documents to return.
+            as_of: When given, excludes documents stored after this timestamp.
+            label: Noun used in the failure log line.
+
+        Returns:
+            Matching document strings, or [] if the store is empty or the query failed.
+        """
+        if self.collection.count() == 0:
+            return []
+
+        conditions: list[dict[str, Any]] = [{"outcome": outcome}, {"regime": regime}]
+        if as_of is not None:
+            conditions.append({"timestamp": {"$lte": as_of.isoformat()}})
+
+        try:
+            results = self.collection.query(
+                query_texts=[query],
+                n_results=min(n_results, self.collection.count()),
+                where=_where(conditions),
+            )
+            return results["documents"][0] if results and results["documents"] else []
+        except Exception as e:
+            logger.warning("[Memory] Failed to retrieve %s: %s", label, e)
+            return []
+
     def retrieve_wisdom(
         self,
         current_macro: MacroContext,
@@ -228,26 +274,16 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
         Returns:
             List of matching document strings from the SUCCESSFUL outcome filter.
         """
-        if self.collection.count() == 0:
-            return []
-
         regime = current_macro.macro_regime.value
-        query = f"Macro regime {regime}, VIX {current_macro.vix_regime.value}, {current_technical_summary}"
-
-        conditions: list[dict[str, Any]] = [{"outcome": "SUCCESSFUL"}, {"regime": regime}]
-        if as_of is not None:
-            conditions.append({"timestamp": {"$lte": as_of.isoformat()}})
-
-        try:
-            results = self.collection.query(
-                query_texts=[query],
-                n_results=min(n_results, self.collection.count()),
-                where=_where(conditions),
-            )
-            return results["documents"][0] if results and results["documents"] else []
-        except Exception as e:
-            logger.warning("[Memory] Failed to retrieve wisdom: %s", e)
-            return []
+        vix_regime = current_macro.vix_regime.value
+        return self._retrieve_by_outcome(
+            query=f"Macro regime {regime}, VIX {vix_regime}, {current_technical_summary}",
+            outcome="SUCCESSFUL",
+            regime=regime,
+            n_results=n_results,
+            as_of=as_of,
+            label="wisdom",
+        )
 
     def retrieve_warnings(
         self,
@@ -267,25 +303,15 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
         Returns:
             List of matching document strings from the FAILED outcome filter for the current regime.
         """
-        if self.collection.count() == 0:
-            return []
-
         regime = current_macro.macro_regime.value
-        conditions: list[dict[str, Any]] = [{"outcome": "FAILED"}, {"regime": regime}]
-        if as_of is not None:
-            conditions.append({"timestamp": {"$lte": as_of.isoformat()}})
-
-        try:
-            query = f"Failed trades in {regime} regime"
-            results = self.collection.query(
-                query_texts=[query],
-                n_results=min(n_results, self.collection.count()),
-                where=_where(conditions),
-            )
-            return results["documents"][0] if results and results["documents"] else []
-        except Exception as e:
-            logger.warning("[Memory] Failed to retrieve warnings: %s", e)
-            return []
+        return self._retrieve_by_outcome(
+            query=f"Failed trades in {regime} regime",
+            outcome="FAILED",
+            regime=regime,
+            n_results=n_results,
+            as_of=as_of,
+            label="warnings",
+        )
 
     def get_agent_accuracy(
         self,
@@ -341,7 +367,7 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
             logger.warning("[Memory] Failed to compute agent accuracy: %s", e)
             return 0.5, 0
 
-    def summary_stats(self) -> dict:
+    def summary_stats(self) -> dict[str, Any]:
         """Compiles aggregate performance statistics and regime diagnostics from the memory database.
 
         avg_return_pct averages over settled rows only (SUCCESSFUL/FAILED/FLAT
@@ -390,9 +416,7 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
                 elif outcome == "FAILED":
                     fails += 1
 
-            best_regime = "N/A"
-            if regime_wins:
-                best_regime = max(regime_wins.items(), key=lambda x: x[1])[0]
+            best_regime = max(regime_wins, key=lambda r: regime_wins[r], default="N/A")
 
             return {
                 "total_stored": count,
@@ -406,7 +430,7 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
             logger.warning("[Memory] Failed to compute summary stats: %s", e)
             return {"total_stored": count}
 
-    def store_decision_snapshot(self, decision: "ARGUSDecision") -> bool:
+    def store_decision_snapshot(self, decision: ARGUSDecision) -> bool:
         """Persists a real-time decision profile before outcomes are finalized.
 
         Populates the vector store with decision-making context, enabling retrieval
@@ -421,11 +445,11 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
         try:
             macro_regime = decision.macro.macro_regime.value if decision.macro else "unknown"
             vix_regime = decision.macro.vix_regime.value if decision.macro else "unknown"
-            agg_signal = decision.aggregated.signal.value if decision.aggregated else "N/A"
+            agg_signal = _signal_or_na(decision.aggregated)
             agg_conv = decision.aggregated.conviction if decision.aggregated else 0.0
-            fund_sig = decision.fundamental.signal.value if decision.fundamental else "N/A"
-            tech_sig = decision.technical.signal.value if decision.technical else "N/A"
-            sent_sig = decision.sentiment.signal.value if decision.sentiment else "N/A"
+            fund_sig = _signal_or_na(decision.fundamental)
+            tech_sig = _signal_or_na(decision.technical)
+            sent_sig = _signal_or_na(decision.sentiment)
             alloc_pct = decision.allocation.allocation_pct if decision.allocation else 0.0
             thesis = decision.allocation.thesis if decision.allocation else "No position taken"
 

@@ -29,6 +29,10 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
+_TRADING_DAYS_PER_YEAR = 252
+_ANNUALIZATION = math.sqrt(_TRADING_DAYS_PER_YEAR)
+_VAR_PERCENTILE = 5  # 5th percentile == the 95% historical VaR level
+
 
 def compute_all_metrics(
     strategy_returns: pd.Series,
@@ -54,155 +58,153 @@ def compute_all_metrics(
     if strategy_returns is None or strategy_returns.empty:
         return {}
 
-    strategy_returns = strategy_returns.dropna()
-    benchmark_returns = benchmark_returns.dropna()
-
-    if not strategy_returns.empty and not benchmark_returns.empty:
-        idx = strategy_returns.index.intersection(benchmark_returns.index)
-        s_ret = strategy_returns.loc[idx]
-        b_ret = benchmark_returns.loc[idx]
-    else:
-        s_ret = strategy_returns
-        b_ret = pd.Series(dtype=float)
-
-    n_days = len(s_ret)
-    if n_days == 0:
+    s_ret, b_ret = _align(strategy_returns.dropna(), benchmark_returns.dropna())
+    if s_ret.empty:
         return {}
 
-    mean_ret = float(s_ret.mean())
-    std_ret = float(s_ret.std())
+    metrics = {
+        **_return_and_drawdown_metrics(s_ret, risk_free_rate),
+        **_benchmark_metrics(s_ret, b_ret, risk_free_rate),
+        **_tail_risk_metrics(s_ret),
+    }
+    if trade_log is not None:
+        metrics.update(_trade_level_metrics(trade_log))
 
-    annualized_return = mean_ret * 252
-    cumulative_return = float((1 + s_ret).cumprod().iloc[-1] - 1)
-    annualized_volatility = std_ret * math.sqrt(252) if std_ret else 0.0
+    return {key: _json_safe(value) for key, value in metrics.items()}
 
-    if std_ret > 0:
-        sharpe_ratio = (mean_ret - risk_free_rate / 252) / std_ret * math.sqrt(252)
-    else:
-        sharpe_ratio = 0.0
 
-    neg_rets = s_ret[s_ret < 0]
-    downside_std = float(neg_rets.std())
-    if downside_std > 0:
-        sortino_ratio = (mean_ret - risk_free_rate / 252) / downside_std * math.sqrt(252)
-    else:
-        sortino_ratio = None
+def _align(
+    strategy_returns: pd.Series, benchmark_returns: pd.Series
+) -> tuple[pd.Series, pd.Series]:
+    """Restricts both series to the dates they share; an empty side drops the benchmark."""
+    if strategy_returns.empty or benchmark_returns.empty:
+        return strategy_returns, pd.Series(dtype=float)
+    shared = strategy_returns.index.intersection(benchmark_returns.index)
+    return strategy_returns.loc[shared], benchmark_returns.loc[shared]
 
-    cum_returns = (1 + s_ret).cumprod()
+
+def _return_and_drawdown_metrics(returns: pd.Series, risk_free_rate: float) -> dict:
+    """Return, volatility, risk-adjusted-ratio and drawdown statistics of the strategy alone."""
+    mean_ret = float(returns.mean())
+    std_ret = float(returns.std())
+    downside_std = float(returns[returns < 0].std())
+    daily_rf = risk_free_rate / _TRADING_DAYS_PER_YEAR
+    annualized_return = mean_ret * _TRADING_DAYS_PER_YEAR
+
+    cum_returns = (1 + returns).cumprod()
     rolling_max = cum_returns.cummax()
     drawdowns = (cum_returns - rolling_max) / rolling_max
-
     max_drawdown = float(drawdowns.min())
 
-    if max_drawdown < 0:
-        calmar_ratio = annualized_return / abs(max_drawdown)
-    else:
-        calmar_ratio = None
-
+    # Consecutive underwater days: the cumulative count restarts at every day back at a high.
     underwater = drawdowns < 0
-    duration_series = underwater.astype(int).groupby((~underwater).cumsum()).cumsum()
-    max_drawdown_duration_days = int(duration_series.max())
+    underwater_run = underwater.astype(int).groupby((~underwater).cumsum()).cumsum()
+    active_drawdowns = drawdowns[underwater]
 
-    active_dds = drawdowns[drawdowns < 0]
-    avg_drawdown = float(active_dds.mean()) if not active_dds.empty else 0.0
+    return {
+        "annualized_return": annualized_return,
+        "cumulative_return": float(cum_returns.iloc[-1] - 1),
+        "annualized_volatility": std_ret * _ANNUALIZATION if std_ret else 0.0,
+        "sharpe_ratio": (mean_ret - daily_rf) / std_ret * _ANNUALIZATION if std_ret > 0 else 0.0,
+        "sortino_ratio": (
+            (mean_ret - daily_rf) / downside_std * _ANNUALIZATION if downside_std > 0 else None
+        ),
+        "calmar_ratio": annualized_return / abs(max_drawdown) if max_drawdown < 0 else None,
+        "max_drawdown": max_drawdown,
+        "max_drawdown_duration_days": int(underwater_run.max()),
+        "avg_drawdown": float(active_drawdowns.mean()) if not active_drawdowns.empty else 0.0,
+    }
 
-    alpha_annualized = None
-    beta = None
-    information_ratio = None
-    r_squared = None
 
-    if len(s_ret) > 1 and len(b_ret) == len(s_ret):
-        b_mean = b_ret.mean()
-        b_std = b_ret.std()
+def _benchmark_metrics(returns: pd.Series, benchmark: pd.Series, risk_free_rate: float) -> dict:
+    """Alpha, beta, information ratio and R^2 against the benchmark.
 
-        if b_std > 0:
-            cov = np.cov(s_ret, b_ret)[0, 1]
-            var_b = np.var(b_ret, ddof=1)
-            if var_b > 0:
-                beta = float(cov / var_b)
-                alpha_daily = mean_ret - (
-                    risk_free_rate / 252 + beta * (b_mean - risk_free_rate / 252)
-                )
-                alpha_annualized = alpha_daily * 252
+    Every value stays None unless the benchmark actually covers the same dates
+    and varies — a degraded, flagged result rather than an invented one.
+    """
+    metrics: dict = {
+        "alpha_annualized": None,
+        "beta": None,
+        "information_ratio": None,
+        "r_squared": None,
+    }
+    if len(returns) <= 1 or len(benchmark) != len(returns):
+        return metrics
 
-                corr = np.corrcoef(s_ret, b_ret)[0, 1]
-                r_squared = float(corr**2)
+    mean_ret = float(returns.mean())
+    daily_rf = risk_free_rate / _TRADING_DAYS_PER_YEAR
+    benchmark_variance = float(np.var(benchmark, ddof=1))
 
-        active_return = s_ret - b_ret
-        tracking_error = active_return.std()
-        if tracking_error > 0:
-            information_ratio = float((active_return.mean() / tracking_error) * math.sqrt(252))
+    if float(benchmark.std()) > 0 and benchmark_variance > 0:
+        beta = float(np.cov(returns, benchmark)[0, 1] / benchmark_variance)
+        alpha_daily = mean_ret - (daily_rf + beta * (float(benchmark.mean()) - daily_rf))
+        metrics["beta"] = beta
+        metrics["alpha_annualized"] = alpha_daily * _TRADING_DAYS_PER_YEAR
+        metrics["r_squared"] = float(np.corrcoef(returns, benchmark)[0, 1] ** 2)
 
-    var_95_historical = float(np.percentile(s_ret, 5)) if len(s_ret) > 0 else 0.0
-    cvar_95_rets = s_ret[s_ret <= var_95_historical]
-    cvar_95 = float(cvar_95_rets.mean()) if not cvar_95_rets.empty else var_95_historical
+    active_return = returns - benchmark
+    tracking_error = float(active_return.std())
+    if tracking_error > 0:
+        metrics["information_ratio"] = float(active_return.mean()) / tracking_error * _ANNUALIZATION
+
+    return metrics
+
+
+def _tail_risk_metrics(returns: pd.Series) -> dict:
+    """Historical VaR/CVaR and the distribution shape of the return series."""
+    var_95 = float(np.percentile(returns, _VAR_PERCENTILE))
+    tail = returns[returns <= var_95]
 
     try:
-        skewness = float(stats.skew(s_ret))
-        kurtosis = float(stats.kurtosis(s_ret))
+        skewness = float(stats.skew(returns))
+        kurtosis = float(stats.kurtosis(returns))
     except Exception:
         skewness = 0.0
         kurtosis = 0.0
 
-    metrics = {
-        "annualized_return": annualized_return,
-        "cumulative_return": cumulative_return,
-        "annualized_volatility": annualized_volatility,
-        "sharpe_ratio": sharpe_ratio,
-        "sortino_ratio": sortino_ratio,
-        "calmar_ratio": calmar_ratio,
-        "max_drawdown": max_drawdown,
-        "max_drawdown_duration_days": max_drawdown_duration_days,
-        "avg_drawdown": avg_drawdown,
-        "alpha_annualized": alpha_annualized,
-        "beta": beta,
-        "information_ratio": information_ratio,
-        "r_squared": r_squared,
-        "var_95_historical": var_95_historical,
-        "cvar_95": cvar_95,
+    return {
+        "var_95_historical": var_95,
+        "cvar_95": float(tail.mean()) if not tail.empty else var_95,
         "skewness": skewness,
         "kurtosis": kurtosis,
     }
 
-    if trade_log is not None:
-        total_trades = len(trade_log)
-        wins = [t for t in trade_log if t.get("return_pct", 0) > 0]
-        losses = [t for t in trade_log if t.get("return_pct", 0) <= 0]
 
-        win_rate = len(wins) / total_trades if total_trades > 0 else 0.0
-        avg_win_pct = float(np.mean([t["return_pct"] for t in wins])) if wins else 0.0
-        avg_loss_pct = float(np.mean([t["return_pct"] for t in losses])) if losses else 0.0
-        win_loss_ratio = abs(avg_win_pct / avg_loss_pct) if avg_loss_pct != 0 else 0.0
+def _trade_level_metrics(trade_log: list[dict]) -> dict:
+    """Win/loss, profit-factor and holding-period statistics over discrete trades."""
+    total_trades = len(trade_log)
+    wins = [t for t in trade_log if t.get("return_pct", 0) > 0]
+    losses = [t for t in trade_log if t.get("return_pct", 0) <= 0]
 
-        gross_wins = sum(t["return_pct"] for t in wins)
-        gross_losses = abs(sum(t["return_pct"] for t in losses))
-        profit_factor = (
-            float(gross_wins / gross_losses)
-            if gross_losses > 0
-            else (float("inf") if gross_wins > 0 else 0.0)
-        )
+    avg_win_pct = float(np.mean([t["return_pct"] for t in wins])) if wins else 0.0
+    avg_loss_pct = float(np.mean([t["return_pct"] for t in losses])) if losses else 0.0
 
-        holding_days = [t.get("holding_days", 0) for t in trade_log]
-        avg_holding_days = float(np.mean(holding_days)) if holding_days else 0.0
+    gross_wins = sum(t["return_pct"] for t in wins)
+    gross_losses = abs(sum(t["return_pct"] for t in losses))
+    if gross_losses > 0:
+        profit_factor = float(gross_wins / gross_losses)
+    elif gross_wins > 0:
+        profit_factor = float("inf")
+    else:
+        profit_factor = 0.0
 
-        metrics.update(
-            {
-                "win_rate": win_rate,
-                "avg_win_pct": avg_win_pct,
-                "avg_loss_pct": avg_loss_pct,
-                "win_loss_ratio": win_loss_ratio,
-                "profit_factor": profit_factor,
-                "total_trades": total_trades,
-                "avg_holding_days": avg_holding_days,
-            }
-        )
+    holding_days = [t.get("holding_days", 0) for t in trade_log]
 
-    # Replace NaN/Inf with None for JSON-safe output; round survivors to 4 dp
-    for k, v in metrics.items():
-        if isinstance(v, float):
-            if math.isnan(v) or math.isinf(v):
-                metrics[k] = None
-            else:
-                metrics[k] = round(v, 4)
+    return {
+        "win_rate": len(wins) / total_trades if total_trades > 0 else 0.0,
+        "avg_win_pct": avg_win_pct,
+        "avg_loss_pct": avg_loss_pct,
+        "win_loss_ratio": abs(avg_win_pct / avg_loss_pct) if avg_loss_pct != 0 else 0.0,
+        "profit_factor": profit_factor,
+        "total_trades": total_trades,
+        "avg_holding_days": float(np.mean(holding_days)) if holding_days else 0.0,
+    }
 
-    return metrics
+
+def _json_safe(value: object) -> object:
+    """NaN and Inf have no JSON representation; surviving floats round to 4 dp."""
+    if not isinstance(value, float):
+        return value
+    if math.isnan(value) or math.isinf(value):
+        return None
+    return round(value, 4)

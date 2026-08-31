@@ -100,28 +100,51 @@ def _strip_volatile(obj):
     return obj
 
 
-def _run_fixture_graph(tmp_path: Path) -> dict:
-    """Invoke the fixture-backed DAG once, with cultural memory mocked out.
+def _strip_volatile_signals(signals: dict) -> dict:
+    """Dumps a ticker -> pydantic signal mapping to JSON with the volatile keys removed."""
+    return {ticker: _strip_volatile(sig.model_dump(mode="json")) for ticker, sig in signals.items()}
 
-    The governor needs no patch: every LLM call here is fixture-backed, and
-    FixtureLLMClient never reaches it (only GroqLLMClient does).
+
+def _build_fixture_graph(
+    tmp_path: Path,
+    market_data: FixtureMarketDataProvider | None = None,
+    portfolio_llm: FixtureLLMClient | None = None,
+):
+    """Compiles the DAG with every seam fixture-backed.
 
     Args:
         tmp_path: Per-test checkpoint directory (X-5) — keeps this run's
             checkpoints out of the real argus_graph.db, not just the fixture
             autouse `_isolated_data_dir` build_graph()'s default would also
             resolve against.
+        market_data: Provider override, for tests that degrade one boundary.
+        portfolio_llm: Allocator LLM override, for tests that capture its prompt.
+
+    Returns:
+        The compiled LangGraph.
+    """
+    return build_graph(
+        market_data=market_data or FixtureMarketDataProvider(),
+        fundamental_llm=_per_ticker_llm("fundamental.json"),
+        sentiment_llm=_per_ticker_llm("sentiment.json"),
+        portfolio_llm=portfolio_llm or _portfolio_llm(),
+        checkpoint_db_path=str(tmp_path / "argus_graph_test.db"),
+    )
+
+
+def _invoke(graph, state: ARGUSState | None = None) -> dict:
+    """Invokes the graph once on a fresh thread, with cultural memory mocked out.
+
+    The governor needs no patch: every LLM call here is fixture-backed, and
+    FixtureLLMClient never reaches it (only GroqLLMClient does).
+
+    Args:
+        graph: A graph from _build_fixture_graph.
+        state: Starting state; defaults to _initial_state().
 
     Returns:
         The final ARGUSState dict produced by the graph.
     """
-    graph = build_graph(
-        market_data=FixtureMarketDataProvider(),
-        fundamental_llm=_per_ticker_llm("fundamental.json"),
-        sentiment_llm=_per_ticker_llm("sentiment.json"),
-        portfolio_llm=_portfolio_llm(),
-        checkpoint_db_path=str(tmp_path / "argus_graph_test.db"),
-    )
     config = {"configurable": {"thread_id": str(uuid4())}}
 
     with mock.patch("argus.orchestration.graph.get_cultural_memory") as mock_get_cultural_memory:
@@ -131,9 +154,7 @@ def _run_fixture_graph(tmp_path: Path) -> dict:
             get_agent_accuracy=mock.Mock(return_value=(0.5, 0)),
             store_decision_snapshot=mock.Mock(),
         )
-        final_state = graph.invoke(_initial_state(), config)
-
-    return final_state
+        return graph.invoke(_initial_state() if state is None else state, config)
 
 
 class _NoneMacroMarketData(FixtureMarketDataProvider):
@@ -157,23 +178,7 @@ def test_macro_context_none_still_produces_a_degraded_allocation(tmp_path):
     specialists, aggregation, risk evaluation, and portfolio allocation must all
     still run, degraded rather than empty, with the gap named in errors.
     """
-    graph = build_graph(
-        market_data=_NoneMacroMarketData(),
-        fundamental_llm=_per_ticker_llm("fundamental.json"),
-        sentiment_llm=_per_ticker_llm("sentiment.json"),
-        portfolio_llm=_portfolio_llm(),
-        checkpoint_db_path=str(tmp_path / "argus_graph_test.db"),
-    )
-    config = {"configurable": {"thread_id": str(uuid4())}}
-
-    with mock.patch("argus.orchestration.graph.get_cultural_memory") as mock_get_cultural_memory:
-        mock_get_cultural_memory.return_value = mock.Mock(
-            retrieve_wisdom=mock.Mock(return_value=[]),
-            retrieve_warnings=mock.Mock(return_value=[]),
-            get_agent_accuracy=mock.Mock(return_value=(0.5, 0)),
-            store_decision_snapshot=mock.Mock(),
-        )
-        final_state = graph.invoke(_initial_state(), config)
+    final_state = _invoke(_build_fixture_graph(tmp_path, market_data=_NoneMacroMarketData()))
 
     assert final_state.get("macro_context") is None
     assert final_state.get("technical_signals")
@@ -229,23 +234,7 @@ def test_spy_fetched_once_per_graph_run_not_once_per_risk_call(tmp_path):
     ticker) — 7 fetches for this 6-ticker universe instead of 1.
     """
     provider = _SpyCountingMarketData()
-    graph = build_graph(
-        market_data=provider,
-        fundamental_llm=_per_ticker_llm("fundamental.json"),
-        sentiment_llm=_per_ticker_llm("sentiment.json"),
-        portfolio_llm=_portfolio_llm(),
-        checkpoint_db_path=str(tmp_path / "argus_graph_test.db"),
-    )
-    config = {"configurable": {"thread_id": str(uuid4())}}
-
-    with mock.patch("argus.orchestration.graph.get_cultural_memory") as mock_get_cultural_memory:
-        mock_get_cultural_memory.return_value = mock.Mock(
-            retrieve_wisdom=mock.Mock(return_value=[]),
-            retrieve_warnings=mock.Mock(return_value=[]),
-            get_agent_accuracy=mock.Mock(return_value=(0.5, 0)),
-            store_decision_snapshot=mock.Mock(),
-        )
-        graph.invoke(_initial_state(), config)
+    _invoke(_build_fixture_graph(tmp_path, market_data=provider))
 
     assert provider.ohlcv_daily_calls.count("SPY") == 1
 
@@ -272,23 +261,7 @@ def test_macro_context_none_still_reaches_a_real_vix_reading(tmp_path):
     rather than defaulting.
     """
     provider = _CountingVixMarketData()
-    graph = build_graph(
-        market_data=provider,
-        fundamental_llm=_per_ticker_llm("fundamental.json"),
-        sentiment_llm=_per_ticker_llm("sentiment.json"),
-        portfolio_llm=_portfolio_llm(),
-        checkpoint_db_path=str(tmp_path / "argus_graph_test.db"),
-    )
-    config = {"configurable": {"thread_id": str(uuid4())}}
-
-    with mock.patch("argus.orchestration.graph.get_cultural_memory") as mock_get_cultural_memory:
-        mock_get_cultural_memory.return_value = mock.Mock(
-            retrieve_wisdom=mock.Mock(return_value=[]),
-            retrieve_warnings=mock.Mock(return_value=[]),
-            get_agent_accuracy=mock.Mock(return_value=(0.5, 0)),
-            store_decision_snapshot=mock.Mock(),
-        )
-        final_state = graph.invoke(_initial_state(), config)
+    final_state = _invoke(_build_fixture_graph(tmp_path, market_data=provider))
 
     assert final_state.get("macro_context") is None
     assert provider.vix_calls == 1
@@ -296,7 +269,7 @@ def test_macro_context_none_still_reaches_a_real_vix_reading(tmp_path):
 
 def test_golden_dag_runs_offline_and_produces_a_valid_allocation(tmp_path):
     """The fixture-backed DAG runs end to end with zero network/LLM/torch dependencies."""
-    final_state = _run_fixture_graph(tmp_path)
+    final_state = _invoke(_build_fixture_graph(tmp_path))
 
     assert final_state.get("macro_context") is not None
     assert final_state.get("technical_signals")
@@ -312,9 +285,7 @@ def test_golden_dag_runs_offline_and_produces_a_valid_allocation(tmp_path):
     errors = final_state.get("errors")
     assert errors is not None and len(errors) == 3
     for ticker in ("MSFT", "JPM", "GOOGL"):
-        assert any(
-            f"zeroed {ticker} allocation (risk verdict VETO)" in e for e in errors
-        )
+        assert any(f"zeroed {ticker} allocation (risk verdict VETO)" in e for e in errors)
 
     alloc = final_state.get("portfolio_allocation")
     assert alloc is not None
@@ -324,53 +295,31 @@ def test_golden_dag_runs_offline_and_produces_a_valid_allocation(tmp_path):
             assert pos.allocation_pct == 0.0
 
 
-def test_missing_indicator_is_reported_in_errors_not_silently_dropped(tmp_path):
-    """A ticker missing a required indicator is excluded from technical_signals
-
-    and named in state["errors"], rather than vanishing with no trace.
-    """
+def _state_missing_nvda_adx() -> ARGUSState:
+    """An initial state whose NVDA session lacks the adx_14 the technical agent requires."""
     with open(FIXTURES_DIR / "market_data" / "session_states.json") as f:
         session_states = json.load(f)
     del session_states["NVDA"]["adx_14"]
 
     state = _initial_state()
     state["session_states"] = session_states
+    return state
 
-    graph = build_graph(
-        market_data=FixtureMarketDataProvider(),
-        fundamental_llm=_per_ticker_llm("fundamental.json"),
-        sentiment_llm=_per_ticker_llm("sentiment.json"),
-        portfolio_llm=_portfolio_llm(),
-        checkpoint_db_path=str(tmp_path / "argus_graph_test.db"),
-    )
-    config = {"configurable": {"thread_id": str(uuid4())}}
 
-    with mock.patch("argus.orchestration.graph.get_cultural_memory") as mock_get_cultural_memory:
-        mock_get_cultural_memory.return_value = mock.Mock(
-            retrieve_wisdom=mock.Mock(return_value=[]),
-            retrieve_warnings=mock.Mock(return_value=[]),
-            get_agent_accuracy=mock.Mock(return_value=(0.5, 0)),
-            store_decision_snapshot=mock.Mock(),
-        )
-        final_state = graph.invoke(state, config)
+def test_missing_indicator_is_reported_in_errors_not_silently_dropped(tmp_path):
+    """A ticker missing a required indicator is named in errors, not dropped without a trace."""
+    final_state = _invoke(_build_fixture_graph(tmp_path), _state_missing_nvda_adx())
 
     assert "NVDA" not in final_state["technical_signals"]
     assert any("NVDA" in e for e in final_state["errors"])
 
 
 def test_missing_indicator_still_reaches_aggregation_with_evidence_surfaced(tmp_path):
-    """A ticker missing one specialist still reaches aggregated_signals
+    """A ticker missing one specialist still reaches aggregated_signals with the gap named.
 
-    with the gap named in agents_present, and the allocator's prompt shows
+    agents_present must name the missing specialist, and the allocator's prompt must show
     the reduced evidence rather than treating the ticker as fully evidenced.
     """
-    with open(FIXTURES_DIR / "market_data" / "session_states.json") as f:
-        session_states = json.load(f)
-    del session_states["NVDA"]["adx_14"]
-
-    state = _initial_state()
-    state["session_states"] = session_states
-
     with open(FIXTURES_DIR / "llm_responses" / "portfolio.json") as f:
         portfolio_response = json.load(f)
     captured_prompts = []
@@ -383,23 +332,8 @@ def test_missing_indicator_still_reaches_aggregation_with_evidence_surfaced(tmp_
         {"only": json.dumps(portfolio_response)}, key_fn=_capture_key_fn
     )
 
-    graph = build_graph(
-        market_data=FixtureMarketDataProvider(),
-        fundamental_llm=_per_ticker_llm("fundamental.json"),
-        sentiment_llm=_per_ticker_llm("sentiment.json"),
-        portfolio_llm=portfolio_llm,
-        checkpoint_db_path=str(tmp_path / "argus_graph_test.db"),
-    )
-    config = {"configurable": {"thread_id": str(uuid4())}}
-
-    with mock.patch("argus.orchestration.graph.get_cultural_memory") as mock_get_cultural_memory:
-        mock_get_cultural_memory.return_value = mock.Mock(
-            retrieve_wisdom=mock.Mock(return_value=[]),
-            retrieve_warnings=mock.Mock(return_value=[]),
-            get_agent_accuracy=mock.Mock(return_value=(0.5, 0)),
-            store_decision_snapshot=mock.Mock(),
-        )
-        final_state = graph.invoke(state, config)
+    graph = _build_fixture_graph(tmp_path, portfolio_llm=portfolio_llm)
+    final_state = _invoke(graph, _state_missing_nvda_adx())
 
     agg = final_state["aggregated_signals"]["NVDA"]
     assert agg.agents_present == ["fundamental", "sentiment"]
@@ -416,13 +350,7 @@ def test_cultural_memory_import_error_degrades_instead_of_crashing_the_run(tmp_p
     retrieve_cultural_memory to an empty result and signal_aggregation's reliability
     lookup to the 0.5 prior, rather than crashing the whole graph run.
     """
-    graph = build_graph(
-        market_data=FixtureMarketDataProvider(),
-        fundamental_llm=_per_ticker_llm("fundamental.json"),
-        sentiment_llm=_per_ticker_llm("sentiment.json"),
-        portfolio_llm=_portfolio_llm(),
-        checkpoint_db_path=str(tmp_path / "argus_graph_test.db"),
-    )
+    graph = _build_fixture_graph(tmp_path)
     config = {"configurable": {"thread_id": str(uuid4())}}
 
     with mock.patch("argus.orchestration.graph.get_cultural_memory") as mock_get_cultural_memory:
@@ -443,29 +371,12 @@ def test_cultural_memory_import_error_degrades_instead_of_crashing_the_run(tmp_p
 
 def test_golden_dag_output_is_stable_across_runs(tmp_path):
     """Two independent invocations of the same fixture-backed graph are byte-identical."""
-    first = _run_fixture_graph(tmp_path)
-    second = _run_fixture_graph(tmp_path)
+    first = _invoke(_build_fixture_graph(tmp_path))
+    second = _invoke(_build_fixture_graph(tmp_path))
 
     first_alloc = _strip_volatile(first["portfolio_allocation"].model_dump(mode="json"))
     second_alloc = _strip_volatile(second["portfolio_allocation"].model_dump(mode="json"))
     assert first_alloc == second_alloc
 
-    first_agg = {
-        t: _strip_volatile(sig.model_dump(mode="json"))
-        for t, sig in first["aggregated_signals"].items()
-    }
-    second_agg = {
-        t: _strip_volatile(sig.model_dump(mode="json"))
-        for t, sig in second["aggregated_signals"].items()
-    }
-    assert first_agg == second_agg
-
-    first_risk = {
-        t: _strip_volatile(sig.model_dump(mode="json"))
-        for t, sig in first["risk_assessments"].items()
-    }
-    second_risk = {
-        t: _strip_volatile(sig.model_dump(mode="json"))
-        for t, sig in second["risk_assessments"].items()
-    }
-    assert first_risk == second_risk
+    for key in ("aggregated_signals", "risk_assessments"):
+        assert _strip_volatile_signals(first[key]) == _strip_volatile_signals(second[key])

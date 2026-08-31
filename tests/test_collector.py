@@ -14,18 +14,14 @@ Not responsible for:
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 from unittest import mock
 
 import pytest
 
 from argus.orchestration.collector import run_collection_cycle
 
-
-def _pipeline(session_states: dict) -> mock.Mock:
-    """Builds a fake MFTDataPipeline whose run_once() returns the given session states."""
-    pipeline = mock.Mock()
-    pipeline.run_once = mock.AsyncMock(return_value=session_states)
-    return pipeline
+_SESSION_STATES = {"AAPL": {"timestamp": "2024-01-02T09:30:00-05:00"}}
 
 
 def _graph() -> mock.Mock:
@@ -33,6 +29,29 @@ def _graph() -> mock.Mock:
     graph = mock.Mock()
     graph.invoke = mock.Mock(return_value={"decisions": [], "errors": [], "macro_context": None})
     return graph
+
+
+async def _run_cycle(graph: mock.Mock, **kwargs: Any):
+    """Runs one cycle over a one-ticker universe against a fake pipeline.
+
+    Args:
+        graph: The fake compiled graph the cycle should invoke.
+        **kwargs: Passed straight through, for the analyze_lock each test varies.
+
+    Returns:
+        The CollectionResult the cycle produced.
+    """
+    pipeline = mock.Mock()
+    pipeline.run_once = mock.AsyncMock(return_value=_SESSION_STATES)
+    return await run_collection_cycle(
+        universe=["AAPL"],
+        total_wealth=100_000.0,
+        invest_pct=0.5,
+        risk_tolerance="MODERATE",
+        pipeline=pipeline,
+        compiled_graph=graph,
+        **kwargs,
+    )
 
 
 @pytest.mark.asyncio
@@ -43,15 +62,7 @@ async def test_run_collection_cycle_skips_when_analyze_lock_is_held():
     graph = _graph()
     graph.invoke.side_effect = AssertionError("must not run while /analyze holds the lock")
 
-    result = await run_collection_cycle(
-        universe=["AAPL"],
-        total_wealth=100_000.0,
-        invest_pct=0.5,
-        risk_tolerance="MODERATE",
-        pipeline=_pipeline({"AAPL": {"timestamp": "2024-01-02T09:30:00-05:00"}}),
-        compiled_graph=graph,
-        analyze_lock=lock,
-    )
+    result = await _run_cycle(graph, analyze_lock=lock)
 
     assert result.ran is False
     assert "already in progress" in result.reason
@@ -64,15 +75,7 @@ async def test_run_collection_cycle_runs_when_analyze_lock_is_free():
     lock = asyncio.Semaphore(1)
     graph = _graph()
 
-    result = await run_collection_cycle(
-        universe=["AAPL"],
-        total_wealth=100_000.0,
-        invest_pct=0.5,
-        risk_tolerance="MODERATE",
-        pipeline=_pipeline({"AAPL": {"timestamp": "2024-01-02T09:30:00-05:00"}}),
-        compiled_graph=graph,
-        analyze_lock=lock,
-    )
+    result = await _run_cycle(graph, analyze_lock=lock)
 
     assert result.ran is True
     graph.invoke.assert_called_once()
@@ -84,14 +87,7 @@ async def test_run_collection_cycle_runs_unguarded_when_analyze_lock_is_none():
     """No analyze_lock (scripts/collect_session.py's standalone caller) runs unguarded."""
     graph = _graph()
 
-    result = await run_collection_cycle(
-        universe=["AAPL"],
-        total_wealth=100_000.0,
-        invest_pct=0.5,
-        risk_tolerance="MODERATE",
-        pipeline=_pipeline({"AAPL": {"timestamp": "2024-01-02T09:30:00-05:00"}}),
-        compiled_graph=graph,
-    )
+    result = await _run_cycle(graph)
 
     assert result.ran is True
     graph.invoke.assert_called_once()

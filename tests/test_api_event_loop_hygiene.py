@@ -30,9 +30,8 @@ _ET = ZoneInfo("America/New_York")
 
 @pytest.fixture(autouse=True)
 def _reset_singletons(monkeypatch):
-    """Installs a fresh live session cache around each test."""
+    """Installs a fresh live session cache for each test."""
     monkeypatch.setattr(api_main, "_live_cache", LiveSessionCache(interval_minutes=1))
-    yield
 
 
 @pytest.fixture

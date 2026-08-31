@@ -41,7 +41,7 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -106,6 +106,11 @@ _graph = None
 _macro_status_agent: MacroStatisticalAgent | None = None
 
 
+def _data_path(filename: str) -> str:
+    """Resolves a filename under the currently configured ARGUS_DATA_DIR."""
+    return f"{settings.ARGUS_DATA_DIR}/{filename}"
+
+
 async def _mft_session_callback(session_states: dict) -> None:
     """Receives compressed technical feature dicts from the MFT pipeline on every sweep.
 
@@ -146,6 +151,21 @@ def _log_task_exception(task: asyncio.Task, name: str) -> None:
         logger.error("[%s] background task crashed: %s", name, exc, exc_info=exc)
 
 
+def _start_background_task(coro, name: str) -> asyncio.Task:
+    """Schedules a coroutine as a background task that logs its own crash.
+
+    Args:
+        coro: The coroutine to run for the lifetime of the app.
+        name: Label used in the crash log line, e.g. "MFTDataPipeline".
+
+    Returns:
+        The created task, which the caller must keep a reference to.
+    """
+    task = asyncio.create_task(coro)
+    task.add_done_callback(lambda t: _log_task_exception(t, name))
+    return task
+
+
 async def _collector_loop(pipeline: MFTDataPipeline, compiled_graph) -> None:
     """Runs run_collection_cycle on a fixed interval for as long as the app is alive.
 
@@ -166,7 +186,7 @@ async def _collector_loop(pipeline: MFTDataPipeline, compiled_graph) -> None:
                 risk_tolerance=settings.ARGUS_RISK_TOLERANCE,
                 pipeline=pipeline,
                 compiled_graph=compiled_graph,
-                decisions_log_path=f"{settings.ARGUS_DATA_DIR}/decisions.jsonl",
+                decisions_log_path=_data_path("decisions.jsonl"),
                 analyze_lock=_analyze_semaphore,
             )
             logger.info("[Collector] cycle result: %s", _last_collection_result)
@@ -189,15 +209,14 @@ def _reconcile_once() -> None:
     report = run_reconciliation_pass(
         LiveMarketDataProvider(),
         get_cultural_memory(),
-        f"{settings.ARGUS_DATA_DIR}/paper_equity.json",
-        decisions_log_path=f"{settings.ARGUS_DATA_DIR}/decisions.jsonl",
-        checkpoint_db_path=f"{settings.ARGUS_DATA_DIR}/argus_graph.db",
+        _data_path("paper_equity.json"),
+        decisions_log_path=_data_path("decisions.jsonl"),
+        checkpoint_db_path=_data_path("argus_graph.db"),
     )
     logger.info(
         "[Reconcile] stored %d/%d outcome(s)", report.outcomes_stored, report.decisions_loaded
     )
-    # Only meaningful once the paper-book step actually ran (see docstring) —
-    # otherwise these are still their zeroed-out defaults, not a real value
+    # Zeroed-out defaults rather than real values unless the paper-book step ran
     if report.paper_book_updated:
         logger.info(
             "[Reconcile] equity=$%.2f (drawdown=%.1f%%)", report.equity, report.drawdown * 100
@@ -269,7 +288,7 @@ def _configure_logging() -> None:
 
 
 def _assert_single_worker() -> None:
-    """Fails fast on the two argv/env spellings of "more than one worker" this can detect.
+    """Fails fast on the argv/env spellings of "more than one worker" this can detect.
 
     The rate governor and kill switch are in-process singletons (see
     argus/orchestration/governor.py). A second worker process would run its
@@ -291,32 +310,27 @@ def _assert_single_worker() -> None:
             than "1".
     """
     argv = sys.argv
+    requested: list[tuple[str, str]] = []
+
     if "--workers" in argv:
         idx = argv.index("--workers")
-        if idx + 1 < len(argv) and argv[idx + 1] != "1":
-            raise RuntimeError(
-                f"ARGUS must run with --workers 1 (in-process governor/kill-switch "
-                f"singletons); got --workers {argv[idx + 1]}. This is only a pre-flight "
-                f"check of argv/env — it can't see a gunicorn config file or "
-                f"uvicorn.run(workers=N), and _acquire_process_lock's flock is the real guard."
-            )
+        if idx + 1 < len(argv):
+            requested.append((f"--workers {argv[idx + 1]}", argv[idx + 1]))
     for arg in argv:
-        if arg.startswith("--workers=") and arg.removeprefix("--workers=") != "1":
-            raise RuntimeError(
-                f"ARGUS must run with --workers 1 (in-process governor/kill-switch "
-                f"singletons); got {arg}. This is only a pre-flight check of argv/env — it "
-                f"can't see a gunicorn config file or uvicorn.run(workers=N), and "
-                f"_acquire_process_lock's flock is the real guard."
-            )
-
+        if arg.startswith("--workers="):
+            requested.append((arg, arg.removeprefix("--workers=")))
     web_concurrency = os.environ.get("WEB_CONCURRENCY")
-    if web_concurrency is not None and web_concurrency != "1":
-        raise RuntimeError(
-            f"ARGUS must run with WEB_CONCURRENCY=1 (in-process governor/kill-switch "
-            f"singletons); got WEB_CONCURRENCY={web_concurrency}. This is only a pre-flight "
-            f"check of argv/env — it can't see a gunicorn config file or "
-            f"uvicorn.run(workers=N), and _acquire_process_lock's flock is the real guard."
-        )
+    if web_concurrency is not None:
+        requested.append((f"WEB_CONCURRENCY={web_concurrency}", web_concurrency))
+
+    for spelling, count in requested:
+        if count != "1":
+            raise RuntimeError(
+                "ARGUS must run with a single worker (in-process governor/kill-switch "
+                f"singletons); got {spelling}. This is only a pre-flight check of argv/env — it "
+                "can't see a gunicorn config file or uvicorn.run(workers=N), and "
+                "_acquire_process_lock's flock is the real guard."
+            )
 
 
 def _acquire_process_lock() -> None:
@@ -338,7 +352,7 @@ def _acquire_process_lock() -> None:
         RuntimeError: If another process already holds the lock.
     """
     global _process_lock_file
-    lock_path = Path(settings.ARGUS_DATA_DIR) / "argus.lock"
+    lock_path = Path(_data_path("argus.lock"))
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_file = open(lock_path, "w")
     try:
@@ -403,7 +417,7 @@ async def lifespan(app: FastAPI):
     _assert_registered_models()
     _acquire_process_lock()
 
-    _graph = build_graph(checkpoint_db_path=f"{settings.ARGUS_DATA_DIR}/argus_graph.db")
+    _graph = build_graph(checkpoint_db_path=_data_path("argus_graph.db"))
 
     _macro_status_agent = MacroStatisticalAgent()
     if _macro_status_agent.classifier.is_fitted:
@@ -417,24 +431,25 @@ async def lifespan(app: FastAPI):
     # rather than waiting for a first /analyze call to register any tickers
     _mft_pipeline = MFTDataPipeline(tickers=list(settings.ARGUS_UNIVERSE))
     _live_cache = LiveSessionCache(interval_minutes=_mft_pipeline.interval_minutes)
-    _pipeline_task = asyncio.create_task(_mft_pipeline.start(on_session_ready=_mft_session_callback))
-    _pipeline_task.add_done_callback(lambda t: _log_task_exception(t, "MFTDataPipeline"))
+    _pipeline_task = _start_background_task(
+        _mft_pipeline.start(on_session_ready=_mft_session_callback), "MFTDataPipeline"
+    )
     logger.info(
         "[Startup] MFT pipeline background task launched: %d ticker(s).",
         len(settings.ARGUS_UNIVERSE),
     )
 
     if settings.ARGUS_COLLECTOR_ENABLED:
-        _collector_task = asyncio.create_task(_collector_loop(_mft_pipeline, _graph))
-        _collector_task.add_done_callback(lambda t: _log_task_exception(t, "CollectorLoop"))
+        _collector_task = _start_background_task(
+            _collector_loop(_mft_pipeline, _graph), "CollectorLoop"
+        )
         logger.info(
             "[Startup] Unattended collector loop launched (interval=%ds).",
             settings.ARGUS_COLLECTOR_INTERVAL_SECONDS,
         )
 
     if settings.ARGUS_RECONCILE_ENABLED:
-        _reconcile_task = asyncio.create_task(_reconcile_loop())
-        _reconcile_task.add_done_callback(lambda t: _log_task_exception(t, "ReconcileLoop"))
+        _reconcile_task = _start_background_task(_reconcile_loop(), "ReconcileLoop")
         logger.info(
             "[Startup] Daily reconciliation loop launched (hour=%d ET).",
             settings.ARGUS_RECONCILE_HOUR_ET,
@@ -444,17 +459,17 @@ async def lifespan(app: FastAPI):
     # ARGUS_TOTAL_WEALTH if none exists yet) so a process restart doesn't
     # silently forget an already-realized drawdown; /kill-switch/reset
     # re-bases if a real session base is known instead
-    _book = paper_book.load(f"{settings.ARGUS_DATA_DIR}/paper_equity.json")
+    book = paper_book.load(_data_path("paper_equity.json"))
     initialize_kill_switch(
-        risk_tolerance=settings.ARGUS_RISK_TOLERANCE, portfolio_value=_book.high_water_mark
+        risk_tolerance=settings.ARGUS_RISK_TOLERANCE, portfolio_value=book.high_water_mark
     )
-    _ks = get_kill_switch()
-    if _ks is not None:
-        _ks.update_portfolio_value(_book.equity)
+    ks = get_kill_switch()
+    if ks is not None:
+        ks.update_portfolio_value(book.equity)
     logger.info(
         "[Startup] Kill switch initialized (paper equity=$%.2f, peak=$%.2f).",
-        _book.equity,
-        _book.high_water_mark,
+        book.equity,
+        book.high_water_mark,
     )
 
     logger.info("[Startup] Governor initialized: %s", governor.get_usage_report())
@@ -471,9 +486,9 @@ async def lifespan(app: FastAPI):
             with suppress(asyncio.CancelledError):
                 await task
 
-    _ks = get_kill_switch()
-    if _ks is not None:
-        await asyncio.to_thread(_ks.stop, 5.0)
+    ks = get_kill_switch()
+    if ks is not None:
+        await asyncio.to_thread(ks.stop, 5.0)
 
     if _mft_pipeline is not None:
         # Pipeline-owned so it can wait out an orphaned buffer worker rather than
@@ -496,7 +511,7 @@ app.add_middleware(
 )
 
 
-async def require_api_key(x_api_key: Optional[str] = Header(default=None)) -> None:
+async def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
     """Gates mutating endpoints (/analyze, /kill-switch/reset) behind a shared secret.
 
     A blank ARGUS_API_KEY (the default) disables the check entirely, so local
@@ -510,9 +525,7 @@ async def require_api_key(x_api_key: Optional[str] = Header(default=None)) -> No
     Raises:
         HTTPException 401: If ARGUS_API_KEY is set and the header doesn't match.
     """
-    if not settings.ARGUS_API_KEY:
-        return
-    if x_api_key != settings.ARGUS_API_KEY:
+    if settings.ARGUS_API_KEY and x_api_key != settings.ARGUS_API_KEY:
         raise HTTPException(401, "Missing or invalid X-API-Key header.")
 
 
@@ -542,13 +555,7 @@ class AnalysisRequest(BaseModel):
         invalid = [t for t in normalized if not TICKER_PATTERN.match(t)]
         if invalid:
             raise ValueError(f"Invalid ticker symbol(s): {invalid}")
-        seen: set[str] = set()
-        deduped = []
-        for t in normalized:
-            if t not in seen:
-                seen.add(t)
-                deduped.append(t)
-        return deduped
+        return list(dict.fromkeys(normalized))
 
 
 class AnalysisResponse(BaseModel):
@@ -590,18 +597,17 @@ def _background_task_status(task: asyncio.Task | None) -> dict:
 async def health():
     """Validates connectivity to model backends, API quotas, and system diagnostics.
 
-    Unlike the P0 gaps it replaces, this reads background-task liveness, the
-    kill switch's halt state, and cache freshness — not just in-memory
-    governor counters — so a dead pipeline/collector/reconcile loop shows up
-    here instead of staying invisible behind a green /health (OBS-2).
+    Reads background-task liveness, the kill switch's halt state, and cache
+    freshness — not just in-memory governor counters — so a dead
+    pipeline/collector/reconcile loop shows up here instead of staying
+    invisible behind a green /health (OBS-2).
 
     Raises:
         HTTPException 503: If any background task (MFT pipeline, collector,
             or reconciliation loop) has stopped running.
     """
     try:
-        llama_cap = governor.get_remaining_capacity(settings.ARGUS_PORTFOLIO_MODEL)
-        can_make_calls = llama_cap > 0
+        can_make_calls = governor.get_remaining_capacity(settings.ARGUS_PORTFOLIO_MODEL) > 0
     except Exception:
         can_make_calls = False
 
@@ -611,6 +617,8 @@ async def health():
         "reconcile": _background_task_status(_reconcile_task),
     }
     dead_tasks = [name for name, status in background_tasks.items() if not status["alive"]]
+    if dead_tasks:
+        raise HTTPException(503, f"Background task(s) not running: {', '.join(dead_tasks)}")
 
     ks = get_kill_switch()
 
@@ -620,8 +628,8 @@ async def health():
         if cache_age_seconds:
             newest_cache_entry_age_seconds = min(cache_age_seconds.values())
 
-    body = {
-        "status": "ok" if not dead_tasks else "degraded",
+    return {
+        "status": "ok",
         "model_versions": {
             "synthesis": settings.ARGUS_PORTFOLIO_MODEL,
             "sentiment": settings.ARGUS_SENTIMENT_MODEL,
@@ -634,10 +642,6 @@ async def health():
         "kill_switch_halted": ks.is_halted if ks else False,
         "newest_cache_entry_age_seconds": newest_cache_entry_age_seconds,
     }
-
-    if dead_tasks:
-        raise HTTPException(503, f"Background task(s) not running: {', '.join(dead_tasks)}")
-    return body
 
 
 @app.get("/pipeline/status")
@@ -712,22 +716,22 @@ async def analyze(req: AnalysisRequest):
         HTTPException 500: If the LangGraph execution fails or produces no allocation.
     """
     ks = get_kill_switch()
-    if ks and ks.is_halted:
-        raise HTTPException(503, "System halted. Kill switch triggered. Manual reset required.")
-    if ks and not ks.new_positions_allowed:
-        raise HTTPException(503, "New positions blocked. VIX above threshold.")
-    if ks and req.risk_tolerance != ks.risk_tolerance:
-        logger.warning(
-            "[API] Request risk_tolerance=%s differs from the kill switch's configured "
-            "risk_tolerance=%s; the configured threshold still governs this request.",
-            req.risk_tolerance,
-            ks.risk_tolerance,
-        )
+    if ks:
+        if ks.is_halted:
+            raise HTTPException(503, "System halted. Kill switch triggered. Manual reset required.")
+        if not ks.new_positions_allowed:
+            raise HTTPException(503, "New positions blocked. VIX above threshold.")
+        if req.risk_tolerance != ks.risk_tolerance:
+            logger.warning(
+                "[API] Request risk_tolerance=%s differs from the kill switch's configured "
+                "risk_tolerance=%s; the configured threshold still governs this request.",
+                req.risk_tolerance,
+                ks.risk_tolerance,
+            )
 
-    # Daily bars would mismatch the resolution the technical agent expects, so a
-    # closed market (checked first) means idle rather than a lower-resolution
-    # fallback. Checking it first also confines every age check below to a
-    # weekday 09:30-16:00 ET window, eliminating the weekend/holiday false positive.
+    # Daily bars would mismatch the resolution the technical agent expects, and
+    # checking this first confines every age check below to a weekday
+    # 09:30-16:00 ET window, eliminating the weekend/holiday false positive
     if _mft_pipeline is None or not _mft_pipeline.is_market_hours():
         raise HTTPException(
             503,
@@ -841,9 +845,7 @@ async def analyze(req: AnalysisRequest):
     # collector (RE-11) — without this, decisions.jsonl (the only source
     # reconcile_decisions reads) never sees a request served through this
     # endpoint, and an API-only deployment reconciles nothing
-    append_decisions_jsonl(
-        final_state.get("decisions") or [], f"{settings.ARGUS_DATA_DIR}/decisions.jsonl"
-    )
+    append_decisions_jsonl(final_state.get("decisions") or [], _data_path("decisions.jsonl"))
 
     # Re-checked rather than trusted from before the (potentially many-second)
     # graph run: the kill switch is process-global and the reconcile loop can
@@ -909,14 +911,15 @@ async def reset_kill_switch(new_inception_value: float = Query(gt=1000)):
         HTTPException 404: If the kill switch has not been initialized.
     """
     ks = get_kill_switch()
-    if ks:
-        book_path = f"{settings.ARGUS_DATA_DIR}/paper_equity.json"
-        book = paper_book.load(book_path)
-        book.rebase(new_inception_value)
-        paper_book.save(book, book_path)
-        ks.reset(new_inception_value)
-        return {"status": "Reset successful"}
-    raise HTTPException(404, "Kill switch not initialized")
+    if ks is None:
+        raise HTTPException(404, "Kill switch not initialized")
+
+    book_path = _data_path("paper_equity.json")
+    book = paper_book.load(book_path)
+    book.rebase(new_inception_value)
+    paper_book.save(book, book_path)
+    ks.reset(new_inception_value)
+    return {"status": "Reset successful"}
 
 
 @app.get("/kill-switch/status")

@@ -18,26 +18,25 @@ Dependencies:
 
 from __future__ import annotations
 
-import logging
 import math
 import uuid
 import warnings
+from collections import Counter
 from datetime import date, datetime
 from enum import Enum
-from typing import Annotated, Any, Literal, Optional
+from typing import Annotated, Literal
 
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     Field,
+    computed_field,
     field_validator,
     model_validator,
-    computed_field,
 )
 
 from argus.params import PORTFOLIO, SYSTEM
 from argus.schemas.prompting import PromptText
-
-logger = logging.getLogger(__name__)
 
 
 class Signal(str, Enum):
@@ -153,10 +152,20 @@ def _clamp_conviction(v: float) -> float:
         warnings.warn(
             f"conviction={v:.4f} exceeds maximum {_CONVICTION_MAX}; "
             "clamping to 0.95 — check your scoring function.",
-            stacklevel=4,
+            stacklevel=3,
         )
         return _CONVICTION_MAX
     return v
+
+
+# BeforeValidator is listed after the constraints so it wraps them: the clamp
+# runs first and the ge/le check sees the clamped value. Reversing the order
+# would make a conviction of 0.99 a ValidationError instead of a warning.
+_Conviction = Annotated[
+    float,
+    Field(ge=0.0, le=_CONVICTION_MAX),
+    BeforeValidator(_clamp_conviction),
+]
 
 
 class MacroContext(BaseModel):
@@ -248,11 +257,8 @@ class TechnicalSignal(BaseModel):
     momentum_1d: float = Field(..., description="1-day log-return")
 
     signal: Signal = Field(..., description="Directional label derived from net_score")
-    conviction: float = Field(
-        ...,
-        ge=0.0,
-        le=_CONVICTION_MAX,
-        description="Normalised confidence in the signal [0, 0.95]",
+    conviction: _Conviction = Field(
+        ..., description="Normalised confidence in the signal [0, 0.95]"
     )
     net_score: float = Field(
         ...,
@@ -263,16 +269,6 @@ class TechnicalSignal(BaseModel):
 
     api_calls_used: int = Field(0, ge=0, description="External API calls consumed")
     timestamp: datetime = Field(..., description="Naive local timestamp of signal production")
-
-    @field_validator("conviction", mode="before")
-    @classmethod
-    def cap_conviction(cls, v: float) -> float:
-        """Silently clamps conviction to the 0.95 maximum.
-
-        Args:
-            v: Raw conviction value.
-        """
-        return _clamp_conviction(v)
 
 
 class FundamentalVerdict(BaseModel):
@@ -286,21 +282,13 @@ class FundamentalVerdict(BaseModel):
     signal: Annotated[Signal, PromptText("signal (string)")] = Field(
         ..., description="Directional label"
     )
-    conviction: Annotated[float, PromptText("conviction (float 0.0–1.0)")] = Field(
-        ..., ge=0.0, le=_CONVICTION_MAX
-    )
+    conviction: Annotated[_Conviction, PromptText("conviction (float 0.0–1.0)")]
     moat_score: Annotated[float, PromptText("moat_score (int 1–10)")] = Field(
         ..., ge=0.0, le=10.0, description="Qualitative competitive moat [0, 10]"
     )
     reasoning: Annotated[str, PromptText("reasoning (string ≤80 words, no markdown)")] = Field(
         ..., description="LLM-generated investment thesis"
     )
-
-    @field_validator("conviction", mode="before")
-    @classmethod
-    def cap_conviction(cls, v: float) -> float:
-        """Silently clamps conviction to the 0.95 maximum."""
-        return _clamp_conviction(v)
 
 
 class FundamentalSignal(BaseModel):
@@ -324,7 +312,7 @@ class FundamentalSignal(BaseModel):
     data_as_of_date: date = Field(..., description="Point-in-time date for financial data")
 
     signal: Signal = Field(..., description="Directional label")
-    conviction: float = Field(..., ge=0.0, le=_CONVICTION_MAX)
+    conviction: _Conviction
     moat_score: float = Field(
         ..., ge=0.0, le=10.0, description="Qualitative competitive moat [0, 10]"
     )
@@ -334,12 +322,6 @@ class FundamentalSignal(BaseModel):
 
     api_calls_used: int = Field(1, ge=0)
     timestamp: datetime = Field(..., description="Naive local timestamp of signal production")
-
-    @field_validator("conviction", mode="before")
-    @classmethod
-    def cap_conviction(cls, v: float) -> float:
-        """Silently clamps conviction to the 0.95 maximum."""
-        return _clamp_conviction(v)
 
 
 class SentimentVerdict(BaseModel):
@@ -352,9 +334,7 @@ class SentimentVerdict(BaseModel):
     signal: Annotated[Signal, PromptText('"BULLISH|BEARISH|NEUTRAL"')] = Field(
         ..., description="Directional label"
     )
-    conviction: Annotated[float, PromptText("<float 0.0–1.0>")] = Field(
-        ..., ge=0.0, le=_CONVICTION_MAX
-    )
+    conviction: Annotated[_Conviction, PromptText("<float 0.0–1.0>")]
     sentiment_decay_risk: Annotated[
         Literal["LOW", "MEDIUM", "HIGH"], PromptText('"LOW|MEDIUM|HIGH"')
     ] = Field(..., description="Estimated speed at which the sentiment signal will decay")
@@ -362,19 +342,13 @@ class SentimentVerdict(BaseModel):
         ..., description="LLM rationale for the signal"
     )
 
-    @field_validator("conviction", mode="before")
-    @classmethod
-    def cap_conviction(cls, v: float) -> float:
-        """Silently clamps conviction to the 0.95 maximum."""
-        return _clamp_conviction(v)
-
 
 class SentimentSignal(BaseModel):
     """News sentiment features with associated signal conviction scores."""
 
     ticker: str = Field(..., description="Equity ticker symbol")
 
-    finbert_net_score: Optional[float] = Field(
+    finbert_net_score: float | None = Field(
         None,
         ge=-1.0,
         le=1.0,
@@ -402,7 +376,7 @@ class SentimentSignal(BaseModel):
     upcoming_catalyst: bool = Field(..., description="True if earnings / FDA / FOMC within 14 days")
 
     signal: Signal = Field(..., description="Directional label")
-    conviction: float = Field(..., ge=0.0, le=_CONVICTION_MAX)
+    conviction: _Conviction
     sentiment_decay_risk: Literal["LOW", "MEDIUM", "HIGH"] = Field(
         ..., description="Estimated speed at which the sentiment signal will decay"
     )
@@ -412,14 +386,8 @@ class SentimentSignal(BaseModel):
     api_calls_used: int = Field(1, ge=0)
     timestamp: datetime = Field(..., description="Naive local timestamp of signal production")
 
-    @field_validator("conviction", mode="before")
-    @classmethod
-    def cap_conviction(cls, v: float) -> float:
-        """Silently clamps conviction to the 0.95 maximum."""
-        return _clamp_conviction(v)
-
     @model_validator(mode="after")
-    def pct_sums_to_one_approx(self) -> "SentimentSignal":
+    def pct_sums_to_one_approx(self) -> SentimentSignal:
         """Warns (not errors) if pct_positive + pct_negative exceeds 1.0.
 
         A sum > 1 indicates a normalisation bug in the upstream FinBERT aggregation
@@ -481,7 +449,7 @@ class RiskAssessment(BaseModel):
     timestamp: datetime = Field(..., description="Naive local timestamp of signal production")
 
     @model_validator(mode="after")
-    def approved_le_proposed(self) -> "RiskAssessment":
+    def approved_le_proposed(self) -> RiskAssessment:
         """Enforces that approved_weight never exceeds proposed_weight.
 
         Violated when an upstream bug or rounding error inflates the approved weight.
@@ -500,7 +468,7 @@ class AggregatedSignal(BaseModel):
 
     ticker: str = Field(..., description="Equity ticker symbol")
     signal: Signal = Field(..., description="Aggregated directional label")
-    conviction: float = Field(..., ge=0.0, le=_CONVICTION_MAX, description="Aggregated conviction score")
+    conviction: _Conviction = Field(..., description="Aggregated conviction score")
     weighted_votes: dict[str, float] = Field(
         ...,
         description=(
@@ -661,14 +629,14 @@ class PortfolioAllocation(BaseModel):
         keys positions by ticker; a duplicate would silently overwrite one
         of the two allocations rather than raising.
         """
-        seen = [pos.ticker for pos in portfolio]
-        duplicates = {t for t in seen if seen.count(t) > 1}
+        counts = Counter(pos.ticker for pos in portfolio)
+        duplicates = sorted(ticker for ticker, n in counts.items() if n > 1)
         if duplicates:
-            raise ValueError(f"Duplicate ticker(s) in portfolio: {sorted(duplicates)}")
+            raise ValueError(f"Duplicate ticker(s) in portfolio: {duplicates}")
         return portfolio
 
     @model_validator(mode="after")
-    def total_allocation_sums_to_one(self) -> "PortfolioAllocation":
+    def total_allocation_sums_to_one(self) -> PortfolioAllocation:
         """Verifies that equity weights + cash_reserve_pct sum to 1.0 ± 0.05.
 
         The upper bound (> 1.01) prevents leverage by catching over-allocation.
@@ -720,14 +688,8 @@ class ARGUSDecision(BaseModel):
     @property
     def total_api_calls(self) -> int:
         """Sums api_calls_used from every non-None child schema."""
-        sources: list[Any] = [
-            self.technical,
-            self.macro,
-            self.fundamental,
-            self.sentiment,
-            self.risk,
-        ]
-        return sum(getattr(s, "api_calls_used", 0) for s in sources if s is not None)
+        sources = [self.technical, self.macro, self.fundamental, self.sentiment, self.risk]
+        return sum(s.api_calls_used for s in sources if s is not None)
 
 
 __all__ = [

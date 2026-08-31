@@ -4,9 +4,9 @@ tests/test_kill_switch.py
 Tests for argus/risk/kill_switch.py (drawdown/VIX circuit breaker) and
 argus/risk/paper_book.py (the synthetic equity curve that feeds it).
 
-fetch_vix is mocked throughout; no test starts the daemon thread or sleeps —
-_check() is driven directly, following the pattern used to reproduce these
-findings originally.
+fetch_vix is mocked throughout. Outside the lifecycle tests (which start and
+stop the monitor thread on a 1-hour interval), _check() is driven directly, so
+no test sleeps on a real check interval.
 """
 
 from __future__ import annotations
@@ -25,6 +25,9 @@ from argus.risk import paper_book
 from argus.risk.kill_switch import KillSwitch, initialize_kill_switch
 from argus.risk.paper_book import PaperBook, compute_run_returns
 from argus.schemas.signals import ARGUSDecision, PositionAllocation, Signal, TechnicalSignal
+
+
+_FETCH_VIX = "argus.data.fetchers.fetch_vix"
 
 
 @pytest.fixture(autouse=True)
@@ -64,6 +67,26 @@ def _expire_vix_cache(ks: KillSwitch) -> None:
     ks._vix_cache_fetched_at = None
 
 
+def _check_at_vix(ks: KillSwitch, vix: float) -> None:
+    """Drives one _check() against a mocked VIX reading."""
+    with mock.patch(_FETCH_VIX, return_value=vix):
+        ks._check()
+
+
+def _seed_persisted_halt() -> KillSwitch:
+    """Writes a halt dump into the cwd, as a prior halted process would have left behind.
+
+    Returns:
+        The seed KillSwitch that wrote it, for comparing against the restored one.
+    """
+    seed = _make_ks("MODERATE", inception=100_000.0)
+    seed._current_portfolio_value = 80_000.0
+    seed._halt_reason = "Drawdown 20.0% >= 12% limit (MODERATE)"
+    seed._halt_time = datetime.now()
+    seed._persist_halt_event(seed._halt_reason, seed._halt_time, 0.20, 15.0)
+    return seed
+
+
 # ---------------------------------------------------------------------------
 # Drawdown thresholds (KS-4, KS-5)
 # ---------------------------------------------------------------------------
@@ -73,7 +96,7 @@ def _expire_vix_cache(ks: KillSwitch) -> None:
     "tolerance,threshold",
     [("CONSERVATIVE", 0.08), ("MODERATE", 0.12), ("AGGRESSIVE", 0.18)],
 )
-@mock.patch("argus.data.fetchers.fetch_vix", return_value=15.0)
+@mock.patch(_FETCH_VIX, return_value=15.0)
 def test_drawdown_halts_at_tier_threshold(mock_vix, tolerance, threshold):
     """The drawdown halt fires once realized drawdown reaches each tier's own threshold."""
     ks = _make_ks(tolerance, inception=100_000.0)
@@ -82,7 +105,7 @@ def test_drawdown_halts_at_tier_threshold(mock_vix, tolerance, threshold):
     assert ks.is_halted
 
 
-@mock.patch("argus.data.fetchers.fetch_vix", return_value=15.0)
+@mock.patch(_FETCH_VIX, return_value=15.0)
 def test_drawdown_does_not_halt_below_threshold(mock_vix):
     """A drawdown just short of the tier threshold does not halt."""
     ks = _make_ks("MODERATE", inception=100_000.0)
@@ -91,7 +114,7 @@ def test_drawdown_does_not_halt_below_threshold(mock_vix):
     assert not ks.is_halted
 
 
-@mock.patch("argus.data.fetchers.fetch_vix", return_value=15.0)
+@mock.patch(_FETCH_VIX, return_value=15.0)
 def test_zero_portfolio_value_registers_as_real_drawdown(mock_vix):
     """KS-4: a literal 0.0 portfolio value must be treated as a real value, not 'unset'."""
     ks = _make_ks("CONSERVATIVE", inception=100_000.0)
@@ -101,7 +124,7 @@ def test_zero_portfolio_value_registers_as_real_drawdown(mock_vix):
     assert ks.status.realized_drawdown == pytest.approx(1.0)
 
 
-@mock.patch("argus.data.fetchers.fetch_vix", return_value=15.0)
+@mock.patch(_FETCH_VIX, return_value=15.0)
 def test_peak_to_trough_drawdown_not_inception_relative(mock_vix):
     """KS-5: drawdown is measured from the running peak, not the stale inception value.
 
@@ -124,9 +147,8 @@ def test_peak_to_trough_drawdown_not_inception_relative(mock_vix):
 def test_reset_clears_halt_and_reseeds_high_water_mark():
     """reset() clears the halt/blackout and re-bases both inception and the peak."""
     ks = _make_ks("MODERATE", inception=100_000.0)
-    with mock.patch("argus.data.fetchers.fetch_vix", return_value=15.0):
-        ks.update_portfolio_value(80_000.0)
-        ks._check()
+    ks.update_portfolio_value(80_000.0)
+    _check_at_vix(ks, 15.0)
     assert ks.is_halted
 
     ks.reset(120_000.0)
@@ -144,20 +166,18 @@ def test_reset_clears_halt_and_reseeds_high_water_mark():
 def test_vix_blackout_sets_and_clears_on_genuine_readings():
     """The blackout sets on a high reading and clears on a later genuine low reading."""
     ks = _make_ks("MODERATE")
-    with mock.patch("argus.data.fetchers.fetch_vix", return_value=40.0):
-        ks._check()
+    _check_at_vix(ks, 40.0)
     assert not ks.new_positions_allowed
 
     _expire_vix_cache(ks)
-    with mock.patch("argus.data.fetchers.fetch_vix", return_value=15.0):
-        ks._check()
+    _check_at_vix(ks, 15.0)
     assert ks.new_positions_allowed
 
 
 def test_vix_reading_is_cached_within_the_ttl():
     """KS-11: a second _check() inside the TTL reuses the cached reading, not a new fetch."""
     ks = _make_ks("MODERATE")
-    with mock.patch("argus.data.fetchers.fetch_vix", return_value=15.0) as mock_vix:
+    with mock.patch(_FETCH_VIX, return_value=15.0) as mock_vix:
         ks._check()
         ks._check()
     mock_vix.assert_called_once()
@@ -166,12 +186,11 @@ def test_vix_reading_is_cached_within_the_ttl():
 def test_vix_fetch_failure_does_not_clear_an_active_blackout():
     """KS-3: a fetch failure must never clear a blackout that's already set."""
     ks = _make_ks("MODERATE")
-    with mock.patch("argus.data.fetchers.fetch_vix", return_value=40.0):
-        ks._check()
+    _check_at_vix(ks, 40.0)
     assert not ks.new_positions_allowed
 
     _expire_vix_cache(ks)
-    with mock.patch("argus.data.fetchers.fetch_vix", side_effect=RuntimeError("network down")):
+    with mock.patch(_FETCH_VIX, side_effect=RuntimeError("network down")):
         ks._check()
     assert not ks.new_positions_allowed
 
@@ -181,7 +200,7 @@ def test_vix_fetch_failure_sets_blackout_after_n_consecutive_failures():
     ks = _make_ks("MODERATE")
     assert ks.new_positions_allowed
 
-    with mock.patch("argus.data.fetchers.fetch_vix", side_effect=RuntimeError("down")):
+    with mock.patch(_FETCH_VIX, side_effect=RuntimeError("down")):
         for _ in range(KillSwitch._VIX_FAILURE_HALT_THRESHOLD - 1):
             ks._check()
             assert ks.new_positions_allowed
@@ -193,16 +212,15 @@ def test_vix_fetch_failure_sets_blackout_after_n_consecutive_failures():
 def test_vix_fetch_success_resets_failure_counter():
     """A single genuine reading between failures resets the consecutive-failure count."""
     ks = _make_ks("MODERATE")
-    with mock.patch("argus.data.fetchers.fetch_vix", side_effect=RuntimeError("down")):
+    with mock.patch(_FETCH_VIX, side_effect=RuntimeError("down")):
         for _ in range(KillSwitch._VIX_FAILURE_HALT_THRESHOLD - 1):
             ks._check()
 
-    with mock.patch("argus.data.fetchers.fetch_vix", return_value=15.0):
-        ks._check()
+    _check_at_vix(ks, 15.0)
     assert ks._consecutive_vix_failures == 0
 
     _expire_vix_cache(ks)  # otherwise these failures would be cache hits, not real fetches
-    with mock.patch("argus.data.fetchers.fetch_vix", side_effect=RuntimeError("down")):
+    with mock.patch(_FETCH_VIX, side_effect=RuntimeError("down")):
         for _ in range(KillSwitch._VIX_FAILURE_HALT_THRESHOLD - 1):
             ks._check()
     assert ks.new_positions_allowed  # only 4 consecutive failures since the reset, not 5
@@ -216,11 +234,7 @@ def test_vix_fetch_success_resets_failure_counter():
 def test_halt_restores_from_a_persisted_dump(tmp_path, monkeypatch):
     """A halt dump written by one KillSwitch instance restores into a fresh one."""
     monkeypatch.chdir(tmp_path)
-    seed = _make_ks("MODERATE", inception=100_000.0)
-    seed._current_portfolio_value = 80_000.0
-    seed._halt_reason = "Drawdown 20.0% >= 12% limit (MODERATE)"
-    seed._halt_time = datetime.now()
-    seed._persist_halt_event(seed._halt_reason, seed._halt_time, 0.20, 15.0)
+    seed = _seed_persisted_halt()
 
     halt_file = kill_switch_module._find_latest_halt_file()
     assert halt_file is not None
@@ -235,11 +249,7 @@ def test_halt_restores_from_a_persisted_dump(tmp_path, monkeypatch):
 def test_initialize_kill_switch_restores_halt_on_reinit(tmp_path, monkeypatch):
     """initialize_kill_switch() re-applies a leftover halt file rather than starting clean."""
     monkeypatch.chdir(tmp_path)
-    seed = _make_ks("MODERATE", inception=100_000.0)
-    seed._current_portfolio_value = 80_000.0
-    seed._halt_reason = "Drawdown 20.0% >= 12% limit (MODERATE)"
-    seed._halt_time = datetime.now()
-    seed._persist_halt_event(seed._halt_reason, seed._halt_time, 0.20, 15.0)
+    seed = _seed_persisted_halt()
 
     with mock.patch.object(KillSwitch, "start"):
         ks = initialize_kill_switch("MODERATE", portfolio_value=100_000.0)
@@ -623,7 +633,7 @@ def test_paperbook_prune_runs_applied_leaves_equity_and_hwm_untouched():
 # ---------------------------------------------------------------------------
 
 
-@mock.patch("argus.data.fetchers.fetch_vix", return_value=15.0)
+@mock.patch(_FETCH_VIX, return_value=15.0)
 def test_start_launches_a_running_daemon_thread(mock_vix):
     """start() launches a background thread that is alive immediately after."""
     ks = KillSwitch("MODERATE", check_interval_seconds=3600)
@@ -635,7 +645,7 @@ def test_start_launches_a_running_daemon_thread(mock_vix):
         ks.stop(timeout=2.0)
 
 
-@mock.patch("argus.data.fetchers.fetch_vix", return_value=15.0)
+@mock.patch(_FETCH_VIX, return_value=15.0)
 def test_start_is_idempotent_when_already_running(mock_vix):
     """A second start() call while the monitor thread is alive is a no-op."""
     ks = KillSwitch("MODERATE", check_interval_seconds=3600)
@@ -649,7 +659,7 @@ def test_start_is_idempotent_when_already_running(mock_vix):
         ks.stop(timeout=2.0)
 
 
-@mock.patch("argus.data.fetchers.fetch_vix", return_value=15.0)
+@mock.patch(_FETCH_VIX, return_value=15.0)
 def test_stop_joins_the_monitor_thread(mock_vix):
     """stop() signals the loop to exit and waits for the thread to finish."""
     ks = KillSwitch("MODERATE", check_interval_seconds=3600)
@@ -673,9 +683,8 @@ def test_reset_deletes_persisted_halt_dumps(tmp_path, monkeypatch):
     """reset() removes halt-dump files so a restart can't resurrect a resolved halt."""
     monkeypatch.chdir(tmp_path)
     ks = _make_ks("MODERATE", inception=100_000.0)
-    with mock.patch("argus.data.fetchers.fetch_vix", return_value=15.0):
-        ks.update_portfolio_value(80_000.0)
-        ks._check()
+    ks.update_portfolio_value(80_000.0)
+    _check_at_vix(ks, 15.0)
     assert ks.is_halted
     assert kill_switch_module._find_latest_halt_file() is not None
 
@@ -692,7 +701,8 @@ def test_reset_deletes_persisted_halt_dumps(tmp_path, monkeypatch):
 def _write_halt_dump(runs_dir, filename: str, halt_time: datetime) -> None:
     """Writes a minimal halt-dump JSON file with the given halt_time content."""
     runs_dir.mkdir(parents=True, exist_ok=True)
-    (runs_dir / filename).write_text(json.dumps({"halt_time": halt_time.isoformat(), "reason": "test"}))
+    dump = {"halt_time": halt_time.isoformat(), "reason": "test"}
+    (runs_dir / filename).write_text(json.dumps(dump))
 
 
 def test_list_halt_dumps_sorts_by_halt_time_content_not_filename(tmp_path, monkeypatch):
@@ -723,9 +733,6 @@ def test_prune_halt_dumps_keeps_only_the_most_recent_n(tmp_path, monkeypatch):
 
     remaining = kill_switch_module._list_halt_dumps(str(runs_dir))
     assert len(remaining) == keep
-    # The three oldest (day 1-3) were pruned; the newest `keep` remain
-    kept_days = sorted(d.stat().st_mtime for d in remaining)
-    assert len(kept_days) == keep
 
 
 # ---------------------------------------------------------------------------
@@ -736,6 +743,5 @@ def test_prune_halt_dumps_keeps_only_the_most_recent_n(tmp_path, monkeypatch):
 def test_status_reports_the_last_observed_vix():
     """KillSwitchStatus.current_vix reflects the last successful VIX reading."""
     ks = _make_ks("MODERATE")
-    with mock.patch("argus.data.fetchers.fetch_vix", return_value=22.5):
-        ks._check()
+    _check_at_vix(ks, 22.5)
     assert ks.status.current_vix == pytest.approx(22.5)

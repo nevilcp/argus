@@ -22,6 +22,7 @@ Dependencies:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import datetime
 from typing import Optional
 from uuid import uuid4
@@ -131,8 +132,7 @@ def build_signal_table(snapshots: dict[str, TickerSnapshot], macro: Optional[Mac
     return "\n".join(lines)
 
 
-# Rendered from PortfolioProposal's own PromptText markers, recursing into
-# ProposedPosition for the nested "portfolio" list.
+# Rendered from PortfolioProposal's PromptText, recursing into ProposedPosition's portfolio list.
 _PROPOSAL_SCHEMA_JSON = schema_block(PortfolioProposal)
 
 
@@ -258,9 +258,7 @@ class PortfolioManagerAgent:
             UnregisteredModel: If the configured model has no rate-limit profile.
         """
         total_wealth = user_profile.get("total_wealth")
-        # Capital base is total wealth, not wealth pre-scaled by invest_pct — invest_pct
-        # is the equity deployment target (ALLOCATION RULE 3 below), applied once by the
-        # LLM against this base, not twice
+        # Capital base is total wealth; invest_pct (RULE 3) is applied once by the LLM, not pre-scaled here.
         investable = float(total_wealth) if total_wealth is not None else 0.0
 
         approved_tickers = [t for t, s in snapshots.items() if s.risk_approved]
@@ -269,10 +267,22 @@ class PortfolioManagerAgent:
             logger.debug("[Portfolio] No approved tickers. Reverting to all-cash.")
             return self._all_cash_allocation(investable)
 
-        # PA-4: invest_pct alone can be unreachable — a 3-ticker universe capped at 15% each
-        # can absorb at most 45%, regardless of what invest_pct requests. Stating the achievable
-        # ceiling (rather than raw invest_pct) in the prompt keeps ALLOCATION RULE 3's target
-        # reachable instead of silently unmeetable for a small approved universe.
+        def record(msg: str, level: str = "warning") -> None:
+            """Logs one enforcement or failure note and mirrors it into ``adjustments``.
+
+            Args:
+                msg: Human-readable note, already prefixed with ``portfolio_allocation:``.
+                level: ``"warning"`` for enforcement adjustments, ``"error"`` for the
+                    failure paths that return None.
+            """
+            if level == "error":
+                logger.error("[Portfolio] %s", msg)
+            else:
+                logger.warning(msg)
+            if adjustments is not None:
+                adjustments.append(msg)
+
+        # PA-4: invest_pct can be unreachable for a small universe; state the achievable ceiling instead.
         invest_pct = float(user_profile.get("invest_pct", 1.0))
         approved_cap_sum = 0.0
         for t in approved_tickers:
@@ -281,38 +291,123 @@ class PortfolioManagerAgent:
             approved_cap_sum += risk.approved_weight
         deployment_ceiling = min(invest_pct, approved_cap_sum)
 
-        # Compute Half-Kelly baselines to anchor the LLM's sizing distribution, using
-        # each ticker's would-be primary_driver's measured win rate (see
-        # reconciliation.credit_primary_driver's argmax(weighted_votes) heuristic) as
-        # the win probability Kelly actually wants. Direction-blind conviction is not
-        # a probability of profit (see README) — using it here was PA-2/PA-3's bug.
-        # reliability/reliability_n are session-level, identical on every ticker's
-        # AggregatedSignal, so any one of them tells us whether outcome data exists at
-        # all without re-querying cultural memory.
+        prompt = self._build_allocation_prompt(
+            investable=investable,
+            invest_pct=invest_pct,
+            deployment_ceiling=deployment_ceiling,
+            user_profile=user_profile,
+            signal_table=build_signal_table(snapshots, macro),
+            kelly_suggestions=self._kelly_anchors(approved_tickers, snapshots),
+            cultural_wisdom=cultural_wisdom,
+            cultural_warnings=cultural_warnings,
+        )
+
+        try:
+            proposal = decode(self.llm_client, SYSTEM_PROMPT, prompt, PortfolioProposal, repair=False)
+        except StructuredOutputError as e:
+            record(f"portfolio_allocation: {e}", "error")
+            return None
+        except (RateLimitExceeded, UnregisteredModel):
+            # No per-ticker fallback here; propagate so the API layer surfaces a 429/503, not a generic 500.
+            raise
+        except Exception as e:
+            record(f"portfolio_allocation: PortfolioManagerAgent API error: {e}", "error")
+            return None
+
+        stage = "response_enforcement"
+        try:
+            enforced_portfolio = self._enforce_risk(proposal, snapshots, investable, record)
+
+            # Force residual exact and clamp to the schema floor (PA-4) rather than let model_validate 500.
+            total_equity = sum(p["allocation_pct"] for p in enforced_portfolio)
+            cash_reserve_pct = round(
+                max(PORTFOLIO.cash_reserve_floor_pct, 1.0 - total_equity), 6
+            )
+
+            data = {
+                "session_id": str(uuid4()),
+                "user_investable_capital": investable,
+                "portfolio": enforced_portfolio,
+                "cash_reserve_pct": cash_reserve_pct,
+                "rebalance_trigger": proposal.rebalance_trigger,
+                "timestamp": datetime.now().isoformat(),  # noqa: DTZ005
+            }
+
+            stage = "schema_validation"
+            allocation = PortfolioAllocation.model_validate(data)
+        except Exception as e:
+            record(f"portfolio_allocation: PortfolioManagerAgent failed at {stage}: {e}", "error")
+            return None
+
+        self._session_count += 1
+        return allocation
+
+    def _kelly_anchors(
+        self, approved_tickers: list[str], snapshots: dict[str, TickerSnapshot]
+    ) -> dict[str, float]:
+        """Computes the Half-Kelly weight to anchor each approved ticker's sizing.
+
+        Args:
+            approved_tickers: Tickers whose snapshots carry a risk-approved verdict.
+            snapshots: Mapping of ticker → TickerSnapshot.
+
+        Returns:
+            Mapping of ticker → Half-Kelly weight, empty when no agent has recorded
+            outcome history yet or every approved ticker is BEARISH.
+        """
+        # Uses primary_driver's win rate as Kelly's probability, not direction-blind conviction (PA-2/PA-3).
         reliability_n: dict[str, int] = {}
         for ticker in approved_tickers:
             agg = snapshots[ticker].aggregated
             if agg and agg.reliability_n:
                 reliability_n = agg.reliability_n
                 break
-        have_accuracy_data = any(n > 0 for n in reliability_n.values())
+        if not any(n > 0 for n in reliability_n.values()):
+            return {}
 
         kelly_suggestions = {}
-        if have_accuracy_data:
-            for ticker in approved_tickers:
-                agg = snapshots[ticker].aggregated
-                risk_signal = snapshots[ticker].risk
-                max_pos = risk_signal.approved_weight if risk_signal else self.max_position_pct
-                # Anchors are for NEUTRAL/BULLISH sizing only (matches the prompt text below)
-                if not agg or agg.signal == Signal.BEARISH or not agg.weighted_votes:
-                    continue
-                driver = max(agg.weighted_votes, key=lambda k: agg.weighted_votes[k])
-                win_prob = agg.reliability.get(driver, 0.5)
-                kelly_suggestions[ticker] = half_kelly_weight(
-                    win_probability=win_prob, max_position=max_pos
-                )
+        for ticker in approved_tickers:
+            agg = snapshots[ticker].aggregated
+            risk_signal = snapshots[ticker].risk
+            max_pos = risk_signal.approved_weight if risk_signal else self.max_position_pct
+            # Anchors are for NEUTRAL/BULLISH sizing only (matches the prompt text below)
+            if not agg or agg.signal == Signal.BEARISH or not agg.weighted_votes:
+                continue
+            driver = max(agg.weighted_votes, key=lambda k: agg.weighted_votes[k])
+            win_prob = agg.reliability.get(driver, 0.5)
+            kelly_suggestions[ticker] = half_kelly_weight(
+                win_probability=win_prob, max_position=max_pos
+            )
+        return kelly_suggestions
 
-        signal_table = build_signal_table(snapshots, macro)
+    def _build_allocation_prompt(
+        self,
+        investable: float,
+        invest_pct: float,
+        deployment_ceiling: float,
+        user_profile: dict,
+        signal_table: str,
+        kelly_suggestions: dict[str, float],
+        cultural_wisdom: Optional[list[str]],
+        cultural_warnings: Optional[list[str]],
+    ) -> str:
+        """Assembles the human-turn allocation prompt from this session's state.
+
+        Args:
+            investable: Total investable capital in USD.
+            invest_pct: Requested equity deployment fraction.
+            deployment_ceiling: The achievable ceiling, min of invest_pct and the
+                approved caps' sum.
+            user_profile: Dict whose ``risk_tolerance`` is quoted in the context block.
+            signal_table: Rendered table from ``build_signal_table``.
+            kelly_suggestions: Mapping of ticker → Half-Kelly weight; empty omits the
+                anchors block.
+            cultural_wisdom: Historical wisdom strings; only the first three are shown.
+            cultural_warnings: Failed-trade pattern strings; only the first three are shown.
+
+        Returns:
+            The prompt string to pair with SYSTEM_PROMPT.
+        """
         wisdom_text = "\n".join(f"- {w}" for w in (cultural_wisdom or [])[:3])
         warnings_text = "\n".join(f"- {w}" for w in (cultural_warnings or [])[:3])
         if kelly_suggestions:
@@ -330,7 +425,7 @@ class PortfolioManagerAgent:
                 "Size NEUTRAL/BULLISH positions from signal strength and Cap alone.\n"
             )
 
-        prompt = (
+        return (
             f"<portfolio_context session=\"{self._session_count}\" as_of=\"intraday\">\n"
             f"  capital_usd: ${investable:,.0f}\n"
             f"  invest_pct: {invest_pct:.0%}\n"
@@ -373,113 +468,68 @@ class PortfolioManagerAgent:
             f"{_PROPOSAL_SCHEMA_JSON}"
         )
 
-        try:
-            proposal = decode(self.llm_client, SYSTEM_PROMPT, prompt, PortfolioProposal, repair=False)
-        except StructuredOutputError as e:
-            msg = f"portfolio_allocation: {e}"
-            logger.error("[Portfolio] %s", msg)
-            if adjustments is not None:
-                adjustments.append(msg)
-            return None
-        except (RateLimitExceeded, UnregisteredModel):
-            # There is no per-ticker fallback here the way fundamental/sentiment
-            # have one — a single allocate() call either produces the whole
-            # portfolio or nothing does. The governor has already exhausted its
-            # own bounded wait before raising either of these, so propagate
-            # immediately and let the caller (node_portfolio_allocation -> the
-            # API layer) surface it as a 429/503 instead of a generic 500.
-            raise
-        except Exception as e:
-            msg = f"portfolio_allocation: PortfolioManagerAgent API error: {e}"
-            logger.error("[Portfolio] %s", msg)
-            if adjustments is not None:
-                adjustments.append(msg)
-            return None
+    def _enforce_risk(
+        self,
+        proposal: PortfolioProposal,
+        snapshots: dict[str, TickerSnapshot],
+        investable: float,
+        record: Callable[[str], None],
+    ) -> list[dict]:
+        """Clamps, zeroes, or drops each proposed position against its risk verdict.
 
-        stage = "response_enforcement"
-        try:
-            # Enforce risk verdicts in code: the LLM's proposal is advisory input,
-            # not a binding allocation, so it cannot be trusted to respect caps it
-            # was merely shown in the prompt.
-            enforced_portfolio = []
-            for pos in proposal.portfolio:
-                ticker = pos.ticker
-                if ticker not in snapshots:
-                    msg = (
-                        f"portfolio_allocation: dropped {ticker} "
-                        "(not in this session's signal universe)"
+        Args:
+            proposal: The decoded LLM proposal.
+            snapshots: Mapping of ticker → TickerSnapshot.
+            investable: Total investable capital in USD, used to price each weight.
+            record: Callback logging one adjustment note per position it changed.
+
+        Returns:
+            One position dict per surviving proposed ticker, ready for
+            PortfolioAllocation validation.
+        """
+        # Enforce risk verdicts in code: the LLM's proposal is advisory, not a binding allocation.
+        enforced_portfolio = []
+        for pos in proposal.portfolio:
+            ticker = pos.ticker
+            if ticker not in snapshots:
+                record(
+                    f"portfolio_allocation: dropped {ticker} "
+                    "(not in this session's signal universe)"
+                )
+                continue
+
+            snap = snapshots[ticker]
+            risk = snap.risk
+            proposed_pct = pos.allocation_pct
+            pos_data = pos.model_dump()
+            if not snap.risk_approved:
+                if proposed_pct:
+                    verdict = risk.verdict.value if risk else "MISSING"
+                    record(
+                        f"portfolio_allocation: zeroed {ticker} allocation "
+                        f"(risk verdict {verdict})"
                     )
-                    logger.warning(msg)
-                    if adjustments is not None:
-                        adjustments.append(msg)
-                    continue
+                pos_data["allocation_pct"] = 0.0
+            else:
+                assert risk is not None  # snap.risk_approved guarantees this
+                cap = risk.approved_weight
+                if proposed_pct > cap + 1e-9:
+                    record(
+                        f"portfolio_allocation: clamped {ticker} allocation from "
+                        f"{proposed_pct:.4f} to risk cap {cap:.4f}"
+                    )
+                    pos_data["allocation_pct"] = cap
 
-                snap = snapshots[ticker]
-                risk = snap.risk
-                proposed_pct = pos.allocation_pct
-                pos_data = pos.model_dump()
-                if not snap.risk_approved:
-                    if proposed_pct:
-                        verdict = risk.verdict.value if risk else "MISSING"
-                        msg = (
-                            f"portfolio_allocation: zeroed {ticker} allocation "
-                            f"(risk verdict {verdict})"
-                        )
-                        logger.warning(msg)
-                        if adjustments is not None:
-                            adjustments.append(msg)
-                    pos_data["allocation_pct"] = 0.0
-                else:
-                    assert risk is not None  # snap.risk_approved guarantees this
-                    cap = risk.approved_weight
-                    if proposed_pct > cap + 1e-9:
-                        msg = (
-                            f"portfolio_allocation: clamped {ticker} allocation from "
-                            f"{proposed_pct:.4f} to risk cap {cap:.4f}"
-                        )
-                        logger.warning(msg)
-                        if adjustments is not None:
-                            adjustments.append(msg)
-                        pos_data["allocation_pct"] = cap
+            pos_data["allocation_usd"] = round(investable * pos_data["allocation_pct"], 2)
+            pos_data["thesis"] = pos_data["thesis"][:PORTFOLIO.thesis_char_limit]
+            if pos_data["advisor_note"] is not None:
+                pos_data["advisor_note"] = pos_data["advisor_note"][:PORTFOLIO.advisor_note_char_limit]
+            if risk is not None and risk.stop_loss is not None:
+                pos_data["stop_loss"] = float(risk.stop_loss)
 
-                pos_data["allocation_usd"] = round(investable * pos_data["allocation_pct"], 2)
-                pos_data["thesis"] = pos_data["thesis"][:PORTFOLIO.thesis_char_limit]
-                if pos_data["advisor_note"] is not None:
-                    pos_data["advisor_note"] = pos_data["advisor_note"][:PORTFOLIO.advisor_note_char_limit]
-                if risk is not None and risk.stop_loss is not None:
-                    pos_data["stop_loss"] = float(risk.stop_loss)
+            enforced_portfolio.append(pos_data)
 
-                enforced_portfolio.append(pos_data)
-
-            # Force residual exact; LLM may set cash_reserve_pct independently, not as 1-equity.
-            # Clamped to the schema floor (PA-4) rather than left to fail model_validate on a
-            # near-fully-deployed session (e.g. invest_pct=0.95), which surfaced as a 500
-            # instead of the achievable allocation this session actually produced
-            total_equity = sum(p["allocation_pct"] for p in enforced_portfolio)
-            cash_reserve_pct = round(
-                max(PORTFOLIO.cash_reserve_floor_pct, 1.0 - total_equity), 6
-            )
-
-            data = {
-                "session_id": str(uuid4()),
-                "user_investable_capital": investable,
-                "portfolio": enforced_portfolio,
-                "cash_reserve_pct": cash_reserve_pct,
-                "rebalance_trigger": proposal.rebalance_trigger,
-                "timestamp": datetime.now().isoformat(),  # noqa: DTZ005
-            }
-
-            stage = "schema_validation"
-            allocation = PortfolioAllocation.model_validate(data)
-        except Exception as e:
-            msg = f"portfolio_allocation: PortfolioManagerAgent failed at {stage}: {e}"
-            logger.error("[Portfolio] %s", msg)
-            if adjustments is not None:
-                adjustments.append(msg)
-            return None
-
-        self._session_count += 1
-        return allocation
+        return enforced_portfolio
 
     def _all_cash_allocation(self, investable: float) -> PortfolioAllocation:
         """Returns a defensive all-cash portfolio structure during risk vetoes or API failures.

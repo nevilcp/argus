@@ -35,6 +35,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import pandas as pd
 from chromadb.errors import ChromaError
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
@@ -52,7 +53,14 @@ from argus.memory.cultural import get_cultural_memory
 from argus.orchestration.aggregator import HybridSignalAggregator
 from argus.orchestration.state import ARGUSState, build_ticker_snapshots
 from argus.params import RISK
-from argus.schemas.signals import AggregatedSignal, ARGUSDecision, RiskAssessment, RiskVerdict, Signal
+from argus.schemas.signals import (
+    AggregatedSignal,
+    ARGUSDecision,
+    MacroContext,
+    RiskAssessment,
+    RiskVerdict,
+    Signal,
+)
 from argus.seams import LiveMarketDataProvider, LLMClient, MarketDataProvider
 
 logger = logging.getLogger("argus.graph")
@@ -71,6 +79,13 @@ _CHECKPOINT_MODEL_CLASSES = (
     "PortfolioAllocation",
     "ARGUSDecision",
 )
+
+# The three specialists HybridSignalAggregator votes over, and so the three whose
+# per-regime reliability is looked up; macro scales their weights rather than voting
+_RELIABILITY_AGENTS = ("technical", "fundamental", "sentiment")
+
+# Signed conviction convention shared with risk.py: positive is long-side pressure
+_SIGNAL_SIGN = {Signal.BULLISH: 1.0, Signal.BEARISH: -1.0, Signal.NEUTRAL: 0.0}
 
 
 def build_checkpoint_serde() -> JsonPlusSerializer:
@@ -161,6 +176,77 @@ def _summarize_technical_posture(aggregated_signals: dict[str, AggregatedSignal]
     )
 
 
+def _session_reliability(
+    macro: Optional[MacroContext], as_of: Optional[datetime]
+) -> tuple[dict[str, float], dict[str, int], bool]:
+    """Reads each specialist's per-regime historical win rate once for the whole session.
+
+    Reliability is a function of the regime, not of the ticker, so this runs
+    once per session rather than once per aggregated ticker.
+
+    Args:
+        macro: This session's MacroContext, or None if the macro node degraded.
+        as_of: Point-in-time cutoff for cultural-memory reads.
+
+    Returns:
+        ``(reliability, reliability_n, model_healthy)`` for
+        HybridSignalAggregator.aggregate(). With no regime to scope the lookup,
+        or with cultural memory unavailable, every agent falls back to the 0.5
+        neutral prior at a zero sample count; only the latter is unhealthy.
+    """
+    neutral_reliability = {name: 0.5 for name in _RELIABILITY_AGENTS}
+    neutral_counts = {name: 0 for name in _RELIABILITY_AGENTS}
+    if macro is None:
+        return neutral_reliability, neutral_counts, True
+
+    try:
+        memory = get_cultural_memory()
+        accuracy = {
+            name: memory.get_agent_accuracy(name, regime=macro.macro_regime.value, as_of=as_of)
+            for name in _RELIABILITY_AGENTS
+        }
+    except (ImportError, OSError, ChromaError) as exc:
+        # Same guard as node_retrieve_cultural_memory; degrade every agent to the
+        # 0.5 neutral prior rather than crash
+        logger.warning("node_signal_aggregation: cultural memory unavailable: %s", exc)
+        return neutral_reliability, neutral_counts, False
+
+    return (
+        {name: rate for name, (rate, _) in accuracy.items()},
+        {name: n for name, (_, n) in accuracy.items()},
+        True,
+    )
+
+
+def _resolve_vix(
+    macro_ctx: Optional[MacroContext], market_data: MarketDataProvider
+) -> tuple[float, Optional[str]]:
+    """Resolves the VIX level the risk engine's blackout gate reads.
+
+    Args:
+        macro_ctx: This session's MacroContext, or None if the macro node degraded.
+        market_data: Direct fallback source for the index level.
+
+    Returns:
+        ``(vix, error)``, where ``error`` is an ARGUSState["errors"] entry naming
+        the fallback that was used, or None when a real level was resolved.
+    """
+    if macro_ctx is not None:
+        return macro_ctx.vix_level, None
+
+    # A FRED outage only takes out the macro bundle; the VIX blackout gate needs
+    # just the index level, which yfinance can still serve directly
+    try:
+        return market_data.vix(), None
+    except Exception as exc:
+        logger.warning(
+            "node_risk_evaluation: VIX fetch failed with no macro_context; "
+            "falling back to vix=20.0: %s",
+            exc,
+        )
+        return 20.0, f"risk_evaluation: VIX fetch failed, used fallback vix=20.0 ({exc})"
+
+
 def _apply_portfolio_cap(single: RiskAssessment, cap: float) -> dict:
     """Maps an SLSQP-derived per-ticker cap onto a single-ticker risk verdict.
 
@@ -173,9 +259,9 @@ def _apply_portfolio_cap(single: RiskAssessment, cap: float) -> dict:
         ``veto_reasons``.
     """
     if cap < RISK.slsqp_zero_cap_epsilon:
-        # A cap this small is no room to allocate, not a REDUCE — REDUCE
-        # still counts as approved (portfolio.py:236) and the prompt would
-        # demand invest_pct deployment against a 0% cap
+        # A cap this small is no room to allocate, not a REDUCE — REDUCE still
+        # counts as approved (see state.py's TickerSnapshot.risk_approved) and the
+        # prompt would demand invest_pct deployment against a 0% cap
         return {
             "verdict": RiskVerdict.VETO,
             "approved_weight": 0.0,
@@ -186,11 +272,10 @@ def _apply_portfolio_cap(single: RiskAssessment, cap: float) -> dict:
             ],
         }
     # Downgrade verdict monotonically: never upgrade a VETO to REDUCE or APPROVE
-    verdict = (
-        single.verdict
-        if single.verdict == RiskVerdict.VETO
-        else (RiskVerdict.REDUCE if cap < single.approved_weight else single.verdict)
-    )
+    if single.verdict != RiskVerdict.VETO and cap < single.approved_weight:
+        verdict = RiskVerdict.REDUCE
+    else:
+        verdict = single.verdict
     return {
         "verdict": verdict,
         "approved_weight": min(cap, single.approved_weight),
@@ -269,15 +354,13 @@ def build_graph(
         if "SPY" not in fetch_tickers:
             fetch_tickers.append("SPY")
         history_dfs = market_data.multiple_daily(fetch_tickers, period="1y")
-        history_serializable = {}
-
-        for ticker, df in history_dfs.items():
-            history_serializable[ticker] = {
+        history_serializable = {
+            ticker: {
                 "dates": df.index.astype(str).tolist(),
                 "prices": df["close"].tolist(),
             }
-
-        # session_states already populated from MFT cache by API layer; pass through unchanged
+            for ticker, df in history_dfs.items()
+        }
         return {
             "price_history": history_serializable,
             "session_states": state.get("session_states") or {},
@@ -379,12 +462,7 @@ def build_graph(
         wisdom = memory.retrieve_wisdom(macro, technical_summary, as_of=as_of)
         warnings = memory.retrieve_warnings(macro, as_of=as_of)
 
-        return {
-            "cultural_memory": {
-                "wisdom": wisdom if wisdom else [],
-                "warnings": warnings if warnings else [],
-            }
-        }
+        return {"cultural_memory": {"wisdom": wisdom or [], "warnings": warnings or []}}
 
     def node_signal_aggregation(state: ARGUSState) -> dict:
         """Consolidates specialized analyst signals into weighted consensus indicators.
@@ -401,35 +479,10 @@ def build_graph(
         Returns:
             Partial state update with ``aggregated_signals``.
         """
-        aggs: dict[str, AggregatedSignal] = {}
         macro = state.get("macro_context")
-        as_of = state.get("as_of")
-        agent_names = ("technical", "fundamental", "sentiment")
-        model_healthy = True
+        reliability, reliability_n, model_healthy = _session_reliability(macro, state.get("as_of"))
 
-        if macro is not None:
-            # Per-regime reliability doesn't depend on ticker, so compute it once
-            # per session rather than once per ticker.
-            regime = macro.macro_regime.value
-            try:
-                memory = get_cultural_memory()
-                accuracy = {
-                    name: memory.get_agent_accuracy(name, regime=regime, as_of=as_of)
-                    for name in agent_names
-                }
-                reliability = {name: accuracy[name][0] for name in agent_names}
-                reliability_n = {name: accuracy[name][1] for name in agent_names}
-            except (ImportError, OSError, ChromaError) as exc:
-                # Same guard as node_retrieve_cultural_memory; degrade every
-                # agent to the 0.5 neutral prior rather than crash
-                logger.warning("node_signal_aggregation: cultural memory unavailable: %s", exc)
-                reliability = {name: 0.5 for name in agent_names}
-                reliability_n = {name: 0 for name in agent_names}
-                model_healthy = False
-        else:
-            reliability = {name: 0.5 for name in agent_names}
-            reliability_n = {name: 0 for name in agent_names}
-
+        aggs: dict[str, AggregatedSignal] = {}
         for ticker in state["universe"]:
             tech = state.get("technical_signals", {}).get(ticker)
             fund = state.get("fundamental_signals", {}).get(ticker)
@@ -439,9 +492,7 @@ def build_graph(
             agg = aggregator.aggregate(
                 tech, macro, fund, sent, reliability=reliability, reliability_n=reliability_n
             )
-            aggs[ticker] = (
-                agg if model_healthy else agg.model_copy(update={"model_healthy": False})
-            )
+            aggs[ticker] = agg if model_healthy else agg.model_copy(update={"model_healthy": False})
         return {"aggregated_signals": aggs}
 
     def node_risk_evaluation(state: ARGUSState) -> dict:
@@ -461,47 +512,22 @@ def build_graph(
             named in ``errors`` rather than raised (RE-10) — nothing downstream
             can safely allocate against a risk session that half-completed.
         """
-        import pandas as pd
-
         errors: list[str] = []
 
         try:
-            history_raw = state.get("price_history", {})
             history = {
                 ticker: pd.Series(data["prices"], index=pd.to_datetime(data["dates"]))
-                for ticker, data in history_raw.items()
+                for ticker, data in state.get("price_history", {}).items()
             }
-            macro_ctx = state.get("macro_context")
-            if macro_ctx is not None:
-                vix = macro_ctx.vix_level
-            else:
-                # A FRED outage only takes out the macro bundle; the VIX blackout gate
-                # needs just the index level, which yfinance can still serve directly
-                try:
-                    vix = market_data.vix()
-                except Exception as exc:
-                    logger.warning(
-                        "node_risk_evaluation: VIX fetch failed with no macro_context; "
-                        "falling back to vix=20.0: %s",
-                        exc,
-                    )
-                    errors.append(
-                        f"risk_evaluation: VIX fetch failed, used fallback vix=20.0 ({exc})"
-                    )
-                    vix = 20.0
+            vix, vix_error = _resolve_vix(state.get("macro_context"), market_data)
+            if vix_error is not None:
+                errors.append(vix_error)
             universe = state["universe"]
 
-            # Extract signed convictions: positive = BULLISH, negative = BEARISH, zero = NEUTRAL
-            convictions = {}
-            aggs = state.get("aggregated_signals", {})
-            if aggs:
-                for t, sig in aggs.items():
-                    sign = (
-                        1.0
-                        if sig.signal == Signal.BULLISH
-                        else (-1.0 if sig.signal == Signal.BEARISH else 0.0)
-                    )
-                    convictions[t] = sig.conviction * sign
+            convictions = {
+                ticker: sig.conviction * _SIGNAL_SIGN[sig.signal]
+                for ticker, sig in state.get("aggregated_signals", {}).items()
+            }
 
             # Joint evaluation captures inter-asset covariance and global diversification limits
             base_weight = min(0.15, 1.0 / len(universe)) if universe else 0.15
@@ -542,16 +568,16 @@ def build_graph(
                 if portfolio_result.avg_correlation is not None:
                     updates["avg_correlation"] = portfolio_result.avg_correlation
 
-                if ticker in ticker_cap_map and not portfolio_vetoed:
-                    updates.update(_apply_portfolio_cap(single, ticker_cap_map[ticker]))
-
-                # Portfolio-level veto overrides all individual verdicts to prevent partial allocation
                 if portfolio_vetoed:
+                    # A portfolio-level veto overrides every individual verdict, so its
+                    # own caps never apply — partial allocation is what it exists to stop
                     updates["verdict"] = RiskVerdict.VETO
                     updates["approved_weight"] = 0.0
                     updates["veto_reasons"] = single.veto_reasons + [
                         f"[Portfolio] {r}" for r in portfolio_result.veto_reasons
                     ]
+                elif ticker in ticker_cap_map:
+                    updates.update(_apply_portfolio_cap(single, ticker_cap_map[ticker]))
 
                 # A single model_validate reconstruction, not sequential model_copy calls —
                 # model_copy skips validators, so it was bypassing approved_le_proposed
@@ -645,8 +671,9 @@ def build_graph(
             memory = None
 
         ticker_snapshots = build_ticker_snapshots(state)
+        universe = state.get("universe", [])
         stored_count = 0
-        for ticker in state.get("universe", []):
+        for ticker in universe:
             try:
                 snap = ticker_snapshots[ticker]
                 decision = ARGUSDecision(
@@ -674,7 +701,7 @@ def build_graph(
         logger.info(
             "[log_decisions] Logged %d/%d decisions to cultural memory.",
             stored_count,
-            len(state.get("universe", [])),
+            len(universe),
         )
         return {"decisions": decisions, "errors": errors}
 

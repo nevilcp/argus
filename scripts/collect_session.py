@@ -31,6 +31,11 @@ from argus.orchestration.graph import build_graph
 logger = logging.getLogger("argus.collect_session")
 
 
+def _data_path(filename: str) -> str:
+    """Resolves a filename under the currently configured ARGUS_DATA_DIR."""
+    return f"{settings.ARGUS_DATA_DIR}/{filename}"
+
+
 def main() -> None:
     """Parses CLI args, runs one collection cycle, and prints the outcome."""
     logging.basicConfig(level=settings.ARGUS_LOG_LEVEL)
@@ -46,28 +51,31 @@ def main() -> None:
     parser.add_argument("--risk-tolerance", default=settings.ARGUS_RISK_TOLERANCE)
     parser.add_argument(
         "--buffer-db",
-        default=f"{settings.ARGUS_DATA_DIR}/ohlcv_buffer.db",
+        default=_data_path("ohlcv_buffer.db"),
         help="Persistent intraday candle buffer path",
     )
     parser.add_argument(
         "--checkpoint-db",
-        default=f"{settings.ARGUS_DATA_DIR}/argus_graph.db",
+        default=_data_path("argus_graph.db"),
         help="LangGraph checkpoint database path",
     )
     parser.add_argument(
         "--decisions-log",
-        default=f"{settings.ARGUS_DATA_DIR}/decisions.jsonl",
+        default=_data_path("decisions.jsonl"),
         help="JSONL file each cycle's decisions are appended to",
     )
     parser.add_argument(
         "--result-out",
-        default=f"{settings.ARGUS_DATA_DIR}/collector_result.json",
+        default=_data_path("collector_result.json"),
         help="Where to write this cycle's CollectionResult as JSON, for the "
         "scheduled workflow to fold into status.json",
     )
     args = parser.parse_args()
 
-    universe = [t.strip() for t in args.universe.split(",") if t.strip()] if args.universe else settings.ARGUS_UNIVERSE
+    if args.universe:
+        universe = [t.strip() for t in args.universe.split(",") if t.strip()]
+    else:
+        universe = settings.ARGUS_UNIVERSE
 
     pipeline = MFTDataPipeline(tickers=list(universe), db_path=args.buffer_db)
     compiled_graph = build_graph(checkpoint_db_path=args.checkpoint_db)
@@ -84,8 +92,9 @@ def main() -> None:
     )
     pipeline.buffer.close()
 
-    Path(args.result_out).parent.mkdir(parents=True, exist_ok=True)
-    Path(args.result_out).write_text(json.dumps(dataclasses.asdict(result)))
+    result_path = Path(args.result_out)
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    result_path.write_text(json.dumps(dataclasses.asdict(result)))
 
     print(f"ran={result.ran} reason={result.reason!r}")
     if result.ran:

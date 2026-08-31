@@ -18,9 +18,10 @@ from __future__ import annotations
 import operator
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Annotated, Any, Optional, TypedDict
+from typing import Annotated, Optional, TypedDict
 
 from argus.schemas.signals import (
+    ARGUSDecision,
     AggregatedSignal,
     FundamentalSignal,
     MacroContext,
@@ -110,7 +111,7 @@ class ARGUSState(TypedDict):
     """Final PortfolioAllocation from PortfolioManagerAgent."""
 
     # ── Node 7: log_decisions ────────────────────────────────────────────────
-    decisions: list[Any]
+    decisions: list[ARGUSDecision]
     """List of completed ARGUSDecision snapshots for this session, written once
     by log_decisions and persisted into the LangGraph checkpoint
     (argus_graph.db). Single writer, no reducer: readable later by

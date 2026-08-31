@@ -47,10 +47,9 @@ class _PointInTimeStubProvider:
 def test_publication_lag_delays_a_release_to_its_actual_publication_month() -> None:
     """A FEDFUNDS print doesn't appear in the frame until after its real release date.
 
-    Direct regression test for the look-ahead bug: FRED indexes FEDFUNDS by
-    reference date, not publication date, so a naive frame would show the
-    2021-06-01 print in the June row. The real publication lag (32 days) pushes
-    it to the July row instead.
+    FRED indexes FEDFUNDS by reference date, not publication date, so a frame
+    built without the lag would show the 2021-06-01 print in the June row. The
+    real publication lag (32 days) pushes it to the July row instead.
     """
     provider = _PointInTimeStubProvider()
     frame = build_macro_feature_frame(provider, start="2019-01-01")
@@ -62,11 +61,10 @@ def test_publication_lag_delays_a_release_to_its_actual_publication_month() -> N
 def test_build_macro_feature_frame_is_deterministic_across_call_sites() -> None:
     """Two calls against the same provider and start date produce identical frames.
 
-    Regression test for the pre-fix design where RegimeClassifier's fit path
-    (fit_on_history) and predict path (analyze) built features through two
-    independent code paths with nothing asserting they agreed. Both now
-    delegate to this single function (see agents/macro.py), so this pins down
-    that it is a pure function of (provider, start) with no hidden state.
+    RegimeClassifier's fit path (fit_on_history) and predict path (analyze)
+    both delegate here (see argus/agents/macro.py), so train/serve skew is
+    only ruled out if this is a pure function of (provider, start) with no
+    hidden state.
     """
     provider = _PointInTimeStubProvider()
 

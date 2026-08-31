@@ -6,6 +6,7 @@ assignment, entry/exit price outcome computation, and reading decisions back
 out of the LangGraph checkpoint.
 """
 
+import json
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -13,6 +14,8 @@ from unittest import mock
 
 import pandas as pd
 import pytest
+from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from argus.memory.cultural import CulturalMemoryManager
@@ -52,17 +55,7 @@ FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 
 def _technical(signal: Signal, conviction: float, ticker: str = "TEST", price: float = 100.0) -> TechnicalSignal:
-    """Builds a TechnicalSignal with fixed indicator values, varying only the given fields.
-
-    Args:
-        signal: Signal direction to assign.
-        conviction: Confidence score to assign.
-        ticker: Ticker symbol.
-        price: Current price.
-
-    Returns:
-        A TechnicalSignal fixture.
-    """
+    """Builds a TechnicalSignal with fixed indicator values, varying only the given fields."""
     return TechnicalSignal(
         ticker=ticker,
         current_price=price,
@@ -83,16 +76,7 @@ def _technical(signal: Signal, conviction: float, ticker: str = "TEST", price: f
 
 
 def _fundamental(signal: Signal, conviction: float, ticker: str = "TEST") -> FundamentalSignal:
-    """Builds a FundamentalSignal with fixed field values, varying only the given fields.
-
-    Args:
-        signal: Signal direction to assign.
-        conviction: Confidence score to assign.
-        ticker: Ticker symbol.
-
-    Returns:
-        A FundamentalSignal fixture.
-    """
+    """Builds a FundamentalSignal with fixed field values, varying only the given fields."""
     return FundamentalSignal(
         ticker=ticker,
         sector="Technology",
@@ -107,16 +91,7 @@ def _fundamental(signal: Signal, conviction: float, ticker: str = "TEST") -> Fun
 
 
 def _sentiment(signal: Signal, conviction: float, ticker: str = "TEST") -> SentimentSignal:
-    """Builds a SentimentSignal with fixed field values, varying only the given fields.
-
-    Args:
-        signal: Signal direction to assign.
-        conviction: Confidence score to assign.
-        ticker: Ticker symbol.
-
-    Returns:
-        A SentimentSignal fixture.
-    """
+    """Builds a SentimentSignal with fixed field values, varying only the given fields."""
     return SentimentSignal(
         ticker=ticker,
         finbert_net_score=0.0,
@@ -133,14 +108,7 @@ def _sentiment(signal: Signal, conviction: float, ticker: str = "TEST") -> Senti
 
 
 def _macro(regime: Regime = Regime.EXPANSION) -> MacroContext:
-    """Builds a MacroContext with fixed field values, varying only the regime.
-
-    Args:
-        regime: Macro regime to assign.
-
-    Returns:
-        A MacroContext fixture.
-    """
+    """Builds a MacroContext with fixed field values, varying only the regime."""
     return MacroContext(
         fed_funds=4.0,
         cpi_yoy=3.0,
@@ -163,14 +131,7 @@ def _macro(regime: Regime = Regime.EXPANSION) -> MacroContext:
 
 
 def _allocation(ticker: str = "TEST") -> PositionAllocation:
-    """Builds a PositionAllocation with fixed field values, varying only the ticker.
-
-    Args:
-        ticker: Ticker symbol.
-
-    Returns:
-        A PositionAllocation fixture.
-    """
+    """Builds a PositionAllocation with fixed field values, varying only the ticker."""
     return PositionAllocation(
         ticker=ticker,
         allocation_pct=0.10,
@@ -186,40 +147,53 @@ class _FakeMarketData:
     """Minimal MarketDataProvider double: only ohlcv_daily is used by reconciliation."""
 
     def __init__(self, closes: dict[str, pd.Series]) -> None:
-        """Stores the fixed per-ticker close series to serve from ohlcv_daily.
-
-        Args:
-            closes: Ticker to close-price series.
-        """
+        """Stores the fixed per-ticker close series to serve from ohlcv_daily."""
         self._closes = closes
 
     def ohlcv_daily(self, ticker: str, period: str = "2y") -> pd.DataFrame:
-        """Returns the fixed close series for the given ticker, ignoring period.
-
-        Args:
-            ticker: Ticker to look up.
-            period: Lookback period (ignored).
-
-        Returns:
-            A DataFrame with the fixed close series.
-        """
+        """Returns the fixed close series for the given ticker, ignoring period."""
         return pd.DataFrame({"close": self._closes[ticker]})
 
 
 def _ten_day_series(start: datetime, start_price: float = 100.0, ticker: str = "TEST") -> _FakeMarketData:
-    """Builds a 10-day daily close series rising by 1.0 per day from start_price.
-
-    Args:
-        start: First date in the series.
-        start_price: Close price on the first day.
-        ticker: Ticker symbol the series is keyed under.
-
-    Returns:
-        A _FakeMarketData backed by the generated series.
-    """
+    """Builds a 10-day daily close series rising by 1.0 per day from start_price."""
     dates = pd.date_range(start=start, periods=10, freq="D")
     closes = pd.Series([start_price + i for i in range(10)], index=dates)
     return _FakeMarketData({ticker: closes})
+
+
+def _aggregated_decision(
+    technical: TechnicalSignal,
+    macro: MacroContext,
+    fundamental: FundamentalSignal | None = None,
+    sentiment: SentimentSignal | None = None,
+    *,
+    reliability: dict[str, float] | None = None,
+    session_timestamp: datetime | None = None,
+    allocation: PositionAllocation | None = None,
+) -> ARGUSDecision:
+    """Builds a TEST decision whose aggregated signal is the real aggregator's output."""
+    aggregated = HybridSignalAggregator().aggregate(
+        technical, macro, fundamental, sentiment, reliability=reliability
+    )
+    return ARGUSDecision(
+        ticker="TEST",
+        session_timestamp=datetime.now() if session_timestamp is None else session_timestamp,
+        technical=technical,
+        fundamental=fundamental,
+        sentiment=sentiment,
+        macro=macro,
+        aggregated=aggregated,
+        allocation=allocation,
+    )
+
+
+def _write_decisions_log(path: Path, *decisions: ARGUSDecision) -> Path:
+    """Writes `decisions` as one JSON object per line at `path` and returns that path."""
+    with open(path, "w", encoding="utf-8") as f:
+        for decision in decisions:
+            f.write(decision.model_dump_json() + "\n")
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -235,55 +209,22 @@ def test_credit_primary_driver_returns_unknown_with_no_signals():
 
 def test_credit_primary_driver_returns_the_sole_signal_when_only_one_present():
     """With only one agent signal present, that agent is credited by default."""
-    technical = _technical(Signal.BULLISH, 0.8)
-    macro = _macro()
-    aggregator = HybridSignalAggregator()
-    aggregated = aggregator.aggregate(technical, macro, None, None)
-
-    decision = ARGUSDecision(
-        ticker="TEST",
-        session_timestamp=datetime.now(),
-        technical=technical,
-        macro=macro,
-        aggregated=aggregated,
-    )
+    decision = _aggregated_decision(_technical(Signal.BULLISH, 0.8), _macro())
     assert credit_primary_driver(decision) == "technical"
 
 
 def test_credit_primary_driver_credits_the_dominant_agent():
     """Leave-one-out ablation credits whichever agent's removal swings conviction most."""
-    technical = _technical(Signal.BULLISH, 0.9)
-    fundamental = _fundamental(Signal.BULLISH, 0.1)
-    macro = _macro()
-    aggregator = HybridSignalAggregator()
-    aggregated = aggregator.aggregate(technical, macro, fundamental, None)
-
-    decision = ARGUSDecision(
-        ticker="TEST",
-        session_timestamp=datetime.now(),
-        technical=technical,
-        fundamental=fundamental,
-        macro=macro,
-        aggregated=aggregated,
+    decision = _aggregated_decision(
+        _technical(Signal.BULLISH, 0.9), _macro(), _fundamental(Signal.BULLISH, 0.1)
     )
     assert credit_primary_driver(decision) == "technical"
 
 
 def test_credit_primary_driver_is_symmetric_under_relabeling():
     """Swapping which agent is dominant should swap the credited driver."""
-    technical = _technical(Signal.BULLISH, 0.1)
-    fundamental = _fundamental(Signal.BULLISH, 0.9)
-    macro = _macro()
-    aggregator = HybridSignalAggregator()
-    aggregated = aggregator.aggregate(technical, macro, fundamental, None)
-
-    decision = ARGUSDecision(
-        ticker="TEST",
-        session_timestamp=datetime.now(),
-        technical=technical,
-        fundamental=fundamental,
-        macro=macro,
-        aggregated=aggregated,
+    decision = _aggregated_decision(
+        _technical(Signal.BULLISH, 0.1), _macro(), _fundamental(Signal.BULLISH, 0.9)
     )
     assert credit_primary_driver(decision) == "fundamental"
 
@@ -298,25 +239,13 @@ def test_credit_primary_driver_replays_the_baseline_reliability_in_each_ablation
     removed — flipping credit to argmax(baseline_votes) regardless of which
     agent was actually ablated.
     """
-    technical = _technical(Signal.BULLISH, 0.9)
-    fundamental = _fundamental(Signal.BEARISH, 0.85)
-    sentiment = _sentiment(Signal.NEUTRAL, 0.3)
-    macro = _macro()
     reliability = {"technical": 0.95, "fundamental": 0.20, "sentiment": 0.50}
-
-    real_aggregator = HybridSignalAggregator()
-    aggregated = real_aggregator.aggregate(
-        technical, macro, fundamental, sentiment, reliability=reliability
-    )
-
-    decision = ARGUSDecision(
-        ticker="TEST",
-        session_timestamp=datetime.now(),
-        technical=technical,
-        fundamental=fundamental,
-        sentiment=sentiment,
-        macro=macro,
-        aggregated=aggregated,
+    decision = _aggregated_decision(
+        _technical(Signal.BULLISH, 0.9),
+        _macro(),
+        _fundamental(Signal.BEARISH, 0.85),
+        _sentiment(Signal.NEUTRAL, 0.3),
+        reliability=reliability,
     )
 
     seen_reliability: list[object] = []
@@ -427,18 +356,11 @@ def test_compute_realized_return_none_when_horizon_not_yet_reached():
 def test_reconcile_decision_stores_outcome_with_ablated_primary_driver():
     """Reconciling a decision stores the realized outcome tagged with its credited driver."""
     start = datetime(2026, 1, 1)
-    technical = _technical(Signal.BULLISH, 0.9, price=100.0)
-    fundamental = _fundamental(Signal.BULLISH, 0.1)
-    macro = _macro()
-    aggregated = HybridSignalAggregator().aggregate(technical, macro, fundamental, None)
-
-    decision = ARGUSDecision(
-        ticker="TEST",
+    decision = _aggregated_decision(
+        _technical(Signal.BULLISH, 0.9, price=100.0),
+        _macro(),
+        _fundamental(Signal.BULLISH, 0.1),
         session_timestamp=start,
-        technical=technical,
-        fundamental=fundamental,
-        macro=macro,
-        aggregated=aggregated,
         allocation=_allocation(),
     )
     market_data = _ten_day_series(start, start_price=100.0)
@@ -548,8 +470,6 @@ def test_reconcile_decisions_fetches_each_ticker_price_history_once():
 
 def test_load_decisions_from_checkpoints_round_trips_a_real_graph_run(tmp_path):
     """Checkpoints round-trip real ARGUSDecision objects, not degraded dicts, per ticker."""
-    import json
-
     universe = ["AAPL", "MSFT", "NVDA", "GOOGL", "JPM", "XOM"]
 
     def per_ticker_llm(fixture_file: str) -> FixtureLLMClient:
@@ -627,13 +547,12 @@ def test_load_decisions_from_checkpoints_round_trips_a_real_graph_run(tmp_path):
 
 def test_compact_decisions_jsonl_drops_sessions_before_cutoff(tmp_path):
     """Decisions older than cutoff are dropped; everything at or after it is kept."""
-    path = tmp_path / "decisions.jsonl"
-    old = ARGUSDecision(ticker="OLD", session_timestamp=datetime(2026, 1, 1))
-    kept_exact = ARGUSDecision(ticker="EXACT", session_timestamp=datetime(2026, 1, 10))
-    new = ARGUSDecision(ticker="NEW", session_timestamp=datetime(2026, 1, 20))
-    with open(path, "w", encoding="utf-8") as f:
-        for d in (old, kept_exact, new):
-            f.write(d.model_dump_json() + "\n")
+    path = _write_decisions_log(
+        tmp_path / "decisions.jsonl",
+        ARGUSDecision(ticker="OLD", session_timestamp=datetime(2026, 1, 1)),
+        ARGUSDecision(ticker="EXACT", session_timestamp=datetime(2026, 1, 10)),
+        ARGUSDecision(ticker="NEW", session_timestamp=datetime(2026, 1, 20)),
+    )
 
     retained = compact_decisions_jsonl(str(path), cutoff=datetime(2026, 1, 10))
 
@@ -649,10 +568,10 @@ def test_compact_decisions_jsonl_missing_file_is_a_noop():
 
 def test_compact_decisions_jsonl_nothing_to_drop_leaves_the_file_untouched(tmp_path):
     """When every decision is at or after cutoff, the file is not rewritten."""
-    path = tmp_path / "decisions.jsonl"
-    decision = ARGUSDecision(ticker="NEW", session_timestamp=datetime(2026, 1, 20))
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(decision.model_dump_json() + "\n")
+    path = _write_decisions_log(
+        tmp_path / "decisions.jsonl",
+        ARGUSDecision(ticker="NEW", session_timestamp=datetime(2026, 1, 20)),
+    )
     original_mtime = path.stat().st_mtime_ns
 
     retained = compact_decisions_jsonl(str(path), cutoff=datetime(2026, 1, 1))
@@ -666,28 +585,34 @@ def test_compact_decisions_jsonl_nothing_to_drop_leaves_the_file_untouched(tmp_p
 # ---------------------------------------------------------------------------
 
 
-def _put_checkpoint(saver: SqliteSaver, thread_id: str, ts: datetime) -> None:
-    """Writes a minimal checkpoint for `thread_id` stamped with `ts`."""
-    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
-    checkpoint = {
+def _put_checkpoint(
+    db_path: str, thread_id: str, ts: datetime, decisions: list[ARGUSDecision] | None = None
+) -> None:
+    """Writes one checkpoint for `thread_id` stamped with `ts`, carrying `decisions` if given."""
+    config: RunnableConfig = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    checkpoint: Checkpoint = {
         "v": 1,
         "ts": ts.isoformat(),
         "id": thread_id,
-        "channel_values": {},
-        "channel_versions": {},
+        "channel_values": {} if decisions is None else {"decisions": decisions},
+        "channel_versions": {} if decisions is None else {"decisions": "1"},
         "versions_seen": {},
+        "updated_channels": None,
     }
-    saver.put(config, checkpoint, {"source": "input", "step": 1, "writes": {}}, {})
+    metadata: CheckpointMetadata = {"source": "input", "step": 1}
+
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    try:
+        SqliteSaver(conn, serde=build_checkpoint_serde()).put(config, checkpoint, metadata, {})
+    finally:
+        conn.close()
 
 
 def test_prune_checkpoints_deletes_only_threads_older_than_cutoff(tmp_path):
     """A thread whose newest checkpoint predates cutoff is deleted; a newer one survives."""
     db_path = str(tmp_path / "argus_graph.db")
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    saver = SqliteSaver(conn, serde=build_checkpoint_serde())
-    _put_checkpoint(saver, "stale-thread", datetime(2026, 1, 1))
-    _put_checkpoint(saver, "fresh-thread", datetime(2026, 1, 20))
-    conn.close()
+    _put_checkpoint(db_path, "stale-thread", datetime(2026, 1, 1))
+    _put_checkpoint(db_path, "fresh-thread", datetime(2026, 1, 20))
 
     deleted = prune_checkpoints(db_path, cutoff=datetime(2026, 1, 10))
 
@@ -708,10 +633,7 @@ def test_prune_checkpoints_missing_db_is_a_noop():
 def test_prune_checkpoints_nothing_stale_deletes_nothing(tmp_path):
     """Every thread newer than cutoff survives untouched."""
     db_path = str(tmp_path / "argus_graph.db")
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    saver = SqliteSaver(conn, serde=build_checkpoint_serde())
-    _put_checkpoint(saver, "fresh-thread", datetime.now())
-    conn.close()
+    _put_checkpoint(db_path, "fresh-thread", datetime.now())
 
     deleted = prune_checkpoints(db_path, cutoff=datetime.now() - timedelta(days=30))
 
@@ -741,29 +663,12 @@ def _autospec_cultural(expired: int = 0) -> mock.MagicMock:
     return cultural
 
 
-def _put_checkpoint_with_decisions(
-    saver: SqliteSaver, thread_id: str, ts: datetime, decisions: list[ARGUSDecision]
-) -> None:
-    """Writes a checkpoint for `thread_id` stamped with `ts`, carrying `decisions` in its channel value."""
-    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
-    checkpoint = {
-        "v": 1,
-        "ts": ts.isoformat(),
-        "id": thread_id,
-        "channel_values": {"decisions": decisions},
-        "channel_versions": {"decisions": "1"},
-        "versions_seen": {},
-    }
-    saver.put(config, checkpoint, {"source": "input", "step": 1, "writes": {}}, {})
-
-
 def test_run_reconciliation_pass_over_matured_decisions_produces_outcome_and_equity(tmp_path):
     """A full pass over matured decisions stores the outcome and compounds its return onto paper equity."""
     start = datetime(2026, 1, 1)
-    decision = _matured_decision("TEST", start)
-    decisions_log = tmp_path / "decisions.jsonl"
-    with open(decisions_log, "w", encoding="utf-8") as f:
-        f.write(decision.model_dump_json() + "\n")
+    decisions_log = _write_decisions_log(
+        tmp_path / "decisions.jsonl", _matured_decision("TEST", start)
+    )
 
     book_path = tmp_path / "paper_equity.json"
     paper_book.save(PaperBook(equity=100_000.0, high_water_mark=100_000.0), str(book_path))
@@ -798,12 +703,8 @@ def test_run_reconciliation_pass_over_matured_decisions_produces_outcome_and_equ
 def test_run_reconciliation_pass_reading_from_checkpoints_bounds_checkpoints(tmp_path):
     """With only a checkpoint path, decisions are read from it and it alone is bounded."""
     start = datetime(2026, 1, 1)
-    decision = _matured_decision("TEST", start)
     db_path = str(tmp_path / "argus_graph.db")
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    saver = SqliteSaver(conn, serde=build_checkpoint_serde())
-    _put_checkpoint_with_decisions(saver, "session-thread", start, [decision])
-    conn.close()
+    _put_checkpoint(db_path, "session-thread", start, [_matured_decision("TEST", start)])
 
     market_data = _ten_day_series(start, start_price=100.0)
     cultural = _autospec_cultural()
@@ -826,16 +727,12 @@ def test_run_reconciliation_pass_reading_from_checkpoints_bounds_checkpoints(tmp
 def test_run_reconciliation_pass_given_both_paths_bounds_both(tmp_path):
     """With both paths given, the decisions log wins as the read source and both stores are bounded."""
     start = datetime(2026, 1, 1)
-    decision = _matured_decision("TEST", start)
-    decisions_log = tmp_path / "decisions.jsonl"
-    with open(decisions_log, "w", encoding="utf-8") as f:
-        f.write(decision.model_dump_json() + "\n")
+    decisions_log = _write_decisions_log(
+        tmp_path / "decisions.jsonl", _matured_decision("TEST", start)
+    )
 
     db_path = str(tmp_path / "argus_graph.db")
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    saver = SqliteSaver(conn, serde=build_checkpoint_serde())
-    _put_checkpoint(saver, "stale-thread", datetime(2020, 1, 1))
-    conn.close()
+    _put_checkpoint(db_path, "stale-thread", datetime(2020, 1, 1))
 
     market_data = _ten_day_series(start, start_price=100.0)
     cultural = _autospec_cultural()
@@ -860,10 +757,9 @@ def test_run_reconciliation_pass_given_both_paths_bounds_both(tmp_path):
 def test_run_reconciliation_pass_one_store_failing_leaves_the_others_bounded_and_names_it(tmp_path):
     """A corrupt checkpoint database fails that one store without skipping decisions.jsonl compaction."""
     start = datetime(2026, 1, 1)
-    decision = _matured_decision("TEST", start)
-    decisions_log = tmp_path / "decisions.jsonl"
-    with open(decisions_log, "w", encoding="utf-8") as f:
-        f.write(decision.model_dump_json() + "\n")
+    decisions_log = _write_decisions_log(
+        tmp_path / "decisions.jsonl", _matured_decision("TEST", start)
+    )
 
     db_path = tmp_path / "argus_graph.db"
     db_path.write_bytes(b"not a sqlite database")
@@ -893,10 +789,9 @@ def test_run_reconciliation_pass_paper_book_not_partially_applied_when_its_step_
 ):
     """A paper-book save failure leaves the persisted book exactly as it was, and names the failure."""
     start = datetime(2026, 1, 1)
-    decision = _matured_decision("TEST", start)
-    decisions_log = tmp_path / "decisions.jsonl"
-    with open(decisions_log, "w", encoding="utf-8") as f:
-        f.write(decision.model_dump_json() + "\n")
+    decisions_log = _write_decisions_log(
+        tmp_path / "decisions.jsonl", _matured_decision("TEST", start)
+    )
 
     book_path = tmp_path / "paper_equity.json"
     paper_book.save(PaperBook(equity=12_345.0, high_water_mark=12_345.0), str(book_path))
