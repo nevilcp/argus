@@ -89,9 +89,7 @@ class HybridSignalAggregator:
             or "UNKNOWN"
         )
 
-        macro_mults = {}
-        if macro:
-            macro_mults = macro.agent_multipliers
+        macro_mults = macro.agent_multipliers if macro else {}
 
         sources = {
             "fundamental": fundamental,
@@ -102,7 +100,10 @@ class HybridSignalAggregator:
         # Mass that could have been cast by all three agents, reliability excluded — the
         # denominator that makes conviction monotone in participation instead of saturating
         # whenever the agents who did vote happen to agree (see Design Decision A, issue #24)
-        w_eff = {name: self.DEFAULT_WEIGHTS[name] * macro_mults.get(name, 1.0) for name in self.DEFAULT_WEIGHTS}
+        w_eff = {
+            name: weight * macro_mults.get(name, 1.0)
+            for name, weight in self.DEFAULT_WEIGHTS.items()
+        }
         max_pool = sum(w_eff.values())
 
         bull_pool: float = 0.0
@@ -118,7 +119,7 @@ class HybridSignalAggregator:
                 weighted_votes[name] = 0.0
                 continue
 
-            reliability_mult = (reliability or {}).get(name, 0.5) / 0.5
+            reliability_mult = reliability_used.get(name, 0.5) / 0.5
             vote = signal.conviction * w_eff[name] * reliability_mult
 
             if signal.signal == Signal.BULLISH:
