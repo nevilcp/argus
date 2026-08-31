@@ -110,6 +110,20 @@ def _portfolio_llm(session_dir: Path) -> FixtureLLMClient:
     return FixtureLLMClient({"only": json.dumps(response)}, key_fn=lambda _prompt: "only")
 
 
+def _neutral_cultural_memory() -> mock.Mock:
+    """Cultural memory isn't a fixture-replay candidate; open-loop replay sees an empty one.
+
+    Returns no wisdom or warnings, and the 0.5 accuracy prior, so reliability
+    weighting is fixed rather than reading live chroma_db state.
+    """
+    return mock.Mock(
+        retrieve_wisdom=mock.Mock(return_value=[]),
+        retrieve_warnings=mock.Mock(return_value=[]),
+        get_agent_accuracy=mock.Mock(return_value=(0.5, 0)),
+        store_decision_snapshot=mock.Mock(),
+    )
+
+
 def _load_session_states(session_dir: Path) -> tuple[list[str], dict[str, dict]]:
     """Loads the fixture's session_states.json and returns its sorted ticker universe.
 
@@ -163,9 +177,8 @@ def replay_session(
         SessionResult with the session's universe and the graph's final state.
     """
     universe, session_states = _load_session_states(session_dir)
-    session_date = _normalize_as_of(
-        datetime.fromisoformat(next(iter(session_states.values()))["timestamp"])
-    )
+    captured_at = next(iter(session_states.values()))["timestamp"]
+    session_date = _normalize_as_of(datetime.fromisoformat(captured_at))
 
     state = ARGUSState(
         ticker=universe[0],
@@ -206,14 +219,11 @@ def replay_session(
 
         with contextlib.ExitStack() as stack:
             if not closed_loop:
-                mock_get_cultural_memory = stack.enter_context(
-                    mock.patch("argus.orchestration.graph.get_cultural_memory")
-                )
-                mock_get_cultural_memory.return_value = mock.Mock(
-                    retrieve_wisdom=mock.Mock(return_value=[]),
-                    retrieve_warnings=mock.Mock(return_value=[]),
-                    get_agent_accuracy=mock.Mock(return_value=(0.5, 0)),
-                    store_decision_snapshot=mock.Mock(),
+                stack.enter_context(
+                    mock.patch(
+                        "argus.orchestration.graph.get_cultural_memory",
+                        return_value=_neutral_cultural_memory(),
+                    )
                 )
             final_state = graph.invoke(state, config)
 
@@ -234,7 +244,7 @@ def replay_sessions(session_dirs: list[Path], **kwargs: Any) -> list[SessionResu
     Returns:
         One SessionResult per session_dir, in the same order.
     """
-    results = []
+    results: list[SessionResult] = []
     for session_dir in session_dirs:
         logger.info("[Replay] Running session %s", session_dir)
         results.append(replay_session(session_dir, **kwargs))

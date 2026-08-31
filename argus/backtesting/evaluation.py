@@ -53,8 +53,9 @@ _CI_ALPHA = 0.05
 
 
 def signed_conviction(decision: ARGUSDecision) -> Optional[float]:
-    """Conviction signed by direction: +conviction (BULLISH), -conviction
-    (BEARISH), 0.0 (NEUTRAL). None if the decision has no aggregated signal.
+    """Conviction signed by direction, or None if the decision has no aggregated signal.
+
+    +conviction for BULLISH, -conviction for BEARISH, 0.0 for NEUTRAL.
     """
     if decision.aggregated is None:
         return None
@@ -118,7 +119,9 @@ def collect_paired_outcomes(
     return pairs
 
 
-def rank_information_coefficient(pairs: Sequence[PairedOutcome]) -> tuple[Optional[float], Optional[float]]:
+def rank_information_coefficient(
+    pairs: Sequence[PairedOutcome],
+) -> tuple[Optional[float], Optional[float]]:
     """Spearman rank correlation between signed conviction and forward return.
 
     Returns:
@@ -135,7 +138,9 @@ def rank_information_coefficient(pairs: Sequence[PairedOutcome]) -> tuple[Option
     return float(rho), float(p_value)
 
 
-def hit_rate_with_deadband(pairs: Sequence[PairedOutcome], deadband: float) -> tuple[Optional[float], int]:
+def hit_rate_with_deadband(
+    pairs: Sequence[PairedOutcome], deadband: float
+) -> tuple[Optional[float], int]:
     """Fraction of decisions outside the dead band where sign(conviction) == sign(return).
 
     Decisions whose forward return falls within +/-deadband are excluded —
@@ -154,11 +159,7 @@ def hit_rate_with_deadband(pairs: Sequence[PairedOutcome], deadband: float) -> t
     scored = [p for p in pairs if abs(p.forward_return) > deadband]
     if not scored:
         return None, 0
-    hits = sum(
-        1
-        for p in scored
-        if (p.signed_conviction > 0) == (p.forward_return > 0)
-    )
+    hits = sum(1 for p in scored if (p.signed_conviction > 0) == (p.forward_return > 0))
     return hits / len(scored), len(scored)
 
 
@@ -337,21 +338,19 @@ def system_behavior_report(session_result: SessionResult) -> SystemBehaviorRepor
     errors: list[str] = session_result.final_state.get("errors") or []
     tickers_total = len(session_result.universe)
     decisions_built = len(decisions)
-
-    reduce_verdicts = sum(
-        1 for d in decisions if d.risk is not None and d.risk.verdict == RiskVerdict.REDUCE
-    )
-    api_calls = [d.total_api_calls for d in decisions]
+    total_api_calls = sum(d.total_api_calls for d in decisions)
 
     return SystemBehaviorReport(
         tickers_total=tickers_total,
         decisions_built=decisions_built,
         schema_validity=decisions_built / tickers_total if tickers_total else 0.0,
         errors=list(errors),
-        reduce_verdicts=reduce_verdicts,
+        reduce_verdicts=sum(
+            1 for d in decisions if d.risk is not None and d.risk.verdict == RiskVerdict.REDUCE
+        ),
         constraint_violations=0,
-        total_api_calls=sum(api_calls),
-        api_calls_per_decision=(sum(api_calls) / len(api_calls)) if api_calls else None,
+        total_api_calls=total_api_calls,
+        api_calls_per_decision=total_api_calls / decisions_built if decisions_built else None,
     )
 
 
@@ -369,16 +368,18 @@ def check_replay_determinism(session_dir: Path) -> bool:
     Returns:
         True if both replays produced identical decisions for every ticker.
     """
-    first = replay_session(session_dir, closed_loop=False)
-    second = replay_session(session_dir, closed_loop=False)
-
-    def _fingerprint(decisions: list[ARGUSDecision]) -> list[tuple]:
+    def fingerprint(result: SessionResult) -> list[tuple]:
+        decisions: list[ARGUSDecision] = result.final_state.get("decisions") or []
         return sorted(
-            (d.ticker, d.aggregated.signal if d.aggregated else None,
-             d.aggregated.conviction if d.aggregated else None, d.total_api_calls)
+            (
+                d.ticker,
+                d.aggregated.signal if d.aggregated else None,
+                d.aggregated.conviction if d.aggregated else None,
+                d.total_api_calls,
+            )
             for d in decisions
         )
 
-    first_decisions = first.final_state.get("decisions") or []
-    second_decisions = second.final_state.get("decisions") or []
-    return _fingerprint(first_decisions) == _fingerprint(second_decisions)
+    first = replay_session(session_dir, closed_loop=False)
+    second = replay_session(session_dir, closed_loop=False)
+    return fingerprint(first) == fingerprint(second)
