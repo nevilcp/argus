@@ -6,6 +6,7 @@ Shared state dictionary schema for the ARGUS LangGraph execution graph.
 Responsibilities:
   - Define the TypedDict shared across all LangGraph nodes
   - Document input/output field contracts per execution stage
+  - Project each ticker's specialist outputs into one typed TickerSnapshot
 
 Not responsible for:
   - State mutation (handled by individual node functions in graph.py)
@@ -15,6 +16,7 @@ Not responsible for:
 from __future__ import annotations
 
 import operator
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated, Any, Optional, TypedDict
 
@@ -24,6 +26,7 @@ from argus.schemas.signals import (
     MacroContext,
     PortfolioAllocation,
     RiskAssessment,
+    RiskVerdict,
     SentimentSignal,
     TechnicalSignal,
 )
@@ -122,3 +125,68 @@ class ARGUSState(TypedDict):
     in parallel off fetch_price_history and write this key concurrently, and
     LangGraph raises InvalidUpdateError on concurrent writes to a key
     without one."""
+
+
+@dataclass(frozen=True)
+class TickerSnapshot:
+    """The per-ticker join of every specialist agent's output for one session.
+
+    A pure, on-demand projection of ARGUSState's parallel per-ticker maps —
+    never stored in state or the checkpoint, and never validated or
+    serialized the way the schemas.signals models are. See build_ticker_snapshots.
+
+    Args:
+        technical: This ticker's TechnicalSignal, or None if absent.
+        fundamental: This ticker's FundamentalSignal, or None if absent.
+        sentiment: This ticker's SentimentSignal, or None if absent.
+        risk: This ticker's RiskAssessment, or None if the risk node never evaluated it.
+        aggregated: This ticker's AggregatedSignal, or None if absent.
+    """
+
+    technical: Optional[TechnicalSignal] = None
+    fundamental: Optional[FundamentalSignal] = None
+    sentiment: Optional[SentimentSignal] = None
+    risk: Optional[RiskAssessment] = None
+    aggregated: Optional[AggregatedSignal] = None
+
+    @property
+    def risk_approved(self) -> bool:
+        """Whether this ticker's risk verdict permits an equity allocation.
+
+        Returns:
+            True for APPROVE or REDUCE; False for VETO or a missing assessment.
+        """
+        return self.risk is not None and self.risk.verdict in (
+            RiskVerdict.APPROVE,
+            RiskVerdict.REDUCE,
+        )
+
+
+def build_ticker_snapshots(state: ARGUSState) -> dict[str, TickerSnapshot]:
+    """Joins every specialist agent's per-ticker output into one TickerSnapshot per ticker.
+
+    Covers the whole session universe, leaving a ticker's fields empty where a
+    specialist never produced output for it. Callers that want a narrower scope
+    (e.g. only tickers with an aggregated signal) filter the result themselves.
+
+    Args:
+        state: ARGUSState with the specialist and risk maps populated.
+
+    Returns:
+        Mapping of ticker → TickerSnapshot, one entry per ticker in state["universe"].
+    """
+    technical_signals = state.get("technical_signals", {})
+    fundamental_signals = state.get("fundamental_signals", {})
+    sentiment_signals = state.get("sentiment_signals", {})
+    risk_assessments = state.get("risk_assessments", {})
+    aggregated_signals = state.get("aggregated_signals", {})
+    return {
+        ticker: TickerSnapshot(
+            technical=technical_signals.get(ticker),
+            fundamental=fundamental_signals.get(ticker),
+            sentiment=sentiment_signals.get(ticker),
+            risk=risk_assessments.get(ticker),
+            aggregated=aggregated_signals.get(ticker),
+        )
+        for ticker in state.get("universe", [])
+    }

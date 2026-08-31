@@ -19,6 +19,7 @@ from argus.memory.cultural import CulturalMemoryManager
 from argus.orchestration.aggregator import HybridSignalAggregator
 from argus.orchestration.graph import build_checkpoint_serde, build_graph
 from argus.orchestration.reconciliation import (
+    ReconciliationReport,
     compact_decisions_jsonl,
     compute_realized_return,
     credit_primary_driver,
@@ -27,8 +28,11 @@ from argus.orchestration.reconciliation import (
     prune_checkpoints,
     reconcile_decision,
     reconcile_decisions,
+    run_reconciliation_pass,
 )
 from argus.orchestration.state import ARGUSState
+from argus.risk import paper_book
+from argus.risk.paper_book import PaperBook
 from argus.schemas.signals import (
     ARGUSDecision,
     FundamentalSignal,
@@ -712,3 +716,213 @@ def test_prune_checkpoints_nothing_stale_deletes_nothing(tmp_path):
     deleted = prune_checkpoints(db_path, cutoff=datetime.now() - timedelta(days=30))
 
     assert deleted == 0
+
+
+# ---------------------------------------------------------------------------
+# run_reconciliation_pass (issue #77)
+# ---------------------------------------------------------------------------
+
+
+def _matured_decision(ticker: str, start: datetime, price: float = 100.0) -> ARGUSDecision:
+    """A decision that took a position and has cleared a 5-day horizon by `start` + 5 days."""
+    return ARGUSDecision(
+        ticker=ticker,
+        session_timestamp=start,
+        technical=_technical(Signal.BULLISH, 0.8, ticker=ticker, price=price),
+        allocation=_allocation(ticker=ticker),
+    )
+
+
+def _autospec_cultural(expired: int = 0) -> mock.MagicMock:
+    """An autospec CulturalMemoryManager with the return values reconcile_decisions and expiry need."""
+    cultural = mock.create_autospec(CulturalMemoryManager, instance=True)
+    cultural.already_reconciled.return_value = set()
+    cultural.expire_pending_snapshots.return_value = expired
+    return cultural
+
+
+def _put_checkpoint_with_decisions(
+    saver: SqliteSaver, thread_id: str, ts: datetime, decisions: list[ARGUSDecision]
+) -> None:
+    """Writes a checkpoint for `thread_id` stamped with `ts`, carrying `decisions` in its channel value."""
+    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    checkpoint = {
+        "v": 1,
+        "ts": ts.isoformat(),
+        "id": thread_id,
+        "channel_values": {"decisions": decisions},
+        "channel_versions": {"decisions": "1"},
+        "versions_seen": {},
+    }
+    saver.put(config, checkpoint, {"source": "input", "step": 1, "writes": {}}, {})
+
+
+def test_run_reconciliation_pass_over_matured_decisions_produces_outcome_and_equity(tmp_path):
+    """A full pass over matured decisions stores the outcome and compounds its return onto paper equity."""
+    start = datetime(2026, 1, 1)
+    decision = _matured_decision("TEST", start)
+    decisions_log = tmp_path / "decisions.jsonl"
+    with open(decisions_log, "w", encoding="utf-8") as f:
+        f.write(decision.model_dump_json() + "\n")
+
+    book_path = tmp_path / "paper_equity.json"
+    paper_book.save(PaperBook(equity=100_000.0, high_water_mark=100_000.0), str(book_path))
+
+    market_data = _ten_day_series(start, start_price=100.0)
+    cultural = _autospec_cultural()
+
+    report = run_reconciliation_pass(
+        market_data,
+        cultural,
+        str(book_path),
+        decisions_log_path=str(decisions_log),
+        horizon_days=5,
+    )
+
+    assert isinstance(report, ReconciliationReport)
+    assert report.decisions_loaded == 1
+    assert report.outcomes_stored == 1
+    assert report.paper_book_updated is True
+    assert report.equity == pytest.approx(105_000.0)
+    assert report.drawdown == pytest.approx(0.0)
+    assert report.decisions_compacted is not None
+    assert report.checkpoints_pruned is None
+    assert report.pending_snapshots_expired == 0
+    assert report.errors == []
+    cultural.store_trade_outcome.assert_called_once()
+
+    reloaded = paper_book.load(str(book_path))
+    assert reloaded.equity == pytest.approx(105_000.0)
+
+
+def test_run_reconciliation_pass_reading_from_checkpoints_bounds_checkpoints(tmp_path):
+    """With only a checkpoint path, decisions are read from it and it alone is bounded."""
+    start = datetime(2026, 1, 1)
+    decision = _matured_decision("TEST", start)
+    db_path = str(tmp_path / "argus_graph.db")
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    saver = SqliteSaver(conn, serde=build_checkpoint_serde())
+    _put_checkpoint_with_decisions(saver, "session-thread", start, [decision])
+    conn.close()
+
+    market_data = _ten_day_series(start, start_price=100.0)
+    cultural = _autospec_cultural()
+
+    report = run_reconciliation_pass(
+        market_data,
+        cultural,
+        str(tmp_path / "paper_equity.json"),
+        checkpoint_db_path=db_path,
+        horizon_days=5,
+    )
+
+    assert report.decisions_loaded == 1
+    assert report.outcomes_stored == 1
+    assert report.decisions_compacted is None
+    assert report.checkpoints_pruned is not None
+    assert report.errors == []
+
+
+def test_run_reconciliation_pass_given_both_paths_bounds_both(tmp_path):
+    """With both paths given, the decisions log wins as the read source and both stores are bounded."""
+    start = datetime(2026, 1, 1)
+    decision = _matured_decision("TEST", start)
+    decisions_log = tmp_path / "decisions.jsonl"
+    with open(decisions_log, "w", encoding="utf-8") as f:
+        f.write(decision.model_dump_json() + "\n")
+
+    db_path = str(tmp_path / "argus_graph.db")
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    saver = SqliteSaver(conn, serde=build_checkpoint_serde())
+    _put_checkpoint(saver, "stale-thread", datetime(2020, 1, 1))
+    conn.close()
+
+    market_data = _ten_day_series(start, start_price=100.0)
+    cultural = _autospec_cultural()
+
+    report = run_reconciliation_pass(
+        market_data,
+        cultural,
+        str(tmp_path / "paper_equity.json"),
+        decisions_log_path=str(decisions_log),
+        checkpoint_db_path=db_path,
+        horizon_days=5,
+    )
+
+    # The checkpoint's only thread carries no decisions -> the log (with one) is the read source
+    assert report.decisions_loaded == 1
+    assert report.decisions_compacted is not None
+    assert report.checkpoints_pruned is not None
+    assert report.checkpoints_pruned >= 1
+    assert report.errors == []
+
+
+def test_run_reconciliation_pass_one_store_failing_leaves_the_others_bounded_and_names_it(tmp_path):
+    """A corrupt checkpoint database fails that one store without skipping decisions.jsonl compaction."""
+    start = datetime(2026, 1, 1)
+    decision = _matured_decision("TEST", start)
+    decisions_log = tmp_path / "decisions.jsonl"
+    with open(decisions_log, "w", encoding="utf-8") as f:
+        f.write(decision.model_dump_json() + "\n")
+
+    db_path = tmp_path / "argus_graph.db"
+    db_path.write_bytes(b"not a sqlite database")
+
+    market_data = _ten_day_series(start, start_price=100.0)
+    cultural = _autospec_cultural(expired=3)
+
+    report = run_reconciliation_pass(
+        market_data,
+        cultural,
+        str(tmp_path / "paper_equity.json"),
+        decisions_log_path=str(decisions_log),
+        checkpoint_db_path=str(db_path),
+        horizon_days=5,
+    )
+
+    assert report.decisions_compacted is not None
+    assert report.checkpoints_pruned is None
+    assert report.pending_snapshots_expired == 3
+    assert report.outcomes_stored == 1
+    assert len(report.errors) == 1
+    assert "checkpoint" in report.errors[0]
+
+
+def test_run_reconciliation_pass_paper_book_not_partially_applied_when_its_step_fails(
+    tmp_path, monkeypatch
+):
+    """A paper-book save failure leaves the persisted book exactly as it was, and names the failure."""
+    start = datetime(2026, 1, 1)
+    decision = _matured_decision("TEST", start)
+    decisions_log = tmp_path / "decisions.jsonl"
+    with open(decisions_log, "w", encoding="utf-8") as f:
+        f.write(decision.model_dump_json() + "\n")
+
+    book_path = tmp_path / "paper_equity.json"
+    paper_book.save(PaperBook(equity=12_345.0, high_water_mark=12_345.0), str(book_path))
+    original_bytes = book_path.read_bytes()
+
+    def _boom(_book, _path) -> None:
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(paper_book, "save", _boom)
+
+    market_data = _ten_day_series(start, start_price=100.0)
+    cultural = _autospec_cultural()
+
+    report = run_reconciliation_pass(
+        market_data,
+        cultural,
+        str(book_path),
+        decisions_log_path=str(decisions_log),
+        horizon_days=5,
+    )
+
+    assert report.paper_book_updated is False
+    assert report.equity == 0.0
+    assert len(report.errors) == 1
+    assert "paper-book update failed" in report.errors[0]
+    assert book_path.read_bytes() == original_bytes
+    # Independent of the failed paper-book step, the other stores still ran
+    assert report.decisions_compacted is not None
+    assert report.pending_snapshots_expired == 0

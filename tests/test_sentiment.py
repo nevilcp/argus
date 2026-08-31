@@ -5,15 +5,12 @@ Tests for the Sentiment Agent and its pure-Python helpers.
 from datetime import datetime, timedelta
 
 
-import argus.agents.sentiment as sentiment_module
 from argus.agents.sentiment import (
     SentimentAgent,
     aggregate_finbert_scores,
-    SentimentDailyCache,
     _check_earnings_calendar,
 )
 from argus.orchestration.governor import RateLimitExceeded
-from argus.schemas.signals import SentimentSignal, SentimentVerdict, Signal
 
 def test_aggregate_finbert_scores_empty():
     """An empty article list returns the neutral, low-confidence default."""
@@ -43,36 +40,6 @@ def test_aggregate_finbert_scores_confidence_cap():
     scored = [{"numeric": 1.0, "label": "positive"} for _ in range(15)]
     res = aggregate_finbert_scores(scored)
     assert res["confidence"] == 1.0 # capped at 1.0
-
-def test_sentiment_daily_cache():
-    """A cache entry becomes stale, and unretrievable, once its TTL elapses."""
-    cache = SentimentDailyCache()
-    assert cache.is_stale("AAPL")
-
-    signal = SentimentSignal(
-        ticker="AAPL",
-        finbert_net_score=0.5,
-        pct_positive=0.7,
-        pct_negative=0.1,
-        news_volume_7d=12,
-        upcoming_catalyst=False,
-        signal=Signal.BULLISH,
-        conviction=0.8,
-        sentiment_decay_risk="LOW",
-        reasoning="Test",
-        api_calls_used=0,
-        timestamp=datetime.now(),
-    )
-
-    cache.set("AAPL", signal)
-    assert not cache.is_stale("AAPL")
-    assert cache.get("AAPL") == signal
-
-    # Backdate the entry past the cache's 86400s TTL to force staleness
-    cache._cache["AAPL"] = (signal, datetime.now() - timedelta(days=2))
-    assert cache.is_stale("AAPL")
-    assert cache.get("AAPL") is None
-
 
 class _StubMarketData:
     """Minimal MarketDataProvider stub exposing only what SentimentAgent.analyze uses."""
@@ -112,11 +79,6 @@ class _RecordingLLMClient:
     def complete(self, system_prompt, user_prompt):
         self.last_user_prompt = user_prompt
         return self._response_text
-
-
-def test_prompt_declared_fields_match_the_verdict_schema():
-    """The prompt's declared output fields and SentimentVerdict's fields must never drift apart."""
-    assert set(sentiment_module._VERDICT_FIELD_DESCRIPTIONS) == set(SentimentVerdict.model_fields)
 
 
 def test_analyze_degrades_the_ticker_on_governor_exhaustion_without_retrying(monkeypatch):

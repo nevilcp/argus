@@ -52,7 +52,8 @@ from pydantic import BaseModel, Field, field_validator
 import argus
 from argus.agents.macro import MacroStatisticalAgent
 from argus.config import settings
-from argus.data.pipeline import MFTDataPipeline, max_bar_age_seconds, session_state_ttl_seconds
+from argus.data.live_session_cache import LiveSessionCache
+from argus.data.pipeline import MFTDataPipeline
 from argus.data.tickers import TICKER_PATTERN
 from argus.memory.cultural import get_cultural_memory
 from argus.orchestration.collector import (
@@ -62,14 +63,9 @@ from argus.orchestration.collector import (
 )
 from argus.orchestration.governor import REGISTERED_MODELS, RateLimitExceeded, UnregisteredModel, governor
 from argus.orchestration.graph import build_graph
-from argus.orchestration.reconciliation import (
-    compact_decisions_jsonl,
-    load_decisions_from_jsonl,
-    prune_checkpoints,
-    reconcile_decisions,
-)
+from argus.orchestration.reconciliation import run_reconciliation_pass
 from argus.orchestration.state import ARGUSState
-from argus.params import RECONCILIATION, SYSTEM
+from argus.params import SYSTEM
 from argus.risk import paper_book
 from argus.risk.kill_switch import get_kill_switch, initialize_kill_switch
 from argus.seams import LiveMarketDataProvider
@@ -78,7 +74,7 @@ logger = logging.getLogger("argus.api")
 
 _ET = ZoneInfo("America/New_York")
 
-_live_session_cache: dict[str, tuple[dict, datetime]] = {}
+_live_cache: LiveSessionCache | None = None
 
 # Initialized during lifespan startup; tickers are registered dynamically per
 # /analyze request in addition to the ARGUS_UNIVERSE seed
@@ -113,46 +109,22 @@ _macro_status_agent: MacroStatisticalAgent | None = None
 async def _mft_session_callback(session_states: dict) -> None:
     """Receives compressed technical feature dicts from the MFT pipeline on every sweep.
 
-    Updates the module-level live cache so the next /analyze call picks up
-    fresh intraday indicators without re-fetching historical data. Each entry
-    stores a (state_dict, updated_at) tuple for TTL-based staleness detection.
+    Publishes them into the module-level live cache so the next /analyze call
+    picks up fresh intraday indicators without re-fetching historical data.
+    Eviction of tickers no longer tracked (API-9) happens inside
+    LiveSessionCache.publish, keyed off the pipeline's current tracked
+    universe.
 
     Args:
         session_states: Mapping of ticker → technical feature dict from MFTDataPipeline.
     """
-    now = datetime.now()  # noqa: DTZ005
-    for ticker, state in session_states.items():
-        _live_session_cache[ticker] = (state, now)
+    if _live_cache is not None and _mft_pipeline is not None:
+        _live_cache.publish(session_states, _mft_pipeline.tickers)
 
-    # Drops entries for tickers no longer tracked (API-9) — without this the
-    # cache only ever grows, holding a stale allocation-eligible entry for any
-    # ticker that was ever registered even after it stops being tracked
-    if _mft_pipeline is not None:
-        tracked = set(_mft_pipeline.tickers)
-        for ticker in list(_live_session_cache):
-            if ticker not in tracked:
-                del _live_session_cache[ticker]
-
-    logger.info("[MFT] Live session cache updated: %d ticker(s)", len(_live_session_cache))
-
-
-def _bar_age_seconds(state: dict, now_et: datetime) -> Optional[float]:
-    """Computes a session state's bar age in seconds, failing closed on a bad timestamp (API-11).
-
-    A missing, malformed, or naive ``timestamp`` must not raise out of
-    /analyze or /pipeline/status — it's treated as staleness instead.
-
-    Args:
-        state: A compressed technical feature dict from the live cache.
-        now_et: Current time, ET-aware, to measure age against.
-
-    Returns:
-        Age in seconds, or None if ``timestamp`` can't be parsed against `now_et`.
-    """
-    try:
-        return (now_et - datetime.fromisoformat(state["timestamp"])).total_seconds()
-    except (KeyError, TypeError, ValueError):
-        return None
+    logger.info(
+        "[MFT] Live session cache updated: %d ticker(s)",
+        len(_live_cache) if _live_cache is not None else 0,
+    )
 
 
 def _log_task_exception(task: asyncio.Task, name: str) -> None:
@@ -203,84 +175,45 @@ async def _collector_loop(pipeline: MFTDataPipeline, compiled_graph) -> None:
         await asyncio.sleep(settings.ARGUS_COLLECTOR_INTERVAL_SECONDS)
 
 
-def _prune_growing_stores(decisions_log: str) -> None:
-    """Bounds the decision/checkpoint/PENDING-snapshot stores, all on one horizon-plus-margin cutoff (PR 6).
-
-    Runs after reconcile_decisions has already had its chance at every session
-    up to the same cutoff, so nothing pruned here was still reconcilable.
-    Failures are logged and swallowed independently per store — a checkpoint
-    DB VACUUM failing must not skip compacting decisions.jsonl, or vice versa.
-
-    Args:
-        decisions_log: Same decisions.jsonl path the caller just reconciled.
-    """
-    cutoff = datetime.now() - timedelta(  # noqa: DTZ005
-        days=RECONCILIATION.horizon_days + RECONCILIATION.retention_margin_days
-    )
-
-    try:
-        kept = compact_decisions_jsonl(decisions_log, cutoff)
-        logger.info("[Reconcile] compacted decisions.jsonl to %d retained decision(s)", kept)
-    except Exception:
-        logger.exception("[Reconcile] decisions.jsonl compaction failed")
-
-    try:
-        checkpoint_db = f"{settings.ARGUS_DATA_DIR}/argus_graph.db"
-        pruned = prune_checkpoints(checkpoint_db, cutoff)
-        logger.info("[Reconcile] pruned %d stale checkpoint thread(s)", pruned)
-    except Exception:
-        logger.exception("[Reconcile] checkpoint pruning failed")
-
-    try:
-        expired = get_cultural_memory().expire_pending_snapshots(cutoff)
-        logger.info("[Reconcile] expired %d stale PENDING snapshot(s)", expired)
-    except Exception:
-        logger.exception("[Reconcile] PENDING snapshot expiry failed")
-
-
 def _reconcile_once() -> None:
-    """Runs one reconciliation pass: outcome backfill, paper-book update, kill-switch sync, store pruning.
+    """Runs one reconciliation pass, then syncs the kill switch off its resulting equity.
 
     Synchronous by design — `_reconcile_loop` runs this via `asyncio.to_thread`
     since it performs per-ticker yfinance fetches directly, which would
     otherwise block the event loop for the whole app for the duration of a run.
+    Kill-switch sync stays here rather than in run_reconciliation_pass: this is
+    the caller with a daemon to sync to, and it's skipped when the paper-book
+    step itself failed — syncing a fresh report's zeroed-out default equity
+    would read as a total portfolio loss (issue #77).
     """
-    decisions_log = f"{settings.ARGUS_DATA_DIR}/decisions.jsonl"
-    decisions = load_decisions_from_jsonl(decisions_log)
-    market_data = LiveMarketDataProvider()
-    stored = reconcile_decisions(
-        decisions,
-        market_data=market_data,
-        cultural=get_cultural_memory(),
-        horizon_days=RECONCILIATION.horizon_days,
+    report = run_reconciliation_pass(
+        LiveMarketDataProvider(),
+        get_cultural_memory(),
+        f"{settings.ARGUS_DATA_DIR}/paper_equity.json",
+        decisions_log_path=f"{settings.ARGUS_DATA_DIR}/decisions.jsonl",
+        checkpoint_db_path=f"{settings.ARGUS_DATA_DIR}/argus_graph.db",
     )
-    logger.info("[Reconcile] stored %d/%d outcome(s)", stored, len(decisions))
-
-    try:
-        book_path = f"{settings.ARGUS_DATA_DIR}/paper_equity.json"
-        book = paper_book.load(book_path)
-        for run_timestamp, run_return in paper_book.compute_run_returns(
-            decisions, market_data, RECONCILIATION.horizon_days
-        ):
-            book.apply_run(run_timestamp, run_return)
-        book.prune_runs_applied(
-            datetime.now()  # noqa: DTZ005
-            - timedelta(days=RECONCILIATION.horizon_days + RECONCILIATION.retention_margin_days)
+    logger.info(
+        "[Reconcile] stored %d/%d outcome(s)", report.outcomes_stored, report.decisions_loaded
+    )
+    # Only meaningful once the paper-book step actually ran (see docstring) —
+    # otherwise these are still their zeroed-out defaults, not a real value
+    if report.paper_book_updated:
+        logger.info(
+            "[Reconcile] equity=$%.2f (drawdown=%.1f%%)", report.equity, report.drawdown * 100
         )
-        paper_book.save(book, book_path)
+    if report.decisions_compacted is not None:
+        logger.info("[Reconcile] decisions.jsonl compacted: %d retained", report.decisions_compacted)
+    if report.checkpoints_pruned is not None:
+        logger.info("[Reconcile] checkpoint threads pruned: %d", report.checkpoints_pruned)
+    logger.info("[Reconcile] PENDING snapshots expired: %d", report.pending_snapshots_expired)
+    for error in report.errors:
+        logger.error("[Reconcile] %s", error)
 
+    if report.paper_book_updated:
         ks = get_kill_switch()
         if ks is not None:
-            ks.update_portfolio_value(book.equity)
-        logger.info(
-            "[Reconcile] paper equity=$%.2f (drawdown=%.1f%%)",
-            book.equity,
-            book.drawdown_from_peak() * 100,
-        )
-    except Exception:
-        logger.exception("[Reconcile] paper-book update failed")
-
-    _prune_growing_stores(decisions_log)
+            ks.update_portfolio_value(report.equity)
 
 
 def _seconds_until_next_reconcile(now_et: datetime, hour: int) -> float:
@@ -306,7 +239,7 @@ def _seconds_until_next_reconcile(now_et: datetime, hour: int) -> float:
 
 
 async def _reconcile_loop() -> None:
-    """Runs reconcile_decisions once a day at settings.ARGUS_RECONCILE_HOUR_ET."""
+    """Runs the reconciliation pass once a day at settings.ARGUS_RECONCILE_HOUR_ET."""
     while True:
         now_et = datetime.now(_ET)
         await asyncio.sleep(_seconds_until_next_reconcile(now_et, settings.ARGUS_RECONCILE_HOUR_ET))
@@ -462,7 +395,7 @@ def _assert_registered_models() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Starts background tasks on startup and stops them cleanly on shutdown."""
-    global _mft_pipeline, _pipeline_task, _collector_task, _reconcile_task, _graph, _macro_status_agent
+    global _mft_pipeline, _pipeline_task, _collector_task, _reconcile_task, _graph, _macro_status_agent, _live_cache
 
     _configure_logging()
     _warn_on_permissive_security_defaults()
@@ -483,6 +416,7 @@ async def lifespan(app: FastAPI):
     # Seeded from ARGUS_UNIVERSE so the pipeline starts collecting immediately
     # rather than waiting for a first /analyze call to register any tickers
     _mft_pipeline = MFTDataPipeline(tickers=list(settings.ARGUS_UNIVERSE))
+    _live_cache = LiveSessionCache(interval_minutes=_mft_pipeline.interval_minutes)
     _pipeline_task = asyncio.create_task(_mft_pipeline.start(on_session_ready=_mft_session_callback))
     _pipeline_task.add_done_callback(lambda t: _log_task_exception(t, "MFTDataPipeline"))
     logger.info(
@@ -681,11 +615,10 @@ async def health():
     ks = get_kill_switch()
 
     newest_cache_entry_age_seconds = None
-    if _mft_pipeline is not None and _mft_pipeline.is_market_hours() and _live_session_cache:
-        now = datetime.now()  # noqa: DTZ005
-        newest_cache_entry_age_seconds = min(
-            (now - updated_at).total_seconds() for _, updated_at in _live_session_cache.values()
-        )
+    if _mft_pipeline is not None and _mft_pipeline.is_market_hours() and _live_cache is not None:
+        cache_age_seconds, _ = _live_cache.ages(datetime.now(_ET))
+        if cache_age_seconds:
+            newest_cache_entry_age_seconds = min(cache_age_seconds.values())
 
     body = {
         "status": "ok" if not dead_tasks else "degraded",
@@ -723,15 +656,9 @@ async def pipeline_status():
 
     buffer_depth = await asyncio.to_thread(_mft_pipeline.buffer.row_counts)
 
-    now = datetime.now()  # noqa: DTZ005
-    now_et = datetime.now(_ET)
-    cache_age_seconds = {
-        ticker: (now - updated_at).total_seconds()
-        for ticker, (_, updated_at) in _live_session_cache.items()
-    }
-    bar_age_seconds = {
-        ticker: _bar_age_seconds(state, now_et) for ticker, (state, _) in _live_session_cache.items()
-    }
+    cache_age_seconds, bar_age_seconds = (
+        _live_cache.ages(datetime.now(_ET)) if _live_cache is not None else ({}, {})
+    )
 
     return {
         "tracked_tickers": list(_mft_pipeline.tickers),
@@ -813,43 +740,34 @@ async def analyze(req: AnalysisRequest):
     # tracked-universe cap
     _mft_pipeline.register_tickers(req.tickers)
 
-    absent = [t for t in req.tickers if t not in _live_session_cache]
-    if absent:
+    if _live_cache is None:
+        raise HTTPException(503, "Live session cache not yet initialized.")
+
+    # Admission answers only "how old is this" for each ticker; the ordering
+    # against market hours above is what decides whether that age matters
+    # right now (issue #78)
+    admission = _live_cache.admit(req.tickers, datetime.now(_ET))
+
+    if admission.absent:
         raise HTTPException(
             503,
-            f"MFT live cache not yet populated for: {absent}. "
+            f"MFT live cache not yet populated for: {admission.absent}. "
             "The pipeline is warming up — retry after the next sweep (~5 min).",
         )
-
-    now = datetime.now()  # noqa: DTZ005
-    stalled = [
-        t for t in req.tickers
-        if (now - _live_session_cache[t][1]).total_seconds() > session_state_ttl_seconds()
-    ]
-    if stalled:
+    if admission.stalled:
         raise HTTPException(
             503,
-            f"MFT pipeline appears stalled for: {stalled}. "
+            f"MFT pipeline appears stalled for: {admission.stalled}. "
             "The live cache hasn't been refreshed recently — check /pipeline/status.",
         )
-
-    # Catches what a write-time TTL can't: a restart that republishes old candles
-    # under a fresh write timestamp (MFT-1). A timestamp that fails to parse
-    # fails closed as stale rather than raising (API-11).
-    now_et = datetime.now(_ET)
-    max_bar_age = max_bar_age_seconds(_mft_pipeline.interval_minutes)
-    stale = [
-        t for t in req.tickers
-        if (age := _bar_age_seconds(_live_session_cache[t][0], now_et)) is None or age > max_bar_age
-    ]
-    if stale:
+    if admission.stale:
         raise HTTPException(
             503,
-            f"MFT cache data is stale for: {stale}. "
+            f"MFT cache data is stale for: {admission.stale}. "
             "The underlying candles are older than expected — check /pipeline/status.",
         )
 
-    live_states = {t: _live_session_cache[t][0] for t in req.tickers}
+    live_states = admission.admitted
     logger.info("[API] MFT cache hit for all %d tickers", len(live_states))
 
     state = ARGUSState(

@@ -50,8 +50,21 @@ see the notes under each entry.
   fetching the latest intraday candles for every tracked ticker in the universe. Its
   callers compress the buffer into session states afterward, via `compress_all`.
 
+- **Live session cache** — the `LiveSessionCache` (`argus/data/live_session_cache.py`)
+  holding the session state each tracked ticker was last published with between
+  sweeps. Owns publication, eviction, and the admission rule that decides whether a
+  cached session state is fresh enough to allocate against; the API gateway holds one
+  instance and gates `/analyze` on its `admit()` result rather than reading session
+  states off the pipeline directly.
+
 - **Decision** — an `ARGUSDecision` (`argus/schemas/signals.py`): a per-ticker snapshot
-  of every agent's output plus the resulting allocation, logged once per session.
+  of every agent's output plus the resulting allocation, logged once per session. A
+  decision is a `TickerSnapshot` plus its allocation and the session's timestamp.
+
+- **TickerSnapshot** (`argus/orchestration/state.py`) — the per-ticker join of every
+  agent's output before an allocation exists: technical, fundamental, sentiment, risk,
+  and aggregated signals. Built on demand from `ARGUSState` by `build_ticker_snapshots`,
+  never stored in state or the checkpoint. What a decision is built from.
 
 - **Allocation** — a `PositionAllocation` or `PortfolioAllocation`
   (`argus/schemas/signals.py`): the risk-enforced target weight(s) a session
@@ -70,7 +83,11 @@ see the notes under each entry.
   (`argus/memory/cultural.py`) that stores trade outcomes and decision snapshots, and
   retrieves regime-scoped historical wisdom and warnings for the portfolio agent.
 
-- **Reconciliation** — the slow-clock pass (`argus/orchestration/reconciliation.py`)
-  that closes the decision-to-outcome loop: computing realized returns, assigning
-  per-agent credit via leave-one-out ablation, and persisting trade outcomes into
-  cultural memory.
+- **Reconciliation** — the slow-clock pass (`argus/orchestration/reconciliation.py`,
+  composed as `run_reconciliation_pass`) that closes the decision-to-outcome loop:
+  computing realized returns, assigning per-agent credit via leave-one-out ablation,
+  persisting trade outcomes into cultural memory, compounding matured runs onto the
+  paper equity curve, and bounding the decisions log, checkpoint database, PENDING
+  snapshots, and applied-runs set so none of them grow forever. The API's background
+  loop and the scheduled CLI script (`scripts/reconcile_outcomes.py`) both run it;
+  only kill-switch sync differs between them, and stays at the API's call site.
