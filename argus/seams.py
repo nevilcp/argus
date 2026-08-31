@@ -270,6 +270,30 @@ def _groq_retry_delay(exc: Exception) -> Optional[float]:
     return None
 
 
+def _response_text(content: Any) -> str:
+    """Flattens an invoked model's ``content`` into plain response text.
+
+    Groq returns a plain string for the models ARGUS registers, but LangChain's
+    content type also admits a list of content blocks, of which only the ones
+    tagged ``"text"`` carry response text.
+
+    Args:
+        content: The ``content`` attribute of a LangChain response message.
+
+    Returns:
+        The response as a single string.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            item.get("text", "")
+            for item in content
+            if isinstance(item, dict) and item.get("type") == "text"
+        )
+    return str(content)
+
+
 class GroqLLMClient:
     """Wraps a ChatGroq model+params combination. One instance per (model, temperature, max_tokens).
 
@@ -373,16 +397,7 @@ class GroqLLMClient:
             token_usage.get("completion_tokens", 0),
         )
 
-        raw = response.content
-        if isinstance(raw, list):
-            raw = "".join(
-                item.get("text", "")
-                for item in raw
-                if isinstance(item, dict) and item.get("type") == "text"
-            )
-        elif not isinstance(raw, str):
-            raw = str(raw)
-        return raw
+        return _response_text(response.content)
 
 
 class FixtureLLMClient:
