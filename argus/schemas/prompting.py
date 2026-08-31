@@ -52,6 +52,14 @@ def _prompt_text(field: FieldInfo) -> PromptText | None:
     return None
 
 
+def _require_prompt_text(model: type[BaseModel], name: str, field: FieldInfo) -> str:
+    """Returns a field's marker text, or raises naming the field that lacks one."""
+    marker = _prompt_text(field)
+    if marker is None:
+        raise TypeError(f"{model.__name__}.{name} has no PromptText marker")
+    return marker.text
+
+
 def _nested_model(annotation: Any) -> tuple[type[BaseModel] | None, bool]:
     """Identifies a field annotation as a direct or list-wrapped BaseModel.
 
@@ -93,10 +101,7 @@ def field_list(model: type[BaseModel]) -> str:
         nested, _ = _nested_model(field.annotation)
         if nested is not None:
             raise TypeError(f"{model.__name__}.{name}: field_list does not support nested models")
-        marker = _prompt_text(field)
-        if marker is None:
-            raise TypeError(f"{model.__name__}.{name} has no PromptText marker")
-        parts.append(marker.text)
+        parts.append(_require_prompt_text(model, name, field))
     return ", ".join(parts)
 
 
@@ -122,17 +127,15 @@ def schema_block(model: type[BaseModel]) -> str:
     entries = []
     for name, field in model.model_fields.items():
         nested, is_list = _nested_model(field.annotation)
-        marker = _prompt_text(field)
-        if nested is not None:
-            if marker is not None:
+        if nested is None:
+            value = _require_prompt_text(model, name, field)
+        else:
+            if _prompt_text(field) is not None:
                 raise TypeError(
-                    f"{model.__name__}.{name} is a nested model and must not carry a PromptText marker"
+                    f"{model.__name__}.{name} is a nested model "
+                    "and must not carry a PromptText marker"
                 )
             rendered = schema_block(nested)
             value = f"[{rendered}]" if is_list else rendered
-        else:
-            if marker is None:
-                raise TypeError(f"{model.__name__}.{name} has no PromptText marker")
-            value = marker.text
         entries.append(f'"{name}":{value}')
     return "{" + ",".join(entries) + "}"
