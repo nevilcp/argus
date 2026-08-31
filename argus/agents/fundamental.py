@@ -38,8 +38,7 @@ from argus.structured_output import StructuredOutputError, decode
 
 logger = logging.getLogger("argus.fundamental")
 
-# Approximate sector-median P/E multiples used as context anchors in the LLM prompt.
-# Values are rough historical averages; not intended as precise trading thresholds.
+# Approximate sector-median P/E anchors for the LLM prompt; rough averages, not precise thresholds.
 _SECTOR_PE_MEDIANS: dict[str, float] = {
     "Technology": 32.0,
     "Consumer Cyclical": 24.0,
@@ -55,16 +54,10 @@ _SECTOR_PE_MEDIANS: dict[str, float] = {
 }
 _DEFAULT_PE_MEDIAN = 20.0
 
-# Fraction of the configured per-minute request budget held back before a
-# ticker's fundamental analysis is even attempted, so the same-model portfolio
-# agent (GOV-13: ARGUS_PORTFOLIO_MODEL defaults to the same model as
-# ARGUS_FUNDAMENTAL_MODEL) still has room after a fundamental batch. Scaled
-# off ARGUS_GROQ_RPM rather than a fixed constant, so a low configured RPM
-# doesn't leave a reserve larger than the budget itself and skip every ticker.
+# Reserve fraction of RPM held back so the portfolio agent (GOV-13) has room after a batch.
 _CAPACITY_RESERVE_FRACTION = 0.1
 
-# Ratios fetched from market_data.fundamentals(ticker): measured data, never
-# LLM output. The LLM only ever supplies signal/conviction/moat_score/reasoning.
+# Measured from market_data.fundamentals(); LLM only supplies signal/conviction/moat/reasoning.
 _MEASURED_FUNDAMENTAL_FIELDS = (
     "sector",
     "industry",
@@ -241,6 +234,36 @@ SYSTEM_PROMPT = (
 )
 
 
+def _signal_payload(
+    verdict: FundamentalVerdict, ticker: str, pit_data: dict[str, Any]
+) -> dict[str, Any]:
+    """Merges an LLM verdict with the measured ratios into a FundamentalSignal payload.
+
+    Args:
+        verdict: Decoded LLM verdict, supplying only signal/conviction/moat_score/reasoning.
+        ticker: Equity ticker symbol.
+        pit_data: Point-in-time dict with keys ``fundamentals`` and ``as_of_date``.
+
+    Returns:
+        Dict ready for ``FundamentalSignal.model_validate``.
+    """
+    data: dict[str, Any] = verdict.model_dump()
+    data["ticker"] = ticker
+    data["data_as_of_date"] = pit_data["as_of_date"]
+    data["timestamp"] = datetime.now().isoformat()  # noqa: DTZ005
+    data["api_calls_used"] = 1
+
+    # Measured ratios come from the fetched payload, never the LLM echo.
+    f = pit_data.get("fundamentals", {})
+    for key in _MEASURED_FUNDAMENTAL_FIELDS:
+        data[key] = f.get(key)
+    data["sector"] = data["sector"] or "Unknown"
+    data["industry"] = data["industry"] or "Unknown"
+
+    data["reasoning"] = data["reasoning"][:400]
+    return data
+
+
 class FundamentalAgent:
     """Agent coordinating LLM valuation and economic moat auditing.
 
@@ -271,18 +294,13 @@ class FundamentalAgent:
             llm_client = GroqLLMClient(
                 model=settings.ARGUS_FUNDAMENTAL_MODEL,
                 temperature=0.1,
-                # Measured against gpt-oss-120b at reasoning_effort="low" on
-                # reconstructed fixture prompts (AAPL/MSFT/NVDA): completion_tokens
-                # peaked at 327, of which up to 193 was reasoning. 450 leaves ~35%
-                # headroom above that peak.
+                # gpt-oss-120b peaked at 327 completion tokens on fixture prompts; 450 leaves ~35% headroom.
                 max_tokens=450,
                 api_key=api_key,
             )
         self.llm_client = llm_client
         self.market_data = market_data or LiveMarketDataProvider()
-        # Keyed on (ticker, session_seed): two backtest sessions replaying the same
-        # ticker on different simulated dates must not serve each other's cached
-        # signal, and a live call (session_seed=None) must not be conflated with either
+        # Keyed on (ticker, session_seed) so backtest sessions and live calls never share a cached signal.
         self.cache: TTLCache[tuple[str, Optional[int]], FundamentalSignal] = TTLCache(
             ttl=timedelta(days=7)
         )
@@ -318,8 +336,7 @@ class FundamentalAgent:
             logger.debug("FundamentalAgent.analyze: Cache hit for %s", ticker)
             return cached
 
-        capacity_reserve = max(1, int(settings.ARGUS_GROQ_RPM * _CAPACITY_RESERVE_FRACTION))
-        if self.llm_client.remaining_capacity() < capacity_reserve:
+        if not self._has_spare_capacity():
             logger.warning(
                 "[Fundamental] Low capacity for %s, skipping %s", settings.ARGUS_FUNDAMENTAL_MODEL, ticker
             )
@@ -356,9 +373,7 @@ class FundamentalAgent:
                 errors.append(f"fundamental_analysis[{ticker}]: {e}")
             return None
         except (RateLimitExceeded, UnregisteredModel) as e:
-            # The governor already exhausted its own bounded wait before raising
-            # either of these — degrade this ticker immediately rather than
-            # retrying into the same wall.
+            # Governor already exhausted its bounded wait; degrade this ticker rather than retry into it.
             logger.warning("[Fundamental] Governor rejected call for %s: %s", ticker, e)
             if errors is not None:
                 errors.append(f"fundamental_analysis[{ticker}]: rate limited: {e}")
@@ -369,28 +384,12 @@ class FundamentalAgent:
                 errors.append(f"fundamental_analysis[{ticker}]: API error: {e}")
             return None
 
-        data: dict[str, Any] = verdict.model_dump()
-        data["ticker"] = ticker
-        data["data_as_of_date"] = pit_data["as_of_date"]
-        data["timestamp"] = datetime.now().isoformat()  # noqa: DTZ005
-        data["api_calls_used"] = 1
-
-        # All measured ratios come from the fetched payload, never the LLM
-        # echo — the LLM only supplies signal/conviction/moat_score/reasoning.
-        f = pit_data.get("fundamentals", {})
-        for key in _MEASURED_FUNDAMENTAL_FIELDS:
-            data[key] = f.get(key)
-        data["sector"] = data["sector"] or "Unknown"
-        data["industry"] = data["industry"] or "Unknown"
-
-        data["reasoning"] = data["reasoning"][:400]
+        data = _signal_payload(verdict, ticker, pit_data)
 
         try:
             signal = FundamentalSignal.model_validate(data)
         except ValidationError as e:
-            # Merged-in measured data (e.g. a negative debt_to_equity) can violate
-            # the signal schema even though the verdict itself decoded cleanly —
-            # degrade this ticker rather than let it crash the batch.
+            # Merged measured data (e.g. negative debt_to_equity) can fail schema even after a clean decode.
             logger.warning("[Fundamental] Measured data failed signal validation for %s: %s", ticker, e)
             if errors is not None:
                 errors.append(f"fundamental_analysis[{ticker}]: measured data failed validation: {e}")
@@ -401,6 +400,16 @@ class FundamentalAgent:
             "[Fundamental] Analysis complete for %s -> %s", ticker, signal.signal.value
         )
         return signal
+
+    def _has_spare_capacity(self) -> bool:
+        """Reports whether the LLM client has room left beyond the held-back reserve.
+
+        Returns:
+            True when the client's remaining capacity still covers the reserve kept
+            for the same-model portfolio agent (see ``_CAPACITY_RESERVE_FRACTION``).
+        """
+        capacity_reserve = max(1, int(settings.ARGUS_GROQ_RPM * _CAPACITY_RESERVE_FRACTION))
+        return self.llm_client.remaining_capacity() >= capacity_reserve
 
     def batch_analyze(
         self, tickers: list[str], backtest_mode: bool = False, session_seed: Optional[int] = None
