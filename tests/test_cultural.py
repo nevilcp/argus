@@ -12,6 +12,7 @@ from unittest import mock
 
 import pytest
 
+import argus.memory.cultural as cultural_module
 from argus.memory.cultural import CulturalMemoryManager, get_cultural_memory
 from argus.params import MEMORY, RECONCILIATION
 from argus.schemas.signals import (
@@ -40,7 +41,19 @@ def _manager_with_query_collection() -> CulturalMemoryManager:
     return manager
 
 
-def _macro(regime: Regime = Regime.EXPANSION, vix_regime: VixRegime = VixRegime.MEDIUM) -> MacroContext:
+def _manager_with_pending(ids: list[str], timestamps: list[str]) -> CulturalMemoryManager:
+    manager = object.__new__(CulturalMemoryManager)
+    manager.collection = mock.Mock()
+    manager.collection.get.return_value = {
+        "ids": ids,
+        "metadatas": [{"outcome": "PENDING", "timestamp": ts} for ts in timestamps],
+    }
+    return manager
+
+
+def _macro(
+    regime: Regime = Regime.EXPANSION, vix_regime: VixRegime = VixRegime.MEDIUM
+) -> MacroContext:
     return MacroContext(
         fed_funds=4.0,
         cpi_yoy=3.0,
@@ -265,16 +278,6 @@ def test_summary_stats_all_pending_reports_zero_average_without_dividing_by_zero
     assert stats["avg_return_pct"] == 0.0
 
 
-def _manager_with_pending(ids: list[str], timestamps: list[str]) -> CulturalMemoryManager:
-    manager = object.__new__(CulturalMemoryManager)
-    manager.collection = mock.Mock()
-    manager.collection.get.return_value = {
-        "ids": ids,
-        "metadatas": [{"outcome": "PENDING", "timestamp": ts} for ts in timestamps],
-    }
-    return manager
-
-
 def test_expire_pending_snapshots_deletes_only_entries_before_cutoff():
     """MEM-3: a snapshot older than cutoff is deleted; one at or after it survives."""
     manager = _manager_with_pending(
@@ -365,16 +368,12 @@ def test_retrieve_wisdom_as_of_filters_on_timestamp():
     }
 
 
-def test_get_cultural_memory_ignores_a_later_persist_dir_and_warns(
-    monkeypatch, caplog, tmp_path
-):
-    """A second get_cultural_memory() call with a different persist_dir cannot
+def test_get_cultural_memory_ignores_a_later_persist_dir_and_warns(monkeypatch, caplog, tmp_path):
+    """A later persist_dir cannot reconfigure the already-constructed singleton.
 
-    reconfigure the already-constructed singleton, and now logs instead of
-    silently ignoring it. Regression test for C8.
+    Regression test for C8: the second call now logs a warning instead of
+    silently ignoring the new directory.
     """
-    import argus.memory.cultural as cultural_module
-
     fake_manager = mock.Mock(persist_dir=str(tmp_path / "first"))
     monkeypatch.setattr(cultural_module, "_cultural_memory", fake_manager)
 

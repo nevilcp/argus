@@ -1,9 +1,12 @@
 """
 tests/test_integration.py
-=========================
-Comprehensive integration tests for ARGUS.
-Tests individual pipelines, the orchestrator graph, schema serialization,
-PiT enforcer, and Governor state limits.
+
+Integration tests for ARGUS: the statistical-agent pipeline, the orchestrator
+graph end to end, signal-schema serialization, and the shared Governor's
+rate limits.
+
+TestEndToEnd exercises live yfinance/FRED calls and needs FRED_API_KEY; every
+LLM boundary it crosses is mocked.
 """
 
 import asyncio
@@ -106,13 +109,8 @@ class TestEndToEnd:
         now actually reaches the LLM call instead of short-circuiting to
         all-cash before ever touching the network.
 
-        Args:
-            mock_sent: Patched SentimentAgent.analyze.
-            mock_fund: Patched FundamentalAgent.analyze.
-            mock_cultural_memory: Patched get_cultural_memory.
-            mock_portfolio: Patched PortfolioManagerAgent.allocate.
-            tmp_path: Pytest tempdir, so this run's checkpoint never lands in
-                the production argus_graph.db.
+        The checkpoint is written under tmp_path so this run never lands in the
+        production argus_graph.db.
         """
         mock_cultural_memory.return_value = mock.Mock(
             retrieve_wisdom=mock.Mock(return_value=[]),
@@ -122,17 +120,7 @@ class TestEndToEnd:
         )
 
         def fund_side_effect(ticker, backtest_mode=False, session_seed=None, errors=None):
-            """Stand in for FundamentalAgent.analyze, matching its real signature.
-
-            Args:
-                ticker: Ticker to build a signal for.
-                backtest_mode: Unused; accepted to match the real signature.
-                session_seed: Unused; accepted to match the real signature.
-                errors: Unused; accepted to match the real signature.
-
-            Returns:
-                A fixed BULLISH FundamentalSignal for the given ticker.
-            """
+            """Returns a fixed BULLISH FundamentalSignal; the extra params match analyze()."""
             return FundamentalSignal(
                 ticker=ticker,
                 sector="Technology",
@@ -148,16 +136,7 @@ class TestEndToEnd:
         mock_fund.side_effect = fund_side_effect
 
         def sent_side_effect(ticker, *args, **kwargs):
-            """Stand in for SentimentAgent.analyze, matching its real signature.
-
-            Args:
-                ticker: Ticker to build a signal for.
-                *args: Unused; accepted to match the real signature.
-                **kwargs: Unused; accepted to match the real signature.
-
-            Returns:
-                A fixed BULLISH SentimentSignal for the given ticker.
-            """
+            """Returns a fixed BULLISH SentimentSignal; the extra params match analyze()."""
             return SentimentSignal(
                 ticker=ticker,
                 signal=Signal.BULLISH,
@@ -182,19 +161,7 @@ class TestEndToEnd:
             cultural_warnings=None,
             adjustments=None,
         ):
-            """Stand in for PortfolioManagerAgent.allocate, matching its real signature.
-
-            Args:
-                user_profile: Dict with total_wealth/invest_pct/risk_tolerance.
-                snapshots: Mapping of ticker -> TickerSnapshot; unused.
-                macro: Current macroeconomic context; unused.
-                cultural_wisdom: Unused; accepted to match the real signature.
-                cultural_warnings: Unused; accepted to match the real signature.
-                adjustments: Unused; accepted to match the real signature.
-
-            Returns:
-                A fixed all-cash PortfolioAllocation.
-            """
+            """Returns a fixed all-cash PortfolioAllocation; the extra params match allocate()."""
             return PortfolioAllocation(
                 session_id=str(uuid4()),
                 user_investable_capital=float(user_profile.get("total_wealth") or 0.0),
@@ -246,10 +213,8 @@ class TestEndToEnd:
                 assert pos.stop_loss >= 0.0
         except Exception as e:
             # The checkpointer can raise a dataframe serialization error unrelated to graph wiring
-            if "msgpack" in str(e).lower() or "not msgpack serializable" in str(e).lower():
-                pass
-            else:
-                raise e
+            if "msgpack" not in str(e).lower():
+                raise
 
     def test_schema_round_trip(self):
         """Signal schemas survive a JSON dump/validate round trip unchanged."""

@@ -23,37 +23,38 @@ from argus.config import settings
 from argus.schemas.signals import Regime, VixRegime
 
 
+_DEFAULT_VIX_CLOSES = [20.0, 20.0, 20.0, 20.0, 10.0]
+
+
 class _StubMarketData:
-    """Minimal MarketDataProvider stub for macro.analyze()'s data needs."""
+    """MarketDataProvider stub for macro.analyze(), with a configurable VIX level and history.
+
+    Args:
+        vix: VIX level reported by macro_bundle().
+        historical_closes: Trailing VIX closes ohlcv_daily() reports, which drive
+            the VIX percentile calculation.
+    """
+
+    def __init__(self, vix: float = 15.0, historical_closes: list[float] | None = None) -> None:
+        self._vix = vix
+        self._closes = historical_closes if historical_closes is not None else _DEFAULT_VIX_CLOSES
 
     def macro_bundle(self) -> dict:
-        """Returns:
-            Fixed macro indicator values.
-        """
-        return {"vix": 15.0, "fed_funds": 2.0, "t10y2y": 1.5, "cpi_yoy": 2.0, "unemployment": 3.5}
+        """Returns fixed macro indicators carrying the configured VIX level."""
+        return {
+            "vix": self._vix,
+            "fed_funds": 2.0,
+            "t10y2y": 1.5,
+            "cpi_yoy": 2.0,
+            "unemployment": 3.5,
+        }
 
     def ohlcv_daily(self, ticker: str, period: str = "2y") -> pd.DataFrame:
-        """Returns a fixed close-price series regardless of the ticker or period.
-
-        Args:
-            ticker: Ticker symbol (ignored).
-            period: Lookback period (ignored).
-
-        Returns:
-            Fixed OHLCV close-price frame.
-        """
-        return pd.DataFrame({"close": [20.0, 20.0, 20.0, 20.0, 10.0]})
+        """Returns the configured closes regardless of the ticker or period."""
+        return pd.DataFrame({"close": self._closes})
 
     def fred_series(self, series_id: str, start: str = "2018-01-01") -> pd.Series:
-        """Returns a fixed series regardless of the FRED series ID or start date.
-
-        Args:
-            series_id: FRED series identifier (ignored).
-            start: Start date (ignored).
-
-        Returns:
-            Fixed series values.
-        """
+        """Returns a fixed series regardless of the FRED series ID or start date."""
         return pd.Series([1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0])
 
 
@@ -85,32 +86,6 @@ def test_agent_multipliers_expansion(monkeypatch: pytest.MonkeyPatch) -> None:
     assert ctx.agent_multipliers["sentiment"] == 0.9
 
 
-class _VixLevelStubMarketData:
-    """MarketDataProvider stub with a configurable VIX level and percentile history."""
-
-    def __init__(self, vix: float, historical_closes: list[float]) -> None:
-        self._vix = vix
-        self._closes = historical_closes
-
-    def macro_bundle(self) -> dict:
-        """Returns fixed macro indicators with the configured VIX level."""
-        return {
-            "vix": self._vix,
-            "fed_funds": 2.0,
-            "t10y2y": 1.5,
-            "cpi_yoy": 2.0,
-            "unemployment": 3.5,
-        }
-
-    def ohlcv_daily(self, ticker: str, period: str = "2y") -> pd.DataFrame:
-        """Returns the configured historical closes for the VIX percentile calc."""
-        return pd.DataFrame({"close": self._closes})
-
-    def fred_series(self, series_id: str, start: str = "2018-01-01") -> pd.Series:
-        """Returns a fixed series regardless of the FRED series ID or start date."""
-        return pd.Series([1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0])
-
-
 def test_vix_regime_buckets_from_level_not_percentile(monkeypatch: pytest.MonkeyPatch) -> None:
     """vix_regime is bucketed from the absolute VIX level, not its trailing percentile.
 
@@ -120,7 +95,7 @@ def test_vix_regime_buckets_from_level_not_percentile(monkeypatch: pytest.Monkey
     """
     # VIX 11, at its 85th trailing percentile (17 of 20 historical closes are lower)
     low_vix_agent = MacroStatisticalAgent(
-        market_data=_VixLevelStubMarketData(11.0, [10.0] * 17 + [50.0] * 3)
+        market_data=_StubMarketData(11.0, [10.0] * 17 + [50.0] * 3)
     )
     monkeypatch.setattr(
         low_vix_agent.classifier, "predict", lambda current_values: (Regime.EXPANSION.value, 0.9)
@@ -132,7 +107,7 @@ def test_vix_regime_buckets_from_level_not_percentile(monkeypatch: pytest.Monkey
     # VIX 28, at its 25th trailing percentile (5 of 20 historical closes are lower).
     # VixRegime buckets HIGH as 25 <= VIX < 35, so 28 lands HIGH despite the low percentile.
     high_vix_agent = MacroStatisticalAgent(
-        market_data=_VixLevelStubMarketData(28.0, [10.0] * 5 + [60.0] * 15)
+        market_data=_StubMarketData(28.0, [10.0] * 5 + [60.0] * 15)
     )
     monkeypatch.setattr(
         high_vix_agent.classifier, "predict", lambda current_values: (Regime.EXPANSION.value, 0.9)
@@ -283,10 +258,11 @@ def test_save_load_round_trip(tmp_path: Path) -> None:
 
 
 def test_committed_artifact_loads_and_discriminates_regimes() -> None:
-    """The artifact shipped at ARGUS_HMM_MODEL_PATH loads under the pinned library
-    versions (DEP-3) and is actually a function of the macro data (DEP-4) — this is
-    the guard that would have caught a version mismatch silently degrading
-    production to the rule-based fallback."""
+    """The shipped artifact loads under the pinned libraries and discriminates regimes.
+
+    DEP-3 and DEP-4: this is the guard that would have caught a library version
+    mismatch silently degrading production to the rule-based fallback.
+    """
     classifier = RegimeClassifier.load(settings.ARGUS_HMM_MODEL_PATH)
 
     assert classifier.is_fitted
@@ -490,16 +466,12 @@ def test_discrimination_scenarios_cover_all_feature_columns() -> None:
     assert len(DISCRIMINATION_SCENARIOS) >= 2
 
 
-class _WindowAssemblyFailureMarketData:
+class _WindowAssemblyFailureMarketData(_StubMarketData):
     """A MarketDataProvider whose FRED calls always fail, forcing window assembly to fail."""
 
     def macro_bundle(self) -> dict:
-        """Returns fixed macro indicator values used for the single-observation fallback."""
+        """Returns the expansion cluster mean, the single-observation fallback's input."""
         return dict(_EXPANSION_POINT)
-
-    def ohlcv_daily(self, ticker: str, period: str = "2y") -> pd.DataFrame:
-        """Returns a fixed close-price series so the VIX-percentile calc still succeeds."""
-        return pd.DataFrame({"close": [20.0, 20.0, 20.0, 20.0, 10.0]})
 
     def fred_series(self, series_id: str, start: str = "2018-01-01") -> pd.Series:
         """Always raises, simulating a FRED outage during window assembly."""

@@ -2,10 +2,9 @@
 tests/test_evaluation.py
 
 Tests for argus/backtesting/evaluation.py. Metric functions are tested
-against synthetic, deterministic data (no network); collect_paired_outcomes/
-evaluate_decisions and
-system_behavior_report are tested end-to-end against the one real fixture
-session with a fake MarketDataProvider standing in for
+against synthetic, deterministic data (no network); collect_paired_outcomes,
+evaluate_decisions, and system_behavior_report are tested end-to-end against
+the one real fixture session with a fake MarketDataProvider standing in for
 LiveMarketDataProvider (see tests/test_reconciliation.py's _FakeMarketData,
 reused here).
 """
@@ -14,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from argus.backtesting.evaluation import (
     PairedOutcome,
@@ -28,9 +28,8 @@ from argus.backtesting.evaluation import (
     trade_level_win_loss_stats,
 )
 from argus.backtesting.replay import SessionResult, replay_session
+from argus.orchestration.aggregator import HybridSignalAggregator
 from argus.schemas.signals import ARGUSDecision, Signal
-import pytest
-
 from tests.test_reconciliation import (
     _allocation,
     _FakeMarketData,
@@ -38,7 +37,6 @@ from tests.test_reconciliation import (
     _technical,
     _ten_day_series,
 )
-from argus.orchestration.aggregator import HybridSignalAggregator
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
@@ -46,6 +44,7 @@ FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 def _decision_with_signal(
     signal: Signal, conviction: float, ticker: str = "TEST", price: float = 100.0
 ) -> ARGUSDecision:
+    """Builds a decision whose aggregated signal comes from the real aggregator."""
     technical = _technical(signal, conviction, ticker=ticker, price=price)
     macro = _macro()
     aggregated = HybridSignalAggregator().aggregate(technical, macro, None, None)
@@ -87,6 +86,7 @@ def test_signed_conviction_none_without_aggregated_signal():
 
 
 def _pairs(convictions: list[float], returns: list[float]) -> list[PairedOutcome]:
+    """Zips convictions with forward returns into PairedOutcomes on synthetic tickers."""
     return [
         PairedOutcome(ticker=f"T{i}", signed_conviction=c, forward_return=r, holding_days=5)
         for i, (c, r) in enumerate(zip(convictions, returns))
@@ -170,18 +170,22 @@ def test_trade_level_win_loss_stats_computes_win_rate_and_profit_factor():
 # ---------------------------------------------------------------------------
 
 
+def _rank_ic(pairs: list[PairedOutcome]) -> float | None:
+    """The rank IC alone, dropping the p-value, as bootstrap_ci's statistic argument."""
+    return rank_information_coefficient(pairs)[0]
+
+
 def test_bootstrap_ci_is_deterministic_and_brackets_zero_pairs():
     """A bootstrap CI over too few pairs to compute the statistic is (None, None)."""
-    assert bootstrap_ci(_pairs([0.5], [0.01]), lambda p: rank_information_coefficient(p)[0]) == (None, None)
+    assert bootstrap_ci(_pairs([0.5], [0.01]), _rank_ic) == (None, None)
 
 
 def test_bootstrap_ci_reproducible_with_fixed_seed():
     """The same seed produces identical bootstrap CIs across runs."""
     pairs = _pairs([0.1, 0.3, 0.5, 0.7, 0.9, -0.2], [-0.03, -0.01, 0.0, 0.02, 0.04, 0.01])
-    stat_fn = lambda p: rank_information_coefficient(p)[0]  # noqa: E731
 
-    first = bootstrap_ci(pairs, stat_fn, n_resamples=500, seed=42)
-    second = bootstrap_ci(pairs, stat_fn, n_resamples=500, seed=42)
+    first = bootstrap_ci(pairs, _rank_ic, n_resamples=500, seed=42)
+    second = bootstrap_ci(pairs, _rank_ic, n_resamples=500, seed=42)
 
     assert first == second
     lower, upper = first
@@ -220,13 +224,10 @@ def test_evaluate_decisions_end_to_end_on_multiple_tickers():
         _decision_with_signal(Signal.BULLISH, 0.8, ticker="A", price=100.0),
         _decision_with_signal(Signal.BEARISH, 0.6, ticker="B", price=100.0),
     ]
-    closes_a = pd.Series(
-        [100.0 + i for i in range(10)], index=pd.date_range(datetime(2026, 1, 1), periods=10, freq="D")
-    )
-    closes_b = pd.Series(
-        [100.0 - i for i in range(10)], index=pd.date_range(datetime(2026, 1, 1), periods=10, freq="D")
-    )
-    market_data = _FakeMarketData({"A": closes_a, "B": closes_b})
+    dates = pd.date_range(datetime(2026, 1, 1), periods=10, freq="D")
+    rising = pd.Series([100.0 + i for i in range(10)], index=dates)
+    falling = pd.Series([100.0 - i for i in range(10)], index=dates)
+    market_data = _FakeMarketData({"A": rising, "B": falling})
 
     result = evaluate_decisions(decisions, market_data, horizon_days=5, deadband=0.01)
 

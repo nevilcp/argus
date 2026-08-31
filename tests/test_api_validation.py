@@ -22,7 +22,10 @@ import api.main as api_main
 import argus.risk.kill_switch as kill_switch_module
 from argus.data.live_session_cache import LiveSessionCache
 
-_PAYLOAD = {"tickers": ["AAPL"], "total_wealth": 100_000, "invest_pct": 0.5}
+
+def _payload(*tickers: str) -> dict:
+    """An /analyze request body that varies only in the tickers it asks for."""
+    return {"tickers": list(tickers), "total_wealth": 100_000, "invest_pct": 0.5}
 
 
 @pytest.fixture(autouse=True)
@@ -41,11 +44,11 @@ def client():
     return TestClient(api_main.app)
 
 
-def _pipeline(monkeypatch, *, market_hours: bool, interval_minutes: int = 1):
+def _pipeline(monkeypatch, *, market_hours: bool):
     """Installs a fake MFTDataPipeline as the module-level `_mft_pipeline`."""
     fake = mock.Mock()
     fake.is_market_hours.return_value = market_hours
-    fake.interval_minutes = interval_minutes
+    fake.interval_minutes = 1
     monkeypatch.setattr(api_main, "_mft_pipeline", fake)
     return fake
 
@@ -55,7 +58,9 @@ def _seed_cache(ticker: str, *, bar_age_seconds: float, write_age_seconds: float
     now = datetime.now(api_main._ET)
     bar_ts = now - timedelta(seconds=bar_age_seconds)
     write_ts = now - timedelta(seconds=write_age_seconds)
-    api_main._live_cache.publish({ticker: {"timestamp": bar_ts.isoformat()}}, [ticker], now=write_ts)
+    api_main._live_cache.publish(
+        {ticker: {"timestamp": bar_ts.isoformat()}}, [ticker], now=write_ts
+    )
 
 
 @pytest.mark.parametrize(
@@ -74,10 +79,7 @@ def _seed_cache(ticker: str, *, bar_age_seconds: float, write_age_seconds: float
 )
 def test_analyze_rejects_malformed_ticker_with_422(client, ticker):
     """A hostile or malformed ticker is rejected by pydantic before any handler runs."""
-    response = client.post(
-        "/analyze",
-        json={"tickers": [ticker], "total_wealth": 100_000, "invest_pct": 0.5},
-    )
+    response = client.post("/analyze", json=_payload(ticker))
     assert response.status_code == 422
 
 
@@ -89,10 +91,7 @@ def test_analyze_accepts_share_class_tickers(client, monkeypatch):
     not mutate pipeline state.
     """
     fake_pipeline = _pipeline(monkeypatch, market_hours=True)
-    response = client.post(
-        "/analyze",
-        json={"tickers": ["BRK.B", "BRK-B"], "total_wealth": 100_000, "invest_pct": 0.5},
-    )
+    response = client.post("/analyze", json=_payload("BRK.B", "BRK-B"))
     assert response.status_code == 503
     fake_pipeline.register_tickers.assert_called_once_with(["BRK.B", "BRK-B"])
 
@@ -100,10 +99,7 @@ def test_analyze_accepts_share_class_tickers(client, monkeypatch):
 def test_analyze_upcases_and_dedupes_tickers(client, monkeypatch):
     """Lowercase, whitespace-padded, and repeated tickers collapse to one upper-cased entry each."""
     fake_pipeline = _pipeline(monkeypatch, market_hours=True)
-    response = client.post(
-        "/analyze",
-        json={"tickers": [" aapl ", "AAPL", "msft"], "total_wealth": 100_000, "invest_pct": 0.5},
-    )
+    response = client.post("/analyze", json=_payload(" aapl ", "AAPL", "msft"))
     assert response.status_code == 503
     fake_pipeline.register_tickers.assert_called_once_with(["AAPL", "MSFT"])
 
@@ -116,7 +112,7 @@ def test_analyze_redacts_internal_exception_details(client, monkeypatch):
     fake_graph.invoke.side_effect = RuntimeError("api_key=sk-secret123 at /etc/passwd")
     monkeypatch.setattr(api_main, "_graph", fake_graph)
 
-    response = client.post("/analyze", json=_PAYLOAD)
+    response = client.post("/analyze", json=_payload("AAPL"))
 
     assert response.status_code == 500
     detail = response.json()["detail"]

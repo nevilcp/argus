@@ -16,6 +16,19 @@ from argus.params import RISK
 from argus.schemas.signals import RiskVerdict
 
 
+_TRADING_YEAR = pd.date_range(start="2023-01-01", periods=253, freq="B")
+
+
+def _prices_from_returns(returns: np.ndarray, dates: pd.DatetimeIndex) -> pd.Series:
+    """Compounds daily returns into a price series starting at 100."""
+    return pd.Series(100 * np.exp(np.cumsum(returns)), index=dates)
+
+
+def _random_prices(dates: pd.DatetimeIndex, mean: float, vol: float) -> pd.Series:
+    """Builds a price series from N(mean, vol) daily returns drawn off the active numpy seed."""
+    return _prices_from_returns(np.random.normal(mean, vol, len(dates)), dates)
+
+
 @pytest.fixture
 def price_history():
     """Create a simulated price history dictionary for tests.
@@ -24,27 +37,18 @@ def price_history():
         Mapping of ticker (plus "SPY" benchmark) to a one-year daily price series.
     """
     np.random.seed(42)  # Fixed seed keeps returns reproducible across runs
-    dates = pd.date_range(start="2023-01-01", periods=253, freq="B")
-    hist = {}
 
     # Moderate, normal volatility: 0.1% daily mean return, 1.5% daily vol
     tickers = ["AAPL", "MSFT", "GOOGL", "META", "AMZN", "TSLA", "JPM", "BAC"]
-    for t in tickers:
-        returns = np.random.normal(0.001, 0.015, len(dates))
-        prices = 100 * np.exp(np.cumsum(returns))
-        hist[t] = pd.Series(prices, index=dates)
-
-    spy_returns = np.random.normal(0.0005, 0.01, len(dates))
-    hist["SPY"] = pd.Series(100 * np.exp(np.cumsum(spy_returns)), index=dates)
+    hist = {t: _random_prices(_TRADING_YEAR, 0.001, 0.015) for t in tickers}
+    hist["SPY"] = _random_prices(_TRADING_YEAR, 0.0005, 0.01)
 
     return hist
 
 
 @pytest.fixture
 def risk_engine():
-    """Returns:
-        A fresh RiskStatisticalEngine instance.
-    """
+    """A fresh RiskStatisticalEngine instance."""
     return RiskStatisticalEngine()
 
 
@@ -78,19 +82,13 @@ def test_overweight_position(risk_engine: RiskStatisticalEngine, price_history: 
 def test_high_var_reduce(risk_engine: RiskStatisticalEngine) -> None:
     """Extreme volatility pushes VaR high enough to trigger REDUCE rather than VETO."""
     np.random.seed(42)
-    dates = pd.date_range(start="2023-01-01", periods=253, freq="B")
-    hist = {}
+    tickers = ["AAPL", "MSFT", "GOOGL", "META", "AMZN"]
 
     # 15% daily volatility is well above normal to force VaR past the REDUCE threshold
-    for t in ["AAPL", "MSFT", "GOOGL", "META", "AMZN"]:
-        returns = np.random.normal(0.0, 0.15, len(dates))
-        hist[t] = pd.Series(100 * np.exp(np.cumsum(returns)), index=dates)
+    hist = {t: _random_prices(_TRADING_YEAR, 0.0, 0.15) for t in tickers}
+    hist["SPY"] = _random_prices(_TRADING_YEAR, 0.0, 0.01)
 
-    hist["SPY"] = pd.Series(
-        100 * np.exp(np.cumsum(np.random.normal(0, 0.01, len(dates)))), index=dates
-    )
-
-    positions = [{"ticker": t, "weight": 0.15} for t in ["AAPL", "MSFT", "GOOGL", "META", "AMZN"]]
+    positions = [{"ticker": t, "weight": 0.15} for t in tickers]
 
     result = risk_engine.evaluate(positions, hist, current_vix=20.0)
 
@@ -179,14 +177,9 @@ def test_per_ticker_var_normalized_to_full_weight() -> None:
     """
     engine = RiskStatisticalEngine()
     np.random.seed(3)
-    dates = pd.date_range(start="2023-01-01", periods=253, freq="B")
     hist = {
-        "AAPL": pd.Series(
-            100 * np.exp(np.cumsum(np.random.normal(0.0, 0.05, len(dates)))), index=dates
-        ),
-        "SPY": pd.Series(
-            100 * np.exp(np.cumsum(np.random.normal(0.0, 0.01, len(dates)))), index=dates
-        ),
+        "AAPL": _random_prices(_TRADING_YEAR, 0.0, 0.05),
+        "SPY": _random_prices(_TRADING_YEAR, 0.0, 0.01),
     }
 
     result = engine.evaluate([{"ticker": "AAPL", "weight": 0.15}], hist, current_vix=20.0)
@@ -208,18 +201,17 @@ def test_ols_portfolio_beta_uses_lookback_window() -> None:
 
     np.random.seed(7)
     spy_returns = np.random.normal(0.0005, 0.01, total_days)
-    spy_prices = 100 * np.exp(np.cumsum(spy_returns))
 
     # Pre-lookback segment: unrelated to SPY (beta ~ 0). In-lookback segment: exactly
     # 2x SPY's return each day (beta == 2). Only .tail(lookback) should see the latter.
     split = total_days - RISK.returns_lookback_days - 1
     old_segment = np.random.normal(0.0, 0.02, split)
     recent_segment = spy_returns[split:] * 2.0
-    asset_prices = 100 * np.exp(np.cumsum(np.concatenate([old_segment, recent_segment])))
+    asset_returns = np.concatenate([old_segment, recent_segment])
 
     price_history = {
-        "AAPL": pd.Series(asset_prices, index=dates),
-        "SPY": pd.Series(spy_prices, index=dates),
+        "AAPL": _prices_from_returns(asset_returns, dates),
+        "SPY": _prices_from_returns(spy_returns, dates),
     }
 
     beta = ols_portfolio_beta([{"ticker": "AAPL", "weight": 0.1}], price_history)
@@ -235,12 +227,11 @@ def test_compute_asset_returns_drops_short_history_ticker_without_shrinking_othe
     ticker's return series down to that same handful of rows and wrecking
     the covariance SLSQP and the VaR/CVaR gates depend on.
     """
-    dates = pd.date_range(start="2023-01-01", periods=253, freq="B")
-    short_dates = dates[-5:]
+    short_dates = _TRADING_YEAR[-5:]
 
     hist = {
-        "AAPL": pd.Series(np.linspace(100, 150, len(dates)), index=dates),
-        "MSFT": pd.Series(np.linspace(200, 250, len(dates)), index=dates),
+        "AAPL": pd.Series(np.linspace(100, 150, len(_TRADING_YEAR)), index=_TRADING_YEAR),
+        "MSFT": pd.Series(np.linspace(200, 250, len(_TRADING_YEAR)), index=_TRADING_YEAR),
         "NEWCO": pd.Series(np.linspace(10, 11, len(short_dates)), index=short_dates),
     }
     positions = [{"ticker": t} for t in ("AAPL", "MSFT", "NEWCO")]
@@ -261,20 +252,13 @@ def test_evaluate_excludes_short_history_ticker_from_covariance(monkeypatch) -> 
     monkeypatch.setattr("argus.agents.risk.get_sector", lambda ticker: "Diversified")
     engine = RiskStatisticalEngine()
 
-    dates = pd.date_range(start="2023-01-01", periods=253, freq="B")
     np.random.seed(5)
-    hist = {}
-    for t in ["AAPL", "MSFT", "GOOGL", "META", "AMZN"]:
-        returns = np.random.normal(0.001, 0.015, len(dates))
-        hist[t] = pd.Series(100 * np.exp(np.cumsum(returns)), index=dates)
-    hist["SPY"] = pd.Series(
-        100 * np.exp(np.cumsum(np.random.normal(0.0005, 0.01, len(dates)))), index=dates
-    )
-    hist["NEWCO"] = pd.Series(np.linspace(10, 11, 5), index=dates[-5:])
+    tickers = ["AAPL", "MSFT", "GOOGL", "META", "AMZN"]
+    hist = {t: _random_prices(_TRADING_YEAR, 0.001, 0.015) for t in tickers}
+    hist["SPY"] = _random_prices(_TRADING_YEAR, 0.0005, 0.01)
+    hist["NEWCO"] = pd.Series(np.linspace(10, 11, 5), index=_TRADING_YEAR[-5:])
 
-    positions = [
-        {"ticker": t, "weight": 0.1} for t in ["AAPL", "MSFT", "GOOGL", "META", "AMZN", "NEWCO"]
-    ]
+    positions = [{"ticker": t, "weight": 0.1} for t in [*tickers, "NEWCO"]]
     result = engine.evaluate(positions, hist, current_vix=20.0)
 
     assert any(r.startswith("Covariance: excluded NEWCO") for r in result.veto_reasons)
@@ -288,18 +272,13 @@ def test_evaluate_skips_optimizer_on_non_finite_covariance(monkeypatch) -> None:
     monkeypatch.setattr("argus.agents.risk.get_sector", lambda ticker: "Diversified")
     engine = RiskStatisticalEngine()
 
-    dates = pd.date_range(start="2023-01-01", periods=253, freq="B")
     np.random.seed(11)
-    aapl_prices = 100 * np.exp(np.cumsum(np.random.normal(0.0005, 0.01, len(dates))))
-    aapl_prices[100] = 0.0  # a zero print makes the next day's pct_change +inf, not NaN
+    aapl = _random_prices(_TRADING_YEAR, 0.0005, 0.01)
+    aapl.iloc[100] = 0.0  # a zero print makes the next day's pct_change +inf, not NaN
     hist = {
-        "AAPL": pd.Series(aapl_prices, index=dates),
-        "MSFT": pd.Series(
-            100 * np.exp(np.cumsum(np.random.normal(0.0005, 0.01, len(dates)))), index=dates
-        ),
-        "SPY": pd.Series(
-            100 * np.exp(np.cumsum(np.random.normal(0.0003, 0.008, len(dates)))), index=dates
-        ),
+        "AAPL": aapl,
+        "MSFT": _random_prices(_TRADING_YEAR, 0.0005, 0.01),
+        "SPY": _random_prices(_TRADING_YEAR, 0.0003, 0.008),
     }
     positions = [{"ticker": "AAPL", "weight": 0.1}, {"ticker": "MSFT", "weight": 0.1}]
 
