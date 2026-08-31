@@ -600,8 +600,8 @@ async def health():
             or reconciliation loop) has stopped running.
     """
     try:
-        llama_cap = governor.get_remaining_capacity(settings.ARGUS_PORTFOLIO_MODEL)
-        can_make_calls = llama_cap > 0
+        portfolio_model_capacity = governor.get_remaining_capacity(settings.ARGUS_PORTFOLIO_MODEL)
+        can_make_calls = portfolio_model_capacity > 0
     except Exception:
         can_make_calls = False
 

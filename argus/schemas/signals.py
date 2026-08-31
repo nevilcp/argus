@@ -267,7 +267,7 @@ class TechnicalSignal(BaseModel):
     @field_validator("conviction", mode="before")
     @classmethod
     def cap_conviction(cls, v: float) -> float:
-        """Silently clamps conviction to the 0.95 maximum.
+        """Clamps conviction to the 0.95 maximum, warning if it truncates.
 
         Args:
             v: Raw conviction value.
@@ -299,7 +299,7 @@ class FundamentalVerdict(BaseModel):
     @field_validator("conviction", mode="before")
     @classmethod
     def cap_conviction(cls, v: float) -> float:
-        """Silently clamps conviction to the 0.95 maximum."""
+        """Clamps conviction to the 0.95 maximum, warning if it truncates."""
         return _clamp_conviction(v)
 
 
@@ -338,7 +338,7 @@ class FundamentalSignal(BaseModel):
     @field_validator("conviction", mode="before")
     @classmethod
     def cap_conviction(cls, v: float) -> float:
-        """Silently clamps conviction to the 0.95 maximum."""
+        """Clamps conviction to the 0.95 maximum, warning if it truncates."""
         return _clamp_conviction(v)
 
 
@@ -365,7 +365,7 @@ class SentimentVerdict(BaseModel):
     @field_validator("conviction", mode="before")
     @classmethod
     def cap_conviction(cls, v: float) -> float:
-        """Silently clamps conviction to the 0.95 maximum."""
+        """Clamps conviction to the 0.95 maximum, warning if it truncates."""
         return _clamp_conviction(v)
 
 
@@ -415,11 +415,11 @@ class SentimentSignal(BaseModel):
     @field_validator("conviction", mode="before")
     @classmethod
     def cap_conviction(cls, v: float) -> float:
-        """Silently clamps conviction to the 0.95 maximum."""
+        """Clamps conviction to the 0.95 maximum, warning if it truncates."""
         return _clamp_conviction(v)
 
     @model_validator(mode="after")
-    def pct_sums_to_one_approx(self) -> "SentimentSignal":
+    def pct_sums_to_one_approx(self) -> SentimentSignal:
         """Warns (not errors) if pct_positive + pct_negative exceeds 1.0.
 
         A sum > 1 indicates a normalisation bug in the upstream FinBERT aggregation
@@ -481,7 +481,7 @@ class RiskAssessment(BaseModel):
     timestamp: datetime = Field(..., description="Naive local timestamp of signal production")
 
     @model_validator(mode="after")
-    def approved_le_proposed(self) -> "RiskAssessment":
+    def approved_le_proposed(self) -> RiskAssessment:
         """Enforces that approved_weight never exceeds proposed_weight.
 
         Violated when an upstream bug or rounding error inflates the approved weight.
@@ -668,7 +668,7 @@ class PortfolioAllocation(BaseModel):
         return portfolio
 
     @model_validator(mode="after")
-    def total_allocation_sums_to_one(self) -> "PortfolioAllocation":
+    def total_allocation_sums_to_one(self) -> PortfolioAllocation:
         """Verifies that equity weights + cash_reserve_pct sum to 1.0 ± 0.05.
 
         The upper bound (> 1.01) prevents leverage by catching over-allocation.

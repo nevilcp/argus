@@ -29,9 +29,10 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
+from collections.abc import Callable, Hashable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Generic, Hashable, Optional, TypeVar
+from typing import Generic, Optional, TypeVar
 
 import pandas as pd
 

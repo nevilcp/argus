@@ -433,7 +433,7 @@ class FixtureLLMClient:
         return self._capacity
 
     @classmethod
-    def from_fixture_file(cls, path: Path, key_fn: Optional[Any] = None) -> "FixtureLLMClient":
+    def from_fixture_file(cls, path: Path, key_fn: Optional[Any] = None) -> FixtureLLMClient:
         """Builds a FixtureLLMClient from a JSON file of key → response text.
 
         Args:

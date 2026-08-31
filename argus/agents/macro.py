@@ -29,7 +29,7 @@ import logging
 import warnings
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional
 
 import hmmlearn
 import joblib
@@ -500,7 +500,7 @@ class RegimeClassifier:
 
         return failures
 
-    def predict(self, current: dict | pd.DataFrame) -> Tuple[str, float]:
+    def predict(self, current: dict | pd.DataFrame) -> tuple[str, float]:
         """Classifies the current economic regime and returns posterior probability confidence.
 
         Falls back to static rule-based classification if the model has not been fitted.
@@ -549,7 +549,7 @@ class RegimeClassifier:
         regime = self.state_to_regime.get(state, Regime.TRANSITIONAL.value)
         return regime, confidence
 
-    def _rule_based_fallback(self, v: dict) -> Tuple[str, float]:
+    def _rule_based_fallback(self, v: dict) -> tuple[str, float]:
         """Applies static thresholds to classify the regime when the HMM is uncalibrated.
 
         Used during cold-start or when historical data fetch fails. Confidence is fixed
@@ -606,7 +606,7 @@ class RegimeClassifier:
         )
 
     @classmethod
-    def load(cls, path: str | Path) -> "RegimeClassifier":
+    def load(cls, path: str | Path) -> RegimeClassifier:
         """Loads a persisted classifier artifact, never raising to the caller.
 
         Args:
@@ -693,7 +693,7 @@ class MacroStatisticalAgent:
                 settings.ARGUS_HMM_MODEL_PATH.
         """
         self.classifier = RegimeClassifier.load(model_path or settings.ARGUS_HMM_MODEL_PATH)
-        self._cache: Tuple[MacroContext, datetime] | None = None
+        self._cache: tuple[MacroContext, datetime] | None = None
         self._cache_ttl_hours = 6
         self.market_data = market_data or LiveMarketDataProvider()
 

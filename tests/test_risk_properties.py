@@ -96,9 +96,10 @@ def test_optimal_weights_never_exceed_total_deployment_budget(tickers: list[str]
 def test_all_negative_convictions_veto_not_reduce_at_zero() -> None:
     """RE-1 guard: a near-zero SLSQP cap becomes VETO, not REDUCE-to-zero.
 
-    REDUCE still counts as an approved ticker downstream (portfolio.py:236), so a
-    0%-cap REDUCE would leave the portfolio agent demanding invest_pct deployment
-    against a cap with no room for it — this is the bug _apply_portfolio_cap closes.
+    REDUCE still counts as an approved ticker downstream (state.py's
+    TickerSnapshot.risk_approved), so a 0%-cap REDUCE would leave the portfolio
+    agent demanding invest_pct deployment against a cap with no room for it —
+    this is the bug _apply_portfolio_cap closes.
     """
     engine = RiskStatisticalEngine()
     history = _multi_asset_price_history()

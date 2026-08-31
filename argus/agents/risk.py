@@ -67,8 +67,8 @@ def get_sector(ticker: str) -> str:
         sector = info.get("sector", "Unknown")
         _SECTOR_CACHE[ticker] = (sector, datetime.now())  # noqa: DTZ005
         return sector
-    except Exception:
-        logger.warning(f"Failed to fetch sector for {ticker}, defaulting to 'Unknown'")
+    except Exception as exc:
+        logger.warning("Failed to fetch sector for %s, defaulting to 'Unknown': %s", ticker, exc)
         _SECTOR_CACHE[ticker] = ("Unknown", datetime.now())  # noqa: DTZ005
         return "Unknown"
 

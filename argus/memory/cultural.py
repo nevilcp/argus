@@ -162,7 +162,7 @@ class CulturalMemoryManager:
         document = f"""{prefix} PATTERN:
 Macro regime: {macro_regime}
 VIX regime: {vix_regime}
-Technical signal: {tech_sig} 
+Technical signal: {tech_sig}
   (RSI={tech_rsi:.0f}, MACD hist={tech_macd:.3f})
 Fundamental signal: {fund_sig}
   (Moat={fund_moat})
@@ -406,7 +406,7 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
             logger.warning("[Memory] Failed to compute summary stats: %s", e)
             return {"total_stored": count}
 
-    def store_decision_snapshot(self, decision: "ARGUSDecision") -> bool:
+    def store_decision_snapshot(self, decision: ARGUSDecision) -> bool:
         """Persists a real-time decision profile before outcomes are finalized.
 
         Populates the vector store with decision-making context, enabling retrieval
