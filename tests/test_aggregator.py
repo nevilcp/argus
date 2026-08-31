@@ -12,11 +12,18 @@ result is identical to today's (pre-reliability) behavior.
 """
 
 from argus.orchestration.aggregator import HybridSignalAggregator
-from argus.schemas.signals import Regime, Signal
+from argus.schemas.signals import (
+    FundamentalSignal,
+    MacroContext,
+    Regime,
+    SentimentSignal,
+    Signal,
+    TechnicalSignal,
+)
 from tests.test_aggregator_properties import _fundamental, _macro, _sentiment, _technical
 
 
-def _split_signals():
+def _split_signals() -> tuple[TechnicalSignal, MacroContext, FundamentalSignal, SentimentSignal]:
     """A genuine three-way split: BULLISH vs. BEARISH vs. NEUTRAL, equal weight."""
     technical = _technical(Signal.BULLISH, 0.8)
     fundamental = _fundamental(Signal.BEARISH, 0.8)
@@ -42,15 +49,10 @@ def test_no_history_reliability_matches_unweighted_aggregation():
         technical, macro, fundamental, sentiment, reliability=None
     )
 
-    assert unweighted.signal == explicit_prior.signal == no_reliability_arg.signal
-    assert (
-        unweighted.conviction == explicit_prior.conviction == no_reliability_arg.conviction
-    )
-    assert (
-        unweighted.weighted_votes
-        == explicit_prior.weighted_votes
-        == no_reliability_arg.weighted_votes
-    )
+    for other in (explicit_prior, no_reliability_arg):
+        assert other.signal == unweighted.signal
+        assert other.conviction == unweighted.conviction
+        assert other.weighted_votes == unweighted.weighted_votes
 
 
 def test_strong_track_record_measurably_outweighs_a_poor_one():

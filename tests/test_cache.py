@@ -39,6 +39,13 @@ def _bars(dates: list[str]) -> pd.DataFrame:
     )
 
 
+def _buffer(
+    buffer_size: int = 20, *, db_path: str = ":memory:", interval: str = "1m"
+) -> OHLCVBuffer:
+    """Builds an OHLCVBuffer, in memory unless `db_path` names a file."""
+    return OHLCVBuffer(db_path=db_path, buffer_size=buffer_size, interval=interval)
+
+
 @pytest.fixture
 def cache():
     """A fresh in-memory DailyBarCache."""
@@ -111,7 +118,7 @@ def test_get_is_isolated_per_ticker(cache):
 
 def test_dst_straddling_insert_returns_a_monotonic_et_frame():
     """A buffer fed DST fall-back candles returns them sorted, ET-indexed, not a raise."""
-    buffer = OHLCVBuffer(db_path=":memory:", buffer_size=20, interval="1m")
+    buffer = _buffer()
 
     # Padding bars ahead of the transition so the buffer clears get_candles' 14-row floor —
     # n_per_side beyond 6 would overlap pre/post UTC instants in the shared DST helper itself
@@ -135,7 +142,7 @@ def test_dst_straddling_insert_returns_a_monotonic_et_frame():
 
 def test_naive_et_and_aware_utc_inputs_for_one_instant_store_identically():
     """The same instant, given as naive ET, aware ET, and aware UTC, canonicalizes to one row."""
-    buffer = OHLCVBuffer(db_path=":memory:", buffer_size=20, interval="1m")
+    buffer = _buffer()
     aware_et = pd.Timestamp("2024-01-02T09:30:00", tz="America/New_York")
 
     buffer.insert_candle("AAPL", {"timestamp": "2024-01-02T09:30:00", "close": 1.0})
@@ -148,7 +155,7 @@ def test_naive_et_and_aware_utc_inputs_for_one_instant_store_identically():
 
 def test_ticker_case_collapses_to_one_key_space():
     """A lowercase and uppercase ticker write into the same row space."""
-    buffer = OHLCVBuffer(db_path=":memory:", buffer_size=20, interval="1m")
+    buffer = _buffer()
     buffer.insert_candle("aapl", {"timestamp": "2024-01-02T09:30:00", "close": 1.0})
     buffer.insert_candle("AAPL", {"timestamp": "2024-01-02T09:31:00", "close": 2.0})
 
@@ -172,7 +179,7 @@ def test_schema_migration_from_v0_drops_and_recreates(tmp_path):
     conn.commit()
     conn.close()
 
-    buffer = OHLCVBuffer(db_path=db_path, buffer_size=20, interval="1m")
+    buffer = _buffer(db_path=db_path)
 
     assert buffer.get_all_tickers() == []
     assert buffer._conn.execute("PRAGMA user_version").fetchone()[0] == 1
@@ -181,11 +188,11 @@ def test_schema_migration_from_v0_drops_and_recreates(tmp_path):
 def test_interval_change_purges_stale_rows(tmp_path):
     """Re-opening a buffer file under a different interval discards the old interval's rows."""
     db_path = str(tmp_path / "buffer.db")
-    old = OHLCVBuffer(db_path=db_path, buffer_size=20, interval="1m")
+    old = _buffer(db_path=db_path)
     old.insert_candle("AAPL", {"timestamp": "2024-01-02T09:30:00", "close": 1.0})
     old.close()
 
-    new = OHLCVBuffer(db_path=db_path, buffer_size=20, interval="5m")
+    new = _buffer(db_path=db_path, interval="5m")
 
     assert new._conn.execute("SELECT COUNT(*) FROM ohlcv").fetchone()[0] == 0
 
@@ -212,7 +219,7 @@ class _CommitCountingConnection:
 
 def test_insert_candles_bulk_uses_a_single_commit():
     """Bulk-inserting N candles commits once, not once per row."""
-    buffer = OHLCVBuffer(db_path=":memory:", buffer_size=50, interval="1m")
+    buffer = _buffer(50)
     proxy = _CommitCountingConnection(buffer._conn)
     buffer._conn = proxy
 
@@ -227,14 +234,14 @@ def test_insert_candles_bulk_uses_a_single_commit():
 
 def test_insert_candles_is_a_noop_for_an_empty_list():
     """Bulk-inserting an empty batch touches nothing."""
-    buffer = OHLCVBuffer(db_path=":memory:", buffer_size=20, interval="1m")
+    buffer = _buffer()
     buffer.insert_candles("AAPL", [])
     assert buffer.get_all_tickers() == []
 
 
 def test_insert_candle_delegates_to_insert_candles(monkeypatch):
     """The single-candle path is a thin wrapper over the bulk path."""
-    buffer = OHLCVBuffer(db_path=":memory:", buffer_size=20, interval="1m")
+    buffer = _buffer()
     received = []
     monkeypatch.setattr(
         buffer, "insert_candles", lambda ticker, candles: received.append((ticker, candles))
@@ -247,7 +254,7 @@ def test_insert_candle_delegates_to_insert_candles(monkeypatch):
 
 def test_row_counts_returns_per_ticker_counts_without_the_get_candles_floor():
     """row_counts() reports real per-ticker counts, including below get_candles' own 14-row floor."""
-    buffer = OHLCVBuffer(db_path=":memory:", buffer_size=50, interval="1m")
+    buffer = _buffer(50)
     for i in range(5):
         buffer.insert_candle("AAPL", {"timestamp": f"2024-01-02T09:{i:02d}:00", "close": float(i)})
     for i in range(20):
@@ -258,7 +265,7 @@ def test_row_counts_returns_per_ticker_counts_without_the_get_candles_floor():
 
 def test_prune_untracked_deletes_rows_outside_the_given_set():
     """prune_untracked removes every row for a ticker not in the tracked set (API-9/API-10)."""
-    buffer = OHLCVBuffer(db_path=":memory:", buffer_size=50, interval="1m")
+    buffer = _buffer(50)
     buffer.insert_candle("AAPL", {"timestamp": "2024-01-02T09:30:00", "close": 1.0})
     buffer.insert_candle("ORPHAN", {"timestamp": "2024-01-02T09:30:00", "close": 1.0})
 
@@ -270,7 +277,7 @@ def test_prune_untracked_deletes_rows_outside_the_given_set():
 
 def test_prune_untracked_is_case_insensitive():
     """A lowercase tracked-set entry still matches the upper-cased stored ticker."""
-    buffer = OHLCVBuffer(db_path=":memory:", buffer_size=50, interval="1m")
+    buffer = _buffer(50)
     buffer.insert_candle("AAPL", {"timestamp": "2024-01-02T09:30:00", "close": 1.0})
 
     deleted = buffer.prune_untracked({"aapl"})
@@ -281,7 +288,7 @@ def test_prune_untracked_is_case_insensitive():
 
 def test_prune_untracked_skips_an_empty_tracked_set():
     """An empty tracked set is treated as 'unknown universe' rather than wiping the buffer."""
-    buffer = OHLCVBuffer(db_path=":memory:", buffer_size=50, interval="1m")
+    buffer = _buffer(50)
     buffer.insert_candle("AAPL", {"timestamp": "2024-01-02T09:30:00", "close": 1.0})
 
     deleted = buffer.prune_untracked(set())
@@ -293,13 +300,13 @@ def test_prune_untracked_skips_an_empty_tracked_set():
 def test_interval_change_logs_the_discarded_count(tmp_path, caplog):
     """The interval-change purge logs how many stale rows it discarded, at WARNING."""
     db_path = str(tmp_path / "buffer.db")
-    old = OHLCVBuffer(db_path=db_path, buffer_size=20, interval="1m")
+    old = _buffer(db_path=db_path)
     for i in range(3):
         old.insert_candle("AAPL", {"timestamp": f"2024-01-02T09:3{i}:00", "close": float(i)})
     old.close()
 
     with caplog.at_level(logging.WARNING, logger="argus.cache"):
-        OHLCVBuffer(db_path=db_path, buffer_size=20, interval="5m")
+        _buffer(db_path=db_path, interval="5m")
 
     assert any("discarded 3" in record.message for record in caplog.records)
 
@@ -314,10 +321,15 @@ class _FakeClock:
         return self.now
 
 
+def _clocked_ttl_cache() -> tuple[TTLCache[str, str], _FakeClock]:
+    """Builds a one-day TTLCache alongside the settable clock driving its expiry."""
+    clock = _FakeClock(datetime(2026, 1, 1, 12, 0, 0))
+    return TTLCache(ttl=timedelta(days=1), clock=clock), clock
+
+
 def test_ttl_cache_returns_a_value_stored_within_the_window():
     """A value stored and read back before the TTL elapses is returned."""
-    clock = _FakeClock(datetime(2026, 1, 1, 12, 0, 0))
-    cache: TTLCache[str, str] = TTLCache(ttl=timedelta(days=1), clock=clock)
+    cache, clock = _clocked_ttl_cache()
 
     cache.set("AAPL", "bullish")
     clock.now += timedelta(hours=23)
@@ -327,8 +339,7 @@ def test_ttl_cache_returns_a_value_stored_within_the_window():
 
 def test_ttl_cache_does_not_return_a_value_once_the_window_has_passed():
     """The same value is no longer returned once the clock passes the TTL."""
-    clock = _FakeClock(datetime(2026, 1, 1, 12, 0, 0))
-    cache: TTLCache[str, str] = TTLCache(ttl=timedelta(days=1), clock=clock)
+    cache, clock = _clocked_ttl_cache()
 
     cache.set("AAPL", "bullish")
     clock.now += timedelta(days=1)
@@ -362,8 +373,7 @@ def test_ttl_cache_keys_differing_only_in_one_component_do_not_share_a_value():
 
 def test_ttl_cache_set_refreshes_the_stored_timestamp():
     """Storing a key again resets its expiry clock rather than keeping the original timestamp."""
-    clock = _FakeClock(datetime(2026, 1, 1, 12, 0, 0))
-    cache: TTLCache[str, str] = TTLCache(ttl=timedelta(days=1), clock=clock)
+    cache, clock = _clocked_ttl_cache()
 
     cache.set("AAPL", "bullish")
     clock.now += timedelta(hours=23)

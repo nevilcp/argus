@@ -52,27 +52,46 @@ def client():
     return TestClient(api_main.app)
 
 
-def _pipeline(monkeypatch, *, market_hours: bool, interval_minutes: int = 1):
-    """Installs a fake MFTDataPipeline as the module-level `_mft_pipeline`."""
-    fake = mock.Mock()
-    fake.is_market_hours.return_value = market_hours
-    fake.interval_minutes = interval_minutes
-    monkeypatch.setattr(api_main, "_mft_pipeline", fake)
-    return fake
+def _ready(monkeypatch):
+    """Clears every freshness gate ahead of /analyze so a request reaches the graph.
+
+    Installs an in-market-hours pipeline and publishes an AAPL state whose bar
+    and write times are both recent enough to clear the staleness gates.
+    """
+    fake_pipeline = mock.Mock(interval_minutes=1)
+    fake_pipeline.is_market_hours.return_value = True
+    monkeypatch.setattr(api_main, "_mft_pipeline", fake_pipeline)
+
+    recent = datetime.now(api_main._ET) - timedelta(seconds=5)
+    api_main._live_cache.publish({"AAPL": {"timestamp": recent.isoformat()}}, ["AAPL"], now=recent)
 
 
-def _seed_cache(ticker: str, *, bar_age_seconds: float, write_age_seconds: float = 0.0):
-    """Populates `_live_cache` with a state whose bar and write times are both controlled."""
-    now = datetime.now(api_main._ET)
-    bar_ts = now - timedelta(seconds=bar_age_seconds)
-    write_ts = now - timedelta(seconds=write_age_seconds)
-    api_main._live_cache.publish({ticker: {"timestamp": bar_ts.isoformat()}}, [ticker], now=write_ts)
+def _install_graph(monkeypatch, **invoke_behavior):
+    """Installs a fake graph as the module-level `_graph`, configuring its invoke() call.
+
+    Args:
+        invoke_behavior: Mock keyword arguments for `invoke` (`side_effect`, `return_value`).
+
+    Returns:
+        The installed fake graph.
+    """
+    fake_graph = mock.Mock()
+    fake_graph.invoke.configure_mock(**invoke_behavior)
+    monkeypatch.setattr(api_main, "_graph", fake_graph)
+    return fake_graph
 
 
-def _ready(client, monkeypatch):
-    """Clears every freshness gate ahead of /analyze so a request reaches the graph."""
-    _pipeline(monkeypatch, market_hours=True)
-    _seed_cache("AAPL", bar_age_seconds=5, write_age_seconds=5)
+def _graph_result(decisions: list) -> dict:
+    """A successful graph return value carrying `decisions` and a minimal allocation."""
+    allocation = mock.Mock(
+        session_id="sess-1", portfolio=[], cash_reserve_pct=0.5, expected_sharpe=1.0
+    )
+    return {
+        "decisions": decisions,
+        "errors": [],
+        "portfolio_allocation": allocation,
+        "macro_context": None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -82,10 +101,11 @@ def _ready(client, monkeypatch):
 
 def test_analyze_rejects_a_concurrent_run_with_429(client, monkeypatch):
     """A held semaphore is reported as 429 with a Retry-After header, not run against the graph."""
-    _ready(client, monkeypatch)
-    fake_graph = mock.Mock()
-    fake_graph.invoke.side_effect = AssertionError("must not run while another analysis holds the slot")
-    monkeypatch.setattr(api_main, "_graph", fake_graph)
+    _ready(monkeypatch)
+    fake_graph = _install_graph(
+        monkeypatch,
+        side_effect=AssertionError("must not run while another analysis holds the slot"),
+    )
 
     held = mock.Mock()
     held.locked.return_value = True
@@ -100,10 +120,8 @@ def test_analyze_rejects_a_concurrent_run_with_429(client, monkeypatch):
 
 def test_analyze_releases_the_semaphore_when_the_graph_raises(client, monkeypatch):
     """The slot is released on a graph exception, not just on success — easy to wedge permanently."""
-    _ready(client, monkeypatch)
-    fake_graph = mock.Mock()
-    fake_graph.invoke.side_effect = RuntimeError("boom")
-    monkeypatch.setattr(api_main, "_graph", fake_graph)
+    _ready(monkeypatch)
+    _install_graph(monkeypatch, side_effect=RuntimeError("boom"))
 
     response = client.post("/analyze", json=_PAYLOAD)
 
@@ -119,12 +137,9 @@ def test_analyze_releases_the_semaphore_when_the_graph_raises(client, monkeypatc
 def test_analyze_returns_504_when_the_graph_exceeds_its_deadline(client, monkeypatch):
     """A graph run that outlives ARGUS_ANALYZE_DEADLINE_SECONDS is bounded with a
     504, not left open past whatever timeout the caller's own proxy already gave up at."""
-    _ready(client, monkeypatch)
+    _ready(monkeypatch)
     monkeypatch.setattr(api_main.settings, "ARGUS_ANALYZE_DEADLINE_SECONDS", 0.05)
-
-    fake_graph = mock.Mock()
-    fake_graph.invoke.side_effect = lambda *a, **kw: time.sleep(0.5)
-    monkeypatch.setattr(api_main, "_graph", fake_graph)
+    _install_graph(monkeypatch, side_effect=lambda *a, **kw: time.sleep(0.5))
 
     response = client.post("/analyze", json=_PAYLOAD)
 
@@ -139,7 +154,7 @@ def test_analyze_returns_504_when_the_graph_exceeds_its_deadline(client, monkeyp
 
 def test_analyze_rejects_when_graph_not_yet_initialized(client, monkeypatch):
     """A None _graph (before lifespan startup finishes) is a 503, not an AttributeError."""
-    _ready(client, monkeypatch)
+    _ready(monkeypatch)
     monkeypatch.setattr(api_main, "_graph", None)
 
     response = client.post("/analyze", json=_PAYLOAD)
@@ -155,7 +170,7 @@ def test_analyze_rejects_when_graph_not_yet_initialized(client, monkeypatch):
 
 def test_analyze_rejects_when_kill_switch_trips_during_the_graph_run(client, monkeypatch):
     """A halt that lands while the graph is running is caught after invoke() returns, not missed."""
-    _ready(client, monkeypatch)
+    _ready(monkeypatch)
     ks = KillSwitch("MODERATE")
     kill_switch_module._kill_switch = ks
 
@@ -163,9 +178,7 @@ def test_analyze_rejects_when_kill_switch_trips_during_the_graph_run(client, mon
         ks._halted.set()
         return {"portfolio_allocation": None, "errors": []}
 
-    fake_graph = mock.Mock()
-    fake_graph.invoke.side_effect = _trip_and_return
-    monkeypatch.setattr(api_main, "_graph", fake_graph)
+    _install_graph(monkeypatch, side_effect=_trip_and_return)
 
     response = client.post("/analyze", json=_PAYLOAD)
 
@@ -205,19 +218,9 @@ def test_analyze_appends_decisions_to_decisions_jsonl(client, monkeypatch):
     reads — never sees a decision made through /analyze, and an API-only
     deployment reconciles nothing.
     """
-    _ready(client, monkeypatch)
+    _ready(monkeypatch)
     decision = ARGUSDecision(ticker="AAPL", session_timestamp=datetime.now())
-    allocation = mock.Mock(
-        session_id="sess-1", portfolio=[], cash_reserve_pct=0.5, expected_sharpe=1.0
-    )
-    fake_graph = mock.Mock()
-    fake_graph.invoke.return_value = {
-        "decisions": [decision],
-        "errors": [],
-        "portfolio_allocation": allocation,
-        "macro_context": None,
-    }
-    monkeypatch.setattr(api_main, "_graph", fake_graph)
+    _install_graph(monkeypatch, return_value=_graph_result([decision]))
 
     response = client.post("/analyze", json=_PAYLOAD)
 
@@ -230,18 +233,8 @@ def test_analyze_appends_decisions_to_decisions_jsonl(client, monkeypatch):
 
 def test_analyze_writes_nothing_when_the_graph_produces_no_decisions(client, monkeypatch):
     """A run with an empty decisions list leaves decisions.jsonl unwritten, not an empty file."""
-    _ready(client, monkeypatch)
-    allocation = mock.Mock(
-        session_id="sess-1", portfolio=[], cash_reserve_pct=0.5, expected_sharpe=1.0
-    )
-    fake_graph = mock.Mock()
-    fake_graph.invoke.return_value = {
-        "decisions": [],
-        "errors": [],
-        "portfolio_allocation": allocation,
-        "macro_context": None,
-    }
-    monkeypatch.setattr(api_main, "_graph", fake_graph)
+    _ready(monkeypatch)
+    _install_graph(monkeypatch, return_value=_graph_result([]))
 
     response = client.post("/analyze", json=_PAYLOAD)
 

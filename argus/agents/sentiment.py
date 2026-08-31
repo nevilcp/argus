@@ -40,16 +40,10 @@ from argus.structured_output import StructuredOutputError, decode
 
 logger = logging.getLogger("argus.sentiment")
 
-# Rough estimate of one fundamental_analysis Groq 70B round-trip, used only to
-# pace batch_analyze's scraper calls against a live provider — see its docstring.
-# Not tuned against real latency measurements; revisit if fundamental_analysis's
-# actual per-ticker duration diverges enough to reintroduce burst risk.
+# Rough estimate of a fundamental_analysis Groq round-trip; not tuned against real latency.
 _FANOUT_PACE_SECONDS_PER_TICKER = 2.5
 
-# Covers config.py's default ARGUS_UNIVERSE so fetch_news's "TICKER OR company_name"
-# query has a real second term — for short tickers like "V" it otherwise becomes
-# "V OR V", which barely narrows the search versus the ticker alone. Unmapped
-# tickers fall back to the ticker itself.
+# Company names for fetch_news's query term; short tickers like V need one to narrow the search.
 _TICKER_COMPANY_NAMES: dict[str, str] = {
     "AAPL": "Apple",
     "MSFT": "Microsoft",
@@ -122,7 +116,6 @@ def score_headlines_with_finbert(articles: list[dict]) -> list[dict]:
 
     finbert = get_finbert()
     results = []
-    # Cap at 25 to limit CPU blocking duration on large fetches
     for article in articles[:25]:
         headline = article.get("title", "")
         if not headline:
@@ -240,9 +233,7 @@ _SENTIMENT_METRIC_LABELS: dict[str, str] = {
 }
 
 
-# Rendered from SentimentVerdict's own PromptText markers, shared between
-# _build_synthesis_prompt and SYSTEM_PROMPT so their two schema restatements
-# can't drift apart from each other or from the schema itself.
+# Rendered from SentimentVerdict's PromptText; shared so prompt/schema can't drift apart.
 _VERDICT_SCHEMA_JSON = schema_block(SentimentVerdict)
 
 
@@ -349,10 +340,7 @@ class SentimentAgent:
             llm_client = GroqLLMClient(
                 model=settings.ARGUS_SENTIMENT_MODEL,
                 temperature=0.1,
-                # Measured against gpt-oss-20b at reasoning_effort="low" on
-                # reconstructed fixture prompts (AAPL/MSFT/NVDA): completion_tokens
-                # peaked at 417, of which up to 357 was reasoning. 550 leaves ~30%
-                # headroom above that peak.
+                # gpt-oss-20b peaked at 417 completion tokens on fixture prompts; 550 leaves ~30% headroom.
                 max_tokens=550,
                 api_key=api_key,
             )
@@ -389,33 +377,7 @@ class SentimentAgent:
         if cached:
             return cached
 
-        try:
-            news = self.market_data.news(ticker, company_name or ticker, days_back=7)
-        except Exception as e:
-            logger.warning("[Sentiment] %s news fetch raised: %s", ticker, e)
-            news = None
-
-        news_available = news is not None
-        news_list = news or []
-        # Keep news_list in its fetched (relevance) order for the [:25] truncation,
-        # then sort the scored subset chronologically so aggregate_finbert_scores's
-        # positional decay actually favors the newest articles
-        articles = [a for a in news_list if a.get("title")]
-        scored = score_headlines_with_finbert(articles)
-        scored.sort(key=lambda s: s["published_at"] or "")
-        agg = aggregate_finbert_scores(scored)
-
-        metrics = {
-            "net_finbert_score": agg["net"],
-            "pct_positive": agg["pct_pos"],
-            "pct_negative": agg["pct_neg"],
-            "finbert_confidence": agg["confidence"],
-            "news_volume_7d": len(news_list),
-            "news_scored_count": len(scored),
-            "news_data_available": news_available,
-            "upcoming_catalyst": _check_earnings_calendar(ticker),
-        }
-
+        metrics = self._news_metrics(ticker, company_name)
         prompt = _build_synthesis_prompt(ticker, metrics)
 
         try:
@@ -426,9 +388,7 @@ class SentimentAgent:
                 errors.append(f"sentiment_analysis[{ticker}]: {e}")
             return None
         except (RateLimitExceeded, UnregisteredModel) as e:
-            # The governor already exhausted its own bounded wait before raising
-            # either of these — degrade this ticker immediately rather than
-            # retrying into the same wall.
+            # Governor already exhausted its bounded wait; degrade this ticker rather than retry into it.
             logger.warning("[Sentiment] Governor rejected call for %s: %s", ticker, e)
             if errors is not None:
                 errors.append(f"sentiment_analysis[{ticker}]: rate limited: {e}")
@@ -441,9 +401,10 @@ class SentimentAgent:
 
         signal = SentimentSignal(
             ticker=ticker,
-            # A failed fetch's 0.0 is indistinguishable from a real neutral
-            # read; persist None rather than fabricate a measured score
-            finbert_net_score=metrics["net_finbert_score"] if news_available else None,
+            # A failed fetch's 0.0 looks like a real neutral; persist None instead of a fabricated score.
+            finbert_net_score=(
+                metrics["net_finbert_score"] if metrics["news_data_available"] else None
+            ),
             pct_positive=metrics["pct_positive"],
             pct_negative=metrics["pct_negative"],
             news_volume_7d=metrics["news_volume_7d"],
@@ -459,6 +420,44 @@ class SentimentAgent:
         )
         self.cache.set(ticker, signal)
         return signal
+
+    def _news_metrics(self, ticker: str, company_name: Optional[str]) -> dict:
+        """Fetches this ticker's recent news and reduces it to the metrics the LLM sees.
+
+        A failed fetch is reported as ``news_data_available: False`` with placeholder
+        counts rather than as a genuine absence of news.
+
+        Args:
+            ticker: Equity ticker symbol.
+            company_name: Display name used in the news query (defaults to the ticker).
+
+        Returns:
+            Dict of the FinBERT aggregates, article counts, fetch-availability flag,
+            and the upcoming-catalyst flag.
+        """
+        try:
+            news = self.market_data.news(ticker, company_name or ticker, days_back=7)
+        except Exception as e:
+            logger.warning("[Sentiment] %s news fetch raised: %s", ticker, e)
+            news = None
+
+        news_list = news or []
+        # Keep fetched order for the [:25] cut, then sort scored subset so decay favors newest articles.
+        articles = [a for a in news_list if a.get("title")]
+        scored = score_headlines_with_finbert(articles)
+        scored.sort(key=lambda s: s["published_at"] or "")
+        agg = aggregate_finbert_scores(scored)
+
+        return {
+            "net_finbert_score": agg["net"],
+            "pct_positive": agg["pct_pos"],
+            "pct_negative": agg["pct_neg"],
+            "finbert_confidence": agg["confidence"],
+            "news_volume_7d": len(news_list),
+            "news_scored_count": len(scored),
+            "news_data_available": news is not None,
+            "upcoming_catalyst": _check_earnings_calendar(ticker),
+        }
 
     def batch_analyze(self, tickers: list[str]) -> tuple[dict[str, SentimentSignal], list[str]]:
         """Generates SentimentSignals sequentially for a list of tickers.

@@ -24,26 +24,23 @@ from argus.schemas.signals import RiskVerdict
 _UNIVERSE = ["AAPL", "MSFT", "GOOGL", "META", "AMZN", "TSLA", "JPM", "BAC"]
 
 
-def _price_history() -> dict[str, pd.Series]:
-    np.random.seed(42)
-    dates = pd.date_range(start="2023-01-01", periods=253, freq="B")
-    hist = {}
-    for t in ["AAPL", "MSFT", "GOOGL"]:
-        returns = np.random.normal(0.001, 0.015, len(dates))
-        prices = 100 * np.exp(np.cumsum(returns))
-        hist[t] = pd.Series(prices, index=dates)
-    return hist
+def _price_history(tickers: list[str], seed: int) -> dict[str, pd.Series]:
+    """Builds a year of seeded geometric-random-walk closes, one series per ticker.
 
+    Args:
+        tickers: Tickers to generate a series for.
+        seed: RNG seed, so a given call site's history is identical run to run.
 
-def _multi_asset_price_history() -> dict[str, pd.Series]:
-    np.random.seed(7)
+    Returns:
+        Mapping of ticker -> daily close series over 253 business days.
+    """
+    np.random.seed(seed)
     dates = pd.date_range(start="2023-01-01", periods=253, freq="B")
-    hist = {}
-    for t in _UNIVERSE:
+    history = {}
+    for ticker in tickers:
         returns = np.random.normal(0.001, 0.015, len(dates))
-        prices = 100 * np.exp(np.cumsum(returns))
-        hist[t] = pd.Series(prices, index=dates)
-    return hist
+        history[ticker] = pd.Series(100 * np.exp(np.cumsum(returns)), index=dates)
+    return history
 
 
 @settings(deadline=None)
@@ -56,7 +53,9 @@ def test_approved_weight_never_exceeds_proposed(weight: float, vix: float) -> No
     engine = RiskStatisticalEngine()
     positions = [{"ticker": "AAPL", "weight": weight}]
 
-    result = engine.evaluate(positions, _price_history(), current_vix=vix)
+    result = engine.evaluate(
+        positions, _price_history(["AAPL", "MSFT", "GOOGL"], seed=42), current_vix=vix
+    )
 
     # RiskAssessment's validator would raise on construction if this were violated
     assert result.approved_weight <= result.proposed_weight + 1e-9
@@ -87,7 +86,7 @@ def test_optimal_weights_never_exceed_total_deployment_budget(tickers: list[str]
     }
 
     result = engine.evaluate(
-        positions, _multi_asset_price_history(), current_vix=20.0, convictions=convictions
+        positions, _price_history(_UNIVERSE, seed=7), current_vix=20.0, convictions=convictions
     )
 
     assert sum(result.optimal_weights.values()) <= RISK.slsqp_max_total_deployment + 1e-6
@@ -96,12 +95,13 @@ def test_optimal_weights_never_exceed_total_deployment_budget(tickers: list[str]
 def test_all_negative_convictions_veto_not_reduce_at_zero() -> None:
     """RE-1 guard: a near-zero SLSQP cap becomes VETO, not REDUCE-to-zero.
 
-    REDUCE still counts as an approved ticker downstream (portfolio.py:236), so a
-    0%-cap REDUCE would leave the portfolio agent demanding invest_pct deployment
-    against a cap with no room for it — this is the bug _apply_portfolio_cap closes.
+    REDUCE still counts as an approved ticker downstream (state.py's
+    TickerSnapshot.risk_approved), so a 0%-cap REDUCE would leave the portfolio
+    agent demanding invest_pct deployment against a cap with no room for it —
+    this is the bug _apply_portfolio_cap closes.
     """
     engine = RiskStatisticalEngine()
-    history = _multi_asset_price_history()
+    history = _price_history(_UNIVERSE, seed=7)
     tickers = _UNIVERSE[:5]
     positions = [{"ticker": t, "weight": 0.15} for t in tickers]
     convictions = {t: -0.9 for t in tickers}

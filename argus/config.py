@@ -21,7 +21,7 @@ Not responsible for:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated, Dict, List, Literal, Optional
+from typing import Annotated, Literal, Optional
 
 from dotenv import load_dotenv
 from pydantic import Field, field_validator
@@ -41,26 +41,6 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv()
 
 
-def _split_csv(value: object) -> object:
-    """Splits a comma-separated env string into a list; passes non-strings through.
-
-    pydantic-settings JSON-decodes env values for list-typed fields by default,
-    which rejects a plain `AAPL,MSFT` string — the fields using this validator
-    are marked `NoDecode` to skip that and land here instead.
-
-    Args:
-        value: Raw field value — a comma-separated string from the environment,
-            or an already-parsed list (e.g. the Python-level default).
-
-    Returns:
-        A list of stripped, non-empty strings, or `value` unchanged if it
-        wasn't a string.
-    """
-    if isinstance(value, str):
-        return [item.strip() for item in value.split(",") if item.strip()]
-    return value
-
-
 class Settings(BaseSettings):
     """Type-safe application settings resolved from environment variables and .env.
 
@@ -68,11 +48,10 @@ class Settings(BaseSettings):
     degrades gracefully when optional keys (e.g. FRED_API_KEY, NEWSAPI_KEY) are absent.
     """
 
-    # Relative to the working directory, not BASE_DIR — an installed
-    # (non-editable) package's BASE_DIR resolves inside site-packages, which
-    # never holds a .env (DEP-7). load_dotenv() above already populates
-    # os.environ from the same location, so this is mostly a fallback for
-    # keys present in .env but not yet exported to the environment.
+    # env_file is relative to the working directory for the same reason
+    # load_dotenv() above is (DEP-7). That call already populated os.environ
+    # from this same file, so this is mostly a fallback for keys present in
+    # .env but not yet exported to the environment.
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -87,7 +66,7 @@ class Settings(BaseSettings):
     newsapi_key: str = Field(default="", description="NewsAPI.org key")
 
     # Broadened to 20 tickers across 7 GICS sectors to reduce sector concentration risk
-    ARGUS_UNIVERSE: Annotated[List[str], NoDecode] = Field(
+    ARGUS_UNIVERSE: Annotated[list[str], NoDecode] = Field(
         default=[
             "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN",
             "META", "TSLA", "JPM", "V", "UNH",
@@ -144,7 +123,7 @@ class Settings(BaseSettings):
     ARGUS_RISK_TOLERANCE: Literal["CONSERVATIVE", "MODERATE", "AGGRESSIVE"] = Field(
         default="MODERATE", description="Risk tolerance used by unattended collection cycles"
     )
-    ARGUS_CORS_ORIGINS: Annotated[List[str], NoDecode] = Field(
+    ARGUS_CORS_ORIGINS: Annotated[list[str], NoDecode] = Field(
         default=["*"], description="Allowed CORS origins for the FastAPI gateway"
     )
     ARGUS_API_KEY: str = Field(
@@ -194,10 +173,26 @@ class Settings(BaseSettings):
     @field_validator("ARGUS_UNIVERSE", "ARGUS_CORS_ORIGINS", mode="before")
     @classmethod
     def _parse_csv_list(cls, value: object) -> object:
-        """Applies :func:`_split_csv` to comma-separated list fields."""
-        return _split_csv(value)
+        """Splits a comma-separated env string into a list; passes non-strings through.
 
-    TECHNICAL_INDICATOR_WEIGHTS: Dict[str, float] = {
+        pydantic-settings JSON-decodes env values for list-typed fields by
+        default, which rejects a plain `AAPL,MSFT` string — both fields
+        validated here are marked `NoDecode` to skip that and land here instead.
+
+        Args:
+            value: Raw field value — a comma-separated string from the
+                environment, or an already-parsed list (e.g. the Python-level
+                default).
+
+        Returns:
+            A list of stripped, non-empty strings, or `value` unchanged if it
+            wasn't a string.
+        """
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    TECHNICAL_INDICATOR_WEIGHTS: dict[str, float] = {
         "rsi": _TECHNICAL_WEIGHTS.rsi,
         "macd": _TECHNICAL_WEIGHTS.macd,
         "bb": _TECHNICAL_WEIGHTS.bb,

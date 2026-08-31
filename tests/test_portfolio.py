@@ -6,9 +6,16 @@ from datetime import datetime
 
 import pytest
 
-from argus.agents.portfolio import half_kelly_weight, build_signal_table
+from argus.agents.portfolio import build_signal_table, half_kelly_weight
 from argus.orchestration.state import TickerSnapshot
-from argus.schemas.signals import RiskAssessment, RiskVerdict, Signal, MacroContext, Regime
+from argus.schemas.signals import (
+    MacroContext,
+    Regime,
+    RiskAssessment,
+    RiskVerdict,
+    Signal,
+)
+
 
 def test_half_kelly_weight_bullish():
     """A half-Kelly weight above the position cap clips to that cap."""
@@ -16,11 +23,13 @@ def test_half_kelly_weight_bullish():
     res = half_kelly_weight(0.6, 0.08, 0.04, 0.15)
     assert res == 0.15
 
+
 def test_half_kelly_weight_bearish():
     """A negative half-Kelly weight floors at 0.0 rather than going short."""
     # b=2, q=0.7: full kelly is -0.05, so half kelly is negative
     res = half_kelly_weight(0.3, 0.08, 0.04, 0.15)
     assert res == 0.0
+
 
 def test_half_kelly_weight_moderate():
     """A half-Kelly weight within the cap passes through unclipped."""
@@ -28,18 +37,43 @@ def test_half_kelly_weight_moderate():
     res = half_kelly_weight(0.5, 0.08, 0.04, 0.15)
     assert pytest.approx(res) == 0.125
 
+
 class MockSignal:
     """Minimal stand-in for a per-agent Signal result.
 
     Args:
         signal: Signal direction.
         conviction: Confidence score for the signal.
+        agents_present: Specialists that contributed, for an aggregated signal.
     """
 
     def __init__(self, signal, conviction, agents_present=None):
         self.signal = signal
         self.conviction = conviction
         self.agents_present = agents_present if agents_present is not None else []
+
+
+def _risk(
+    verdict: RiskVerdict,
+    approved_weight: float,
+    var_99: float,
+    stop_loss: float | None,
+    portfolio_beta: float,
+    veto_reasons: list[str] | None = None,
+) -> RiskAssessment:
+    """Builds a RiskAssessment against a fixed 0.15 proposed weight and zero API cost."""
+    return RiskAssessment(
+        verdict=verdict,
+        proposed_weight=0.15,
+        approved_weight=approved_weight,
+        var_99=var_99,
+        stop_loss=stop_loss,
+        portfolio_beta=portfolio_beta,
+        veto_reasons=veto_reasons or [],
+        api_calls_used=0,
+        timestamp=datetime.now(),
+    )
+
 
 def test_build_signal_table():
     """Vetoed positions are excluded from the table; others render with their approved weight."""
@@ -68,15 +102,24 @@ def test_build_signal_table():
             fundamental=MockSignal(Signal.BULLISH, 0.8),
             technical=MockSignal(Signal.NEUTRAL, 0.5),
             sentiment=MockSignal(Signal.BULLISH, 0.7),
-            aggregated=MockSignal(Signal.BULLISH, 0.85, agents_present=["fundamental", "technical", "sentiment"]),
-            risk=RiskAssessment(verdict=RiskVerdict.APPROVE, proposed_weight=0.15, approved_weight=0.15, var_99=0.02, stop_loss=150.0, portfolio_beta=1.1, api_calls_used=0, timestamp=datetime.now()),
+            aggregated=MockSignal(
+                Signal.BULLISH, 0.85, agents_present=["fundamental", "technical", "sentiment"]
+            ),
+            risk=_risk(RiskVerdict.APPROVE, 0.15, var_99=0.02, stop_loss=150.0, portfolio_beta=1.1),
         ),
         "TSLA": TickerSnapshot(
-            risk=RiskAssessment(verdict=RiskVerdict.VETO, proposed_weight=0.15, approved_weight=0.0, var_99=0.08, stop_loss=None, portfolio_beta=2.0, veto_reasons=["Too risky"], api_calls_used=0, timestamp=datetime.now()),
+            risk=_risk(
+                RiskVerdict.VETO,
+                0.0,
+                var_99=0.08,
+                stop_loss=None,
+                portfolio_beta=2.0,
+                veto_reasons=["Too risky"],
+            ),
         ),
         "MSFT": TickerSnapshot(
             fundamental=MockSignal(Signal.BEARISH, 0.9),
-            risk=RiskAssessment(verdict=RiskVerdict.REDUCE, proposed_weight=0.15, approved_weight=0.05, var_99=0.05, stop_loss=280.0, portfolio_beta=0.9, api_calls_used=0, timestamp=datetime.now()),
+            risk=_risk(RiskVerdict.REDUCE, 0.05, var_99=0.05, stop_loss=280.0, portfolio_beta=0.9),
         ),
     }
 
@@ -90,7 +133,7 @@ def test_build_signal_table():
     assert "FUND=BULLISH(0.80)" in table
     assert "TECH=NEUTRAL(0.50)" in table
     assert "FUND=BEARISH(0.90)" in table
-    assert "TECH=N/A" in table # MSFT missing tech signal
-    assert "Cap=5.0%" in table # MSFT reduced weight
-    assert "Evidence=3/3" in table # AAPL has all three specialists present
-    assert "Evidence=0/3" in table # MSFT has no aggregated signal
+    assert "TECH=N/A" in table  # MSFT missing tech signal
+    assert "Cap=5.0%" in table  # MSFT reduced weight
+    assert "Evidence=3/3" in table  # AAPL has all three specialists present
+    assert "Evidence=0/3" in table  # MSFT has no aggregated signal

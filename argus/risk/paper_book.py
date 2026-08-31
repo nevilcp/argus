@@ -49,6 +49,72 @@ from argus.seams import MarketDataProvider
 logger = logging.getLogger("argus.paper_book")
 
 
+def _close_prices(
+    ticker: str,
+    market_data: MarketDataProvider,
+    cache: dict[str, Optional[pd.Series]],
+) -> Optional[pd.Series]:
+    """Returns a ticker's daily close series, fetching each ticker at most once per cache.
+
+    Args:
+        ticker: Ticker to price.
+        market_data: Source of the daily close price series.
+        cache: Per-call memo, mutated in place; a failed fetch is cached as
+            None so a broken ticker isn't retried for every decision on it.
+
+    Returns:
+        The close price series, or None if the fetch failed.
+    """
+    if ticker not in cache:
+        try:
+            cache[ticker] = market_data.ohlcv_daily(ticker)["close"]
+        except Exception as exc:
+            logger.warning("[PaperBook] failed to fetch price history for %s: %s", ticker, exc)
+            cache[ticker] = None
+    return cache[ticker]
+
+
+def _weighted_run_return(
+    run_decisions: list[ARGUSDecision],
+    market_data: MarketDataProvider,
+    horizon_days: int,
+    prices_by_ticker: dict[str, Optional[pd.Series]],
+) -> Optional[float]:
+    """Averages one run's matured decision outcomes, weighted by allocation_pct.
+
+    Args:
+        run_decisions: Decisions sharing one session_timestamp, all already
+            confirmed by _needs_reconciliation.
+        market_data: Source of each ticker's daily close price series.
+        horizon_days: Calendar days after session_timestamp defining each
+            decision's target exit date.
+        prices_by_ticker: Price memo shared across runs, see _close_prices.
+
+    Returns:
+        The weighted-average return, or None if nothing in the run has
+        matured or priced yet — never a fabricated 0.0.
+    """
+    weighted_sum = 0.0
+    weight_total = 0.0
+    for decision in run_decisions:
+        prices = _close_prices(decision.ticker, market_data, prices_by_ticker)
+        if prices is None:
+            continue
+        outcome = compute_realized_return(decision, market_data, horizon_days, prices=prices)
+        if outcome is None:
+            continue
+
+        actual_return_pct, _, _ = outcome
+        assert decision.allocation is not None, "_needs_reconciliation already confirmed this"
+        weight = decision.allocation.allocation_pct
+        weighted_sum += actual_return_pct * weight
+        weight_total += weight
+
+    if weight_total <= 0:
+        return None
+    return weighted_sum / weight_total
+
+
 def compute_run_returns(
     decisions: list[ARGUSDecision],
     market_data: MarketDataProvider,
@@ -88,34 +154,11 @@ def compute_run_returns(
         if last_kept_timestamp is not None and run_timestamp < last_kept_timestamp + horizon:
             continue
 
-        weighted_sum = 0.0
-        weight_total = 0.0
-        for decision in by_run[run_timestamp]:
-            ticker = decision.ticker
-            if ticker not in prices_by_ticker:
-                try:
-                    prices_by_ticker[ticker] = market_data.ohlcv_daily(ticker)["close"]
-                except Exception as exc:
-                    logger.warning(
-                        "[PaperBook] failed to fetch price history for %s: %s", ticker, exc
-                    )
-                    prices_by_ticker[ticker] = None
-
-            prices = prices_by_ticker[ticker]
-            if prices is None:
-                continue
-            outcome = compute_realized_return(decision, market_data, horizon_days, prices=prices)
-            if outcome is None:
-                continue
-
-            actual_return_pct, _, _ = outcome
-            assert decision.allocation is not None, "_needs_reconciliation already confirmed this"
-            weight = decision.allocation.allocation_pct
-            weighted_sum += actual_return_pct * weight
-            weight_total += weight
-
-        if weight_total > 0:
-            results.append((run_timestamp, weighted_sum / weight_total))
+        run_return = _weighted_run_return(
+            by_run[run_timestamp], market_data, horizon_days, prices_by_ticker
+        )
+        if run_return is not None:
+            results.append((run_timestamp, run_return))
             last_kept_timestamp = run_timestamp
 
     return results
@@ -205,6 +248,13 @@ class PaperBook:
         return before - len(self.runs_applied)
 
 
+def _fresh_book() -> PaperBook:
+    """Returns an empty book seeded at settings.ARGUS_TOTAL_WEALTH."""
+    return PaperBook(
+        equity=settings.ARGUS_TOTAL_WEALTH, high_water_mark=settings.ARGUS_TOTAL_WEALTH
+    )
+
+
 def load(path: str) -> PaperBook:
     """Loads a persisted PaperBook, or starts a fresh one at ARGUS_TOTAL_WEALTH.
 
@@ -220,9 +270,7 @@ def load(path: str) -> PaperBook:
     """
     file_path = Path(path)
     if not file_path.exists():
-        return PaperBook(
-            equity=settings.ARGUS_TOTAL_WEALTH, high_water_mark=settings.ARGUS_TOTAL_WEALTH
-        )
+        return _fresh_book()
 
     try:
         with open(file_path, encoding="utf-8") as f:
@@ -238,9 +286,7 @@ def load(path: str) -> PaperBook:
         )
     except Exception as exc:
         logger.warning("[PaperBook] failed to load %s, starting fresh: %s", path, exc)
-        return PaperBook(
-            equity=settings.ARGUS_TOTAL_WEALTH, high_water_mark=settings.ARGUS_TOTAL_WEALTH
-        )
+        return _fresh_book()
 
 
 def save(book: PaperBook, path: str) -> None:

@@ -36,8 +36,7 @@ from argus.seams import LiveMarketDataProvider, MarketDataProvider
 
 logger = logging.getLogger("argus.risk")
 
-# Stores (sector_string, cached_at) per ticker; 24h TTL reflects corporate reclassifications
-# (M&A, spin-offs) without a restart
+# Stores (sector, cached_at) per ticker; 24h TTL reflects M&A/spin-off reclassification.
 _SECTOR_CACHE: dict[str, tuple[str, datetime]] = {}
 _SECTOR_CACHE_TTL_SECONDS = RISK.sector_cache_ttl_seconds  # 24 hours
 
@@ -67,8 +66,8 @@ def get_sector(ticker: str) -> str:
         sector = info.get("sector", "Unknown")
         _SECTOR_CACHE[ticker] = (sector, datetime.now())  # noqa: DTZ005
         return sector
-    except Exception:
-        logger.warning(f"Failed to fetch sector for {ticker}, defaulting to 'Unknown'")
+    except Exception as exc:
+        logger.warning("Failed to fetch sector for %s, defaulting to 'Unknown': %s", ticker, exc)
         _SECTOR_CACHE[ticker] = ("Unknown", datetime.now())  # noqa: DTZ005
         return "Unknown"
 
@@ -124,9 +123,7 @@ def compute_portfolio_returns(
         DataFrame of weighted daily returns per ticker, with NaN rows dropped.
     """
     asset_returns = compute_asset_returns(positions, price_history, lookback)
-    # Reindexed to asset_returns' own columns: a ticker compute_asset_returns dropped
-    # for insufficient history must not reappear here as an all-NaN column via .mul()'s
-    # column-union alignment
+    # Reindexed to asset_returns' columns so a dropped ticker doesn't reappear as all-NaN via .mul().
     weights = pd.Series({pos["ticker"]: pos["weight"] for pos in positions}).reindex(
         asset_returns.columns
     )
@@ -267,8 +264,7 @@ def atr_stop_losses(
         if ticker in price_history:
             series = price_history[ticker]
             if len(series) > RISK.atr_period:
-                # NOTE: true_range is close-to-close diff, not H-L-Cprev — understates ATR for
-                # volatile stocks with large intraday gaps; pass OHLCV data here for precision
+                # NOTE: true_range is close-to-close, not H-L-Cprev — understates ATR on large intraday gaps.
                 true_range = series.diff().abs().dropna()
                 atr_14 = true_range.tail(RISK.atr_period).mean()
                 latest_close = float(series.iloc[-1])
@@ -321,6 +317,204 @@ class RiskStatisticalEngine:
         self.max_port_beta = settings.MAX_PORTFOLIO_BETA
         self.market_data = market_data or LiveMarketDataProvider()
 
+    def _structural_violations(
+        self,
+        proposed_positions: list[dict],
+        current_vix: float,
+        total_weight: float,
+    ) -> tuple[list[str], Optional[str]]:
+        """Runs gate 1: per-position caps, book size, and the VIX blackout.
+
+        Args:
+            proposed_positions: List of dicts with keys ``ticker`` and ``weight``.
+            current_vix: Current CBOE VIX level for blackout checking.
+            total_weight: Summed proposed weight across all positions.
+
+        Returns:
+            Tuple of (violations, diversification_note). A non-empty ``violations`` list
+            vetoes the book; ``diversification_note`` is informational and is None when
+            the position count clears the diversification floor.
+        """
+        violations = []
+
+        for pos in proposed_positions:
+            if pos["weight"] > self.max_position_pct:
+                violations.append(
+                    f"{pos['ticker']} weight {pos['weight']:.1%} > limit {self.max_position_pct:.1%}"
+                )
+
+        # Below-floor diversification is informational, not a violation — small books aren't a VETO fault.
+        diversification_note: Optional[str] = None
+        if (
+            len(proposed_positions) > 1
+            and len(proposed_positions) < RISK.min_positions_diversification
+            and total_weight > 0
+        ):
+            diversification_note = (
+                f"Below diversification floor: {len(proposed_positions)} positions "
+                f"(min {RISK.min_positions_diversification})"
+            )
+
+        if len(proposed_positions) > RISK.max_positions:
+            # Unreachable via the API (tickers capped at 20 there too); kept for direct callers.
+            violations.append(
+                f"Over-diversification: {len(proposed_positions)} positions (max {RISK.max_positions})"
+            )
+
+        if current_vix >= self.vix_blackout:
+            violations.append(
+                f"VIX {current_vix:.1f} >= blackout threshold {self.vix_blackout:.1f}"
+            )
+
+        return violations, diversification_note
+
+    def _solve_optimal_weights(
+        self,
+        proposed_positions: list[dict],
+        price_history: dict[str, pd.Series],
+        sector_to_tickers: dict[str, list],
+        convictions: Optional[dict[str, float]],
+    ) -> tuple[dict[str, float], Optional[bool], list[str]]:
+        """Runs gate 2: the SLSQP solve for allocation ceilings under per-sector caps.
+
+        Args:
+            proposed_positions: List of dicts with keys ``ticker`` and ``weight``.
+            price_history: Mapping of ticker → daily close price Series.
+            sector_to_tickers: Mapping of GICS sector → tickers proposed in it, one
+                inequality constraint per sector.
+            convictions: Optional mapping of ticker → signed conviction score used by the
+                SLSQP objective. Positive = BULLISH, negative = BEARISH, zero = NEUTRAL.
+
+        Returns:
+            Tuple of (optimal_weights, optimizer_converged, optimizer_notes). Weights are
+            empty and ``optimizer_converged`` is None whenever the solve was skipped —
+            single-position books, no usable return history, or a degenerate covariance
+            matrix — with ``optimizer_notes`` naming the reason where there is one.
+        """
+        optimizer_notes: list[str] = []
+        if len(proposed_positions) <= 1:
+            return {}, None, optimizer_notes
+
+        # Raw per-asset returns: cov must not be pre-weighted or w^T*cov*w double-applies it.
+        dropped_tickers: list[str] = []
+        returns_df = compute_asset_returns(
+            proposed_positions, price_history, dropped=dropped_tickers
+        )
+        if dropped_tickers:
+            optimizer_notes.append(
+                f"Covariance: excluded {', '.join(dropped_tickers)} — fewer than "
+                f"{RISK.min_beta_overlap_points} overlapping return observations"
+            )
+        if returns_df.empty:
+            return {}, None, optimizer_notes
+
+        cov = returns_df.cov() * 252
+        if not np.isfinite(cov.to_numpy()).all():
+            # Thin overlap can still leave a non-finite matrix even after the drop; SLSQP can't recover.
+            optimizer_notes.append(
+                "Covariance: non-finite values in the covariance matrix — "
+                "SLSQP optimization skipped"
+            )
+            return {}, None, optimizer_notes
+
+        tickers = list(returns_df.columns)
+        n = len(tickers)
+
+        def _obj(w: np.ndarray, _conv: Optional[dict[str, float]] = convictions) -> float:
+            """Minimises variance penalised by signed conviction.
+
+            Signed conviction (passed from graph.py):
+              +conviction for BULLISH → optimizer drives weight UP
+              -conviction for BEARISH → optimizer drives weight to 0
+               0 for NEUTRAL          → pure variance minimisation
+
+            ``_conv`` is bound at definition time to prevent closure capture
+            from picking up a mutated reference if convictions changes later.
+            """
+            variance = float(np.dot(w, np.dot(cov, w)))
+            if _conv:
+                alpha = sum(w[i] * _conv.get(tickers[i], 0.0) for i in range(n))
+                # Lambda=1.0 trades off return conviction against variance equally
+                return -alpha + RISK.slsqp_risk_aversion * variance
+            return variance
+
+        w0 = np.full(n, min(self.max_position_pct, 1.0 / n))
+        bounds = tuple((0.0, self.max_position_pct) for _ in range(n))
+
+        cons = []
+        for sec, sec_tickers in sector_to_tickers.items():
+            idxs = [i for i, t in enumerate(tickers) if t in sec_tickers]
+            cap = self.max_sector_pct
+            cons.append(
+                {
+                    "type": "ineq",
+                    "fun": lambda w, idx=idxs, c=cap: c - sum(w[i] for i in idx),
+                }
+            )
+        # A long-only book cannot deploy more capital than it has
+        cons.append({"type": "ineq", "fun": lambda w: RISK.slsqp_max_total_deployment - np.sum(w)})
+
+        res = minimize(
+            _obj,
+            w0,
+            method="SLSQP",
+            bounds=bounds,
+            constraints=cons,
+            options={"ftol": RISK.slsqp_ftol, "maxiter": RISK.slsqp_maxiter},
+        )
+        optimizer_converged = bool(res.success)
+        if not res.success:
+            logger.warning("[Risk] SLSQP solve did not converge: %s", res.message)
+            return {}, optimizer_converged, optimizer_notes
+
+        optimal_weights = {tickers[i]: float(res.x[i]) for i in range(n)}
+        logger.debug(
+            "[Risk] SLSQP optimal weights: %s",
+            {t: f"{w:.3f}" for t, w in optimal_weights.items()},
+        )
+        return optimal_weights, optimizer_converged, optimizer_notes
+
+    def _statistical_violations(
+        self,
+        var99: float,
+        cvar: float,
+        beta: float,
+        corr: float,
+        sector_weights: dict[str, float],
+        has_sector_violation: bool,
+    ) -> list[str]:
+        """Runs gate 3: the VaR, CVaR, beta, correlation, and sector-cap thresholds.
+
+        Args:
+            var99: Portfolio 99% historical Value-at-Risk, normalized to a full book.
+            cvar: Portfolio Conditional Value-at-Risk, normalized to a full book.
+            beta: Weighted OLS portfolio beta against the benchmark.
+            corr: Mean pairwise correlation across the proposed positions.
+            sector_weights: Mapping of GICS sector → summed proposed weight.
+            has_sector_violation: Whether any sector exceeds the concentration cap.
+
+        Returns:
+            List of breached thresholds, empty when every statistical gate passes.
+        """
+        stat_violations: list[str] = []
+        if var99 > RISK.var_limit:
+            stat_violations.append(f"VaR 99%: {var99:.2%} > {RISK.var_limit:.0%} limit")
+        if cvar > RISK.cvar_limit:
+            stat_violations.append(f"CVaR: {cvar:.2%} > {RISK.cvar_limit:.0%} limit")
+        if beta > self.max_port_beta:
+            stat_violations.append(f"Beta {beta:.2f} > {self.max_port_beta:.2f}")
+        if corr > RISK.correlation_limit:
+            stat_violations.append(f"Avg correlation > {RISK.correlation_limit} — reduce overlap")
+        if has_sector_violation:
+            for sec, w in sector_weights.items():
+                if w > self.max_sector_pct:
+                    stat_violations.append(
+                        f"Sector '{sec}' weight {w:.1%} > limit {self.max_sector_pct:.1%} "
+                        f"(optimizer applied caps)"
+                    )
+
+        return stat_violations
+
     def evaluate(
         self,
         proposed_positions: list[dict],
@@ -343,41 +537,13 @@ class RiskStatisticalEngine:
         Returns:
             RiskAssessment with verdict, optimal weights, and risk statistics.
         """
-        violations = []
-
         total_weight = sum(p["weight"] for p in proposed_positions)
 
-        for pos in proposed_positions:
-            if pos["weight"] > self.max_position_pct:
-                violations.append(
-                    f"{pos['ticker']} weight {pos['weight']:.1%} > limit {self.max_position_pct:.1%}"
-                )
-
-        # Below-floor diversification is informational (folded into veto_reasons below on
-        # whichever verdict is reached), not a `violations` entry — a 2-4 ticker universe is
-        # a normal small-book session, not a structural fault worth an all-cash VETO
-        diversification_note: Optional[str] = None
-        if (
-            len(proposed_positions) > 1
-            and len(proposed_positions) < RISK.min_positions_diversification
-            and total_weight > 0
-        ):
-            diversification_note = (
-                f"Below diversification floor: {len(proposed_positions)} positions "
-                f"(min {RISK.min_positions_diversification})"
-            )
-
-        if len(proposed_positions) > RISK.max_positions:
-            # api/main.py's AnalyzeRequest.tickers caps max_length at the same 20, so this
-            # branch is currently unreachable through the API — kept for direct callers
-            violations.append(
-                f"Over-diversification: {len(proposed_positions)} positions (max {RISK.max_positions})"
-            )
-
-        if current_vix >= self.vix_blackout:
-            violations.append(
-                f"VIX {current_vix:.1f} >= blackout threshold {self.vix_blackout:.1f}"
-            )
+        violations, diversification_note = self._structural_violations(
+            proposed_positions, current_vix, total_weight
+        )
+        # Carried on every verdict, so build the list once rather than at each construction site
+        diversification_notes = [diversification_note] if diversification_note else []
 
         if violations:
             logger.debug("Risk evaluate: VETO due to %s", violations)
@@ -385,7 +551,7 @@ class RiskStatisticalEngine:
                 verdict=RiskVerdict.VETO,
                 approved_weight=0.0,
                 proposed_weight=total_weight,
-                veto_reasons=violations + ([diversification_note] if diversification_note else []),
+                veto_reasons=violations + diversification_notes,
                 optimal_weights={},
                 var_99=0.0,
                 cvar=0.0,
@@ -406,115 +572,23 @@ class RiskStatisticalEngine:
 
         has_sector_violation = any(w > self.max_sector_pct for w in sector_weights.values())
 
-        optimal_weights: dict[str, float] = {}
-        optimizer_converged: Optional[bool] = None
-        optimizer_notes: list[str] = []
-        if len(proposed_positions) > 1:
-            # Raw per-asset returns: the objective applies w itself, so cov must not
-            # already be weighted or w^T*cov*w double-applies it
-            dropped_tickers: list[str] = []
-            returns_df = compute_asset_returns(proposed_positions, price_history, dropped=dropped_tickers)
-            if dropped_tickers:
-                optimizer_notes.append(
-                    f"Covariance: excluded {', '.join(dropped_tickers)} — fewer than "
-                    f"{RISK.min_beta_overlap_points} overlapping return observations"
-                )
-            if not returns_df.empty:
-                cov = returns_df.cov() * 252
-                if not np.isfinite(cov.to_numpy()).all():
-                    # A too-thin overlap can still leave a degenerate (non-finite) matrix
-                    # even after the per-ticker drop above; SLSQP has no recovery from that
-                    optimizer_notes.append(
-                        "Covariance: non-finite values in the covariance matrix — "
-                        "SLSQP optimization skipped"
-                    )
-                else:
-                    tickers = list(returns_df.columns)
-                    n = len(tickers)
-
-                    def _obj(w: np.ndarray, _conv: Optional[dict[str, float]] = convictions) -> float:
-                        """Minimises variance penalised by signed conviction.
-
-                        Signed conviction (passed from graph.py):
-                          +conviction for BULLISH → optimizer drives weight UP
-                          -conviction for BEARISH → optimizer drives weight to 0
-                           0 for NEUTRAL          → pure variance minimisation
-
-                        ``_conv`` is bound at definition time to prevent closure capture
-                        from picking up a mutated reference if convictions changes later.
-                        """
-                        variance = float(np.dot(w, np.dot(cov, w)))
-                        if _conv:
-                            alpha = sum(w[i] * _conv.get(tickers[i], 0.0) for i in range(n))
-                            # Lambda=1.0 trades off return conviction against variance equally
-                            return -alpha + RISK.slsqp_risk_aversion * variance
-                        return variance
-
-                    w0 = np.full(n, min(self.max_position_pct, 1.0 / n))
-                    bounds = tuple((0.0, self.max_position_pct) for _ in range(n))
-
-                    cons = []
-                    for sec, sec_tickers in sector_to_tickers.items():
-                        idxs = [i for i, t in enumerate(tickers) if t in sec_tickers]
-                        cap = self.max_sector_pct
-                        cons.append(
-                            {
-                                "type": "ineq",
-                                "fun": lambda w, idx=idxs, c=cap: c - sum(w[i] for i in idx),
-                            }
-                        )
-                    # A long-only book cannot deploy more capital than it has
-                    cons.append(
-                        {"type": "ineq", "fun": lambda w: RISK.slsqp_max_total_deployment - np.sum(w)}
-                    )
-
-                    res = minimize(
-                        _obj,
-                        w0,
-                        method="SLSQP",
-                        bounds=bounds,
-                        constraints=cons,
-                        options={"ftol": RISK.slsqp_ftol, "maxiter": RISK.slsqp_maxiter},
-                    )
-                    optimizer_converged = bool(res.success)
-                    if res.success:
-                        optimal_weights = {tickers[i]: float(res.x[i]) for i in range(n)}
-                        logger.debug(
-                            "[Risk] SLSQP optimal weights: %s",
-                            {t: f"{w:.3f}" for t, w in optimal_weights.items()},
-                        )
-                    else:
-                        logger.warning("[Risk] SLSQP solve did not converge: %s", res.message)
+        optimal_weights, optimizer_converged, optimizer_notes = self._solve_optimal_weights(
+            proposed_positions, price_history, sector_to_tickers, convictions
+        )
 
         returns = compute_portfolio_returns(proposed_positions, price_history)
         port_returns = returns.sum(axis=1) if not returns.empty else pd.Series(dtype=float)
 
-        # Normalize to a full (weight=1.0) book before comparing to var_limit/cvar_limit, so
-        # the same threshold means the same thing for the portfolio call (sum(w)~1.0) and a
-        # single-ticker call (w=0.15) — unnormalized, the per-ticker call was diluted 1/0.15x
-        # and under-detected exactly the volatility the gate exists to catch
+        # Normalize to a full book (w=1.0) before VaR/CVaR so per-ticker calls aren't diluted.
         normalized_returns = port_returns / total_weight if total_weight > 0 else port_returns
         var99 = historical_var(normalized_returns)
         cvar = conditional_var(normalized_returns)
         beta = ols_portfolio_beta(proposed_positions, price_history, market_data=self.market_data)
         corr = avg_pairwise_correlation(returns)
 
-        stat_violations: list[str] = []
-        if var99 > RISK.var_limit:
-            stat_violations.append(f"VaR 99%: {var99:.2%} > {RISK.var_limit:.0%} limit")
-        if cvar > RISK.cvar_limit:
-            stat_violations.append(f"CVaR: {cvar:.2%} > {RISK.cvar_limit:.0%} limit")
-        if beta > self.max_port_beta:
-            stat_violations.append(f"Beta {beta:.2f} > {self.max_port_beta:.2f}")
-        if corr > RISK.correlation_limit:
-            stat_violations.append(f"Avg correlation > {RISK.correlation_limit} — reduce overlap")
-        if has_sector_violation:
-            for sec, w in sector_weights.items():
-                if w > self.max_sector_pct:
-                    stat_violations.append(
-                        f"Sector '{sec}' weight {w:.1%} > limit {self.max_sector_pct:.1%} "
-                        f"(optimizer applied caps)"
-                    )
+        stat_violations = self._statistical_violations(
+            var99, cvar, beta, corr, sector_weights, has_sector_violation
+        )
 
         if stat_violations:
             logger.debug("Risk evaluate: REDUCE due to %s", stat_violations)
@@ -522,9 +596,7 @@ class RiskStatisticalEngine:
                 verdict=RiskVerdict.REDUCE,
                 approved_weight=min(total_weight * RISK.reduce_weight_multiplier, total_weight),
                 proposed_weight=total_weight,
-                veto_reasons=stat_violations
-                + ([diversification_note] if diversification_note else [])
-                + optimizer_notes,
+                veto_reasons=stat_violations + diversification_notes + optimizer_notes,
                 optimal_weights=optimal_weights,
                 optimizer_converged=optimizer_converged,
                 var_99=var99,
@@ -549,7 +621,7 @@ class RiskStatisticalEngine:
             verdict=RiskVerdict.APPROVE,
             approved_weight=total_weight,
             proposed_weight=total_weight,
-            veto_reasons=([diversification_note] if diversification_note else []) + optimizer_notes,
+            veto_reasons=diversification_notes + optimizer_notes,
             optimal_weights=optimal_weights,
             optimizer_converged=optimizer_converged,
             var_99=var99,

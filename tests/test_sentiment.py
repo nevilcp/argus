@@ -1,9 +1,12 @@
 """
+tests/test_sentiment.py
+
 Tests for the Sentiment Agent and its pure-Python helpers.
 """
 
 from datetime import datetime, timedelta
 
+import pytest
 
 from argus.agents.sentiment import (
     SentimentAgent,
@@ -12,10 +15,21 @@ from argus.agents.sentiment import (
 )
 from argus.orchestration.governor import RateLimitExceeded
 
+_NEUTRAL_RESPONSE = (
+    '{"signal": "NEUTRAL", "conviction": 0.3, "sentiment_decay_risk": "LOW", "reasoning": "n/a"}'
+)
+
+
+def _no_upcoming_earnings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stubs the calendar lookup, which would otherwise reach yfinance on every analyze()."""
+    monkeypatch.setattr("argus.agents.sentiment._check_earnings_calendar", lambda ticker: False)
+
+
 def test_aggregate_finbert_scores_empty():
     """An empty article list returns the neutral, low-confidence default."""
     res = aggregate_finbert_scores([])
     assert res == {"net": 0.0, "pct_pos": 0.0, "pct_neg": 0.0, "confidence": 0.3}
+
 
 def test_aggregate_finbert_scores_decay():
     """A later-position negative article outweighs an equal-magnitude earlier positive one.
@@ -33,13 +47,15 @@ def test_aggregate_finbert_scores_decay():
     assert res["net"] < 0.0
     assert res["pct_pos"] == 0.5
     assert res["pct_neg"] == 0.5
-    assert res["confidence"] == 0.2 # 2 articles = 0.2
+    assert res["confidence"] == 0.2  # 2 articles = 0.2
+
 
 def test_aggregate_finbert_scores_confidence_cap():
     """Confidence saturates at 1.0 regardless of how many articles are scored."""
     scored = [{"numeric": 1.0, "label": "positive"} for _ in range(15)]
     res = aggregate_finbert_scores(scored)
-    assert res["confidence"] == 1.0 # capped at 1.0
+    assert res["confidence"] == 1.0
+
 
 class _StubMarketData:
     """Minimal MarketDataProvider stub exposing only what SentimentAgent.analyze uses."""
@@ -83,7 +99,7 @@ class _RecordingLLMClient:
 
 def test_analyze_degrades_the_ticker_on_governor_exhaustion_without_retrying(monkeypatch):
     """A RateLimitExceeded from the LLM client fails that ticker immediately, once, into errors."""
-    monkeypatch.setattr("argus.agents.sentiment._check_earnings_calendar", lambda ticker: False)
+    _no_upcoming_earnings(monkeypatch)
 
     market_data = _StubMarketData(news=[])
 
@@ -109,7 +125,7 @@ def test_analyze_degrades_the_ticker_on_governor_exhaustion_without_retrying(mon
 
 def test_analyze_degrades_the_ticker_without_repairing_a_bad_response(monkeypatch):
     """Repair stays disabled: an invalid response is not re-prompted with the failure appended."""
-    monkeypatch.setattr("argus.agents.sentiment._check_earnings_calendar", lambda ticker: False)
+    _no_upcoming_earnings(monkeypatch)
     monkeypatch.setattr("argus.structured_output.time.sleep", lambda s: None)
 
     market_data = _StubMarketData(news=[])
@@ -126,12 +142,10 @@ def test_analyze_degrades_the_ticker_without_repairing_a_bad_response(monkeypatc
 
 def test_analyze_flags_unavailable_news_in_the_llm_prompt(monkeypatch):
     """A None news result surfaces as an explicit False flag, not a silent zero."""
-    monkeypatch.setattr("argus.agents.sentiment._check_earnings_calendar", lambda ticker: False)
+    _no_upcoming_earnings(monkeypatch)
 
     market_data = _StubMarketData(news=None)
-    llm = _RecordingLLMClient(
-        '{"signal": "NEUTRAL", "conviction": 0.3, "sentiment_decay_risk": "LOW", "reasoning": "no data"}'
-    )
+    llm = _RecordingLLMClient(_NEUTRAL_RESPONSE)
     agent = SentimentAgent(llm_client=llm, market_data=market_data)
 
     signal = agent.analyze("AAPL")
@@ -148,7 +162,7 @@ def test_analyze_flags_unavailable_news_in_the_llm_prompt(monkeypatch):
 
 def test_analyze_reports_availability_true_with_real_data(monkeypatch):
     """Genuine news data is flagged available, not confused with the absence placeholder."""
-    monkeypatch.setattr("argus.agents.sentiment._check_earnings_calendar", lambda ticker: False)
+    _no_upcoming_earnings(monkeypatch)
     # Headlines are non-empty here, which would otherwise load the real FinBERT
     # pipeline; stub it out since this test only cares about the availability flags.
     monkeypatch.setattr(
@@ -169,7 +183,8 @@ def test_analyze_reports_availability_true_with_real_data(monkeypatch):
         news=[{"title": "Real headline", "description": "", "published_at": "", "source": ""}],
     )
     llm = _RecordingLLMClient(
-        '{"signal": "BULLISH", "conviction": 0.6, "sentiment_decay_risk": "LOW", "reasoning": "positive"}'
+        '{"signal": "BULLISH", "conviction": 0.6, "sentiment_decay_risk": "LOW",'
+        ' "reasoning": "positive"}'
     )
     agent = SentimentAgent(llm_client=llm, market_data=market_data)
 
@@ -185,12 +200,10 @@ def test_analyze_reports_availability_true_with_real_data(monkeypatch):
 
 def test_batch_analyze_paces_only_against_a_live_market_data_provider(monkeypatch):
     """Fixture-backed providers skip fan-out pacing so the test suite stays fast."""
-    monkeypatch.setattr("argus.agents.sentiment._check_earnings_calendar", lambda ticker: False)
+    _no_upcoming_earnings(monkeypatch)
 
     market_data = _StubMarketData(news=[])
-    llm = _RecordingLLMClient(
-        '{"signal": "NEUTRAL", "conviction": 0.3, "sentiment_decay_risk": "LOW", "reasoning": "n/a"}'
-    )
+    llm = _RecordingLLMClient(_NEUTRAL_RESPONSE)
     agent = SentimentAgent(llm_client=llm, market_data=market_data)
 
     sleep_calls = []
@@ -210,7 +223,7 @@ def test_scored_articles_are_sorted_by_published_at_before_aggregation(monkeypat
     Here the most relevant (first) article is old and negative; the least
     relevant (last) article is new and positive. Decay must favor the new one.
     """
-    monkeypatch.setattr("argus.agents.sentiment._check_earnings_calendar", lambda ticker: False)
+    _no_upcoming_earnings(monkeypatch)
 
     def stub_score(articles):
         polarity = {"stale bad news": -1.0, "fresh good news": 1.0}
@@ -234,9 +247,7 @@ def test_scored_articles_are_sorted_by_published_at_before_aggregation(monkeypat
             {"title": "fresh good news", "published_at": "2024-06-01T00:00:00Z"},
         ],
     )
-    llm = _RecordingLLMClient(
-        '{"signal": "NEUTRAL", "conviction": 0.3, "sentiment_decay_risk": "LOW", "reasoning": "n/a"}'
-    )
+    llm = _RecordingLLMClient(_NEUTRAL_RESPONSE)
     agent = SentimentAgent(llm_client=llm, market_data=market_data)
 
     signal = agent.analyze("AAPL")
@@ -247,16 +258,14 @@ def test_scored_articles_are_sorted_by_published_at_before_aggregation(monkeypat
 
 def test_analyze_tolerates_a_raising_news_provider(monkeypatch):
     """A news provider that raises mid-fetch degrades to unavailable rather than crashing."""
-    monkeypatch.setattr("argus.agents.sentiment._check_earnings_calendar", lambda ticker: False)
+    _no_upcoming_earnings(monkeypatch)
 
     class _RaisingNewsMarketData(_StubMarketData):
         def news(self, ticker, company_name, days_back=7):
             raise RuntimeError("provider outage")
 
     market_data = _RaisingNewsMarketData(news=None)
-    llm = _RecordingLLMClient(
-        '{"signal": "NEUTRAL", "conviction": 0.3, "sentiment_decay_risk": "LOW", "reasoning": "n/a"}'
-    )
+    llm = _RecordingLLMClient(_NEUTRAL_RESPONSE)
     agent = SentimentAgent(llm_client=llm, market_data=market_data)
 
     signal = agent.analyze("AAPL")
@@ -268,12 +277,10 @@ def test_analyze_tolerates_a_raising_news_provider(monkeypatch):
 
 def test_batch_analyze_tolerates_a_single_ticker_raising(monkeypatch):
     """One ticker's uncaught exception must not abort the batch; the rest still complete."""
-    monkeypatch.setattr("argus.agents.sentiment._check_earnings_calendar", lambda ticker: False)
+    _no_upcoming_earnings(monkeypatch)
 
     market_data = _StubMarketData(news=[])
-    llm = _RecordingLLMClient(
-        '{"signal": "NEUTRAL", "conviction": 0.3, "sentiment_decay_risk": "LOW", "reasoning": "n/a"}'
-    )
+    llm = _RecordingLLMClient(_NEUTRAL_RESPONSE)
     agent = SentimentAgent(llm_client=llm, market_data=market_data)
     original_analyze = agent.analyze
 
@@ -294,7 +301,7 @@ def test_batch_analyze_tolerates_a_single_ticker_raising(monkeypatch):
 
 def test_batch_analyze_passes_company_name_for_known_tickers(monkeypatch):
     """A short ticker like 'V' gets its full company name so the news query isn't 'V OR V'."""
-    monkeypatch.setattr("argus.agents.sentiment._check_earnings_calendar", lambda ticker: False)
+    _no_upcoming_earnings(monkeypatch)
 
     received = {}
 
@@ -304,9 +311,7 @@ def test_batch_analyze_passes_company_name_for_known_tickers(monkeypatch):
             return []
 
     market_data = _RecordingMarketData(news=[])
-    llm = _RecordingLLMClient(
-        '{"signal": "NEUTRAL", "conviction": 0.3, "sentiment_decay_risk": "LOW", "reasoning": "n/a"}'
-    )
+    llm = _RecordingLLMClient(_NEUTRAL_RESPONSE)
     agent = SentimentAgent(llm_client=llm, market_data=market_data)
 
     agent.batch_analyze(["V", "ZZZZ"])

@@ -40,9 +40,10 @@ import re
 import threading
 import time
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Deque, Mapping, Optional
+from typing import Optional
 
 from argus.config import settings
 
@@ -104,6 +105,19 @@ _DURATION_COMPONENT_RE = re.compile(r"(\d+(?:\.\d+)?)(h|ms|m|s)")
 _DURATION_UNIT_SECONDS = {"h": 3600.0, "m": 60.0, "s": 1.0, "ms": 0.001}
 
 
+def _require_registered(model: str) -> None:
+    """Rejects a model the governor holds no rate-limit profile for.
+
+    Args:
+        model: Provider model identifier string.
+
+    Raises:
+        UnregisteredModel: If ``model`` is not in REGISTERED_MODELS.
+    """
+    if model not in REGISTERED_MODELS:
+        raise UnregisteredModel(f"{model!r} has no registered rate-limit profile")
+
+
 def _parse_reset_duration(value: str) -> float:
     """Parses a Go-style duration string into seconds.
 
@@ -132,6 +146,46 @@ def _parse_reset_duration(value: str) -> float:
         return float(value)
     except (TypeError, ValueError):
         raise ValueError(f"unparseable Groq reset duration: {value!r}")
+
+
+def _observe_axis(
+    model: str,
+    headers: Mapping[str, str],
+    axis: str,
+    axis_headers: tuple[str, str, str],
+    now: float,
+) -> Optional[tuple[int, int, Optional[float]]]:
+    """Reads one rate-limit axis's (limit, remaining, reset) triple out of a Groq response.
+
+    Args:
+        model: Provider model identifier string, for log context.
+        headers: Response headers from a Groq API call.
+        axis: Axis name as it appears in log messages.
+        axis_headers: This axis's (limit, remaining, reset) header names.
+        now: The time.monotonic() reading the reset deadline is measured from.
+
+    Returns:
+        ``(limit, remaining, reset_at)``, or None when the axis is absent or its
+        limit/remaining pair is malformed. An unparseable reset alone yields a
+        None ``reset_at`` rather than discarding the whole axis.
+    """
+    limit_header, remaining_header, reset_header = axis_headers
+    if not all(header in headers for header in axis_headers):
+        return None
+
+    try:
+        limit = int(headers[limit_header])
+        remaining = int(headers[remaining_header])
+    except (ValueError, TypeError) as e:
+        logger.warning("[Governor] Malformed %s headers for %s: %s", axis, model, e)
+        return None
+
+    reset_at: Optional[float] = None
+    try:
+        reset_at = now + _parse_reset_duration(headers[reset_header])
+    except ValueError as e:
+        logger.warning("[Governor] Unparseable %s reset for %s: %s", axis, model, e)
+    return limit, remaining, reset_at
 
 
 # Measured against representative reconstructed prompts (fundamental, sentiment,
@@ -194,8 +248,8 @@ class ModelUsage:
     tokens_today: int = 0
     current_date: str = field(default_factory=lambda: datetime.now(timezone.utc).strftime("%Y-%m-%d"))
 
-    requests_window: Deque[float] = field(default_factory=deque)
-    tokens_window: Deque[tuple[float, int]] = field(default_factory=deque)
+    requests_window: deque[float] = field(default_factory=deque)
+    tokens_window: deque[tuple[float, int]] = field(default_factory=deque)
 
     limit_requests: Optional[int] = None
     limit_tokens: Optional[int] = None
@@ -307,8 +361,7 @@ class RateLimitGovernor:
                 typically because estimated_tokens alone exceeds the tokens-per-minute
                 budget.
         """
-        if model not in REGISTERED_MODELS:
-            raise UnregisteredModel(f"{model!r} has no registered rate-limit profile")
+        _require_registered(model)
 
         bootstrap = BOOTSTRAP_LIMITS[model]
 
@@ -395,46 +448,11 @@ class RateLimitGovernor:
         Raises:
             UnregisteredModel: If ``model`` has no known rate-limit profile.
         """
-        if model not in REGISTERED_MODELS:
-            raise UnregisteredModel(f"{model!r} has no registered rate-limit profile")
-
-        has_token_axis = all(h in headers for h in _TOKEN_AXIS_HEADERS)
-        has_request_axis = all(h in headers for h in _REQUEST_AXIS_HEADERS)
-        if not has_token_axis and not has_request_axis:
-            return
+        _require_registered(model)
 
         now = time.monotonic()
-        token_values: Optional[tuple[int, int, Optional[float]]] = None
-        if has_token_axis:
-            try:
-                limit_tokens = int(headers["x-ratelimit-limit-tokens"])
-                remaining_tokens = int(headers["x-ratelimit-remaining-tokens"])
-            except (ValueError, TypeError) as e:
-                logger.warning("[Governor] Malformed token-axis headers for %s: %s", model, e)
-            else:
-                reset_tokens_at = None
-                try:
-                    reset_tokens_at = now + _parse_reset_duration(headers["x-ratelimit-reset-tokens"])
-                except ValueError as e:
-                    logger.warning("[Governor] Unparseable token-axis reset for %s: %s", model, e)
-                token_values = (limit_tokens, remaining_tokens, reset_tokens_at)
-
-        request_values: Optional[tuple[int, int, Optional[float]]] = None
-        if has_request_axis:
-            try:
-                limit_requests = int(headers["x-ratelimit-limit-requests"])
-                remaining_requests = int(headers["x-ratelimit-remaining-requests"])
-            except (ValueError, TypeError) as e:
-                logger.warning("[Governor] Malformed request-axis headers for %s: %s", model, e)
-            else:
-                reset_requests_at = None
-                try:
-                    reset_requests_at = now + _parse_reset_duration(
-                        headers["x-ratelimit-reset-requests"]
-                    )
-                except ValueError as e:
-                    logger.warning("[Governor] Unparseable request-axis reset for %s: %s", model, e)
-                request_values = (limit_requests, remaining_requests, reset_requests_at)
+        token_values = _observe_axis(model, headers, "token-axis", _TOKEN_AXIS_HEADERS, now)
+        request_values = _observe_axis(model, headers, "request-axis", _REQUEST_AXIS_HEADERS, now)
 
         if token_values is None and request_values is None:
             return
@@ -478,8 +496,7 @@ class RateLimitGovernor:
         Raises:
             UnregisteredModel: If ``model`` has no known rate-limit profile.
         """
-        if model not in REGISTERED_MODELS:
-            raise UnregisteredModel(f"{model!r} has no registered rate-limit profile")
+        _require_registered(model)
 
         delta = (prompt_tokens + completion_tokens) - estimated_tokens
         with self._lock:
@@ -507,8 +524,7 @@ class RateLimitGovernor:
         Raises:
             UnregisteredModel: If ``model`` has no known rate-limit profile.
         """
-        if model not in REGISTERED_MODELS:
-            raise UnregisteredModel(f"{model!r} has no registered rate-limit profile")
+        _require_registered(model)
 
         with self._lock:
             usage = self._get_usage(model)

@@ -14,6 +14,13 @@ from argus.backtesting.replay import _normalize_as_of, replay_session, replay_se
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 
+def _fixture_capture_date() -> datetime:
+    """Returns the capture timestamp of the first session in the fixture's session_states.json."""
+    with open(FIXTURES_DIR / "market_data" / "session_states.json") as f:
+        session_states = json.load(f)
+    return datetime.fromisoformat(next(iter(session_states.values()))["timestamp"])
+
+
 def test_replay_session_produces_a_valid_allocation():
     """A replayed session allocates every ticker in its universe."""
     result = replay_session(FIXTURES_DIR)
@@ -58,9 +65,7 @@ def test_replay_session_stamps_decisions_with_the_fixture_capture_date():
     now always passed to the graph, and node_log_decisions uses it directly
     (or falls back to wall-clock only when it is unset, as in a live session).
     """
-    with open(FIXTURES_DIR / "market_data" / "session_states.json") as f:
-        session_states = json.load(f)
-    expected_date = datetime.fromisoformat(next(iter(session_states.values()))["timestamp"])
+    expected_date = _fixture_capture_date()
 
     result = replay_session(FIXTURES_DIR, closed_loop=False)
 
@@ -85,9 +90,7 @@ def test_replay_session_closed_loop_scopes_cultural_memory_to_the_session_date()
     with mock.patch("argus.orchestration.graph.get_cultural_memory", return_value=mock_memory):
         replay_session(FIXTURES_DIR, closed_loop=True)
 
-    with open(FIXTURES_DIR / "market_data" / "session_states.json") as f:
-        session_states = json.load(f)
-    expected_as_of = datetime.fromisoformat(next(iter(session_states.values()))["timestamp"])
+    expected_as_of = _fixture_capture_date()
 
     assert mock_memory.retrieve_wisdom.call_args.kwargs["as_of"] == expected_as_of
     assert mock_memory.retrieve_warnings.call_args.kwargs["as_of"] == expected_as_of

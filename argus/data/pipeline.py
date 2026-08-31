@@ -164,6 +164,121 @@ def _finite_or_none(value: Optional[float]) -> Optional[float]:
     return value
 
 
+def _rounded(value: Optional[float], digits: int) -> Optional[float]:
+    """Rounds a computed indicator value, passing None through untouched.
+
+    Args:
+        value: An indicator value, or None where it couldn't be computed.
+        digits: Decimal places to round to.
+
+    Returns:
+        The rounded value, or None.
+    """
+    return None if value is None else round(value, digits)
+
+
+def _last_series_value(series: Optional[pd.Series]) -> Optional[float]:
+    """Reads the final value of a pandas_ta result series.
+
+    Args:
+        series: A pandas_ta result, or None when it produced nothing.
+
+    Returns:
+        The last value as a float, or None if `series` is None or empty. May be
+        NaN — callers that need a finite result pass it through `_finite_or_none`.
+    """
+    if series is None or series.empty:
+        return None
+    return float(series.iloc[-1])
+
+
+def _last_column_value(
+    df: Optional[pd.DataFrame], prefix: str, missing_label: Optional[str] = None
+) -> Optional[float]:
+    """Reads the final value of the first `df` column whose name starts with `prefix`.
+
+    pandas_ta names its output columns after the parameters they were computed
+    with (e.g. MACDh_12_26_9), so a prefix match is the only stable way to
+    locate one across pandas_ta versions.
+
+    Args:
+        df: A pandas_ta result frame, or None when it produced nothing.
+        prefix: Upper-case column-name prefix identifying the wanted series.
+        missing_label: Indicator name to log at WARNING when `df` has rows but
+            carries no matching column; omitted for indicators that stay quiet.
+
+    Returns:
+        The last value as a float, or None if `df` is empty or has no match.
+    """
+    if df is None or df.empty:
+        return None
+    matches = [c for c in df.columns if c.upper().startswith(prefix)]
+    if not matches:
+        if missing_label:
+            logger.warning(
+                "_compress_candles: %s column not found in %s", missing_label, list(df.columns)
+            )
+        return None
+    return float(df[matches[0]].iloc[-1])
+
+
+def _atr_pct(ind_df: pd.DataFrame, close_last: float) -> Optional[float]:
+    """Computes ATR-14 as a fraction of the latest close.
+
+    Args:
+        ind_df: Resampled OHLCV frame at `_INDICATOR_RESAMPLE_MINUTES`.
+        close_last: Latest raw close, the denominator.
+
+    Returns:
+        ATR as a fraction of price, or None if ATR or the close is unusable.
+    """
+    atr = _last_series_value(ta.atr(ind_df["high"], ind_df["low"], ind_df["close"], length=14))
+    if atr is None or not close_last:
+        return None
+    return _finite_or_none(atr / close_last)
+
+
+def _vwap_distance(ind_df: pd.DataFrame, close_last: float) -> Optional[float]:
+    """Computes the latest close's signed distance from session VWAP, as a fraction.
+
+    Args:
+        ind_df: Resampled OHLCV frame at `_INDICATOR_RESAMPLE_MINUTES`.
+        close_last: Latest raw close.
+
+    Returns:
+        `(close - vwap) / vwap`, or None when VWAP can't be computed.
+    """
+    try:
+        vwap_series = ta.vwap(ind_df["high"], ind_df["low"], ind_df["close"], ind_df["volume"])
+        vwap = _finite_or_none(_last_series_value(vwap_series))
+    except Exception:
+        # pandas_ta raises on zero-volume days; leave unset rather than fabricate 0.0
+        return None
+    if not vwap or not close_last:
+        return None
+    return _finite_or_none((close_last - vwap) / vwap)
+
+
+def _volume_ratio(volume_s: pd.Series) -> Optional[float]:
+    """Compares the latest bar's volume against its recent mean.
+
+    Args:
+        volume_s: Resampled volume series, ascending.
+
+    Returns:
+        Latest volume over its rolling 20-bar mean (the full-series mean below
+        20 bars), or None if the mean is zero or the ratio isn't finite.
+    """
+    mean = (
+        float(volume_s.rolling(20).mean().iloc[-1])
+        if len(volume_s) >= 20
+        else float(volume_s.mean())
+    )
+    if not mean:
+        return None
+    return _finite_or_none(float(volume_s.iloc[-1]) / mean)
+
+
 def _return_since(
     close_s: pd.Series, delta: pd.Timedelta, *, same_session: bool
 ) -> Optional[float]:
@@ -201,6 +316,26 @@ def _return_since(
     if located_close == 0:
         return None
     return (float(close_s.iloc[-1]) / located_close) - 1.0
+
+
+_CANDLE_FIELDS = ("open", "high", "low", "close", "volume")
+
+
+def _candle_from_row(timestamp: pd.Timestamp, row: pd.Series) -> dict:
+    """Builds one OHLCVBuffer candle dict from a fetched frame's row.
+
+    Args:
+        timestamp: The row's index value.
+        row: One row of a fetched OHLCV frame; a column absent from it lands as
+            None rather than a fabricated default.
+
+    Returns:
+        Dict with a `timestamp` key plus every `_CANDLE_FIELDS` entry.
+    """
+    candle: dict = {"timestamp": timestamp.isoformat()}
+    for field in _CANDLE_FIELDS:
+        candle[field] = float(row[field]) if field in row.index else None
+    return candle
 
 
 def _resample_ohlcv(df: pd.DataFrame, interval_minutes: int, target_minutes: int) -> pd.DataFrame:
@@ -319,7 +454,7 @@ class MFTDataPipeline:
                 dropped too, both logged at WARNING.
         """
         valid = [t for t in tickers if is_valid_ticker(t)]
-        invalid = [t for t in tickers if t not in valid]
+        invalid = [t for t in tickers if not is_valid_ticker(t)]
         if invalid:
             logger.warning(
                 "MFTDataPipeline.register_tickers: rejected malformed ticker(s): %s", invalid
@@ -468,15 +603,11 @@ class MFTDataPipeline:
                     try:
                         await on_session_ready(session_states)
                     except Exception as exc:
-                        logger.error(
-                            "_fetch_loop: callback raised %s: %s", type(exc).__name__, exc
-                        )
+                        logger.error("_fetch_loop: callback raised %s: %s", type(exc).__name__, exc)
                 else:
                     logger.debug("_fetch_loop: outside market hours — idle")
             except Exception as exc:
-                logger.error(
-                    "_fetch_loop: sweep failed — %s: %s", type(exc).__name__, exc
-                )
+                logger.error("_fetch_loop: sweep failed — %s: %s", type(exc).__name__, exc)
 
             elapsed = time.monotonic() - started
             await self._wait_or_stop(max(0.0, _FETCH_INTERVAL - elapsed))
@@ -560,17 +691,7 @@ class MFTDataPipeline:
             if df is None or df.empty:
                 return 0, 0.0
 
-            candles = [
-                {
-                    "timestamp": idx.isoformat(),
-                    "open": float(row["open"]) if "open" in row.index else None,
-                    "high": float(row["high"]) if "high" in row.index else None,
-                    "low": float(row["low"]) if "low" in row.index else None,
-                    "close": float(row["close"]) if "close" in row.index else None,
-                    "volume": float(row["volume"]) if "volume" in row.index else None,
-                }
-                for idx, row in df.iterrows()
-            ]
+            candles = [_candle_from_row(idx, row) for idx, row in df.iterrows()]
             self.buffer.insert_candles(ticker, candles)
             latest_close = float(df["close"].iloc[-1]) if "close" in df.columns else 0.0
             return len(df), latest_close
@@ -648,79 +769,36 @@ class MFTDataPipeline:
         if len(ind_df) < _required_indicator_bars():
             return None
 
-        rsi_series = ta.rsi(ind_df["close"], length=14)
-        rsi_14 = (
-            float(rsi_series.iloc[-1]) if rsi_series is not None and not rsi_series.empty else None
-        )
-
-        macd_df = ta.macd(ind_df["close"], fast=12, slow=26, signal=9)
-        macd_hist = None
-        if macd_df is not None and not macd_df.empty:
-            # pandas_ta names the histogram column with an 'h' suffix, e.g. MACDh_12_26_9
-            hist_col = [c for c in macd_df.columns if c.upper().startswith("MACDH_")]
-            if hist_col:
-                macd_hist = _finite_or_none(float(macd_df[hist_col[0]].iloc[-1]))
-            else:
-                logger.warning("_compress_candles: MACD histogram column not found in %s", list(macd_df.columns))
-
-        bb_df = ta.bbands(ind_df["close"], length=20, std=2)
-        bb_pct_b = None
-        if bb_df is not None and not bb_df.empty:
-            # pandas_ta names the %B column with a 'BBP_' prefix, e.g. BBP_20_2.0
-            pct_col = [c for c in bb_df.columns if c.upper().startswith("BBP_")]
-            if pct_col:
-                bb_pct_b = float(bb_df[pct_col[0]].iloc[-1])
-            else:
-                logger.warning("_compress_candles: BB %%B column not found in %s", list(bb_df.columns))
-
-        atr_series = ta.atr(ind_df["high"], ind_df["low"], ind_df["close"], length=14)
         close_last = float(df["close"].iloc[-1])
-        atr_pct = None
-        if atr_series is not None and not atr_series.empty and close_last:
-            atr_pct = _finite_or_none(float(atr_series.iloc[-1]) / close_last)
-
-        adx_df = ta.adx(ind_df["high"], ind_df["low"], ind_df["close"], length=14)
-        adx_14 = None
-        if adx_df is not None and not adx_df.empty:
-            adx_col = [c for c in adx_df.columns if c.upper().startswith("ADX_")]
-            if adx_col:
-                adx_14 = float(adx_df[adx_col[0]].iloc[-1])
-
-        vwap_distance = None
-        try:
-            vwap_series = ta.vwap(ind_df["high"], ind_df["low"], ind_df["close"], ind_df["volume"])
-            if vwap_series is not None and not vwap_series.empty:
-                vwap_val = _finite_or_none(float(vwap_series.iloc[-1]))
-                if vwap_val and close_last:
-                    vwap_distance = _finite_or_none((close_last - vwap_val) / vwap_val)
-        except Exception:
-            # pandas_ta raises on zero-volume days; leave unset rather than fabricate 0.0
-            pass
-
-        vol_series = ind_df["volume"]
-        vol_mean = (
-            float(vol_series.rolling(20).mean().iloc[-1])
-            if len(vol_series) >= 20
-            else float(vol_series.mean())
-        )
-        volume_ratio = (
-            _finite_or_none(float(vol_series.iloc[-1]) / vol_mean) if vol_mean else None
-        )
-
         close_s = df["close"]
-        momentum_30m = _return_since(close_s, pd.Timedelta(minutes=30), same_session=True)
-        momentum_1d = _return_since(close_s, pd.Timedelta(days=1), same_session=False)
+
+        rsi_14 = _last_series_value(ta.rsi(ind_df["close"], length=14))
+        macd_hist = _finite_or_none(
+            _last_column_value(
+                ta.macd(ind_df["close"], fast=12, slow=26, signal=9),
+                "MACDH_",
+                "MACD histogram",
+            )
+        )
+        bb_pct_b = _last_column_value(ta.bbands(ind_df["close"], length=20, std=2), "BBP_", "BB %B")
+        adx_14 = _last_column_value(
+            ta.adx(ind_df["high"], ind_df["low"], ind_df["close"], length=14), "ADX_"
+        )
 
         return {
-            "rsi_14": round(rsi_14, 4) if rsi_14 is not None else None,
-            "macd_histogram": round(macd_hist, 6) if macd_hist is not None else None,
-            "bb_percent_b": round(bb_pct_b, 4) if bb_pct_b is not None else None,
-            "atr_pct": round(atr_pct, 6) if atr_pct is not None else None,
-            "adx_14": round(adx_14, 4) if adx_14 is not None else None,
-            "vwap_distance": round(vwap_distance, 6) if vwap_distance is not None else None,
-            "volume_ratio": round(volume_ratio, 4) if volume_ratio is not None else None,
-            "momentum_30m": round(momentum_30m, 6) if momentum_30m is not None else None,
-            "momentum_1d": round(momentum_1d, 6) if momentum_1d is not None else None,
+            "rsi_14": _rounded(rsi_14, 4),
+            "macd_histogram": _rounded(macd_hist, 6),
+            "bb_percent_b": _rounded(bb_pct_b, 4),
+            "atr_pct": _rounded(_atr_pct(ind_df, close_last), 6),
+            "adx_14": _rounded(adx_14, 4),
+            "vwap_distance": _rounded(_vwap_distance(ind_df, close_last), 6),
+            "volume_ratio": _rounded(_volume_ratio(ind_df["volume"]), 4),
+            "momentum_30m": _rounded(
+                _return_since(close_s, pd.Timedelta(minutes=30), same_session=True), 6
+            ),
+            "momentum_1d": _rounded(
+                _return_since(close_s, pd.Timedelta(days=1), same_session=False), 6
+            ),
             "close": round(close_last, 4),
             "timestamp": df.index[-1].isoformat(),
         }
