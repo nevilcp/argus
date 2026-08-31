@@ -47,6 +47,54 @@ class _CapturingLLMClient:
         return json.dumps(self._response_json)
 
 
+def _risk(verdict: RiskVerdict, approved_weight: float, proposed_weight: float) -> RiskAssessment:
+    return RiskAssessment(
+        verdict=verdict,
+        approved_weight=approved_weight,
+        proposed_weight=proposed_weight,
+        var_99=0.05,
+        portfolio_beta=1.0,
+        timestamp=TIMESTAMP,
+    )
+
+
+def _approved(*tickers: str, weight: float = 0.10) -> dict[str, TickerSnapshot]:
+    """Snapshots for tickers the risk engine approved at the same per-position cap."""
+    return {
+        ticker: TickerSnapshot(risk=_risk(RiskVerdict.APPROVE, weight, weight))
+        for ticker in tickers
+    }
+
+
+def _profile(invest_pct: float = 0.5) -> dict:
+    """The user profile every allocate() call in this module passes."""
+    return {"total_wealth": 100_000.0, "invest_pct": invest_pct, "risk_tolerance": "MODERATE"}
+
+
+def _position(
+    ticker: str, allocation_pct: float, stop_loss: float = 10.0, thesis: str = "Bullish"
+) -> dict:
+    """One proposed position inside the allocator LLM's response body."""
+    return {
+        "ticker": ticker,
+        "allocation_pct": allocation_pct,
+        "stop_loss": stop_loss,
+        "thesis": thesis,
+        "composite_conviction": 0.7,
+        "time_horizon": "3-6 months",
+    }
+
+
+def _llm_response(portfolio: list[dict]) -> FixtureLLMClient:
+    body = {
+        "portfolio": portfolio,
+        "cash_reserve_pct": 0.5,
+        "expected_sharpe": None,
+        "rebalance_trigger": "MONTHLY",
+    }
+    return FixtureLLMClient({"only": json.dumps(body)}, key_fn=lambda _prompt: "only")
+
+
 def test_allocate_reraises_on_governor_exhaustion_without_retrying():
     """A RateLimitExceeded from the LLM client propagates immediately, unlike fundamental/sentiment.
 
@@ -67,11 +115,7 @@ def test_allocate_reraises_on_governor_exhaustion_without_retrying():
     agent = PortfolioManagerAgent(llm_client=llm)
 
     with pytest.raises(RateLimitExceeded):
-        agent.allocate(
-            user_profile={"total_wealth": 100_000.0, "invest_pct": 0.5, "risk_tolerance": "MODERATE"},
-            snapshots={"AAPL": TickerSnapshot(risk=_risk(RiskVerdict.APPROVE, approved_weight=0.10, proposed_weight=0.10))},
-            macro=None,
-        )
+        agent.allocate(user_profile=_profile(), snapshots=_approved("AAPL"), macro=None)
 
     assert llm.calls == 1
 
@@ -82,81 +126,34 @@ def test_allocate_does_not_repair_a_bad_response(monkeypatch):
     llm_client = _CapturingLLMClient({"cash_reserve_pct": 0.5})
 
     agent = PortfolioManagerAgent(llm_client=llm_client)
-    alloc = agent.allocate(
-        user_profile={"total_wealth": 100_000.0, "invest_pct": 0.5, "risk_tolerance": "MODERATE"},
-        snapshots={"AAPL": TickerSnapshot(risk=_risk(RiskVerdict.APPROVE, approved_weight=0.10, proposed_weight=0.10))},
-        macro=None,
-    )
+    alloc = agent.allocate(user_profile=_profile(), snapshots=_approved("AAPL"), macro=None)
 
     assert alloc is None
     assert "Your previous response was invalid" not in llm_client.last_prompt
 
 
-def _risk(verdict: RiskVerdict, approved_weight: float, proposed_weight: float) -> RiskAssessment:
-    return RiskAssessment(
-        verdict=verdict,
-        approved_weight=approved_weight,
-        proposed_weight=proposed_weight,
-        var_99=0.05,
-        portfolio_beta=1.0,
-        timestamp=TIMESTAMP,
-    )
-
-
-def _llm_response(portfolio: list[dict]) -> FixtureLLMClient:
-    body = {
-        "portfolio": portfolio,
-        "cash_reserve_pct": 0.5,
-        "expected_sharpe": None,
-        "rebalance_trigger": "MONTHLY",
-    }
-    return FixtureLLMClient({"only": json.dumps(body)}, key_fn=lambda _prompt: "only")
-
-
 def test_allocate_enforces_caps_vetoes_and_fabrications_in_code():
-    """An over-cap allocation is clamped, a VETO'd ticker is zeroed-not-dropped,
+    """Each of an over-cap, a VETO'd, and a fabricated ticker is corrected in code.
 
-    and a fabricated ticker absent from snapshots is dropped — each producing
-    an adjustments entry rather than validating silently.
+    The over-cap allocation is clamped, the VETO'd ticker is zeroed-not-dropped, and
+    the fabricated ticker absent from snapshots is dropped — each producing an
+    adjustments entry rather than validating silently.
     """
-    snapshots = {
-        "OVER_CAP": TickerSnapshot(risk=_risk(RiskVerdict.APPROVE, approved_weight=0.10, proposed_weight=0.10)),
-        "VETOED": TickerSnapshot(risk=_risk(RiskVerdict.VETO, approved_weight=0.0, proposed_weight=0.10)),
-    }
+    snapshots = _approved("OVER_CAP")
+    snapshots["VETOED"] = TickerSnapshot(risk=_risk(RiskVerdict.VETO, 0.0, 0.10))
 
     llm_client = _llm_response(
         [
-            {
-                "ticker": "OVER_CAP",
-                "allocation_pct": 0.15,
-                "stop_loss": 100.0,
-                "thesis": "Bullish",
-                "composite_conviction": 0.7,
-                "time_horizon": "3-6 months",
-            },
-            {
-                "ticker": "VETOED",
-                "allocation_pct": 0.08,
-                "stop_loss": 50.0,
-                "thesis": "Should have been skipped",
-                "composite_conviction": 0.6,
-                "time_horizon": "3-6 months",
-            },
-            {
-                "ticker": "FABRICATED",
-                "allocation_pct": 0.05,
-                "stop_loss": 20.0,
-                "thesis": "Never analyzed",
-                "composite_conviction": 0.5,
-                "time_horizon": "3-6 months",
-            },
+            _position("OVER_CAP", 0.15, stop_loss=100.0),
+            _position("VETOED", 0.08, stop_loss=50.0, thesis="Should have been skipped"),
+            _position("FABRICATED", 0.05, stop_loss=20.0, thesis="Never analyzed"),
         ]
     )
 
     agent = PortfolioManagerAgent(llm_client=llm_client)
     adjustments: list[str] = []
     alloc = agent.allocate(
-        user_profile={"total_wealth": 100_000.0, "invest_pct": 0.5, "risk_tolerance": "MODERATE"},
+        user_profile=_profile(),
         snapshots=snapshots,
         macro=None,
         adjustments=adjustments,
@@ -169,22 +166,24 @@ def test_allocate_enforces_caps_vetoes_and_fabrications_in_code():
     assert positions["VETOED"].allocation_pct == 0.0
     assert "FABRICATED" not in positions
 
-    assert any("clamped OVER_CAP allocation from 0.1500 to risk cap 0.1000" in a for a in adjustments)
+    assert any(
+        "clamped OVER_CAP allocation from 0.1500 to risk cap 0.1000" in a for a in adjustments
+    )
     assert any("zeroed VETOED allocation (risk verdict VETO)" in a for a in adjustments)
     assert any("dropped FABRICATED" in a for a in adjustments)
     assert len(adjustments) == 3
 
 
 def test_allocate_names_the_json_parse_stage_on_exhausted_retries(monkeypatch):
-    """A response that never parses as JSON is reported as a json_parse failure, not a generic one."""
+    """A response that never parses as JSON is reported as a json_parse failure, not generic."""
     monkeypatch.setattr("argus.structured_output.time.sleep", lambda *_: None)
     llm_client = FixtureLLMClient({"only": "not valid json"}, key_fn=lambda _prompt: "only")
 
     agent = PortfolioManagerAgent(llm_client=llm_client)
     adjustments: list[str] = []
     alloc = agent.allocate(
-        user_profile={"total_wealth": 100_000.0, "invest_pct": 0.5, "risk_tolerance": "MODERATE"},
-        snapshots={"OVER_CAP": TickerSnapshot(risk=_risk(RiskVerdict.APPROVE, approved_weight=0.10, proposed_weight=0.10))},
+        user_profile=_profile(),
+        snapshots=_approved("OVER_CAP"),
         macro=None,
         adjustments=adjustments,
     )
@@ -194,7 +193,7 @@ def test_allocate_names_the_json_parse_stage_on_exhausted_retries(monkeypatch):
 
 
 def test_allocate_names_the_schema_validation_stage_on_exhausted_retries(monkeypatch):
-    """Valid JSON that fails PortfolioProposal's schema is reported as schema_validation, not json_parse."""
+    """Valid JSON failing the proposal schema is reported as schema_validation, not json_parse."""
     monkeypatch.setattr("argus.structured_output.time.sleep", lambda *_: None)
     # Missing the required "rebalance_trigger" field -> model_validate raises, json.loads does not
     llm_client = FixtureLLMClient(
@@ -204,8 +203,8 @@ def test_allocate_names_the_schema_validation_stage_on_exhausted_retries(monkeyp
     agent = PortfolioManagerAgent(llm_client=llm_client)
     adjustments: list[str] = []
     alloc = agent.allocate(
-        user_profile={"total_wealth": 100_000.0, "invest_pct": 0.5, "risk_tolerance": "MODERATE"},
-        snapshots={"OVER_CAP": TickerSnapshot(risk=_risk(RiskVerdict.APPROVE, approved_weight=0.10, proposed_weight=0.10))},
+        user_profile=_profile(),
+        snapshots=_approved("OVER_CAP"),
         macro=None,
         adjustments=adjustments,
     )
@@ -239,31 +238,18 @@ def test_allocate_clamps_cash_reserve_to_schema_floor_at_high_deployment():
     than leave a residual just under the schema's floor, which used to fail model_validate
     (and surface as a 500) on a near-fully-deployed session.
     """
-    tickers = [f"T{i}" for i in range(6)]
-    caps = {t: 0.15 for t in tickers}
+    caps = {f"T{i}": 0.15 for i in range(6)}
     caps["T6"] = 0.051
-    tickers.append("T6")
 
     snapshots = {
-        t: TickerSnapshot(risk=_risk(RiskVerdict.APPROVE, approved_weight=caps[t], proposed_weight=caps[t]))
-        for t in tickers
+        ticker: TickerSnapshot(risk=_risk(RiskVerdict.APPROVE, cap, cap))
+        for ticker, cap in caps.items()
     }
-    portfolio = [
-        {
-            "ticker": t,
-            "allocation_pct": caps[t],
-            "stop_loss": 10.0,
-            "thesis": "Bullish",
-            "composite_conviction": 0.7,
-            "time_horizon": "3-6 months",
-        }
-        for t in tickers
-    ]
-    llm_client = _llm_response(portfolio)
+    llm_client = _llm_response([_position(ticker, cap) for ticker, cap in caps.items()])
 
     agent = PortfolioManagerAgent(llm_client=llm_client)
     alloc = agent.allocate(
-        user_profile={"total_wealth": 100_000.0, "invest_pct": 0.95, "risk_tolerance": "MODERATE"},
+        user_profile=_profile(invest_pct=0.95),
         snapshots=snapshots,
         macro=None,
     )
@@ -277,18 +263,14 @@ def test_allocate_states_achievable_deployment_ceiling_not_raw_invest_pct():
     (min(invest_pct, sum of approved Caps)), not raw invest_pct, so ALLOCATION RULE 3's
     target is reachable for a small approved universe under per-position caps.
     """
-    snapshots = {
-        t: TickerSnapshot(risk=_risk(RiskVerdict.APPROVE, approved_weight=0.15, proposed_weight=0.15))
-        for t in ("A", "B", "C")
-    }
     llm_client = _CapturingLLMClient(
         {"portfolio": [], "cash_reserve_pct": 1.0, "rebalance_trigger": "MONTHLY"}
     )
 
     agent = PortfolioManagerAgent(llm_client=llm_client)
     agent.allocate(
-        user_profile={"total_wealth": 100_000.0, "invest_pct": 0.95, "risk_tolerance": "MODERATE"},
-        snapshots=snapshots,
+        user_profile=_profile(invest_pct=0.95),
+        snapshots=_approved("A", "B", "C", weight=0.15),
         macro=None,
     )
 

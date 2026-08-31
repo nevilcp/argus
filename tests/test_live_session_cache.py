@@ -38,16 +38,12 @@ def _publish(
     now: datetime,
     bar_age_seconds: float,
     write_age_seconds: float = 0.0,
-    tracked_universe=None,
+    tracked_universe: list[str] | None = None,
 ) -> None:
     """Publishes one ticker with independently controlled bar age and write age."""
     state = {"timestamp": (now - timedelta(seconds=bar_age_seconds)).isoformat()}
-    published_at = now - timedelta(seconds=write_age_seconds)
-    cache.publish(
-        {ticker: state},
-        tracked_universe if tracked_universe is not None else [ticker],
-        now=published_at,
-    )
+    universe = tracked_universe if tracked_universe is not None else [ticker]
+    cache.publish({ticker: state}, universe, now=now - timedelta(seconds=write_age_seconds))
 
 
 def test_session_state_ttl_seconds_tolerates_one_missed_sweep():

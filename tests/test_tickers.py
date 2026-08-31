@@ -33,6 +33,8 @@ _ACCEPTED = [
     "AAPL", "MSFT", "BRK.B", "BRK-B", "BF-B", "F", "T", "V", "UNH", "GOOGL",
 ]
 
+_INDICES_AND_CRYPTO_PAIRS = ["^GSPC", "^DJI", "BTC-USD", "ETH-USD"]
+
 
 @given(st.sampled_from(_ACCEPTED))
 def test_accepts_the_class_share_set(ticker):
@@ -40,7 +42,7 @@ def test_accepts_the_class_share_set(ticker):
     assert is_valid_ticker(ticker)
 
 
-@given(st.sampled_from(["^GSPC", "^DJI", "BTC-USD", "ETH-USD"]))
+@given(st.sampled_from(_INDICES_AND_CRYPTO_PAIRS))
 def test_rejects_indices_and_crypto_pairs(ticker):
     """Indices and crypto pairs are deliberately excluded: no GICS sector or financials."""
     assert not is_valid_ticker(ticker)

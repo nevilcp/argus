@@ -28,12 +28,7 @@ def test_score_rsi_bounded(rsi: float) -> None:
     delta=st.floats(min_value=0.01, max_value=0.5, allow_nan=False),
 )
 def test_score_rsi_monotonically_non_increasing(rsi: float, delta: float) -> None:
-    """Higher RSI never scores more bullish than a lower RSI.
-
-    Args:
-        rsi: Base RSI value to compare from.
-        delta: Positive offset added to rsi for the higher comparison point.
-    """
+    """Higher RSI never scores more bullish than a lower RSI."""
     higher_rsi = min(100.0, rsi + delta)
     assert _score_rsi({"rsi_14": higher_rsi}) <= _score_rsi({"rsi_14": rsi}) + 1e-9
 
@@ -49,9 +44,8 @@ def test_score_bollinger_bounded(bb: float) -> None:
 def test_score_bollinger_antisymmetric_about_half(bb: float) -> None:
     """%B and its mirror image around 0.5 score as exact opposites.
 
-    Args:
-        bb: %B value; a breach this far below the lower band scores the same
-            magnitude, opposite sign, as the mirrored breach above the upper band.
+    A breach below the lower band scores the same magnitude, opposite sign, as
+    the mirrored breach above the upper band.
     """
     mirrored = 1.0 - bb
     score = _score_bollinger({"bb_percent_b": bb})

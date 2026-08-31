@@ -5,7 +5,6 @@ Tests for the Fundamental Agent and its pure-Python helpers.
 import json
 from datetime import datetime
 
-
 import argus.agents.fundamental as fundamental_module
 from argus.agents.fundamental import (
     FundamentalAgent,
@@ -15,6 +14,13 @@ from argus.agents.fundamental import (
     build_compact_prompt,
 )
 from argus.seams import FixtureLLMClient
+
+# The smallest fundamentals payload FundamentalSignal will validate against
+_MINIMAL_FUNDAMENTALS = {"sector": "Technology", "industry": "Consumer Electronics"}
+
+_VALID_LLM_RESPONSE = json.dumps(
+    {"signal": "NEUTRAL", "conviction": 0.5, "moat_score": 5, "reasoning": "r"}
+)
 
 
 class _StubMarketData:
@@ -27,7 +33,14 @@ class _StubMarketData:
         return dict(self._fundamentals)
 
 
-class _RecordingLLMClient:
+class _UnlimitedCapacityLLMClient:
+    """Base for the LLM stubs below, none of which are testing the capacity gate."""
+
+    def remaining_capacity(self) -> int:
+        return 1_000_000
+
+
+class _RecordingLLMClient(_UnlimitedCapacityLLMClient):
     """Stub LLMClient returning a fixed response while recording the prompt it received."""
 
     def __init__(self, response_text: str) -> None:
@@ -38,8 +51,6 @@ class _RecordingLLMClient:
         self.last_user_prompt = user_prompt
         return self._response_text
 
-    def remaining_capacity(self) -> int:
-        return 1_000_000
 
 def test_anonymize_ticker():
     """Anonymized IDs are deterministic per (ticker, seed) and vary if either input changes."""
@@ -54,6 +65,7 @@ def test_anonymize_ticker():
     id4 = anonymize_ticker("MSFT", 20240101)
     assert id1 != id4
 
+
 def test_build_compact_prompt():
     """The compact prompt embeds fundamentals and substitutes the anon ID when provided."""
     pit_data = {
@@ -62,23 +74,24 @@ def test_build_compact_prompt():
             "sector": "Technology",
             "pe_ttm": 25.5,
             "revenue_growth_yoy": 0.15,
-            "custom_metric": 100
-        }
+            "custom_metric": 100,
+        },
     }
 
     prompt_real = build_compact_prompt("AAPL", pit_data)
     assert 'ticker="AAPL"' in prompt_real
     assert 'as_of="2024-01-01"' in prompt_real
     assert 'sector="Technology"' in prompt_real
-    assert 'P/E Ratio: 25.5' in prompt_real
-    assert 'custom_metric: 100' in prompt_real
+    assert "P/E Ratio: 25.5" in prompt_real
+    assert "custom_metric: 100" in prompt_real
     # Value comes from _SECTOR_PE_MEDIANS, not the input data
-    assert 'industry median ~32.0x' in prompt_real
+    assert "industry median ~32.0x" in prompt_real
 
     prompt_anon = build_compact_prompt("AAPL", pit_data, anon_id="COMP_XYZ")
     assert 'ticker="COMP_XYZ"' in prompt_anon
     assert 'sector="Technology"' in prompt_anon
     assert "AAPL" not in prompt_anon
+
 
 def test_use_backtest_seed_treats_zero_as_a_valid_seed():
     """session_seed=0 is a legal Optional[int] and must not be treated as falsy."""
@@ -86,9 +99,11 @@ def test_use_backtest_seed_treats_zero_as_a_valid_seed():
     assert _use_backtest_seed(True, None) is False
     assert _use_backtest_seed(False, 20240101) is False
 
+
 def test_session_seed_to_date_parses_yyyymmdd_stamp():
     """session_seed is an integer date stamp, e.g. 20240115 -> 2024-01-15."""
     assert _session_seed_to_date(20240115) == datetime(2024, 1, 15).date()
+
 
 def test_analyze_overwrites_llm_echoed_ratios_with_measured_data():
     """Every measured ratio in the persisted signal comes from the fetched payload, never the LLM's echo."""
@@ -133,12 +148,11 @@ def test_analyze_overwrites_llm_echoed_ratios_with_measured_data():
     for key, value in measured.items():
         assert getattr(signal, key) == value
 
+
 def test_analyze_anonymizes_and_derives_as_of_date_from_session_seed():
     """A seeded backtest call anonymizes the ticker and stamps data_as_of_date from session_seed, not today."""
-    market_data = _StubMarketData({"sector": "Technology", "industry": "Consumer Electronics"})
-    llm = _RecordingLLMClient(
-        json.dumps({"signal": "NEUTRAL", "conviction": 0.5, "moat_score": 5, "reasoning": "r"})
-    )
+    market_data = _StubMarketData(_MINIMAL_FUNDAMENTALS)
+    llm = _RecordingLLMClient(_VALID_LLM_RESPONSE)
     agent = FundamentalAgent(llm_client=llm, market_data=market_data)
 
     signal = agent.analyze("AAPL", backtest_mode=True, session_seed=20240115)
@@ -147,22 +161,18 @@ def test_analyze_anonymizes_and_derives_as_of_date_from_session_seed():
     assert "AAPL" not in llm.last_user_prompt
     assert signal.data_as_of_date == _session_seed_to_date(20240115)
 
+
 def test_analyze_retries_with_the_prior_validation_error_in_the_prompt():
     """A malformed first response's error is carried into the retry prompt, not silently re-sent."""
-    market_data = _StubMarketData({"sector": "Technology", "industry": "Consumer Electronics"})
+    market_data = _StubMarketData(_MINIMAL_FUNDAMENTALS)
     prompts: list[str] = []
 
-    class _FlakyThenValidLLMClient:
+    class _FlakyThenValidLLMClient(_UnlimitedCapacityLLMClient):
         def complete(self, system_prompt: str, user_prompt: str) -> str:
             prompts.append(user_prompt)
             if len(prompts) == 1:
                 return "not valid json"
-            return json.dumps(
-                {"signal": "NEUTRAL", "conviction": 0.5, "moat_score": 5, "reasoning": "r"}
-            )
-
-        def remaining_capacity(self) -> int:
-            return 1_000_000
+            return _VALID_LLM_RESPONSE
 
     agent = FundamentalAgent(llm_client=_FlakyThenValidLLMClient(), market_data=market_data)
     signal = agent.analyze("AAPL")
@@ -174,18 +184,15 @@ def test_analyze_retries_with_the_prior_validation_error_in_the_prompt():
 
 def test_analyze_degrades_the_ticker_on_governor_exhaustion_without_retrying():
     """A RateLimitExceeded from the LLM client fails that ticker immediately, once, into errors."""
-    market_data = _StubMarketData({"sector": "Technology", "industry": "Consumer Electronics"})
+    market_data = _StubMarketData(_MINIMAL_FUNDAMENTALS)
 
-    class _RateLimitedLLMClient:
+    class _RateLimitedLLMClient(_UnlimitedCapacityLLMClient):
         def __init__(self) -> None:
             self.calls = 0
 
         def complete(self, system_prompt: str, user_prompt: str) -> str:
             self.calls += 1
             raise fundamental_module.RateLimitExceeded("gpt-oss-120b quota exhausted")
-
-        def remaining_capacity(self) -> int:
-            return 1_000_000
 
     llm = _RateLimitedLLMClient()
     agent = FundamentalAgent(llm_client=llm, market_data=market_data)
@@ -202,15 +209,9 @@ def test_analyze_degrades_the_ticker_on_governor_exhaustion_without_retrying():
 def test_analyze_degrades_the_ticker_when_measured_data_fails_signal_validation():
     """A schema violation in the merged-in measured data (not the verdict) must not crash the batch."""
     market_data = _StubMarketData(
-        {
-            "sector": "Technology",
-            "industry": "Consumer Electronics",
-            "debt_to_equity": -1.5,  # FundamentalSignal requires ge=0.0
-        }
+        {**_MINIMAL_FUNDAMENTALS, "debt_to_equity": -1.5}  # FundamentalSignal requires ge=0.0
     )
-    llm = _RecordingLLMClient(
-        json.dumps({"signal": "NEUTRAL", "conviction": 0.5, "moat_score": 5, "reasoning": "r"})
-    )
+    llm = _RecordingLLMClient(_VALID_LLM_RESPONSE)
     agent = FundamentalAgent(llm_client=llm, market_data=market_data)
 
     errors: list[str] = []
@@ -228,12 +229,8 @@ def test_analyze_does_not_skip_every_ticker_at_a_low_configured_rpm(monkeypatch)
     """
     monkeypatch.setattr(fundamental_module.settings, "ARGUS_GROQ_RPM", 10)
 
-    market_data = _StubMarketData({"sector": "Technology", "industry": "Consumer Electronics"})
-    llm = FixtureLLMClient(
-        {"only": json.dumps({"signal": "NEUTRAL", "conviction": 0.5, "moat_score": 5, "reasoning": "r"})},
-        key_fn=lambda _p: "only",
-        capacity=10,
-    )
+    market_data = _StubMarketData(_MINIMAL_FUNDAMENTALS)
+    llm = FixtureLLMClient({"only": _VALID_LLM_RESPONSE}, key_fn=lambda _p: "only", capacity=10)
     agent = FundamentalAgent(llm_client=llm, market_data=market_data)
 
     errors: list[str] = []
