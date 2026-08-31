@@ -417,7 +417,6 @@ With the default `.env`, this alone gives the same unattended behavior — hourl
 │   ├── params.py         # Provenance-tagged numeric constants
 │   └── seams.py          # Market-data/LLM injection seam used by tests and replay
 ├── scripts/              # collect_session, reconcile_outcomes, replay_backtest, run_evaluation
-├── .agents/rules/        # Standing agent rules (commenting, code review, README generation)
 ├── .github/workflows/    # ci.yml (lint/type-check/test gate), image.yml, collector.yml, reconcile.yml
 ├── data/                 # (Auto-generated, gitignored) Persistent intraday buffer, checkpoint DB, decision log
 ├── chroma_db/            # (Auto-generated, gitignored) Local persistent vector database
