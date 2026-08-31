@@ -37,9 +37,7 @@ from argus.schemas.signals import (
 
 logger = logging.getLogger("argus.technical")
 
-# Module alias — the contract itself lives in schemas/signals.py, shared with
-# data/pipeline.py's readiness gate. Kept so existing references here (and in
-# tests) don't need to import from schemas directly.
+# Alias for schemas/signals.py's contract; kept for existing refs (incl. tests).
 _REQUIRED_INDICATOR_KEYS = SESSION_STATE_REQUIRED_KEYS
 
 
@@ -273,8 +271,7 @@ class TechnicalStatisticalAgent:
             "analyze[%s] net_score=%.4f (vol_mod=%.2f)", ticker, net_score, volume_modifier
         )
 
-        # RSI extremes override net_score direction to prevent contradictory signals
-        # (e.g., a bullish net score while RSI is deeply overbought)
+        # RSI extremes override net_score to avoid contradictory signals (e.g. overbought bullish).
         rsi_raw = float(s.get("rsi_14", 50.0))
         if rsi_raw > TECHNICAL.rsi_overbought and net_score > 0.0:
             logger.debug(
