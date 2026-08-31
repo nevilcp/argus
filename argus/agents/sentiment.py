@@ -24,14 +24,16 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import numpy as np
 
 from argus.config import settings
 from argus.data import fetchers
+from argus.data.cache import TTLCache
 from argus.orchestration.governor import RateLimitExceeded, UnregisteredModel
+from argus.schemas.prompting import schema_block
 from argus.schemas.signals import SentimentSignal, SentimentVerdict
 from argus.seams import GroqLLMClient, LiveMarketDataProvider, LLMClient, MarketDataProvider
 from argus.structured_output import StructuredOutputError, decode
@@ -185,51 +187,6 @@ def aggregate_finbert_scores(scored: list[dict], decay_rate: float = 0.95) -> di
     }
 
 
-class SentimentDailyCache:
-    """In-memory per-ticker cache for SentimentSignals with a 1-day TTL.
-
-    Avoids redundant FinBERT inference and LLM calls for the same ticker
-    within a single trading session.
-    """
-
-    def __init__(self) -> None:
-        """Initializes an empty per-ticker cache."""
-        self._cache: dict[str, tuple[SentimentSignal, datetime]] = {}
-        self._ttl_days = 1
-
-    def get(self, ticker: str) -> Optional[SentimentSignal]:
-        """Returns a cached signal if it exists and is within the TTL window.
-
-        Args:
-            ticker: Equity ticker symbol.
-
-        Returns:
-            Cached SentimentSignal, or None if absent or stale.
-        """
-        if ticker in self._cache:
-            signal, cached_at = self._cache[ticker]
-            if (datetime.now() - cached_at).total_seconds() < self._ttl_days * 86400:  # noqa: DTZ005
-                return signal
-        return None
-
-    def set(self, ticker: str, signal: SentimentSignal) -> None:
-        """Stores a signal with the current timestamp.
-
-        Args:
-            ticker: Equity ticker symbol.
-            signal: Validated SentimentSignal to cache.
-        """
-        self._cache[ticker] = (signal, datetime.now())  # noqa: DTZ005
-
-    def is_stale(self, ticker: str) -> bool:
-        """Returns True if the ticker has no valid cached signal.
-
-        Args:
-            ticker: Equity ticker symbol.
-        """
-        return self.get(ticker) is None
-
-
 def _check_earnings_calendar(ticker: str) -> bool:
     """Returns True if an earnings date falls within the next 14 days.
 
@@ -283,21 +240,10 @@ _SENTIMENT_METRIC_LABELS: dict[str, str] = {
 }
 
 
-# Field descriptions for the prompt's declared output schema, keyed by the same
-# names as SentimentVerdict's schema — a drift test (test_sentiment.py) asserts
-# the two stay equal, so a schema change that isn't mirrored here fails loudly
-# instead of leaving the prompt asking for fields the model can't supply. Shared
-# between _build_synthesis_prompt and SYSTEM_PROMPT so their two schema restatements
-# can't drift apart from each other either.
-_VERDICT_FIELD_DESCRIPTIONS: dict[str, str] = {
-    "signal": '"BULLISH|BEARISH|NEUTRAL"',
-    "conviction": "<float 0.0–1.0>",
-    "sentiment_decay_risk": '"LOW|MEDIUM|HIGH"',
-    "reasoning": '"<≤60 words citing the primary driver>"',
-}
-_VERDICT_SCHEMA_JSON = (
-    "{" + ", ".join(f'"{k}": {v}' for k, v in _VERDICT_FIELD_DESCRIPTIONS.items()) + "}"
-)
+# Rendered from SentimentVerdict's own PromptText markers, shared between
+# _build_synthesis_prompt and SYSTEM_PROMPT so their two schema restatements
+# can't drift apart from each other or from the schema itself.
+_VERDICT_SCHEMA_JSON = schema_block(SentimentVerdict)
 
 
 def _build_synthesis_prompt(ticker: str, metrics: dict) -> str:
@@ -412,7 +358,7 @@ class SentimentAgent:
             )
         self.llm_client = llm_client
         self.market_data = market_data or LiveMarketDataProvider()
-        self.cache = SentimentDailyCache()
+        self.cache: TTLCache[str, SentimentSignal] = TTLCache(ttl=timedelta(days=1))
 
     def analyze(
         self,
@@ -439,10 +385,9 @@ class SentimentAgent:
         Returns:
             A validated SentimentSignal, or None if decoding ultimately fails.
         """
-        if not self.cache.is_stale(ticker):
-            cached = self.cache.get(ticker)
-            if cached:
-                return cached
+        cached = self.cache.get(ticker)
+        if cached:
+            return cached
 
         try:
             news = self.market_data.news(ticker, company_name or ticker, days_back=7)

@@ -1,20 +1,21 @@
 """
 tests/test_api_freshness.py
 
-Tests for /analyze's freshness gate added in PR2 (MFT-1, API-5): the gate
-must reject on bar age, not just cache-write age, and must check market
-hours before either age check so bar-age is never evaluated outside a
-weekday 09:30-16:00 ET session.
+Route-level tests for /analyze's freshness gate (issue #78). The four
+freshness clauses themselves — absent/stalled/stale/malformed/naive/
+one-full-interval-old — now live at the LiveSessionCache seam (see
+tests/test_live_session_cache.py) and are verified there with an explicit
+clock, no HTTP client required.
 
-Also covers PR3's MFT-14 (publication merged into the fetch loop, so a bar
-published a full fetch interval ago still clears the gate) and API-11 (a
-malformed or naive bar timestamp fails closed as staleness instead of
-raising).
+What's genuinely a route concern and stays here: market hours outranking
+every age check, each admission group mapping to its own response text, and
+ticker registration happening only after the earlier gates pass — none of
+that is LiveSessionCache's to know about.
 
 These exercise the route function directly via FastAPI's TestClient rather
 than going through the app's lifespan, so no MFT pipeline, collector, or
-reconcile loop needs to start. `_mft_pipeline` and `_live_session_cache`
-are set directly on the api.main module instead.
+reconcile loop needs to start. `_mft_pipeline` and `_live_cache` are set
+directly on the api.main module instead.
 """
 
 from __future__ import annotations
@@ -27,16 +28,16 @@ from fastapi.testclient import TestClient
 
 import api.main as api_main
 import argus.risk.kill_switch as kill_switch_module
-from argus.data.pipeline import _FETCH_INTERVAL
+from argus.data.live_session_cache import AdmissionResult, LiveSessionCache
 
 _PAYLOAD = {"tickers": ["AAPL"], "total_wealth": 100_000, "invest_pct": 0.5}
 
 
 @pytest.fixture(autouse=True)
 def _reset_singletons(monkeypatch):
-    """Clears the kill-switch singleton and live session cache around each test."""
+    """Clears the kill-switch singleton and installs a fresh live session cache around each test."""
     kill_switch_module._kill_switch = None
-    monkeypatch.setattr(api_main, "_live_session_cache", {})
+    monkeypatch.setattr(api_main, "_live_cache", LiveSessionCache(interval_minutes=1))
     monkeypatch.setattr(api_main.settings, "ARGUS_API_KEY", "")
     yield
     kill_switch_module._kill_switch = None
@@ -57,119 +58,45 @@ def _pipeline(monkeypatch, *, market_hours: bool, interval_minutes: int = 1):
     return fake
 
 
-def _seed_cache(ticker: str, *, bar_age_seconds: float, write_age_seconds: float = 0.0):
-    """Populates `_live_session_cache` with a state whose bar and write times are both controlled."""
-    bar_ts = datetime.now(api_main._ET) - timedelta(seconds=bar_age_seconds)
-    write_ts = datetime.now() - timedelta(seconds=write_age_seconds)
-    api_main._live_session_cache[ticker] = ({"timestamp": bar_ts.isoformat()}, write_ts)
-
-
-def test_analyze_rejects_when_market_closed(client, monkeypatch):
-    """Market-closed is checked before any cache lookup, regardless of what's cached."""
-    _pipeline(monkeypatch, market_hours=False)
-    response = client.post("/analyze", json=_PAYLOAD)
-    assert response.status_code == 503
-    assert "closed" in response.json()["detail"].lower()
-
-
-def test_analyze_rejects_absent_ticker_as_warming_up(client, monkeypatch):
-    """A ticker never seen by the pipeline is reported as warming up, not stalled or stale."""
-    _pipeline(monkeypatch, market_hours=True)
-    response = client.post("/analyze", json=_PAYLOAD)
-    assert response.status_code == 503
-    assert "warming up" in response.json()["detail"].lower()
-
-
-def test_analyze_rejects_stalled_write_before_checking_bar_age(client, monkeypatch):
-    """A cache entry that stopped being refreshed is reported as stalled, even with a fresh bar."""
-    _pipeline(monkeypatch, market_hours=True)
-    _seed_cache("AAPL", bar_age_seconds=5, write_age_seconds=10_000)
-    response = client.post("/analyze", json=_PAYLOAD)
-    assert response.status_code == 503
-    assert "stalled" in response.json()["detail"].lower()
-
-
-def test_analyze_rejects_stale_bar_reproduced_case(client, monkeypatch):
-    """The reproduced MFT-1 case: a bar 9 days old, written just now, is rejected as stale."""
-    _pipeline(monkeypatch, market_hours=True)
-    _seed_cache("AAPL", bar_age_seconds=9 * 24 * 3600, write_age_seconds=5)
-    response = client.post("/analyze", json=_PAYLOAD)
-    assert response.status_code == 503
-    assert "stale" in response.json()["detail"].lower()
-
-
-def test_analyze_rejects_stale_bar_on_a_weekday_holiday(client, monkeypatch):
-    """is_market_hours only checks weekday, so a holiday's stale republished bar must fail-close."""
-    _pipeline(monkeypatch, market_hours=True)
-    _seed_cache("AAPL", bar_age_seconds=2 * 24 * 3600, write_age_seconds=5)
-    response = client.post("/analyze", json=_PAYLOAD)
-    assert response.status_code == 503
-    assert "stale" in response.json()["detail"].lower()
-
-
 def test_analyze_market_closed_outranks_bar_age(client, monkeypatch):
-    """A hopelessly stale bar still surfaces as market-closed, not stale, outside session hours."""
+    """A hopelessly stale bar still surfaces as market-closed, not stale, outside session hours (issue #78)."""
     _pipeline(monkeypatch, market_hours=False)
-    _seed_cache("AAPL", bar_age_seconds=9 * 24 * 3600, write_age_seconds=9 * 24 * 3600)
+    now = datetime.now(api_main._ET) - timedelta(days=9)
+    api_main._live_cache.publish({"AAPL": {"timestamp": now.isoformat()}}, ["AAPL"], now=now)
+
     response = client.post("/analyze", json=_PAYLOAD)
+
     assert response.status_code == 503
     assert "closed" in response.json()["detail"].lower()
 
 
-def test_analyze_passes_freshness_gate_with_a_current_bar(client, monkeypatch):
-    """A fresh write and a fresh bar clear every freshness check and reach the graph."""
+@pytest.mark.parametrize(
+    "admission_field, expected_substring",
+    [
+        ("absent", "warming up"),
+        ("stalled", "stalled"),
+        ("stale", "stale"),
+    ],
+)
+def test_analyze_maps_each_admission_group_to_its_own_response_text(
+    client, monkeypatch, admission_field, expected_substring
+):
+    """Each of LiveSessionCache.admit()'s three rejection groups produces distinct response wording."""
     _pipeline(monkeypatch, market_hours=True)
-    _seed_cache("AAPL", bar_age_seconds=5, write_age_seconds=5)
-    fake_graph = mock.Mock()
-    fake_graph.invoke.side_effect = RuntimeError("sentinel: freshness gate cleared")
-    monkeypatch.setattr(api_main, "_graph", fake_graph)
-
-    response = client.post("/analyze", json=_PAYLOAD)
-
-    # A 500 (rather than any of the 503 freshness variants) proves every gate
-    # above was cleared and the graph itself was reached; the exception text
-    # is redacted behind a correlation ref (API-7, see test_api_validation.py)
-    # so it isn't asserted here.
-    assert response.status_code == 500
-    assert fake_graph.invoke.called
-
-
-def test_analyze_passes_freshness_gate_with_a_bar_one_full_fetch_interval_old(client, monkeypatch):
-    """MFT-14: publication now runs on the same cadence as the fetch sweep, so a bar as old as one
-    full _FETCH_INTERVAL still clears max_bar_age_seconds — the case that a slower, decoupled
-    publish timer used to miss for most of each cycle.
-    """
-    _pipeline(monkeypatch, market_hours=True)
-    _seed_cache("AAPL", bar_age_seconds=_FETCH_INTERVAL, write_age_seconds=5)
-    fake_graph = mock.Mock()
-    fake_graph.invoke.side_effect = RuntimeError("sentinel: freshness gate cleared")
-    monkeypatch.setattr(api_main, "_graph", fake_graph)
-
-    response = client.post("/analyze", json=_PAYLOAD)
-
-    assert response.status_code == 500
-    assert fake_graph.invoke.called
-
-
-def test_analyze_rejects_a_malformed_bar_timestamp_as_stale(client, monkeypatch):
-    """API-11: a non-ISO timestamp fails closed as staleness (503) instead of raising a 500."""
-    _pipeline(monkeypatch, market_hours=True)
-    write_ts = datetime.now()
-    api_main._live_session_cache["AAPL"] = ({"timestamp": "not-a-timestamp"}, write_ts)
+    result = AdmissionResult(**{admission_field: ["AAPL"]})
+    monkeypatch.setattr(api_main._live_cache, "admit", mock.Mock(return_value=result))
 
     response = client.post("/analyze", json=_PAYLOAD)
 
     assert response.status_code == 503
-    assert "stale" in response.json()["detail"].lower()
+    assert expected_substring in response.json()["detail"].lower()
 
 
-def test_analyze_rejects_a_naive_bar_timestamp_as_stale(client, monkeypatch):
-    """API-11: a naive (tz-less) timestamp fails closed as staleness rather than raising a TypeError."""
-    _pipeline(monkeypatch, market_hours=True)
-    write_ts = datetime.now()
-    api_main._live_session_cache["AAPL"] = ({"timestamp": datetime.now().isoformat()}, write_ts)
+def test_analyze_market_closed_skips_ticker_registration(client, monkeypatch):
+    """A rejected-by-market-hours request must not mutate pipeline state (API-12)."""
+    fake_pipeline = _pipeline(monkeypatch, market_hours=False)
 
     response = client.post("/analyze", json=_PAYLOAD)
 
     assert response.status_code == 503
-    assert "stale" in response.json()["detail"].lower()
+    fake_pipeline.register_tickers.assert_not_called()

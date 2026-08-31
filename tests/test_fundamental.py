@@ -3,20 +3,17 @@ Tests for the Fundamental Agent and its pure-Python helpers.
 """
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 
 
 import argus.agents.fundamental as fundamental_module
 from argus.agents.fundamental import (
     FundamentalAgent,
-    FundamentalCache,
     _session_seed_to_date,
     _use_backtest_seed,
     anonymize_ticker,
     build_compact_prompt,
 )
-from argus.orchestration.governor import BOOTSTRAP_LIMITS, RateLimitGovernor
-from argus.schemas.signals import FundamentalSignal, FundamentalVerdict, Signal
 from argus.seams import FixtureLLMClient
 
 
@@ -41,14 +38,8 @@ class _RecordingLLMClient:
         self.last_user_prompt = user_prompt
         return self._response_text
 
-def test_prompt_declared_fields_match_the_verdict_schema():
-    """The prompt's declared output fields and FundamentalVerdict's fields must never drift apart.
-
-    The prompt used to also declare six measured ratios the agent unconditionally
-    overwrote after parsing; this asserts none of those field names sneak back in.
-    """
-    assert set(fundamental_module._VERDICT_FIELD_DESCRIPTIONS) == set(FundamentalVerdict.model_fields)
-
+    def remaining_capacity(self) -> int:
+        return 1_000_000
 
 def test_anonymize_ticker():
     """Anonymized IDs are deterministic per (ticker, seed) and vary if either input changes."""
@@ -88,61 +79,6 @@ def test_build_compact_prompt():
     assert 'ticker="COMP_XYZ"' in prompt_anon
     assert 'sector="Technology"' in prompt_anon
     assert "AAPL" not in prompt_anon
-
-def test_fundamental_cache():
-    """A cached signal is served until it exceeds the 7-day TTL, then evicted."""
-    cache = FundamentalCache()
-    assert cache.is_stale("AAPL")
-
-    signal = FundamentalSignal(
-        ticker="AAPL",
-        sector="Technology",
-        industry="Consumer Electronics",
-        data_as_of_date=datetime.now().date(),
-        signal=Signal.BULLISH,
-        conviction=0.9,
-        moat_score=8,
-        reasoning="Test",
-        api_calls_used=0,
-        timestamp=datetime.now(),
-    )
-
-    cache.set("AAPL", signal)
-    assert not cache.is_stale("AAPL")
-    assert cache.get("AAPL") == signal
-
-    # Backdate the entry past the 7-day TTL rather than waiting for it to expire
-    cache._cache[("AAPL", None)] = (signal, datetime.now() - timedelta(days=8))
-    assert cache.is_stale("AAPL")
-    assert cache.get("AAPL") is None
-
-def test_fundamental_cache_keys_on_session_seed():
-    """Two backtest sessions with different session_seed must not share a cached signal."""
-    cache = FundamentalCache()
-
-    def make_signal(reasoning: str) -> FundamentalSignal:
-        return FundamentalSignal(
-            ticker="AAPL",
-            sector="Technology",
-            industry="Consumer Electronics",
-            data_as_of_date=datetime.now().date(),
-            signal=Signal.BULLISH,
-            conviction=0.9,
-            moat_score=8,
-            reasoning=reasoning,
-            api_calls_used=0,
-            timestamp=datetime.now(),
-        )
-
-    sig_session_1 = make_signal("session 1")
-    sig_session_2 = make_signal("session 2")
-
-    cache.set("AAPL", sig_session_1, session_seed=20240101)
-    cache.set("AAPL", sig_session_2, session_seed=20240102)
-
-    assert cache.get("AAPL", session_seed=20240101) == sig_session_1
-    assert cache.get("AAPL", session_seed=20240102) == sig_session_2
-    assert cache.get("AAPL") is None
 
 def test_use_backtest_seed_treats_zero_as_a_valid_seed():
     """session_seed=0 is a legal Optional[int] and must not be treated as falsy."""
@@ -225,6 +161,9 @@ def test_analyze_retries_with_the_prior_validation_error_in_the_prompt():
                 {"signal": "NEUTRAL", "conviction": 0.5, "moat_score": 5, "reasoning": "r"}
             )
 
+        def remaining_capacity(self) -> int:
+            return 1_000_000
+
     agent = FundamentalAgent(llm_client=_FlakyThenValidLLMClient(), market_data=market_data)
     signal = agent.analyze("AAPL")
 
@@ -244,6 +183,9 @@ def test_analyze_degrades_the_ticker_on_governor_exhaustion_without_retrying():
         def complete(self, system_prompt: str, user_prompt: str) -> str:
             self.calls += 1
             raise fundamental_module.RateLimitExceeded("gpt-oss-120b quota exhausted")
+
+        def remaining_capacity(self) -> int:
+            return 1_000_000
 
     llm = _RateLimitedLLMClient()
     agent = FundamentalAgent(llm_client=llm, market_data=market_data)
@@ -281,20 +223,16 @@ def test_analyze_degrades_the_ticker_when_measured_data_fails_signal_validation(
 
 def test_analyze_does_not_skip_every_ticker_at_a_low_configured_rpm(monkeypatch):
     """A low ARGUS_GROQ_RPM must not make the pre-flight capacity reserve exceed
-    the budget itself (GOV-13) — an idle governor should still admit the call.
-
-    BOOTSTRAP_LIMITS is a dict computed once from settings at governor import
-    time, not re-read per call, so simulating ARGUS_GROQ_RPM=10 requires
-    patching it directly rather than just monkeypatching settings.
+    the budget itself (GOV-13) — a client reporting that full budget as remaining
+    capacity should still admit the call.
     """
-    model = fundamental_module.settings.ARGUS_FUNDAMENTAL_MODEL
     monkeypatch.setattr(fundamental_module.settings, "ARGUS_GROQ_RPM", 10)
-    monkeypatch.setitem(BOOTSTRAP_LIMITS[model], "requests_per_minute", 10)
-    monkeypatch.setattr(fundamental_module, "governor", RateLimitGovernor())
 
     market_data = _StubMarketData({"sector": "Technology", "industry": "Consumer Electronics"})
-    llm = _RecordingLLMClient(
-        json.dumps({"signal": "NEUTRAL", "conviction": 0.5, "moat_score": 5, "reasoning": "r"})
+    llm = FixtureLLMClient(
+        {"only": json.dumps({"signal": "NEUTRAL", "conviction": 0.5, "moat_score": 5, "reasoning": "r"})},
+        key_fn=lambda _p: "only",
+        capacity=10,
     )
     agent = FundamentalAgent(llm_client=llm, market_data=market_data)
 
@@ -303,3 +241,26 @@ def test_analyze_does_not_skip_every_ticker_at_a_low_configured_rpm(monkeypatch)
 
     assert signal is not None
     assert errors == []
+
+
+def test_analyze_skips_the_ticker_and_makes_no_calls_when_capacity_is_low():
+    """A low-capacity client skips the ticker before any market-data fetch or LLM call.
+
+    The capacity check must stay ahead of the fetch so a skipped ticker still
+    costs no network call — asserted here by a market-data stub that raises
+    if it is ever invoked.
+    """
+
+    class _ExplodingMarketData:
+        def fundamentals(self, ticker: str) -> dict:
+            raise AssertionError("fundamentals() must not be called when capacity is low")
+
+    llm = FixtureLLMClient({}, capacity=0)
+    agent = FundamentalAgent(llm_client=llm, market_data=_ExplodingMarketData())
+
+    errors: list[str] = []
+    signal = agent.analyze("AAPL", errors=errors)
+
+    assert signal is None
+    assert len(errors) == 1
+    assert "capacity too low" in errors[0]

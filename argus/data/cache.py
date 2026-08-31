@@ -1,13 +1,16 @@
 """
 argus/data/cache.py
 
-SQLite-backed caches for OHLCV price candles: a rolling intraday buffer and a
-per-trading-day cache for daily bars.
+SQLite-backed caches for OHLCV price candles — a rolling intraday buffer and a
+per-trading-day cache for daily bars — plus a generic in-memory TTL cache for
+agents that only need to dedupe within a process lifetime.
 
 Responsibilities:
   - Buffer rolling intraday OHLCV candles with a configurable max-rows limit
   - Cache daily OHLCV bars keyed by (ticker, trading_date), so a ticker
     refreshed earlier the same UTC day is served from disk rather than refetched
+  - Provide a generic in-memory time-to-live cache, keyed and windowed by the
+    caller, for agent-level result caches that don't need to survive a restart
 
 Not responsible for:
   - Fetching raw data (see data/fetchers.py)
@@ -26,13 +29,66 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Generic, Hashable, Optional, TypeVar
 
 import pandas as pd
 
 logger = logging.getLogger("argus.cache")
+
+_K = TypeVar("_K", bound=Hashable)
+_V = TypeVar("_V")
+
+
+class TTLCache(Generic[_K, _V]):
+    """Generic in-memory cache whose entries expire after a fixed time window.
+
+    Callers supply their own key type and expiry window at construction — the
+    fundamental and sentiment agents each keep one of these rather than a
+    bespoke cache class (see argus/agents/fundamental.py and
+    argus/agents/sentiment.py).
+    """
+
+    def __init__(self, ttl: timedelta, clock: Callable[[], datetime] = datetime.now) -> None:
+        """Initializes an empty cache.
+
+        Args:
+            ttl: Age at which a stored entry stops being returned.
+            clock: Returns the current time; defaults to wall-clock time.
+                Overridable so expiry can be tested at its boundary instead of
+                waiting for `ttl` to actually elapse.
+        """
+        self._ttl = ttl
+        self._clock = clock
+        self._entries: dict[_K, tuple[_V, datetime]] = {}
+
+    def get(self, key: _K) -> Optional[_V]:
+        """Returns the cached value for key, or None if absent or expired.
+
+        Args:
+            key: Cache key.
+
+        Returns:
+            The cached value, or None.
+        """
+        entry = self._entries.get(key)
+        if entry is None:
+            return None
+        value, cached_at = entry
+        if self._clock() - cached_at >= self._ttl:
+            return None
+        return value
+
+    def set(self, key: _K, value: _V) -> None:
+        """Stores value under key, timestamped at the current clock time.
+
+        Args:
+            key: Cache key.
+            value: Value to store.
+        """
+        self._entries[key] = (value, self._clock())
+
 
 _ET = "America/New_York"
 
