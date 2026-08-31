@@ -37,19 +37,23 @@ logger = logging.getLogger("argus.run_evaluation")
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
 
 
+def _format_ci(bounds: tuple[float | None, float | None], number_format: str) -> str:
+    lo, hi = bounds
+    if lo is None:
+        return "undefined"
+    return f"[{lo:{number_format}}, {hi:{number_format}}]"
+
+
 def _print_evaluation(label: str, result: EvaluationResult) -> None:
     print(f"\n--- {label} (n={result.n}) ---")
     if result.n < 2:
         print("  Too few decisions to compute rank IC or hit-rate.")
         return
-    ic_lo, ic_hi = result.rank_ic_ci
-    ic_ci = f"[{ic_lo:+.4f}, {ic_hi:+.4f}]" if ic_lo is not None else "undefined"
     print(f"  rank IC:        {result.rank_ic:+.4f} (p={result.rank_ic_p_value:.4f}), "
-          f"95% CI {ic_ci}")
-    hit_lo, hit_hi = result.hit_rate_ci
+          f"95% CI {_format_ci(result.rank_ic_ci, '+.4f')}")
     if result.hit_rate is not None:
-        ci = f"[{hit_lo:.4f}, {hit_hi:.4f}]" if hit_lo is not None else "undefined"
-        print(f"  hit-rate:       {result.hit_rate:.4f} (n={result.hit_rate_n}), 95% CI {ci}")
+        print(f"  hit-rate:       {result.hit_rate:.4f} (n={result.hit_rate_n}), "
+              f"95% CI {_format_ci(result.hit_rate_ci, '.4f')}")
     else:
         print("  hit-rate:       undefined (every decision fell inside the dead band)")
 
@@ -103,9 +107,10 @@ def main() -> None:
             and ci_lo > 0
             and closed_result.rank_ic > open_result.rank_ic
         )
-        verdict = "closed-loop cleared the pre-registered bar" if helped else \
-            "closed-loop did NOT clear the pre-registered bar"
-        print(f"\nVerdict: {verdict}")
+        if helped:
+            print("\nVerdict: closed-loop cleared the pre-registered bar")
+        else:
+            print("\nVerdict: closed-loop did NOT clear the pre-registered bar")
 
     print("\n=== System-behavior metrics (open-loop session; reported separately) ===")
     sys_report = system_behavior_report(open_loop)
