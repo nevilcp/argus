@@ -36,6 +36,13 @@ def _default_runs_dir() -> str:
     return settings.ARGUS_RUNS_DIR or f"{settings.ARGUS_DATA_DIR}/runs"
 
 
+def _drawdown_fraction(high_water_mark: float, current_value: float) -> float:
+    """Returns peak-to-trough drawdown as a fraction, or 0.0 when there is no positive peak."""
+    if high_water_mark <= 0:
+        return 0.0
+    return (high_water_mark - current_value) / high_water_mark
+
+
 @dataclass
 class KillSwitchStatus:
     """Snapshot of the active kill switch status and calculated indicators."""
@@ -176,6 +183,27 @@ class KillSwitch:
         self._current_portfolio_value = current_value
         self._high_water_mark = max(self._high_water_mark, current_value)
 
+    def _marked_value(self) -> float:
+        """Returns the latest mark, falling back to inception before the first update.
+
+        Callers must have already established that an inception value exists.
+        """
+        if self._current_portfolio_value is not None:
+            return self._current_portfolio_value
+        assert self._portfolio_inception_value is not None, "caller must check inception first"
+        return self._portfolio_inception_value
+
+    def _engage_halt(self, reason: str, halt_time: datetime) -> None:
+        """Records the halt reason/time under the state lock, then raises the halt flag.
+
+        The flag is set last so a reader that sees ``halted`` always sees the
+        matching reason and timestamp with it (KS-12).
+        """
+        with self._state_lock:
+            self._halt_reason = reason
+            self._halt_time = halt_time
+        self._halted.set()
+
     def _monitor_loop(self) -> None:
         """Monitoring loop, waiting between checks until stop() is called."""
         while not self._stop_event.is_set():
@@ -218,17 +246,9 @@ class KillSwitch:
         if self._portfolio_inception_value is None:
             return
 
-        current = (
-            self._current_portfolio_value
-            if self._current_portfolio_value is not None
-            else self._portfolio_inception_value
-        )
+        current = self._marked_value()
         self._high_water_mark = max(self._high_water_mark, current)
-        drawdown = (
-            (self._high_water_mark - current) / self._high_water_mark
-            if self._high_water_mark > 0
-            else 0.0
-        )
+        drawdown = _drawdown_fraction(self._high_water_mark, current)
         threshold = self.DRAWDOWN_THRESHOLDS[self.risk_tolerance]
 
         try:
@@ -263,10 +283,7 @@ class KillSwitch:
         if drawdown >= threshold and not self._halted.is_set():
             reason = f"Drawdown {drawdown:.1%} >= {threshold:.0%} limit ({self.risk_tolerance})"
             halt_time = datetime.now()  # noqa: DTZ005
-            with self._state_lock:
-                self._halt_reason = reason
-                self._halt_time = halt_time
-            self._halted.set()
+            self._engage_halt(reason, halt_time)
             logger.critical("KILL SWITCH TRIGGERED: %s", reason)
             self._persist_halt_event(reason, halt_time, drawdown, self._last_vix or 0.0)
 
@@ -317,13 +334,12 @@ class KillSwitch:
         if self._portfolio_inception_value is None:
             drawdown = 0.0
         else:
-            current = (
-                self._current_portfolio_value
-                if self._current_portfolio_value is not None
+            peak = (
+                self._high_water_mark
+                if self._high_water_mark > 0
                 else self._portfolio_inception_value
             )
-            hwm = self._high_water_mark if self._high_water_mark > 0 else self._portfolio_inception_value
-            drawdown = (hwm - current) / hwm if hwm > 0 else 0.0
+            drawdown = _drawdown_fraction(peak, self._marked_value())
 
         with self._state_lock:
             reason = self._halt_reason
@@ -355,10 +371,7 @@ class KillSwitch:
         halt_time_raw = dump.get("halt_time")
         # Naive local if no persisted halt_time — matches fromisoformat's naive parse of halt_time_raw
         halt_time = datetime.fromisoformat(halt_time_raw) if halt_time_raw else datetime.now()  # noqa: DTZ005
-        with self._state_lock:
-            self._halt_reason = reason
-            self._halt_time = halt_time
-        self._halted.set()
+        self._engage_halt(reason, halt_time)
         logger.warning(
             "Kill switch restored HALTED state from %s: %s. Call POST /kill-switch/reset "
             "to resume (this also deletes the halt dump).",
@@ -395,11 +408,7 @@ class KillSwitch:
         self._current_portfolio_value = new_inception_value
         self._high_water_mark = new_inception_value
         self._consecutive_vix_failures = 0
-        for path in _list_halt_dumps():
-            try:
-                path.unlink()
-            except Exception as e:
-                logger.error("Failed to delete halt dump %s: %s", path, e)
+        _delete_halt_dumps(_list_halt_dumps())
         logger.info(
             "Kill switch reset. New inception value: $%s", f"{new_inception_value:,.0f}"
         )
@@ -440,6 +449,15 @@ def _list_halt_dumps(runs_dir: Optional[str] = None) -> list[Path]:
     return sorted(directory.glob("argus_halt_*.json"), key=_halt_time)
 
 
+def _delete_halt_dumps(paths: list[Path]) -> None:
+    """Deletes the given halt dumps, logging and skipping any that can't be removed."""
+    for path in paths:
+        try:
+            path.unlink()
+        except Exception as e:
+            logger.error("Failed to delete halt dump %s: %s", path, e)
+
+
 def _prune_halt_dumps(runs_dir: Optional[str] = None) -> None:
     """Deletes all but the most recent KILL_SWITCH.max_halt_dumps_retained halt dumps.
 
@@ -449,12 +467,7 @@ def _prune_halt_dumps(runs_dir: Optional[str] = None) -> None:
     """
     keep = KILL_SWITCH.max_halt_dumps_retained
     dumps = _list_halt_dumps(runs_dir)
-    stale = dumps[:-keep] if keep > 0 else dumps
-    for path in stale:
-        try:
-            path.unlink()
-        except Exception as e:
-            logger.error("Failed to prune halt dump %s: %s", path, e)
+    _delete_halt_dumps(dumps[:-keep] if keep > 0 else dumps)
 
 
 def _find_latest_halt_file(runs_dir: Optional[str] = None) -> Optional[Path]:
