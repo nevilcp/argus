@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import warnings
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -165,6 +166,37 @@ def _min_pairwise_mahalanobis(hmm: GaussianHMM, occupancy: np.ndarray) -> float:
 def _major_minor(version: str) -> str:
     """Truncates a dotted version string to its major.minor prefix."""
     return ".".join(version.split(".")[:2])
+
+
+def _check_artifact_compatibility(metadata: dict) -> None:
+    """Verifies a persisted artifact was trained against the installed code and libraries.
+
+    Args:
+        metadata: The "metadata" mapping written by RegimeClassifier.save().
+
+    Raises:
+        ValueError: If the artifact's feature columns, hmmlearn version, or
+            scikit-learn version disagree with what is currently installed.
+    """
+    if metadata.get("feature_columns") != FEATURE_COLUMNS:
+        raise ValueError(
+            f"feature column mismatch: artifact trained on "
+            f"{metadata.get('feature_columns')!r}, code expects {FEATURE_COLUMNS!r}"
+        )
+    # Major.minor only: a patch-level `pip install -U scikit-learn` shouldn't
+    # silently drop production to the rule-based path
+    artifact_hmmlearn = metadata.get("hmmlearn_version", "")
+    if _major_minor(artifact_hmmlearn) != _major_minor(hmmlearn.__version__):
+        raise ValueError(
+            f"hmmlearn version mismatch: artifact={artifact_hmmlearn!r}, "
+            f"installed={hmmlearn.__version__!r}"
+        )
+    artifact_sklearn = metadata.get("sklearn_version", "")
+    if _major_minor(artifact_sklearn) != _major_minor(sklearn.__version__):
+        raise ValueError(
+            f"scikit-learn version mismatch: artifact={artifact_sklearn!r}, "
+            f"installed={sklearn.__version__!r}"
+        )
 
 
 class RegimeClassifier:
@@ -622,26 +654,7 @@ class RegimeClassifier:
         try:
             payload = joblib.load(path)
             metadata = payload["metadata"]
-
-            if metadata.get("feature_columns") != FEATURE_COLUMNS:
-                raise ValueError(
-                    f"feature column mismatch: artifact trained on "
-                    f"{metadata.get('feature_columns')!r}, code expects {FEATURE_COLUMNS!r}"
-                )
-            # Major.minor only: a patch-level `pip install -U scikit-learn` shouldn't
-            # silently drop production to the rule-based path
-            artifact_hmmlearn = metadata.get("hmmlearn_version", "")
-            if _major_minor(artifact_hmmlearn) != _major_minor(hmmlearn.__version__):
-                raise ValueError(
-                    f"hmmlearn version mismatch: artifact={artifact_hmmlearn!r}, "
-                    f"installed={hmmlearn.__version__!r}"
-                )
-            artifact_sklearn = metadata.get("sklearn_version", "")
-            if _major_minor(artifact_sklearn) != _major_minor(sklearn.__version__):
-                raise ValueError(
-                    f"scikit-learn version mismatch: artifact={artifact_sklearn!r}, "
-                    f"installed={sklearn.__version__!r}"
-                )
+            _check_artifact_compatibility(metadata)
 
             classifier = cls()
             classifier.hmm = payload["hmm"]
@@ -729,6 +742,73 @@ class MacroStatisticalAgent:
         except Exception as e:
             logger.error("Failed to fit HMM on history: %s", e)
 
+    def _resolve_field(
+        self,
+        window_final: pd.Series | None,
+        field_name: str,
+        raw_value: Optional[float],
+        *,
+        warn_message: Optional[str] = None,
+    ) -> float:
+        """Reads one macro field from the feature window, falling back to the FRED bundle.
+
+        Args:
+            window_final: Final row of the monthly feature frame, or None if the
+                window could not be assembled.
+            field_name: Column to read from window_final.
+            raw_value: The same field as it came back from macro_bundle(), used
+                only when window_final is unavailable.
+            warn_message: Logged at WARNING when both sources are unavailable and
+                the field falls back to 0.0. Omit for fields that degrade silently.
+
+        Returns:
+            The field's value, or 0.0 if neither source supplied one.
+        """
+        if window_final is not None:
+            return float(window_final[field_name])
+        if raw_value is not None:
+            return raw_value
+        if warn_message is not None:
+            logger.warning(warn_message)
+        return 0.0
+
+    def _trend_vs_lag(
+        self,
+        series_fetch_fn: Callable[[], pd.Series],
+        current_value: float,
+        lag: int,
+        threshold: float,
+        *,
+        label: str,
+    ) -> str:
+        """Buckets a value's move against the same series `lag` periods back.
+
+        Args:
+            series_fetch_fn: Returns the already-transformed FRED series to compare
+                against, oldest observation first. Any transform the comparison
+                needs (e.g. a year-over-year percent change) belongs in here.
+            current_value: The present-day value, on the returned series' scale.
+            lag: How many periods back to compare against.
+            threshold: Move size, in the series' units, that separates a direction
+                from STABLE.
+            label: Short name of the trend, used only in the failure log line.
+
+        Returns:
+            "RISING", "FALLING", or "STABLE" — the last also being the fallback
+            when the series cannot be fetched or is shorter than `lag`.
+        """
+        try:
+            series = series_fetch_fn()
+            if len(series) > lag:
+                lagged = series.iloc[-(lag + 1)]
+                if current_value > lagged + threshold:
+                    return "RISING"
+                if current_value < lagged - threshold:
+                    return "FALLING"
+        except Exception as exc:
+            logger.warning("Failed to compute %s trend; defaulting to STABLE: %s", label, exc)
+        return "STABLE"
+
     def analyze(self) -> Optional[MacroContext]:
         """Compiles real-time economic indicators into a unified MacroContext.
 
@@ -813,32 +893,30 @@ class MacroStatisticalAgent:
         else:
             vix_regime = VixRegime.EXTREME
 
-        if window_final is not None:
-            fed_funds = float(window_final["fed_funds"])
-        else:
-            fed_funds = fed_funds_raw if fed_funds_raw is not None else 0.0
-            if fed_funds_raw is None:
-                logger.warning("analyze: fed_funds is None from FRED bundle; defaulting to 0.0 for trend calc.")
+        fed_funds = self._resolve_field(
+            window_final,
+            "fed_funds",
+            fed_funds_raw,
+            warn_message=(
+                "analyze: fed_funds is None from FRED bundle; defaulting to 0.0 for trend calc."
+            ),
+        )
+        interest_rate_trend = self._trend_vs_lag(
+            lambda: self.market_data.fred_series("FEDFUNDS"),
+            fed_funds,
+            lag=6,
+            threshold=0.25,
+            label="interest rate",
+        )
 
-        # Determine 6-month trailing interest rate trend against historical baseline
-        interest_rate_trend = "STABLE"
-        try:
-            ff_hist = self.market_data.fred_series("FEDFUNDS")
-            if len(ff_hist) > 6:
-                ff_6m_ago = ff_hist.iloc[-7]
-                if fed_funds > ff_6m_ago + 0.25:
-                    interest_rate_trend = "RISING"
-                elif fed_funds < ff_6m_ago - 0.25:
-                    interest_rate_trend = "FALLING"
-        except Exception:
-            pass
-
-        if window_final is not None:
-            t10y2y = float(window_final["t10y2y"])
-        else:
-            t10y2y = t10y2y_raw if t10y2y_raw is not None else 0.0
-            if t10y2y_raw is None:
-                logger.warning("analyze: t10y2y is None from FRED bundle; defaulting to 0.0 for yield curve.")
+        t10y2y = self._resolve_field(
+            window_final,
+            "t10y2y",
+            t10y2y_raw,
+            warn_message=(
+                "analyze: t10y2y is None from FRED bundle; defaulting to 0.0 for yield curve."
+            ),
+        )
 
         if t10y2y < -0.1:
             yield_curve = YieldCurve.INVERTED
@@ -847,26 +925,14 @@ class MacroStatisticalAgent:
         else:
             yield_curve = YieldCurve.NORMAL
 
-        if window_final is not None:
-            cpi_yoy = float(window_final["cpi_yoy"])
-        else:
-            cpi_yoy_raw = current.get("cpi_yoy")
-            cpi_yoy = cpi_yoy_raw if cpi_yoy_raw is not None else 0.0
-
-        # Determine 3-month trailing inflation trajectory
-        inflation_traj = "STABLE"
-        try:
-            cpi_hist = self.market_data.fred_series("CPIAUCSL")
-            cpi_yoy_hist = cpi_hist.pct_change(12) * 100.0
-            cpi_yoy_hist = cpi_yoy_hist.dropna()
-            if len(cpi_yoy_hist) > 3:
-                cpi_3m_ago = cpi_yoy_hist.iloc[-4]
-                if cpi_yoy > cpi_3m_ago + 0.1:
-                    inflation_traj = "RISING"
-                elif cpi_yoy < cpi_3m_ago - 0.1:
-                    inflation_traj = "FALLING"
-        except Exception:
-            pass
+        cpi_yoy = self._resolve_field(window_final, "cpi_yoy", current.get("cpi_yoy"))
+        inflation_traj = self._trend_vs_lag(
+            lambda: (self.market_data.fred_series("CPIAUCSL").pct_change(12) * 100.0).dropna(),
+            cpi_yoy,
+            lag=3,
+            threshold=0.1,
+            label="inflation",
+        )
 
         if regime == Regime.EXPANSION and fed_funds < 4.5:
             sector_signal = SectorSignal.GROWTH_FAVORED
@@ -886,12 +952,9 @@ class MacroStatisticalAgent:
             "sentiment": sent_mult,
         }
 
-        if window_final is not None:
-            unemployment = float(window_final["unemployment"])
-        else:
-            unemployment = (
-                current.get("unemployment", 0.0) if current.get("unemployment") is not None else 0.0
-            )
+        unemployment = self._resolve_field(
+            window_final, "unemployment", current.get("unemployment")
+        )
 
         ctx = MacroContext(
             fed_funds=fed_funds,
