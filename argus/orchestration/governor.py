@@ -40,9 +40,10 @@ import re
 import threading
 import time
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Deque, Mapping, Optional
+from typing import Optional
 
 from argus.config import settings
 
@@ -194,8 +195,8 @@ class ModelUsage:
     tokens_today: int = 0
     current_date: str = field(default_factory=lambda: datetime.now(timezone.utc).strftime("%Y-%m-%d"))
 
-    requests_window: Deque[float] = field(default_factory=deque)
-    tokens_window: Deque[tuple[float, int]] = field(default_factory=deque)
+    requests_window: deque[float] = field(default_factory=deque)
+    tokens_window: deque[tuple[float, int]] = field(default_factory=deque)
 
     limit_requests: Optional[int] = None
     limit_tokens: Optional[int] = None

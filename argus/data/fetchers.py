@@ -26,16 +26,17 @@ Dependencies:
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import random
 import time
-import functools
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
-from typing import Any, Callable, Optional, TypeVar
+from typing import Any, Optional, TypeVar
 
 import pandas as pd
 import yfinance as yf

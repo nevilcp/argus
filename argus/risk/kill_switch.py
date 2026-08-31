@@ -96,7 +96,7 @@ class KillSwitch:
 
         self.risk_tolerance = user_risk_tolerance.upper()
         if self.risk_tolerance not in self.DRAWDOWN_THRESHOLDS:
-            logger.warning(f"Unknown risk tolerance {self.risk_tolerance}, defaulting to MODERATE.")
+            logger.warning("Unknown risk tolerance %s, defaulting to MODERATE.", self.risk_tolerance)
             self.risk_tolerance = "MODERATE"
 
         self.check_interval = check_interval_seconds
@@ -125,7 +125,6 @@ class KillSwitch:
         self._vix_cache_fetched_at: Optional[float] = None
 
         self._thread: Optional[threading.Thread] = None
-        self._logger = logging.getLogger("argus.kill_switch")
 
     def start(self, initial_portfolio_value: float) -> None:
         """Starts the background thread monitoring loop with the initial portfolio value.
@@ -136,7 +135,7 @@ class KillSwitch:
             initial_portfolio_value: Total portfolio value at session inception (USD).
         """
         if self._thread is not None and self._thread.is_alive():
-            self._logger.warning("start() called while already running; ignoring.")
+            logger.warning("start() called while already running; ignoring.")
             return
 
         self._stop_event.clear()
@@ -147,8 +146,9 @@ class KillSwitch:
             target=self._monitor_loop, daemon=True, name="KillSwitchMonitor"
         )
         self._thread.start()
-        self._logger.info(
-            f"Kill switch monitor started. Inception value: ${initial_portfolio_value:,.0f}"
+        logger.info(
+            "Kill switch monitor started. Inception value: $%s",
+            f"{initial_portfolio_value:,.0f}",
         )
 
     def stop(self, timeout: Optional[float] = None) -> None:
@@ -161,7 +161,7 @@ class KillSwitch:
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=timeout)
-            self._logger.info("Kill switch monitor stopped.")
+            logger.info("Kill switch monitor stopped.")
 
     def update_portfolio_value(self, current_value: float) -> None:
         """Thread-safe update of the current portfolio valuation.
@@ -182,7 +182,7 @@ class KillSwitch:
             try:
                 self._check()
             except Exception as e:
-                self._logger.error(f"Kill switch monitor error: {e}")
+                logger.error("Kill switch monitor error: %s", e)
             self._stop_event.wait(self.check_interval)
 
     def _fetch_vix_cached(self) -> float:
@@ -235,17 +235,17 @@ class KillSwitch:
             vix = self._fetch_vix_cached()
         except Exception as exc:
             self._consecutive_vix_failures += 1
-            self._logger.error(
-                f"VIX fetch failed ({self._consecutive_vix_failures} consecutive): {exc}"
+            logger.error(
+                "VIX fetch failed (%d consecutive): %s", self._consecutive_vix_failures, exc
             )
             if (
                 self._consecutive_vix_failures >= self._VIX_FAILURE_HALT_THRESHOLD
                 and not self._new_positions_blocked.is_set()
             ):
                 self._new_positions_blocked.set()
-                self._logger.warning(
-                    "VIX BLACKOUT (fail-closed): "
-                    f"{self._consecutive_vix_failures} consecutive fetch failures."
+                logger.warning(
+                    "VIX BLACKOUT (fail-closed): %d consecutive fetch failures.",
+                    self._consecutive_vix_failures,
                 )
         else:
             self._consecutive_vix_failures = 0
@@ -253,12 +253,12 @@ class KillSwitch:
 
             if vix >= self.vix_blackout and not self._new_positions_blocked.is_set():
                 self._new_positions_blocked.set()
-                self._logger.warning(
-                    f"VIX BLACKOUT: {vix:.1f} >= {self.vix_blackout}. New positions blocked."
+                logger.warning(
+                    "VIX BLACKOUT: %.1f >= %s. New positions blocked.", vix, self.vix_blackout
                 )
             elif vix < self.vix_blackout and self._new_positions_blocked.is_set():
                 self._new_positions_blocked.clear()
-                self._logger.info(f"VIX normalized to {vix:.1f}. New positions unblocked.")
+                logger.info("VIX normalized to %.1f. New positions unblocked.", vix)
 
         if drawdown >= threshold and not self._halted.is_set():
             reason = f"Drawdown {drawdown:.1%} >= {threshold:.0%} limit ({self.risk_tolerance})"
@@ -267,7 +267,7 @@ class KillSwitch:
                 self._halt_reason = reason
                 self._halt_time = halt_time
             self._halted.set()
-            self._logger.critical(f"KILL SWITCH TRIGGERED: {reason}")
+            logger.critical("KILL SWITCH TRIGGERED: %s", reason)
             self._persist_halt_event(reason, halt_time, drawdown, self._last_vix or 0.0)
 
     def _persist_halt_event(
@@ -307,7 +307,7 @@ class KillSwitch:
             with open(filename, "w") as f:
                 json.dump(dump, f, indent=4)
         except Exception as e:
-            self._logger.error(f"Failed to write halt event file: {e}")
+            logger.error("Failed to write halt event file: %s", e)
 
         _prune_halt_dumps(str(runs_dir))
 
@@ -348,7 +348,7 @@ class KillSwitch:
             with open(path) as f:
                 dump = json.load(f)
         except Exception as e:
-            self._logger.error(f"Failed to read halt event file {path}: {e}")
+            logger.error("Failed to read halt event file %s: %s", path, e)
             return
 
         reason = dump.get("reason") or f"Restored from {path.name}"
@@ -359,9 +359,11 @@ class KillSwitch:
             self._halt_reason = reason
             self._halt_time = halt_time
         self._halted.set()
-        self._logger.warning(
-            f"Kill switch restored HALTED state from {path.name}: {reason}. "
-            "Call POST /kill-switch/reset to resume (this also deletes the halt dump)."
+        logger.warning(
+            "Kill switch restored HALTED state from %s: %s. Call POST /kill-switch/reset "
+            "to resume (this also deletes the halt dump).",
+            path.name,
+            reason,
         )
 
     @property
@@ -397,8 +399,10 @@ class KillSwitch:
             try:
                 path.unlink()
             except Exception as e:
-                self._logger.error(f"Failed to delete halt dump {path}: {e}")
-        self._logger.info(f"Kill switch reset. New inception value: ${new_inception_value:,.0f}")
+                logger.error("Failed to delete halt dump %s: %s", path, e)
+        logger.info(
+            "Kill switch reset. New inception value: $%s", f"{new_inception_value:,.0f}"
+        )
 
 
 _kill_switch: Optional[KillSwitch] = None
@@ -450,7 +454,7 @@ def _prune_halt_dumps(runs_dir: Optional[str] = None) -> None:
         try:
             path.unlink()
         except Exception as e:
-            logger.error(f"Failed to prune halt dump {path}: {e}")
+            logger.error("Failed to prune halt dump %s: %s", path, e)
 
 
 def _find_latest_halt_file(runs_dir: Optional[str] = None) -> Optional[Path]:

@@ -173,9 +173,9 @@ def _apply_portfolio_cap(single: RiskAssessment, cap: float) -> dict:
         ``veto_reasons``.
     """
     if cap < RISK.slsqp_zero_cap_epsilon:
-        # A cap this small is no room to allocate, not a REDUCE — REDUCE
-        # still counts as approved (portfolio.py:236) and the prompt would
-        # demand invest_pct deployment against a 0% cap
+        # A cap this small is no room to allocate, not a REDUCE — REDUCE still
+        # counts as approved (see state.py's TickerSnapshot.risk_approved) and the
+        # prompt would demand invest_pct deployment against a 0% cap
         return {
             "verdict": RiskVerdict.VETO,
             "approved_weight": 0.0,
