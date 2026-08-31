@@ -298,14 +298,9 @@ class TechnicalStatisticalAgent:
         if abs_score < TECHNICAL.net_score_neutral_threshold:
             signal = Signal.NEUTRAL
             conviction = TECHNICAL.neutral_conviction_floor + abs_score
-        elif net_score > 0:
-            signal = Signal.BULLISH
-            conviction = min(
-                TECHNICAL.conviction_base + abs_score * TECHNICAL.conviction_score_multiplier,
-                TECHNICAL.conviction_ceiling,
-            )
         else:
-            signal = Signal.BEARISH
+            # Direction splits BULLISH from BEARISH; conviction scales off the magnitude alone
+            signal = Signal.BULLISH if net_score > 0 else Signal.BEARISH
             conviction = min(
                 TECHNICAL.conviction_base + abs_score * TECHNICAL.conviction_score_multiplier,
                 TECHNICAL.conviction_ceiling,

@@ -241,6 +241,37 @@ SYSTEM_PROMPT = (
 )
 
 
+def _signal_payload(
+    verdict: FundamentalVerdict, ticker: str, pit_data: dict[str, Any]
+) -> dict[str, Any]:
+    """Merges an LLM verdict with the measured ratios into a FundamentalSignal payload.
+
+    Args:
+        verdict: Decoded LLM verdict, supplying only signal/conviction/moat_score/reasoning.
+        ticker: Equity ticker symbol.
+        pit_data: Point-in-time dict with keys ``fundamentals`` and ``as_of_date``.
+
+    Returns:
+        Dict ready for ``FundamentalSignal.model_validate``.
+    """
+    data: dict[str, Any] = verdict.model_dump()
+    data["ticker"] = ticker
+    data["data_as_of_date"] = pit_data["as_of_date"]
+    data["timestamp"] = datetime.now().isoformat()  # noqa: DTZ005
+    data["api_calls_used"] = 1
+
+    # All measured ratios come from the fetched payload, never the LLM
+    # echo — the LLM only supplies signal/conviction/moat_score/reasoning.
+    f = pit_data.get("fundamentals", {})
+    for key in _MEASURED_FUNDAMENTAL_FIELDS:
+        data[key] = f.get(key)
+    data["sector"] = data["sector"] or "Unknown"
+    data["industry"] = data["industry"] or "Unknown"
+
+    data["reasoning"] = data["reasoning"][:400]
+    return data
+
+
 class FundamentalAgent:
     """Agent coordinating LLM valuation and economic moat auditing.
 
@@ -318,8 +349,7 @@ class FundamentalAgent:
             logger.debug("FundamentalAgent.analyze: Cache hit for %s", ticker)
             return cached
 
-        capacity_reserve = max(1, int(settings.ARGUS_GROQ_RPM * _CAPACITY_RESERVE_FRACTION))
-        if self.llm_client.remaining_capacity() < capacity_reserve:
+        if not self._has_spare_capacity():
             logger.warning(
                 "[Fundamental] Low capacity for %s, skipping %s", settings.ARGUS_FUNDAMENTAL_MODEL, ticker
             )
@@ -369,21 +399,7 @@ class FundamentalAgent:
                 errors.append(f"fundamental_analysis[{ticker}]: API error: {e}")
             return None
 
-        data: dict[str, Any] = verdict.model_dump()
-        data["ticker"] = ticker
-        data["data_as_of_date"] = pit_data["as_of_date"]
-        data["timestamp"] = datetime.now().isoformat()  # noqa: DTZ005
-        data["api_calls_used"] = 1
-
-        # All measured ratios come from the fetched payload, never the LLM
-        # echo — the LLM only supplies signal/conviction/moat_score/reasoning.
-        f = pit_data.get("fundamentals", {})
-        for key in _MEASURED_FUNDAMENTAL_FIELDS:
-            data[key] = f.get(key)
-        data["sector"] = data["sector"] or "Unknown"
-        data["industry"] = data["industry"] or "Unknown"
-
-        data["reasoning"] = data["reasoning"][:400]
+        data = _signal_payload(verdict, ticker, pit_data)
 
         try:
             signal = FundamentalSignal.model_validate(data)
@@ -401,6 +417,16 @@ class FundamentalAgent:
             "[Fundamental] Analysis complete for %s -> %s", ticker, signal.signal.value
         )
         return signal
+
+    def _has_spare_capacity(self) -> bool:
+        """Reports whether the LLM client has room left beyond the held-back reserve.
+
+        Returns:
+            True when the client's remaining capacity still covers the reserve kept
+            for the same-model portfolio agent (see ``_CAPACITY_RESERVE_FRACTION``).
+        """
+        capacity_reserve = max(1, int(settings.ARGUS_GROQ_RPM * _CAPACITY_RESERVE_FRACTION))
+        return self.llm_client.remaining_capacity() >= capacity_reserve
 
     def batch_analyze(
         self, tickers: list[str], backtest_mode: bool = False, session_seed: Optional[int] = None

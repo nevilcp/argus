@@ -389,33 +389,7 @@ class SentimentAgent:
         if cached:
             return cached
 
-        try:
-            news = self.market_data.news(ticker, company_name or ticker, days_back=7)
-        except Exception as e:
-            logger.warning("[Sentiment] %s news fetch raised: %s", ticker, e)
-            news = None
-
-        news_available = news is not None
-        news_list = news or []
-        # Keep news_list in its fetched (relevance) order for the [:25] truncation,
-        # then sort the scored subset chronologically so aggregate_finbert_scores's
-        # positional decay actually favors the newest articles
-        articles = [a for a in news_list if a.get("title")]
-        scored = score_headlines_with_finbert(articles)
-        scored.sort(key=lambda s: s["published_at"] or "")
-        agg = aggregate_finbert_scores(scored)
-
-        metrics = {
-            "net_finbert_score": agg["net"],
-            "pct_positive": agg["pct_pos"],
-            "pct_negative": agg["pct_neg"],
-            "finbert_confidence": agg["confidence"],
-            "news_volume_7d": len(news_list),
-            "news_scored_count": len(scored),
-            "news_data_available": news_available,
-            "upcoming_catalyst": _check_earnings_calendar(ticker),
-        }
-
+        metrics = self._news_metrics(ticker, company_name)
         prompt = _build_synthesis_prompt(ticker, metrics)
 
         try:
@@ -443,7 +417,9 @@ class SentimentAgent:
             ticker=ticker,
             # A failed fetch's 0.0 is indistinguishable from a real neutral
             # read; persist None rather than fabricate a measured score
-            finbert_net_score=metrics["net_finbert_score"] if news_available else None,
+            finbert_net_score=(
+                metrics["net_finbert_score"] if metrics["news_data_available"] else None
+            ),
             pct_positive=metrics["pct_positive"],
             pct_negative=metrics["pct_negative"],
             news_volume_7d=metrics["news_volume_7d"],
@@ -459,6 +435,46 @@ class SentimentAgent:
         )
         self.cache.set(ticker, signal)
         return signal
+
+    def _news_metrics(self, ticker: str, company_name: Optional[str]) -> dict:
+        """Fetches this ticker's recent news and reduces it to the metrics the LLM sees.
+
+        A failed fetch is reported as ``news_data_available: False`` with placeholder
+        counts rather than as a genuine absence of news.
+
+        Args:
+            ticker: Equity ticker symbol.
+            company_name: Display name used in the news query (defaults to the ticker).
+
+        Returns:
+            Dict of the FinBERT aggregates, article counts, fetch-availability flag,
+            and the upcoming-catalyst flag.
+        """
+        try:
+            news = self.market_data.news(ticker, company_name or ticker, days_back=7)
+        except Exception as e:
+            logger.warning("[Sentiment] %s news fetch raised: %s", ticker, e)
+            news = None
+
+        news_list = news or []
+        # Keep news_list in its fetched (relevance) order for the [:25] truncation,
+        # then sort the scored subset chronologically so aggregate_finbert_scores's
+        # positional decay actually favors the newest articles
+        articles = [a for a in news_list if a.get("title")]
+        scored = score_headlines_with_finbert(articles)
+        scored.sort(key=lambda s: s["published_at"] or "")
+        agg = aggregate_finbert_scores(scored)
+
+        return {
+            "net_finbert_score": agg["net"],
+            "pct_positive": agg["pct_pos"],
+            "pct_negative": agg["pct_neg"],
+            "finbert_confidence": agg["confidence"],
+            "news_volume_7d": len(news_list),
+            "news_scored_count": len(scored),
+            "news_data_available": news is not None,
+            "upcoming_catalyst": _check_earnings_calendar(ticker),
+        }
 
     def batch_analyze(self, tickers: list[str]) -> tuple[dict[str, SentimentSignal], list[str]]:
         """Generates SentimentSignals sequentially for a list of tickers.
