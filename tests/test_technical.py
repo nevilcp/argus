@@ -1,7 +1,3 @@
-"""
-Tests for the Technical Analysis Agent (argus/agents/technical.py).
-"""
-
 import math
 
 import pytest
@@ -15,16 +11,12 @@ from argus.schemas.signals import Signal
 
 @pytest.fixture
 def agent() -> TechnicalStatisticalAgent:
-    """Returns:
-        A fresh TechnicalStatisticalAgent instance.
-    """
+    """Returns a fresh TechnicalStatisticalAgent instance."""
     return TechnicalStatisticalAgent()
 
 
 def _complete_state(**overrides: float) -> dict:
-    """Returns:
-        A fully-populated session state dict, overridden per-field by kwargs.
-    """
+    """Returns a fully-populated session state dict, overridden per-field by kwargs."""
     base = {
         "rsi_14": 50.0,
         "macd_histogram": 0.0,

@@ -1,14 +1,12 @@
-"""
-tests/test_risk_properties.py
+"""Property-based tests on RiskStatisticalEngine.evaluate().
 
-Property-based test on RiskStatisticalEngine.evaluate() — regardless of the
-proposed position weight or VIX level, the engine must never approve more
-than it was asked to approve. RiskAssessment already enforces this as a
-Pydantic model validator (argus/schemas/signals.py: "approved_weight cannot
-exceed proposed_weight"), so this test's job is to prove the engine's own
-decision logic can't construct a RiskAssessment that violates it — i.e. the
-validator never actually fires across the input space evaluate() is called
-with.
+Regardless of the proposed position weight or VIX level, the engine must
+never approve more than it was asked to approve. RiskAssessment already
+enforces this as a Pydantic model validator (schemas/signals.py:
+"approved_weight cannot exceed proposed_weight"), so this module's job is to
+prove the engine's own decision logic can't construct a RiskAssessment that
+violates it — i.e. the validator never actually fires across the input space
+evaluate() is called with.
 """
 
 import numpy as np
@@ -49,7 +47,7 @@ def _price_history(tickers: list[str], seed: int) -> dict[str, pd.Series]:
     vix=st.floats(min_value=0.0, max_value=100.0, allow_nan=False),
 )
 def test_approved_weight_never_exceeds_proposed(weight: float, vix: float) -> None:
-    """Across the full weight/VIX input space, approved weight never exceeds proposed weight."""
+    """Across the full weight/VIX input space, approved weight never exceeds proposed."""
     engine = RiskStatisticalEngine()
     positions = [{"ticker": "AAPL", "weight": weight}]
 
@@ -72,7 +70,7 @@ def test_approved_weight_never_exceeds_proposed(weight: float, vix: float) -> No
     data=st.data(),
 )
 def test_optimal_weights_never_exceed_total_deployment_budget(tickers: list[str], data) -> None:
-    """RE-1 regression: the SLSQP solve never deploys more than the book's capital.
+    """Regression: the SLSQP solve never deploys more than the book's capital.
 
     Before the fix, the optimizer had a sum(w) >= 0.50 floor and no upper bound,
     so a sufficiently bullish conviction vector could solve past 100% deployment.
@@ -93,7 +91,7 @@ def test_optimal_weights_never_exceed_total_deployment_budget(tickers: list[str]
 
 
 def test_all_negative_convictions_veto_not_reduce_at_zero() -> None:
-    """RE-1 guard: a near-zero SLSQP cap becomes VETO, not REDUCE-to-zero.
+    """Guard: a near-zero SLSQP cap becomes VETO, not REDUCE-to-zero.
 
     REDUCE still counts as an approved ticker downstream (state.py's
     TickerSnapshot.risk_approved), so a 0%-cap REDUCE would leave the portfolio

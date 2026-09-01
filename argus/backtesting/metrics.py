@@ -1,8 +1,6 @@
-"""
-argus/backtesting/metrics.py
+"""Pure return-series risk and performance metrics.
 
-Pure return-series risk and performance metrics. Its trade-level block
-(win rate, profit factor, avg win/loss) is reused by
+Its trade-level block (win rate, profit factor, avg win/loss) is reused by
 backtesting/evaluation.py's trade_level_win_loss_stats; the return-series
 block (Sharpe, Sortino, max drawdown, alpha/beta, VaR/CVaR) has no caller
 yet — nothing in this repo produces a daily equity curve for it to score.

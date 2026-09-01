@@ -22,7 +22,7 @@ Responsibilities:
     (ARGUS_COLLECTOR_ENABLED / ARGUS_RECONCILE_ENABLED) so the system keeps
     accumulating decisions and outcomes without a human calling /analyze,
     pruning every store the reconcile loop touches back to a bounded window
-    (PR 6) as part of the same daily pass
+    as part of the same daily pass
   - Serialize graph invocations across /analyze and the collector loop, and
     guard against a second process sharing this one's data directory
 
@@ -85,13 +85,13 @@ _reconcile_task: asyncio.Task | None = None
 _last_collection_result: CollectionResult | None = None
 
 # Serializes graph invocations across /analyze and the unattended collector
-# loop (API-3) — both call the same governor-gated graph, and a second
-# concurrent run only pushes both toward RateLimitExceeded rather than adding
-# real throughput. Held only around the graph invoke itself.
+# loop — both call the same governor-gated graph, and a second concurrent
+# run only pushes both toward RateLimitExceeded rather than adding real
+# throughput. Held only around the graph invoke itself.
 _analyze_semaphore = asyncio.Semaphore(1)
 
-# Holds the open file object backing the process-exclusivity flock (API-2) for
-# as long as this process runs; garbage-collecting it would release the lock
+# Holds the open file object backing the process-exclusivity flock for as
+# long as this process runs; garbage-collecting it would release the lock
 _process_lock_file = None
 
 # Built once in lifespan startup, pointed at the same persistent checkpoint
@@ -116,7 +116,7 @@ async def _mft_session_callback(session_states: dict) -> None:
 
     Publishes them into the module-level live cache so the next /analyze call
     picks up fresh intraday indicators without re-fetching historical data.
-    Eviction of tickers no longer tracked (API-9) happens inside
+    Eviction of tickers no longer tracked happens inside
     LiveSessionCache.publish, keyed off the pipeline's current tracked
     universe.
 
@@ -204,7 +204,7 @@ def _reconcile_once() -> None:
     Kill-switch sync stays here rather than in run_reconciliation_pass: this is
     the caller with a daemon to sync to, and it's skipped when the paper-book
     step itself failed — syncing a fresh report's zeroed-out default equity
-    would read as a total portfolio loss (issue #77).
+    would read as a total portfolio loss.
     """
     report = run_reconciliation_pass(
         LiveMarketDataProvider(),
@@ -236,7 +236,7 @@ def _reconcile_once() -> None:
 
 
 def _seconds_until_next_reconcile(now_et: datetime, hour: int) -> float:
-    """Seconds to sleep until the next `hour:00` ET, correct across DST transitions (API-13).
+    """Computes seconds until the next `hour:00` ET, safe across DST transitions.
 
     `target - now_et` alone is unsafe here: both are built from the same
     ZoneInfo instance, and aware-datetime subtraction with a shared tzinfo
@@ -270,7 +270,7 @@ async def _reconcile_loop() -> None:
 
 
 def _configure_logging() -> None:
-    """Attaches a stream handler to the ``argus`` logger tree so ARGUS_LOG_LEVEL takes effect (OBS-1).
+    """Attaches a stream handler to the ``argus`` logger tree so ARGUS_LOG_LEVEL takes effect.
 
     Under uvicorn the root logger has no handlers at level WARNING, so every
     argus.* `logger.info`/`debug` call is silently dropped and
@@ -300,7 +300,7 @@ def _assert_single_worker() -> None:
 
     This is a best-effort pre-flight only, not the real guard: it can't see
     gunicorn's `-w`, a gunicorn config file, or a programmatic
-    `uvicorn.run(workers=N)`. `_acquire_process_lock` (API-2) is what actually
+    `uvicorn.run(workers=N)`. `_acquire_process_lock` is what actually
     catches those, and the case that costs real money — two containers on one
     data volume — which no argv/env spelling of "workers" describes at all.
 
@@ -334,7 +334,7 @@ def _assert_single_worker() -> None:
 
 
 def _acquire_process_lock() -> None:
-    """Takes an exclusive, non-blocking flock on ``${ARGUS_DATA_DIR}/argus.lock`` (API-2).
+    """Takes an exclusive, non-blocking flock on ``${ARGUS_DATA_DIR}/argus.lock``.
 
     This is the real single-process guard, unlike `_assert_single_worker`'s
     argv/env pre-flight: it catches every way two ARGUS processes could end up
@@ -367,7 +367,7 @@ def _acquire_process_lock() -> None:
 
 
 def _warn_on_permissive_security_defaults() -> None:
-    """Logs a WARNING for each security-relevant setting still at its permissive default (DEP-8).
+    """Logs a WARNING for each security-relevant setting still at its permissive default.
 
     ARGUS_CORS_ORIGINS defaulting to ``["*"]`` and a blank ARGUS_API_KEY are
     both fine for local development behind a trusted network boundary, but
@@ -387,7 +387,7 @@ def _warn_on_permissive_security_defaults() -> None:
 
 
 def _assert_registered_models() -> None:
-    """Fails fast if a configured agent model has no rate-limit profile (GOV-11).
+    """Fails fast if a configured agent model has no rate-limit profile.
 
     Converts what would otherwise be a first-call UnregisteredModel deep inside
     a request into a boot-time failure, so a typo'd or unsupported
@@ -492,7 +492,7 @@ async def lifespan(app: FastAPI):
 
     if _mft_pipeline is not None:
         # Pipeline-owned so it can wait out an orphaned buffer worker rather than
-        # racing it — cancelling the loops above can't stop one already mid-`to_thread` (MFT-16)
+        # racing it — cancelling the loops above can't stop one already mid-`to_thread`
         await _mft_pipeline.close_buffer()
 
     if _process_lock_file is not None:
@@ -540,7 +540,7 @@ class AnalysisRequest(BaseModel):
     @field_validator("tickers")
     @classmethod
     def _normalize_tickers(cls, tickers: list[str]) -> list[str]:
-        """Strips whitespace, upper-cases, validates ticker shape, then dedupes (API-1, API-6).
+        """Strips whitespace, upper-cases, validates ticker shape, then dedupes.
 
         Runs in that order deliberately: pydantic's StringConstraints checks
         `pattern` against the raw, pre-transform string even when combined
@@ -572,7 +572,7 @@ class AnalysisResponse(BaseModel):
 
 
 def _background_task_status(task: asyncio.Task | None) -> dict:
-    """Reports a background task's liveness, distinguishing "never enabled" from "died" (OBS-2).
+    """Reports a background task's liveness, distinguishing "never enabled" from "died".
 
     Args:
         task: The task to inspect, or None if the loop it would run was never
@@ -600,7 +600,7 @@ async def health():
     Reads background-task liveness, the kill switch's halt state, and cache
     freshness — not just in-memory governor counters — so a dead
     pipeline/collector/reconcile loop shows up here instead of staying
-    invisible behind a green /health (OBS-2).
+    invisible behind a green /health.
 
     Raises:
         HTTPException 503: If any background task (MFT pipeline, collector,
@@ -694,7 +694,7 @@ async def analyze(req: AnalysisRequest):
     settings.ARGUS_RISK_TOLERANCE (see argus/risk/kill_switch.py's class
     docstring) — a request's own risk_tolerance does not change which
     threshold guards it. A mismatch is logged, not rejected: this endpoint
-    still serves the request under the configured threshold (KS-6).
+    still serves the request under the configured threshold.
 
     Args:
         req: AnalysisRequest with tickers, total_wealth, invest_pct, and risk_tolerance.
@@ -702,9 +702,9 @@ async def analyze(req: AnalysisRequest):
     Raises:
         HTTPException 401: If ARGUS_API_KEY is set and the X-API-Key header doesn't match.
         HTTPException 429: If the governor's rate budget is exhausted for a
-            configured model (GOV-7), or another analysis (a concurrent
-            /analyze call or the unattended collector) is already in progress
-            (API-3) — retry after a short wait.
+            configured model, or another analysis (a concurrent /analyze
+            call or the unattended collector) is already in progress —
+            retry after a short wait.
         HTTPException 503: If the graph hasn't finished initializing, the kill switch
             is triggered (before or after the graph run), VIX is above the blackout
             threshold, the market is currently closed, the MFT cache has not yet
@@ -739,8 +739,8 @@ async def analyze(req: AnalysisRequest):
             "Retry between 09:30 and 16:00 ET on a weekday.",
         )
 
-    # Registered only once every earlier gate has cleared (API-12) — a
-    # rejected request must not mutate pipeline state or spend a slot in the
+    # Registered only once every earlier gate has cleared — a rejected
+    # request must not mutate pipeline state or spend a slot in the
     # tracked-universe cap
     _mft_pipeline.register_tickers(req.tickers)
 
@@ -749,7 +749,7 @@ async def analyze(req: AnalysisRequest):
 
     # Admission answers only "how old is this" for each ticker; the ordering
     # against market hours above is what decides whether that age matters
-    # right now (issue #78)
+    # right now
     admission = _live_cache.admit(req.tickers, datetime.now(_ET))
 
     if admission.absent:
@@ -803,7 +803,7 @@ async def analyze(req: AnalysisRequest):
     config = {"configurable": {"thread_id": str(uuid4())}}
 
     # No await between this check and the acquire below, so nothing can slip
-    # in between them (API-3) — Semaphore.acquire returns synchronously when
+    # in between them — Semaphore.acquire returns synchronously when
     # unlocked, and a later refactor that inserts an await here breaks that.
     if _analyze_semaphore.locked():
         raise HTTPException(
@@ -819,9 +819,9 @@ async def analyze(req: AnalysisRequest):
                 timeout=settings.ARGUS_ANALYZE_DEADLINE_SECONDS,
             )
     except asyncio.TimeoutError:
-        # The underlying thread can't be cancelled and keeps running (GOV-12
-        # notes async job submission as future work), but the server no longer
-        # holds the connection open past a proxy's own timeout with no signal.
+        # The underlying thread can't be cancelled and keeps running — async
+        # job submission is a possible future improvement — but the server no
+        # longer holds the connection open past a proxy's own timeout with no signal.
         logger.error(
             "[API] Graph run exceeded the %ss deadline", settings.ARGUS_ANALYZE_DEADLINE_SECONDS
         )
@@ -842,14 +842,14 @@ async def analyze(req: AnalysisRequest):
         raise HTTPException(500, f"Agent graph error (ref {ref})")
 
     # /analyze is the other entry point into the graph besides the unattended
-    # collector (RE-11) — without this, decisions.jsonl (the only source
+    # collector — without this, decisions.jsonl (the only source
     # reconcile_decisions reads) never sees a request served through this
     # endpoint, and an API-only deployment reconciles nothing
     append_decisions_jsonl(final_state.get("decisions") or [], _data_path("decisions.jsonl"))
 
     # Re-checked rather than trusted from before the (potentially many-second)
     # graph run: the kill switch is process-global and the reconcile loop can
-    # trip it mid-run (API-8)
+    # trip it mid-run
     ks = get_kill_switch()
     if ks and ks.is_halted:
         raise HTTPException(
@@ -895,7 +895,7 @@ async def reset_kill_switch(new_inception_value: float = Query(gt=1000)):
     Also deletes any persisted halt-dump files (see KillSwitch.reset), so a
     subsequent restart can't silently re-apply a halt this call just resolved.
     Rebases the persisted paper-equity curve to new_inception_value in the same
-    operation (KS-15) — otherwise the next reconcile pass would call
+    operation — otherwise the next reconcile pass would call
     update_portfolio_value with the stale, already-drawn-down equity and
     re-halt within check_interval_seconds.
 
@@ -924,8 +924,9 @@ async def reset_kill_switch(new_inception_value: float = Query(gt=1000)):
 
 @app.get("/kill-switch/status")
 async def kill_switch_status():
-    """Reports the kill switch's current gate state, so an operator can see why the
-    system halted without reading logs.
+    """Reports the kill switch's current gate state.
+
+    Lets an operator see why the system halted without reading logs.
 
     Returns:
         Dict mirroring KillSwitchStatus's fields, plus the configured risk_tolerance.

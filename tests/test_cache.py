@@ -1,8 +1,9 @@
-"""
-Tests for argus/data/cache.py: DailyBarCache, the per-(ticker, trading_date)
-disk cache that lets fetch_multiple_daily skip the network on same-day
-re-runs, OHLCVBuffer, the rolling intraday candle buffer, and TTLCache, the
-generic in-memory cache shared by the fundamental and sentiment agents.
+"""Tests for argus/data/cache.py.
+
+Covers DailyBarCache, the per-(ticker, trading_date) disk cache that lets
+fetch_multiple_daily skip the network on same-day re-runs; OHLCVBuffer, the
+rolling intraday candle buffer; and TTLCache, the generic in-memory cache
+shared by the fundamental and sentiment agents.
 """
 
 import logging
@@ -92,7 +93,7 @@ def test_put_overwrites_prior_rows_for_same_ticker(cache):
 
 
 def test_put_prunes_rows_older_than_the_freshly_fetched_window(cache):
-    """RE-14 regression: a later put() with a newer window discards the prior window's rows.
+    """A later put() with a newer window discards the prior window's rows.
 
     fetch_multiple_daily re-fetches a full trailing window (e.g. period="1y")
     on every cache miss and re-supplies it to put(); without pruning here,
@@ -163,7 +164,7 @@ def test_ticker_case_collapses_to_one_key_space():
 
 
 def test_schema_migration_from_v0_drops_and_recreates(tmp_path):
-    """A pre-PR1 buffer file (no interval column, user_version 0) migrates without raising."""
+    """A legacy buffer file (no interval column) migrates without raising."""
     db_path = str(tmp_path / "legacy.db")
     conn = sqlite3.connect(db_path)
     conn.execute(
@@ -198,7 +199,7 @@ def test_interval_change_purges_stale_rows(tmp_path):
 
 
 class _CommitCountingConnection:
-    """Forwards every call to a real sqlite3.Connection except commit(), which it also counts.
+    """Wraps a real sqlite3.Connection, counting only its commit() calls.
 
     sqlite3.Connection is an immutable C type — neither its class nor its
     instances accept a patched `commit` attribute — so counting calls to it
@@ -264,7 +265,7 @@ def test_row_counts_returns_per_ticker_counts_without_the_get_candles_floor():
 
 
 def test_prune_untracked_deletes_rows_outside_the_given_set():
-    """prune_untracked removes every row for a ticker not in the tracked set (API-9/API-10)."""
+    """prune_untracked removes every row for a ticker not in the tracked set."""
     buffer = _buffer(50)
     buffer.insert_candle("AAPL", {"timestamp": "2024-01-02T09:30:00", "close": 1.0})
     buffer.insert_candle("ORPHAN", {"timestamp": "2024-01-02T09:30:00", "close": 1.0})
@@ -355,7 +356,7 @@ def test_ttl_cache_returns_none_for_a_key_that_was_never_stored():
 
 
 def test_ttl_cache_keys_differing_only_in_one_component_do_not_share_a_value():
-    """Two tuple keys differing only in their second element don't serve each other's value.
+    """Two tuple keys differing only in one component don't share a value.
 
     Mirrors FundamentalCache's (ticker, session_seed) key: two backtest
     sessions replaying the same ticker must not share a cached value, and a

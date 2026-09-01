@@ -55,6 +55,12 @@ class CulturalMemoryManager:
     Uses a local SentenceTransformer embedding model (all-MiniLM-L6-v2) to avoid
     per-query API costs and ensure retrieval works offline. The collection uses
     cosine similarity (hnsw:space=cosine) to match multi-dimensional market context.
+
+    Attributes:
+        client: ChromaDB PersistentClient backing the store.
+        ef: SentenceTransformer embedding function used for indexing and queries.
+        collection: The ``argus_wisdom`` ChromaDB collection.
+        persist_dir: Absolute filesystem directory the collection persists to.
     """
 
     def __init__(self, persist_dir: str = "./chroma_db"):
@@ -63,6 +69,9 @@ class CulturalMemoryManager:
         Args:
             persist_dir: Filesystem directory backing the ChromaDB PersistentClient.
         """
+        # Deferred to construction time: embedding_functions pulls in
+        # sentence-transformers, an optional `models` extra (see pyproject.toml),
+        # so importing this module must not require it
         import chromadb
         from chromadb.utils import embedding_functions
 
@@ -373,7 +382,7 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
         avg_return_pct averages over settled rows only (SUCCESSFUL/FAILED/FLAT
         outcomes carry a real return_pct; PENDING snapshots don't). Dividing by
         total_stored instead — which includes every still-open PENDING
-        snapshot — structurally biases the average toward 0.0 (MEM-2).
+        snapshot — structurally biases the average toward 0.0.
 
         Returns:
             Dict with keys: total_stored, successful_count, failed_count,
@@ -488,7 +497,7 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
             return False
 
     def expire_pending_snapshots(self, cutoff: datetime) -> int:
-        """Deletes PENDING decision snapshots older than cutoff (MEM-3).
+        """Deletes PENDING decision snapshots older than cutoff.
 
         A snapshot only leaves PENDING once store_trade_outcome settles it
         (see its docstring); a decision that never took a position, or whose

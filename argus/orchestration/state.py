@@ -136,7 +136,7 @@ class TickerSnapshot:
     never stored in state or the checkpoint, and never validated or
     serialized the way the schemas.signals models are. See build_ticker_snapshots.
 
-    Args:
+    Attributes:
         technical: This ticker's TechnicalSignal, or None if absent.
         fundamental: This ticker's FundamentalSignal, or None if absent.
         sentiment: This ticker's SentimentSignal, or None if absent.

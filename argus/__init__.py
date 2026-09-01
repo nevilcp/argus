@@ -9,6 +9,6 @@ here, so importing `argus` stays cheap and free of import cycles.
 from importlib.metadata import version
 
 # pyproject.toml is the single source of truth for the version — a literal
-# here would drift from it (DEP-6)
+# here would drift from it.
 __version__ = version("argus")
 __author__ = "ARGUS Team"

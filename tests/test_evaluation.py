@@ -1,10 +1,9 @@
-"""
-tests/test_evaluation.py
+"""Tests for argus/backtesting/evaluation.py.
 
-Tests for argus/backtesting/evaluation.py. Metric functions are tested
-against synthetic, deterministic data (no network); collect_paired_outcomes,
-evaluate_decisions, and system_behavior_report are tested end-to-end against
-the one real fixture session with a fake MarketDataProvider standing in for
+Metric functions are tested against synthetic, deterministic data (no
+network); collect_paired_outcomes, evaluate_decisions, and
+system_behavior_report are tested end-to-end against the one real fixture
+session, with a fake MarketDataProvider standing in for
 LiveMarketDataProvider (see tests/test_reconciliation.py's _FakeMarketData,
 reused here).
 """

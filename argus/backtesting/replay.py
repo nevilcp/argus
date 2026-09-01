@@ -1,8 +1,4 @@
-"""
-argus/backtesting/replay.py
-
-Minimal intraday backtest: replays recorded fixture "sessions" through the
-real ARGUS graph (build_graph()), in strict time order.
+"""Replays recorded fixture sessions through the real ARGUS graph, in order.
 
 This exists instead of a multi-year walk-forward backtest because Yahoo's
 5-minute intraday data is only available for the trailing 60 days, and the
@@ -16,13 +12,12 @@ the system's "return None rather than fabricate defaults" rule.
 A "session" here is one fixture snapshot directory shaped like
 tests/fixtures/ (market_data/ + llm_responses/ subdirectories) — one real
 point-in-time capture of everything the graph needs, hand-captured in the
-same format. Point-in-time correctness is
-structural here, not runtime-enforced (contrast the deleted
-PointInTimeEnforcer): each session's FixtureMarketDataProvider is scoped to
-that session's own directory, so a later session's data cannot leak into an
-earlier one — there is nothing to leak, since each session only ever sees
-its own files, and replay_sessions() only invokes session N+1 after N has
-returned.
+same format. Point-in-time correctness is structural here, not
+runtime-enforced (contrast the deleted PointInTimeEnforcer): each session's
+FixtureMarketDataProvider is scoped to that session's own directory, so a
+later session's data cannot leak into an earlier one — there is nothing to
+leak, since each session only ever sees its own files, and
+replay_sessions() only invokes session N+1 after N has returned.
 
 Today exactly one such session exists (tests/fixtures/). Scaling this to
 the ~60-day / ~780-decision-point window the design targets requires
@@ -77,7 +72,13 @@ def _normalize_as_of(ts: datetime) -> datetime:
 
 @dataclass
 class SessionResult:
-    """One replayed session's identity and raw graph output."""
+    """One replayed session's identity and raw graph output.
+
+    Attributes:
+        session_dir: Fixture directory the session was replayed from.
+        universe: Sorted tickers present in this session.
+        final_state: Raw ARGUSState dict returned by the graph.
+    """
 
     session_dir: Path
     universe: list[str]
@@ -90,6 +91,16 @@ def _per_ticker_llm(session_dir: Path, fixture_file: str, universe: list[str]) -
     Matches tests/test_golden_dag.py's approach — fundamental/sentiment
     prompts embed the real ticker as their subject (build_compact_prompt,
     backtest_mode=False).
+
+    Args:
+        session_dir: Directory shaped like tests/fixtures/.
+        fixture_file: Response file name under session_dir/llm_responses/,
+            e.g. "fundamental.json".
+        universe: Tickers to match against each prompt's text.
+
+    Returns:
+        A FixtureLLMClient that replies with the fixture response keyed to
+        whichever universe ticker the prompt names.
     """
     with open(session_dir / "llm_responses" / fixture_file) as f:
         responses = json.load(f)
@@ -104,17 +115,33 @@ def _per_ticker_llm(session_dir: Path, fixture_file: str, universe: list[str]) -
 
 
 def _portfolio_llm(session_dir: Path) -> FixtureLLMClient:
-    """PortfolioManagerAgent.allocate() makes exactly one LLM call per session."""
+    """Builds the FixtureLLMClient for PortfolioManagerAgent's one LLM call.
+
+    PortfolioManagerAgent.allocate() makes exactly one LLM call per session,
+    so no per-ticker key function is needed.
+
+    Args:
+        session_dir: Directory shaped like tests/fixtures/.
+
+    Returns:
+        A FixtureLLMClient that returns the fixture's portfolio.json
+        response regardless of prompt content.
+    """
     with open(session_dir / "llm_responses" / "portfolio.json") as f:
         response = json.load(f)
     return FixtureLLMClient({"only": json.dumps(response)}, key_fn=lambda _prompt: "only")
 
 
 def _neutral_cultural_memory() -> mock.Mock:
-    """Cultural memory isn't a fixture-replay candidate; open-loop replay sees an empty one.
+    """Builds a neutral mock cultural-memory client for open-loop replay.
 
-    Returns no wisdom or warnings, and the 0.5 accuracy prior, so reliability
-    weighting is fixed rather than reading live chroma_db state.
+    Cultural memory isn't itself a fixture-replay candidate, so open-loop
+    replay substitutes this for the real chroma_db-backed client.
+
+    Returns:
+        A mock exposing empty wisdom/warnings and the 0.5 accuracy prior, so
+        reliability weighting stays fixed rather than reading live
+        chroma_db state.
     """
     return mock.Mock(
         retrieve_wisdom=mock.Mock(return_value=[]),

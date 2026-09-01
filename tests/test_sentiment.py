@@ -1,9 +1,3 @@
-"""
-tests/test_sentiment.py
-
-Tests for the Sentiment Agent and its pure-Python helpers.
-"""
-
 from datetime import datetime, timedelta
 
 import pytest

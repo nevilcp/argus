@@ -1,16 +1,14 @@
-"""
-tests/test_api_startup.py
+"""Tests for api/main.py's boot-time guards and liveness reporting.
 
-Tests for api/main.py's boot-time guards and liveness reporting:
+Covers:
 
-  - `_assert_single_worker` (GOV-8), across `--workers N`, `--workers=N` and
+  - `_assert_single_worker`, across `--workers N`, `--workers=N` and
     `WEB_CONCURRENCY`
-  - `_assert_registered_models` (GOV-11)
+  - `_assert_registered_models`
   - `_acquire_process_lock`'s cross-process guard (an exclusive flock on
     `${ARGUS_DATA_DIR}/argus.lock`)
-  - `_configure_logging` (OBS-1) and `/health`'s background-task liveness
-    reporting (OBS-2)
-  - `_warn_on_permissive_security_defaults` (DEP-8)
+  - `_configure_logging` and `/health`'s background-task liveness reporting
+  - `_warn_on_permissive_security_defaults`
 
 The boot-time guards are pure sys.argv/settings checks, so they're exercised
 directly rather than through the app's lifespan.
@@ -146,7 +144,7 @@ def _reset_argus_logger():
 
 
 def test_configure_logging_attaches_a_handler_at_the_configured_level(monkeypatch):
-    """_configure_logging (OBS-1) makes ARGUS_LOG_LEVEL take effect on the argus logger tree."""
+    """_configure_logging makes ARGUS_LOG_LEVEL take effect on the argus logger tree."""
     monkeypatch.setattr(api_main.settings, "ARGUS_LOG_LEVEL", "DEBUG")
 
     api_main._configure_logging()
@@ -166,7 +164,7 @@ def test_configure_logging_is_idempotent():
 
 
 def test_warns_on_permissive_cors_and_blank_api_key(monkeypatch, caplog):
-    """Both defaults being permissive (DEP-8) logs a WARNING for each, naming the setting."""
+    """Both defaults being permissive logs a WARNING for each, naming the setting."""
     monkeypatch.setattr(api_main.settings, "ARGUS_CORS_ORIGINS", ["*"])
     monkeypatch.setattr(api_main.settings, "ARGUS_API_KEY", "")
 
@@ -209,7 +207,7 @@ def _reset_health_globals(monkeypatch):
 
 
 def test_health_reports_ok_when_no_background_tasks_are_configured(health_client):
-    """Loops that were never started (e.g. collector/reconcile disabled) aren't a failure (OBS-2)."""
+    """Loops that were never started (e.g. collector/reconcile disabled) aren't a failure."""
     response = health_client.get("/health")
 
     assert response.status_code == 200
@@ -226,7 +224,7 @@ def test_health_reports_ok_when_no_background_tasks_are_configured(health_client
 
 @pytest.mark.asyncio
 async def test_health_returns_503_naming_a_crashed_background_task(monkeypatch):
-    """A task that died with an exception makes /health a 503 naming it (OBS-2)."""
+    """A task that died with an exception makes /health a 503 naming it."""
 
     async def _boom():
         raise RuntimeError("pipeline exploded")

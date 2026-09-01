@@ -43,14 +43,24 @@ logger = logging.getLogger("argus.collector")
 
 @dataclass
 class CollectionResult:
-    """Outcome of one run_collection_cycle() call."""
+    """Outcome of one run_collection_cycle() call.
+
+    Attributes:
+        ran: False when the cycle skipped the graph entirely (no session
+            data yet).
+        reason: Human-readable explanation, e.g. "market closed", "collected".
+        tickers_with_session_data: Tickers the MFT sweep actually populated
+            session data for this cycle.
+        decisions_logged: Count of decisions appended to the JSONL log.
+        macro_regime: The macro agent's regime classification for this
+            cycle, or None if the graph didn't run or produced no macro
+            context.
+        errors: Error messages accumulated during the graph invocation.
+        timestamp: ISO-formatted time this result was constructed.
+    """
 
     ran: bool
-    """False when the cycle skipped the graph entirely (no session data yet)."""
-
     reason: str
-    """Human-readable explanation — e.g. "market closed", "collected"."""
-
     tickers_with_session_data: list[str] = field(default_factory=list)
     decisions_logged: int = 0
     macro_regime: str | None = None
@@ -128,7 +138,7 @@ async def run_collection_cycle(
             graph.py's ``_CheckpointedGraph``.
         decisions_log_path: JSONL file each cycle's decisions are appended to.
         analyze_lock: The same semaphore api/main.py's `/analyze` guards its
-            graph invocation with (API-3) — the collector is a third caller of
+            graph invocation with — the collector is a third caller of
             the same graph and governor, so it shares the slot rather than
             invoking concurrently with a live `/analyze` run. It skips rather
             than waits: an unattended cycle has nowhere to be on time, so
@@ -191,8 +201,8 @@ async def run_collection_cycle(
     )
     # SqliteSaver checkpoints synchronously (see graph.py's module docstring), so
     # invoke() blocks — run it off the event loop rather than stalling this coroutine.
-    # No await between the locked() check above and this acquire (API-3's race-free
-    # pattern), so a concurrent /analyze can't slip in between the check and the hold.
+    # No await between the locked() check above and this acquire, so a concurrent
+    # /analyze can't slip in between the check and the hold.
     if analyze_lock is not None:
         async with analyze_lock:
             final_state = await asyncio.to_thread(compiled_graph.invoke, state, config)

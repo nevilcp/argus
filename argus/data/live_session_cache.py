@@ -5,7 +5,7 @@ The live session cache: the named seam between the MFT pipeline that
 produces per-ticker session states and the API gateway that allocates
 against them. Owns publication, eviction, admission, and age reporting for
 the freshness rule an /analyze request must clear before a cached session
-state can be used (issue #78).
+state can be used.
 
 Responsibilities:
   - Publish a sweep's compressed session states, evicting entries for
@@ -81,7 +81,7 @@ def max_bar_age_seconds(interval_minutes: int) -> int:
 
 
 def _bar_age_seconds(state: dict, now_et: datetime) -> Optional[float]:
-    """Computes a session state's bar age in seconds, failing closed on a bad timestamp (API-11).
+    """Computes a session state's bar age in seconds, failing closed on a bad timestamp.
 
     A missing, malformed, or naive ``timestamp`` must not raise out of
     admit() or ages() — it's treated as staleness instead.
@@ -116,7 +116,7 @@ class AdmissionResult:
 
 
 class LiveSessionCache:
-    """Publication, eviction, admission, and age reporting for MFT session states (issue #78).
+    """Publication, eviction, admission, and age reporting for MFT session states.
 
     Constructed once at startup and held in one module global by its
     caller. Holds no pipeline reference of its own — publish() takes the

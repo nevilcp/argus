@@ -269,7 +269,7 @@ class RegimeClassifier:
                 random_state=seed,
             )
             with warnings.catch_warnings():
-                # Sub-1e-4 monotonicity wobble near the optimum is benign, not a failure
+                # Sub-1e-4 monotonicity wobble near the optimum is benign, not a failure.
                 warnings.filterwarnings("ignore", category=ConvergenceWarning)
                 candidate.fit(scaled_features)
 
@@ -913,7 +913,7 @@ class MacroStatisticalAgent:
         else:
             sector_signal = SectorSignal.VALUE_FAVORED
 
-        # Scale agent multipliers by volatility regime; high VIX amplifies technical and sentiment signals
+        # Scale agent multipliers by volatility regime; high VIX amplifies technical and sentiment signals.
         fund_mult = 1.3 if (regime == Regime.EXPANSION and vix_percentile < 40) else 0.9
         tech_mult = 1.2 if vix_percentile > 60 else 1.0
         sent_mult = 1.15 if vix_percentile > 50 else 0.9
