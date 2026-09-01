@@ -152,7 +152,7 @@ class _CheckpointedGraph:
 
 
 def _summarize_technical_posture(aggregated_signals: dict[str, AggregatedSignal]) -> str:
-    """Builds retrieve_wisdom's free-text technical-posture argument from this session's own signals.
+    """Builds this session's technical-posture summary for retrieve_wisdom's query.
 
     Replaces a hardcoded "mixed technicals" placeholder that never reflected the
     session it was queried for.
@@ -307,8 +307,8 @@ def build_graph(
             argus/orchestration/reconciliation.py's own tests — can point it
             at a temp file instead of the real store production callers use.
             None (default) resolves to ``<ARGUS_DATA_DIR>/argus_graph.db`` at
-            call time (X-5), so tests/conftest.py's per-test ARGUS_DATA_DIR
-            override also isolates a call site that omits this argument.
+            call time, so tests/conftest.py's per-test ARGUS_DATA_DIR override
+            also isolates a call site that omits this argument.
 
     Returns:
         A _CheckpointedGraph, ready for .invoke(). Recompiles with a fresh
@@ -430,7 +430,7 @@ def build_graph(
         return {"sentiment_signals": signals, "errors": errors}
 
     def node_retrieve_cultural_memory(state: ARGUSState) -> dict:
-        """Retrieves semantic trading wisdom and historical trade patterns matching the current regime.
+        """Retrieves cultural-memory wisdom and warnings matching the current regime.
 
         Runs after signal_aggregation (not beside the specialist fan-out) so it can
         summarize this session's own aggregated_signals into the similarity query,
@@ -441,7 +441,7 @@ def build_graph(
                 query and ``aggregated_signals`` to summarize into it.
 
         Returns:
-            Partial state update with ``cultural_memory`` dict containing 'wisdom' and 'warnings' lists.
+            Partial state update with a ``cultural_memory`` dict of 'wisdom' and 'warnings' lists.
         """
         macro = state.get("macro_context")
         if not macro:
@@ -509,8 +509,8 @@ def build_graph(
         Returns:
             Partial state update with ``risk_assessments`` and ``errors``. On an
             unexpected failure, ``risk_assessments`` is empty and the failure is
-            named in ``errors`` rather than raised (RE-10) — nothing downstream
-            can safely allocate against a risk session that half-completed.
+            named in ``errors`` rather than raised — nothing downstream can
+            safely allocate against a risk session that half-completed.
         """
         errors: list[str] = []
 
@@ -544,9 +544,9 @@ def build_graph(
                     "risk_evaluation: SLSQP solve did not converge; portfolio-level caps "
                     "were not applied to any ticker"
                 )
-            # RE-4: below-floor diversification is informational on the assessment's own
-            # veto_reasons (risk.py), not a hard VETO — surface it here too so it's visible
-            # without inspecting every per-ticker assessment
+            # Below-floor diversification is informational on the assessment's own
+            # veto_reasons (risk.py), not a hard VETO — surface it here too so it's
+            # visible without inspecting every per-ticker assessment
             errors.extend(
                 f"risk_evaluation: {r}"
                 for r in portfolio_result.veto_reasons
@@ -594,7 +594,7 @@ def build_graph(
             return {"risk_assessments": {}, "errors": errors}
 
     def node_portfolio_allocation(state: ARGUSState) -> dict:
-        """Determines capital allocations using specialist ratings, risk targets, and memory heuristics.
+        """Allocates capital using specialist signals, risk targets, and cultural-memory heuristics.
 
         Args:
             state: ARGUSState with all signal, risk, and cultural memory fields populated.
