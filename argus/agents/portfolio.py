@@ -1,7 +1,4 @@
-"""
-argus/agents/portfolio.py
-
-Generative portfolio construction and allocation manager agent.
+"""Generative portfolio construction and allocation manager agent.
 
 Responsibilities:
   - Synthesize specialist analyst inputs into optimized portfolio allocations
@@ -73,7 +70,7 @@ def half_kelly_weight(
 
     full_kelly = (b * p - q) / b
     half_kelly = full_kelly / PORTFOLIO.kelly_divisor
-    # Floor at 0.0 so negative Kelly (bearish expectation) does not force a 2% allocation
+    # Floor at 0.0 so negative Kelly (bearish expectation) does not force a 2% allocation.
     return float(np.clip(half_kelly, 0.0, max_position))
 
 
@@ -188,6 +185,11 @@ class PortfolioManagerAgent:
     prompt already carries the signal table, sizing anchors, and cultural memory,
     so a repair round-trip would be a large charge against the governor. Falls
     back to all-cash on API failures or when no tickers are risk-approved.
+
+    Attributes:
+        llm_client: LLM backend used to generate portfolio proposals.
+        max_position_pct: Hard ceiling on any single position's allocation,
+            sourced from settings.MAX_SINGLE_POSITION_PCT.
     """
 
     def __init__(self, llm_client: Optional[LLMClient] = None) -> None:
@@ -370,7 +372,7 @@ class PortfolioManagerAgent:
             agg = snapshots[ticker].aggregated
             risk_signal = snapshots[ticker].risk
             max_pos = risk_signal.approved_weight if risk_signal else self.max_position_pct
-            # Anchors are for NEUTRAL/BULLISH sizing only (matches the prompt text below)
+            # Anchors are for NEUTRAL/BULLISH sizing only (matches the prompt text below).
             if not agg or agg.signal == Signal.BEARISH or not agg.weighted_votes:
                 continue
             driver = max(agg.weighted_votes, key=lambda k: agg.weighted_votes[k])

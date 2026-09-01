@@ -1,7 +1,4 @@
-"""
-argus/agents/risk.py
-
-Deterministic capital protection and portfolio risk optimization agent.
+"""Deterministic capital protection and portfolio risk optimization agent.
 
 Responsibilities:
   - Compute portfolio-level metrics (VaR, CVaR, Beta, average pairwise correlation)
@@ -303,6 +300,17 @@ class RiskStatisticalEngine:
       3. Statistical thresholds (VaR, CVaR, Beta, correlation)
 
     Returns a RiskAssessment with APPROVE, REDUCE, or VETO verdict.
+
+    Attributes:
+        max_position_pct: Ceiling on a single position's weight, from
+          settings.MAX_SINGLE_POSITION_PCT.
+        max_sector_pct: Ceiling on a single sector's summed weight, from
+          settings.MAX_SECTOR_CONCENTRATION.
+        vix_blackout: VIX level at or above which new positions are vetoed,
+          from settings.VIX_BLACKOUT_THRESHOLD.
+        max_port_beta: Ceiling on weighted portfolio beta, from
+          settings.MAX_PORTFOLIO_BETA.
+        market_data: Provider used for price and beta lookups.
     """
 
     def __init__(self, market_data: Optional[MarketDataProvider] = None) -> None:
@@ -421,12 +429,12 @@ class RiskStatisticalEngine:
         n = len(tickers)
 
         def _obj(w: np.ndarray, _conv: Optional[dict[str, float]] = convictions) -> float:
-            """Minimises variance penalised by signed conviction.
+            """Minimizes variance penalized by signed conviction.
 
             Signed conviction (passed from graph.py):
               +conviction for BULLISH → optimizer drives weight UP
               -conviction for BEARISH → optimizer drives weight to 0
-               0 for NEUTRAL          → pure variance minimisation
+               0 for NEUTRAL          → pure variance minimization
 
             ``_conv`` is bound at definition time to prevent closure capture
             from picking up a mutated reference if convictions changes later.
@@ -434,7 +442,7 @@ class RiskStatisticalEngine:
             variance = float(np.dot(w, np.dot(cov, w)))
             if _conv:
                 alpha = sum(w[i] * _conv.get(tickers[i], 0.0) for i in range(n))
-                # Lambda=1.0 trades off return conviction against variance equally
+                # Lambda=1.0 trades off return conviction against variance equally.
                 return -alpha + RISK.slsqp_risk_aversion * variance
             return variance
 
@@ -451,7 +459,7 @@ class RiskStatisticalEngine:
                     "fun": lambda w, idx=idxs, c=cap: c - sum(w[i] for i in idx),
                 }
             )
-        # A long-only book cannot deploy more capital than it has
+        # A long-only book cannot deploy more capital than it has.
         cons.append({"type": "ineq", "fun": lambda w: RISK.slsqp_max_total_deployment - np.sum(w)})
 
         res = minimize(
@@ -542,7 +550,7 @@ class RiskStatisticalEngine:
         violations, diversification_note = self._structural_violations(
             proposed_positions, current_vix, total_weight
         )
-        # Carried on every verdict, so build the list once rather than at each construction site
+        # Carried on every verdict, so build the list once rather than at each construction site.
         diversification_notes = [diversification_note] if diversification_note else []
 
         if violations:
