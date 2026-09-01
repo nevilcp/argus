@@ -3,8 +3,8 @@ argus/schemas/prompting.py
 
 Renders each agent's declared LLM output schema directly from its Pydantic
 verdict/proposal model, so the prompt text shown to the model and the
-constraints its response is validated against cannot drift apart (issue
-#76). Depends on pydantic and nothing else — deliberately kept out of
+constraints its response is validated against cannot drift apart. Depends
+on pydantic and nothing else — deliberately kept out of
 argus/structured_output.py, which reaches groq, httpx, langchain_groq, and
 pandas through argus/seams.py, and out of argus/schemas/signals.py's own
 import surface being widened with anything heavier, since that module is
@@ -36,7 +36,7 @@ from pydantic.fields import FieldInfo
 class PromptText:
     """Annotated marker carrying the exact text an LLM is shown for one field.
 
-    Args:
+    Attributes:
         text: Verbatim text for this field — prose for field_list, a JSON
             value (already quoted if it's a string) for schema_block.
     """

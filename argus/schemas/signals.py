@@ -40,7 +40,7 @@ from argus.schemas.prompting import PromptText
 
 
 class Signal(str, Enum):
-    """Market direction classification returned by specialized analyst agents."""
+    """Market direction classification returned by an analyst agent."""
 
     BULLISH = "BULLISH"
     BEARISH = "BEARISH"
@@ -77,7 +77,7 @@ class YieldCurve(str, Enum):
 
     NORMAL = "NORMAL"     # spread > +25 bps
     FLAT = "FLAT"         # -25 bps ≤ spread ≤ +25 bps
-    INVERTED = "INVERTED" # spread < -25 bps (recession signal)
+    INVERTED = "INVERTED"  # spread < -25 bps (recession signal)
 
 
 class SectorSignal(str, Enum):
@@ -102,10 +102,9 @@ SESSION_STATE_REQUIRED_KEYS: frozenset[str] = frozenset({
     "timestamp",
 })
 
-# timestamp is a required key but not a numeric indicator (API-11) — it's
-# checked for presence like every other key, but exempt from the
-# finite-float check below, which would otherwise raise trying to float() an
-# ISO string
+# timestamp is a required key but not a numeric indicator — it's checked for
+# presence like every other key, but exempt from the finite-float check
+# below, which would otherwise raise trying to float() an ISO string.
 _NUMERIC_SESSION_STATE_KEYS = SESSION_STATE_REQUIRED_KEYS - {"timestamp"}
 
 
@@ -137,7 +136,7 @@ _CONVICTION_MAX = 0.95
 
 
 def _clamp_conviction(v: float) -> float:
-    """Clamps conviction metrics to 0.95, emitting a warning if truncation occurs.
+    """Clamps a conviction value to 0.95, warning when truncation occurs.
 
     The 0.95 ceiling prevents the system from expressing certainty in any signal,
     preserving a minimum margin of doubt as a risk management mechanism.
@@ -169,7 +168,7 @@ _Conviction = Annotated[
 
 
 class MacroContext(BaseModel):
-    """Macroeconomic state parameters and conviction multipliers scaling downstream specialist agents."""
+    """Macroeconomic state and conviction multipliers for specialist agents."""
 
     fed_funds: float = Field(..., description="Effective Federal Funds Rate (%)")
     cpi_yoy: float = Field(..., description="Consumer Price Index YoY (%)")
@@ -217,7 +216,7 @@ class MacroContext(BaseModel):
     @field_validator("agent_multipliers", mode="before")
     @classmethod
     def validate_multiplier_keys(cls, v: dict[str, float]) -> dict[str, float]:
-        """Ensures required agent keys are present and defaults missing ones to 1.0.
+        """Ensures required agent keys exist, defaulting missing ones to 1.0.
 
         Args:
             v: Raw multiplier dict from the macro agent.
@@ -241,7 +240,7 @@ class MacroContext(BaseModel):
 
 
 class TechnicalSignal(BaseModel):
-    """Technical indicator outputs and consolidated directional signals for an individual asset."""
+    """Technical indicator outputs and directional signals for one asset."""
 
     ticker: str = Field(..., description="Equity ticker symbol, e.g. 'AAPL'")
 
@@ -272,7 +271,7 @@ class TechnicalSignal(BaseModel):
 
 
 class FundamentalVerdict(BaseModel):
-    """What the LLM itself returns for a fundamental analysis — judgement only.
+    """What the LLM returns for a fundamental analysis — judgement only.
 
     Never carries measured ratios: those come from the market-data provider
     and are merged in by the agent to build a FundamentalSignal. See
@@ -292,7 +291,7 @@ class FundamentalVerdict(BaseModel):
 
 
 class FundamentalSignal(BaseModel):
-    """Corporate fundamental metrics and qualitative moat ratings for a target asset."""
+    """Corporate fundamentals and qualitative moat rating for one asset."""
 
     ticker: str = Field(..., description="Equity ticker symbol")
 
@@ -406,7 +405,7 @@ class SentimentSignal(BaseModel):
 
 
 class RiskAssessment(BaseModel):
-    """Risk verdicts, exposure boundaries, and volatility statistics for a given position."""
+    """Risk verdict, exposure limits, and volatility stats for a position."""
 
     verdict: RiskVerdict = Field(..., description="Disposition on the proposed portfolio")
     approved_weight: float = Field(
@@ -519,7 +518,7 @@ class AggregatedSignal(BaseModel):
 
 
 class ProposedPosition(BaseModel):
-    """A single position as the LLM itself proposes it — advisory, not yet risk-enforced.
+    """A position as the LLM proposes it — advisory, not yet risk-enforced.
 
     Never carries allocation_usd or a risk-approved stop_loss: the agent computes
     the former from allocation_pct and overrides the latter with the risk engine's
@@ -569,7 +568,7 @@ class PortfolioProposal(BaseModel):
 
 
 class PositionAllocation(BaseModel):
-    """Target allocation weight, pricing levels, and thesis for a single asset."""
+    """Target allocation weight, pricing levels, and thesis for one asset."""
 
     ticker: str = Field(..., description="Equity ticker symbol")
     allocation_pct: float = Field(
@@ -596,7 +595,7 @@ class PositionAllocation(BaseModel):
 
 
 class PortfolioAllocation(BaseModel):
-    """Portfolio-level allocation profile detailing equity positions and cash reserves."""
+    """Portfolio-level allocation of equity positions and cash reserves."""
 
     session_id: str = Field(..., description="Unique identifier for this advisory session")
     user_investable_capital: float = Field(
@@ -666,7 +665,7 @@ class PortfolioAllocation(BaseModel):
 
 
 class ARGUSDecision(BaseModel):
-    """Unified snapshot capturing all agent signals, risk constraints, and target weights."""
+    """Unified snapshot of agent signals, risk limits, and target weights."""
 
     decision_id: str = Field(
         default_factory=lambda: str(uuid.uuid4()),
@@ -687,7 +686,7 @@ class ARGUSDecision(BaseModel):
     @computed_field  # type: ignore[misc]
     @property
     def total_api_calls(self) -> int:
-        """Sums api_calls_used from every non-None child schema."""
+        """Total api_calls_used summed across every non-None child schema."""
         sources = [self.technical, self.macro, self.fundamental, self.sentiment, self.risk]
         return sum(s.api_calls_used for s in sources if s is not None)
 
