@@ -30,7 +30,7 @@ by its own process. api/main.py enforces --workers 1 so the API never runs
 two ignorant copies of it (see Dockerfile.api's CMD), but
 scripts/reconcile_outcomes.py's Actions collector is a second, independent
 process making calls against the same Groq key — a second governor this
-module has no visibility into and cannot coordinate with (GOV-8).
+module has no visibility into and cannot coordinate with.
 """
 
 from __future__ import annotations
@@ -83,7 +83,7 @@ BOOTSTRAP_LIMITS: dict[str, dict[str, int]] = {
 }
 
 # Groq's rate-limit response headers, split by axis so one axis can be observed
-# without the other (GOV-6) — a response is never required to carry both.
+# without the other — a response is never required to carry both.
 # x-ratelimit-*-requests is a DAILY figure; x-ratelimit-*-tokens is a PER-MINUTE
 # figure. Groq publishes no header for RPM or TPD at all, so those two stay
 # BOOTSTRAP_LIMITS-enforced even once headers arrive for the other two.
@@ -224,7 +224,7 @@ def estimate_tokens(system_prompt: str, user_prompt: str, max_tokens: int) -> in
 
 
 # Rolling admission window — replaces a fixed-minute bucket so a burst can never
-# land 2x budget by straddling a bucket boundary (GOV-4).
+# land 2x budget by straddling a bucket boundary.
 _WINDOW_SECONDS = 60.0
 
 
@@ -232,16 +232,37 @@ _WINDOW_SECONDS = 60.0
 class ModelUsage:
     """Per-model rolling usage counters, plus Groq's own header-reported limits once observed.
 
-    ``requests_today``/``tokens_today`` are daily bootstrap counters, reset on
-    UTC date rollover. ``requests_window``/``tokens_window`` hold the
-    (monotonic timestamp[, tokens]) of every admitted call within the trailing
-    ``_WINDOW_SECONDS``, pruned lazily on each access — the rolling
-    replacement for a fixed-minute bucket. Both are informational and the sole
-    enforcement basis before the first header arrives. ``limit_requests``/
-    ``remaining_requests`` are the provider's own DAILY request accounting;
-    ``limit_tokens``/``remaining_tokens`` are its PER-MINUTE token accounting.
-    Both stay ``None`` — bootstrap enforcement only — until ``observe_headers``
-    sets ``limits_observed``.
+    The header-reported fields are informational only until ``observe_headers``
+    sets ``limits_observed``; before that, ``wait_if_needed`` enforces off the
+    bootstrap counters alone.
+
+    Attributes:
+        requests_today: Daily bootstrap request counter, reset on UTC date
+            rollover.
+        tokens_today: Daily bootstrap token counter, reset on UTC date
+            rollover.
+        current_date: UTC date (YYYY-MM-DD) the two counters above were last
+            reset for.
+        requests_window: Monotonic timestamp of every admitted request within
+            the trailing ``_WINDOW_SECONDS``, pruned lazily on each access —
+            the rolling replacement for a fixed-minute bucket.
+        tokens_window: (monotonic timestamp, tokens) pair for every admitted
+            call within the trailing ``_WINDOW_SECONDS``, pruned the same way
+            as ``requests_window``.
+        limit_requests: Provider-reported daily request limit, or None before
+            the first header arrives.
+        limit_tokens: Provider-reported per-minute token limit, or None
+            before the first header arrives.
+        remaining_requests: Provider-reported daily requests remaining, or
+            None before the first header arrives.
+        remaining_tokens: Provider-reported per-minute tokens remaining, or
+            None before the first header arrives.
+        reset_requests_at: time.monotonic() deadline at which
+            remaining_requests resets, immune to wall-clock adjustment.
+        reset_tokens_at: time.monotonic() deadline at which remaining_tokens
+            resets, immune to wall-clock adjustment.
+        limits_observed: Whether ``observe_headers`` has ever populated the
+            provider-reported fields above.
     """
 
     requests_today: int = 0
@@ -255,7 +276,6 @@ class ModelUsage:
     limit_tokens: Optional[int] = None
     remaining_requests: Optional[int] = None
     remaining_tokens: Optional[int] = None
-    # time.monotonic() deadlines, immune to wall-clock adjustment
     reset_requests_at: Optional[float] = None
     reset_tokens_at: Optional[float] = None
     limits_observed: bool = False

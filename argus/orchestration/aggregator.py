@@ -41,6 +41,11 @@ class HybridSignalAggregator:
 
     Arbitration uses a weighted Borda-count style voting scheme. Macro multipliers
     scale each agent's base weight at runtime; the highest-weighted signal pool wins.
+
+    Attributes:
+        DEFAULT_WEIGHTS: Base per-agent vote weight for fundamental, technical,
+            and sentiment, before macro multipliers and reliability scaling
+            are applied.
     """
 
     DEFAULT_WEIGHTS = {
@@ -99,7 +104,7 @@ class HybridSignalAggregator:
 
         # Mass that could have been cast by all three agents, reliability excluded — the
         # denominator that makes conviction monotone in participation instead of saturating
-        # whenever the agents who did vote happen to agree (see Design Decision A, issue #24)
+        # whenever the agents who did vote happen to agree
         w_eff = {
             name: weight * macro_mults.get(name, 1.0)
             for name, weight in self.DEFAULT_WEIGHTS.items()

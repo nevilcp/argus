@@ -20,10 +20,10 @@ Responsibilities:
   - load_decisions_from_jsonl: read ARGUSDecision objects back out of a
     decisions.jsonl log (the unattended collector's lighter-weight alternative)
   - prune_checkpoints / compact_decisions_jsonl: bound the two decision
-    stores above so neither grows forever (PR 6)
+    stores above so neither grows forever
   - run_reconciliation_pass: compose the above plus the paper-book update
     into the one reconciliation sequence both api/main.py and
-    scripts/reconcile_outcomes.py run (issue #77)
+    scripts/reconcile_outcomes.py run
 
 Not responsible for:
   - Deciding what a "good" outcome is, or evaluation metrics (see
@@ -422,7 +422,7 @@ def load_decisions_from_jsonl(path: str) -> list[ARGUSDecision]:
 
 
 def compact_decisions_jsonl(path: str, cutoff: datetime) -> int:
-    """Rewrites a decisions.jsonl log, dropping sessions older than cutoff (COL-1).
+    """Rewrites a decisions.jsonl log, dropping sessions older than cutoff.
 
     Meant to run right after a reconcile_decisions() pass over the same log
     (see api/main.py's _reconcile_once and scripts/reconcile_outcomes.py) with
@@ -466,12 +466,12 @@ def compact_decisions_jsonl(path: str, cutoff: datetime) -> int:
 
 
 def prune_checkpoints(db_path: str, cutoff: datetime) -> int:
-    """Deletes every checkpoint thread whose most recent checkpoint predates cutoff, then VACUUMs (RE-13).
+    """Deletes every checkpoint thread whose most recent checkpoint predates cutoff, then VACUUMs.
 
     Each build_graph() invocation checkpoints under a fresh, never-reused
     thread_id (see build_graph()'s callers) and nothing resumes a thread by
     id, so a thread's checkpoints exist only as load_decisions_from_checkpoints'
-    read path — a fallback now that RE-11 makes decisions.jsonl the durable
+    read path — a fallback now that decisions.jsonl is the durable
     record both /analyze and the collector write to. Retention, not removal:
     the checkpoint DB stays available as that fallback for anything within the
     reconciliation window, it just no longer grows without bound.
@@ -520,24 +520,43 @@ def prune_checkpoints(db_path: str, cutoff: datetime) -> int:
 
 @dataclass
 class ReconciliationReport:
-    """Outcome of one run_reconciliation_pass() call."""
+    """Outcome of one run_reconciliation_pass() call.
+
+    Attributes:
+        decisions_loaded: Count of decisions read from the configured
+            decision source (decisions.jsonl or the checkpoint database).
+        outcomes_stored: Count of decisions actually reconciled and stored
+            via cultural.store_trade_outcome.
+        paper_book_updated: Whether the paper-book update step completed.
+            False if it raised — equity/drawdown are then still their unset
+            defaults, not a real (zeroed-out) portfolio value, so a caller
+            syncing a kill switch off `equity` must gate on this first.
+        equity: Paper-book equity after this pass, or 0.0 if
+            paper_book_updated is False.
+        drawdown: Paper-book drawdown from peak after this pass, or 0.0 if
+            paper_book_updated is False.
+        runs_applied_pruned: Count of applied-run entries pruned from the
+            paper book.
+        pending_snapshots_expired: Count of PENDING cultural-memory
+            snapshots expired by this pass.
+        decisions_compacted: Retained decisions.jsonl count, or None if
+            decisions_log_path wasn't given.
+        checkpoints_pruned: Deleted checkpoint-thread count, or None if
+            checkpoint_db_path wasn't given.
+        errors: One entry per independent step that failed; every other
+            step still ran.
+    """
 
     decisions_loaded: int = 0
     outcomes_stored: int = 0
     paper_book_updated: bool = False
-    """False if the paper-book step raised — equity/drawdown are then still
-    their unset defaults, not a real (zeroed-out) portfolio value, so a
-    caller syncing a kill switch off `equity` must gate on this first."""
     equity: float = 0.0
     drawdown: float = 0.0
     runs_applied_pruned: int = 0
     pending_snapshots_expired: int = 0
     decisions_compacted: Optional[int] = None
-    """Retained decisions.jsonl count, or None if decisions_log_path wasn't given."""
     checkpoints_pruned: Optional[int] = None
-    """Deleted checkpoint-thread count, or None if checkpoint_db_path wasn't given."""
     errors: list[str] = field(default_factory=list)
-    """One entry per independent step that failed; every other step still ran."""
 
 
 @contextmanager
@@ -567,7 +586,7 @@ def run_reconciliation_pass(
     checkpoint_db_path: Optional[str] = None,
     horizon_days: int = RECONCILIATION.horizon_days,
 ) -> ReconciliationReport:
-    """Runs the one reconciliation sequence shared by api/main.py and scripts/reconcile_outcomes.py (issue #77).
+    """Runs the one reconciliation sequence shared by api/main.py and scripts/reconcile_outcomes.py.
 
     Loads decisions, reconciles the matured ones against market_data, updates
     the paper book, and bounds every growing store whose path was supplied.
@@ -616,7 +635,7 @@ def run_reconciliation_pass(
     """
     # Deferred: argus.risk.paper_book imports this module for
     # _needs_reconciliation/compute_realized_return, so importing it at
-    # module level here would be circular
+    # module level here would be circular.
     from argus.risk import paper_book
 
     if decisions_log_path:
