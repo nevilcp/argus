@@ -28,7 +28,7 @@ logger = logging.getLogger("argus.train_macro_hmm")
 
 
 def main() -> None:
-    """Parses CLI args, fits the HMM on FRED/VIX history, and saves the artifact."""
+    """Parses CLI args, fits the HMM, and saves the artifact if it validates."""
     logging.basicConfig(level=settings.ARGUS_LOG_LEVEL)
 
     parser = argparse.ArgumentParser(description=__doc__)
