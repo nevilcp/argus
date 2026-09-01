@@ -23,7 +23,7 @@ DEFAULT_SESSION_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtur
 
 
 def main() -> None:
-    """Replays each given session directory (or the default fixtures) and prints allocations."""
+    """Replays each given session (default: fixtures dir) and prints its allocation."""
     session_dirs = [Path(p) for p in sys.argv[1:]] or [DEFAULT_SESSION_DIR]
 
     results = replay_sessions(session_dirs)

@@ -38,6 +38,15 @@ FIXTURES_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
 
 
 def _format_ci(bounds: tuple[float | None, float | None], number_format: str) -> str:
+    """Formats a confidence interval for display.
+
+    Args:
+        bounds: (lower, upper) bound pair; both None when the CI is undefined.
+        number_format: Format spec applied to each bound (e.g. "+.4f").
+
+    Returns:
+        "[lo, hi]" formatted with number_format, or "undefined" if bounds is unset.
+    """
     lo, hi = bounds
     if lo is None:
         return "undefined"
@@ -45,6 +54,13 @@ def _format_ci(bounds: tuple[float | None, float | None], number_format: str) ->
 
 
 def _print_evaluation(label: str, result: EvaluationResult) -> None:
+    """Prints one evaluation section's rank IC, hit-rate, and trade-level stats.
+
+    Args:
+        label: Section heading, e.g. "Open-loop" or "Closed-loop".
+        result: Evaluation output to report; sections whose inputs are
+            undefined (fewer than 2 decisions, or no trade pairs) are skipped.
+    """
     print(f"\n--- {label} (n={result.n}) ---")
     if result.n < 2:
         print("  Too few decisions to compute rank IC or hit-rate.")
@@ -102,6 +118,8 @@ def main() -> None:
 
     if closed_result.rank_ic is not None and open_result.rank_ic is not None:
         ci_lo, _ci_hi = closed_result.rank_ic_ci
+        # Pre-registered bar: closed-loop must beat open-loop's rank IC, and the
+        # improvement's confidence interval must exclude zero.
         helped = (
             ci_lo is not None
             and ci_lo > 0
