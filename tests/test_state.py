@@ -1,9 +1,3 @@
-"""
-tests/test_state.py
-
-Tests for TickerSnapshot and build_ticker_snapshots.
-"""
-
 from datetime import datetime
 
 from argus.orchestration.state import TickerSnapshot, build_ticker_snapshots

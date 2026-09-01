@@ -104,10 +104,10 @@ class TestEndToEnd:
         default installs/CI don't have, and because this smoke test is about graph
         wiring, not vector-DB behavior. PortfolioManagerAgent.allocate is mocked
         for the same reason FundamentalAgent/SentimentAgent are: GROQ_API_KEY is
-        intentionally unset in CI (see .github/workflows/ci.yml), and with RE-4's
-        fix this 2-ticker universe no longer VETOes every ticker, so allocate()
-        now actually reaches the LLM call instead of short-circuiting to
-        all-cash before ever touching the network.
+        intentionally unset in CI (see .github/workflows/ci.yml), and this
+        2-ticker universe no longer VETOes every ticker, so allocate() now
+        actually reaches the LLM call instead of short-circuiting to all-cash
+        before ever touching the network.
 
         The checkpoint is written under tmp_path so this run never lands in the
         production argus_graph.db.
@@ -207,7 +207,7 @@ class TestEndToEnd:
             assert len(alloc.portfolio) >= 1 or alloc.cash_reserve_pct == 1.0
 
             for pos in alloc.portfolio:
-                # RE-7: the per-ticker risk gate now REDUCEs (stop_loss=0.0) real
+                # The per-ticker risk gate now REDUCEs (stop_loss=0.0) real
                 # positions it previously under-detected, so 0.0 is a legitimate
                 # outcome on live market data, not just an unpopulated field
                 assert pos.stop_loss >= 0.0

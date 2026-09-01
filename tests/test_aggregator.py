@@ -1,14 +1,13 @@
 """
 tests/test_aggregator.py
 
-Unit tests for HybridSignalAggregator.aggregate()'s reliability-weighting
-parameter. Reuses the signal/macro builders from test_aggregator_properties.py
-rather than duplicating them.
+Unit tests for HybridSignalAggregator.aggregate()'s reliability weighting.
 
-Covers the two claims the rebuild plan's verification section makes about
-this mechanism: an agent with a strong regime-specific track record
-measurably outweighs one with a poor record, and with no history the
-result is identical to today's (pre-reliability) behavior.
+Reuses the signal/macro builders from test_aggregator_properties.py rather
+than duplicating them. Covers two claims about that mechanism: an agent
+with a strong regime-specific track record measurably outweighs one with a
+poor record, and with no history the result is identical to today's
+(pre-reliability) behavior.
 """
 
 from argus.orchestration.aggregator import HybridSignalAggregator
@@ -56,7 +55,7 @@ def test_no_history_reliability_matches_unweighted_aggregation():
 
 
 def test_strong_track_record_measurably_outweighs_a_poor_one():
-    """A high-reliability agent's vote gains weight while a low-reliability one's shrinks."""
+    """A high-reliability agent's vote gains weight; a low-reliability one's shrinks."""
     technical, macro, fundamental, sentiment = _split_signals()
     aggregator = HybridSignalAggregator()
 

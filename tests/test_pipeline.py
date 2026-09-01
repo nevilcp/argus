@@ -1,7 +1,3 @@
-"""
-Tests for the MFT Data Pipeline.
-"""
-
 import asyncio
 import dataclasses
 import importlib
@@ -145,7 +141,7 @@ def test_register_tickers_rejects_malformed_symbols():
 
 
 def test_register_tickers_caps_the_tracked_universe(monkeypatch):
-    """Registrations beyond SYSTEM.max_tracked_tickers are dropped, not appended (API-1)."""
+    """Registrations beyond SYSTEM.max_tracked_tickers are dropped, not appended."""
     _override_system(monkeypatch, max_tracked_tickers=3)
     pipeline = MFTDataPipeline([])
     pipeline.register_tickers(["AAPL", "MSFT", "TSLA", "NVDA", "GOOGL"])
@@ -163,7 +159,7 @@ def test_init_routes_initial_universe_through_register_tickers(monkeypatch):
 
 
 def test_register_tickers_refreshes_last_requested_at_for_already_tracked_tickers():
-    """A repeat request for an already-tracked ticker still bumps its last_requested_at (API-12)."""
+    """A repeat request for an already-tracked ticker still bumps its last_requested_at."""
     pipeline = MFTDataPipeline(["AAPL"])
     stale = datetime.now(pipeline_module._ET) - timedelta(days=10)
     pipeline.last_requested_at["AAPL"] = stale
@@ -174,7 +170,7 @@ def test_register_tickers_refreshes_last_requested_at_for_already_tracked_ticker
 
 
 def test_evict_stale_tickers_drops_a_non_seed_ticker_unused_beyond_the_ttl(monkeypatch):
-    """A ticker registered outside the pipeline's seed universe expires after the TTL (API-12)."""
+    """A ticker registered outside the pipeline's seed universe expires after the TTL."""
     _override_system(monkeypatch, tracked_ticker_ttl_seconds=60)
     pipeline = MFTDataPipeline(["AAPL"])
     pipeline.register_tickers(["MSFT"])
@@ -187,7 +183,7 @@ def test_evict_stale_tickers_drops_a_non_seed_ticker_unused_beyond_the_ttl(monke
 
 
 def test_evict_stale_tickers_exempts_the_seed_universe(monkeypatch):
-    """The pipeline's own seed tickers survive the TTL even if never re-requested (API-12)."""
+    """The pipeline's own seed tickers survive the TTL even if never re-requested."""
     _override_system(monkeypatch, tracked_ticker_ttl_seconds=60)
     pipeline = MFTDataPipeline(["AAPL"])
     pipeline.last_requested_at["AAPL"] = datetime.now(pipeline_module._ET) - timedelta(seconds=120)
@@ -198,7 +194,7 @@ def test_evict_stale_tickers_exempts_the_seed_universe(monkeypatch):
 
 
 def test_evict_stale_tickers_keeps_a_recently_requested_ticker(monkeypatch):
-    """A ticker requested within the TTL window is not evicted (API-12)."""
+    """A ticker requested within the TTL window is not evicted."""
     _override_system(monkeypatch, tracked_ticker_ttl_seconds=3600)
     pipeline = MFTDataPipeline(["AAPL"])
     pipeline.register_tickers(["MSFT"])
@@ -476,7 +472,7 @@ async def test_fetch_loop_cadence_holds_across_a_slow_sweep(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_fetch_loop_publishes_compressed_state_after_each_sweep():
-    """Publication is merged into the fetch loop (MFT-14): one sweep, one compress, one callback."""
+    """Publication is merged into the fetch loop: one sweep, one compress, one callback."""
     pipeline = MFTDataPipeline(["AAPL"], interval="1m")
     _seed_two_session_buffer(pipeline, "AAPL")
     pipeline._is_market_hours = lambda: True
@@ -547,7 +543,7 @@ def test_compress_all_skips_a_ticker_whose_get_candles_raises(monkeypatch):
 
 
 def test_compress_all_ignores_an_untracked_ticker(monkeypatch):
-    """compress_all only considers tickers still in self.tickers (API-10)."""
+    """compress_all only considers tickers still in self.tickers."""
     pipeline = MFTDataPipeline(["GOOD"], interval="1m")
     _seed_two_session_buffer(pipeline, "GOOD")
     _seed_two_session_buffer(pipeline, "ORPHAN")
@@ -559,7 +555,7 @@ def test_compress_all_ignores_an_untracked_ticker(monkeypatch):
 
 
 def test_compress_all_prunes_untracked_buffer_rows():
-    """compress_all deletes buffered rows for a ticker no longer in self.tickers (API-9)."""
+    """compress_all deletes buffered rows for a ticker no longer in self.tickers."""
     pipeline = MFTDataPipeline(["GOOD"], interval="1m")
     _seed_two_session_buffer(pipeline, "GOOD")
     _seed_two_session_buffer(pipeline, "ORPHAN")
@@ -593,7 +589,7 @@ def test_buffer_warm_skips_a_ticker_whose_get_candles_raises(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_start_propagates_a_fetch_loop_exception(monkeypatch):
-    """start() surfaces _fetch_loop's exception rather than swallowing it (single loop now, MFT-14)."""
+    """start() surfaces _fetch_loop's exception rather than swallowing it (single loop now)."""
     pipeline = MFTDataPipeline([], interval="1m")
 
     async def dying_fetch_loop(on_session_ready):
@@ -622,7 +618,7 @@ async def test_stop_ends_the_loop_promptly(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_close_buffer_waits_out_an_in_flight_buffer_worker():
-    """close_buffer blocks until a worker holding _buffer_op_lock releases it (MFT-16)."""
+    """close_buffer blocks until a worker holding _buffer_op_lock releases it."""
     pipeline = MFTDataPipeline([], interval="1m")
     pipeline._buffer_op_lock.acquire()
 
@@ -672,7 +668,7 @@ def test_fetch_and_insert_returns_zero_on_an_empty_fetch(monkeypatch):
 
 
 def test_fetch_and_insert_uses_the_full_period_for_a_cold_buffer(monkeypatch):
-    """A ticker with no buffered rows yet gets the full `_FETCH_PERIOD` fetch (MFT-15)."""
+    """A ticker with no buffered rows yet gets the full `_FETCH_PERIOD` fetch."""
     pipeline = MFTDataPipeline([], interval="1m")
     captured = _capture_fetch_period(monkeypatch)
     monkeypatch.setattr(pipeline.buffer, "row_counts", lambda: {})
@@ -683,7 +679,7 @@ def test_fetch_and_insert_uses_the_full_period_for_a_cold_buffer(monkeypatch):
 
 
 def test_fetch_and_insert_uses_the_steady_state_period_for_a_warm_buffer(monkeypatch):
-    """A ticker already holding an indicator-ready depth gets the short trailing fetch (MFT-15)."""
+    """A ticker already holding an indicator-ready depth gets the short trailing fetch."""
     pipeline = MFTDataPipeline([], interval="1m")
     captured = _capture_fetch_period(monkeypatch)
     monkeypatch.setattr(pipeline.buffer, "row_counts", lambda: {"AAPL": _required_raw_bars(1)})

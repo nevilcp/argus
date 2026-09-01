@@ -1,10 +1,9 @@
-"""
-tests/test_position_sizing.py
+"""Regression tests for the Half-Kelly anchor and the allocation capital base.
 
-Regression tests for PA-2, PA-3, PA-4: the Half-Kelly anchor must come from a
-measured win rate (not direction-blind conviction) and must be omitted when no
-such measurement exists, and the capital base for allocation_pct/allocation_usd
-must be total wealth rather than wealth pre-scaled by invest_pct.
+The Half-Kelly anchor must come from a measured win rate (not
+direction-blind conviction) and must be omitted when no such measurement
+exists, and the capital base for allocation_pct/allocation_usd must be total
+wealth rather than wealth pre-scaled by invest_pct.
 """
 
 import json
@@ -77,7 +76,10 @@ def _agent_with_capture(body: dict) -> tuple[PortfolioManagerAgent, list[str]]:
 
 
 def test_bearish_ticker_receives_no_kelly_anchor():
-    """A BEARISH ticker is never listed under HALF-KELLY ANCHORS, even with outcome data."""
+    """A BEARISH ticker is never listed under HALF-KELLY ANCHORS.
+
+    Even with outcome data present.
+    """
     snapshots = {
         "BULL": _snapshot(
             "BULL",
@@ -103,7 +105,10 @@ def test_bearish_ticker_receives_no_kelly_anchor():
 
 
 def test_kelly_anchor_block_omitted_when_no_agent_has_data():
-    """The whole HALF-KELLY ANCHORS block is omitted, with an explanation, when every n == 0."""
+    """The whole HALF-KELLY ANCHORS block is omitted, with an explanation.
+
+    When every agent's reliability sample size (n) is 0.
+    """
     snapshots = {
         "AAPL": _snapshot(
             "AAPL",
@@ -140,11 +145,11 @@ def test_kelly_anchor_uses_primary_drivers_measured_win_rate_not_conviction():
 
 
 def test_capital_base_is_total_wealth_not_wealth_times_invest_pct():
-    """user_investable_capital and allocation_usd are based on total_wealth, not on invest_pct.
+    """user_investable_capital and allocation_usd are based on total_wealth.
 
-    Reproduces PA-2/PA-3: previously invest_pct was applied once to shrink the
-    capital base and again by the LLM's deployment target, so requesting 80%
-    deployment produced roughly invest_pct^2 (64%) of true total wealth.
+    Not on invest_pct. Previously invest_pct was applied once to shrink the
+    capital base and again by the LLM's deployment target, so requesting
+    80% deployment produced roughly invest_pct^2 (64%) of true total wealth.
     """
     body = {
         "portfolio": [

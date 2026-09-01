@@ -1,9 +1,7 @@
-"""
-tests/test_fetchers.py
+"""Tests for argus/data/fetchers.py.
 
-Tests for argus/data/fetchers.py's retry classification, NewsAPI budget
-enforcement, and the "None means unavailable, not neutral" contract for
-NewsAPI.
+Covers retry classification, NewsAPI budget enforcement, and the "None
+means unavailable, not neutral" contract for NewsAPI.
 """
 
 from datetime import timedelta
@@ -180,8 +178,12 @@ def test_newsapi_budget_resets_on_new_day():
 
 
 def test_newsapi_budget_survives_a_fresh_process():
-    """A second _NewsApiBudget instance under the same ARGUS_DATA_DIR resumes today's
-    count instead of restarting at zero — the Actions collector's cold-start case (GOV-14)."""
+    """A fresh _NewsApiBudget resumes today's count instead of restarting at zero.
+
+    This is the Actions collector's cold-start case: a second process
+    sharing the same ARGUS_DATA_DIR must not silently reopen the daily
+    budget.
+    """
     first = fetchers._NewsApiBudget(daily_limit=2)
     assert first.try_reserve() is True
 
@@ -294,7 +296,7 @@ def test_daily_bar_cache_lives_under_argus_data_dir(monkeypatch, tmp_path):
     """The lazily-built module singleton lands under settings.ARGUS_DATA_DIR, not the cwd.
 
     The old cwd-relative default landed outside docker-compose's mounted
-    volumes and was destroyed on every container restart (MFT-13).
+    volumes and was destroyed on every container restart.
     """
     monkeypatch.setattr(fetchers, "_DAILY_BAR_CACHE", None)
 

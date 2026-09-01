@@ -1,8 +1,4 @@
-"""
-tests/test_api_event_loop_hygiene.py
-
-Tests for PR4 (MFT-6/7/13, API-4): api/main.py must not block the event loop
-on buffer reads or the daily reconciliation cycle.
+"""api/main.py must never block the event loop on reads or reconciliation.
 
 These exercise route/loop functions directly via FastAPI's TestClient or as
 bare coroutines, mirroring test_api_freshness.py's pattern of setting
@@ -63,7 +59,7 @@ def test_reconcile_once_is_a_plain_sync_function():
 
 
 def test_seconds_until_next_reconcile_is_dst_safe():
-    """API-13 regression: the sleep duration must reflect real elapsed time across a DST jump.
+    """The sleep duration must reflect real elapsed time across a DST jump.
 
     `target - now_et` alone is wrong here: both operands are built from the
     same ZoneInfo("America/New_York") instance, so aware-datetime

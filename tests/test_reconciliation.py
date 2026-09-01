@@ -1,9 +1,7 @@
-"""
-tests/test_reconciliation.py
+"""Tests for orchestration/reconciliation.py.
 
-Tests for argus/orchestration/reconciliation.py: leave-one-out credit
-assignment, entry/exit price outcome computation, and reading decisions back
-out of the LangGraph checkpoint.
+Covers leave-one-out credit assignment, entry/exit price outcome
+computation, and reading decisions back out of the LangGraph checkpoint.
 """
 
 import json
@@ -55,7 +53,7 @@ FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 
 def _technical(signal: Signal, conviction: float, ticker: str = "TEST", price: float = 100.0) -> TechnicalSignal:
-    """Builds a TechnicalSignal with fixed indicator values, varying only the given fields."""
+    """Builds a TechnicalSignal with fixed indicators, varying only the given fields."""
     return TechnicalSignal(
         ticker=ticker,
         current_price=price,
@@ -76,7 +74,7 @@ def _technical(signal: Signal, conviction: float, ticker: str = "TEST", price: f
 
 
 def _fundamental(signal: Signal, conviction: float, ticker: str = "TEST") -> FundamentalSignal:
-    """Builds a FundamentalSignal with fixed field values, varying only the given fields."""
+    """Builds a FundamentalSignal with fixed fields, varying only the given ones."""
     return FundamentalSignal(
         ticker=ticker,
         sector="Technology",
@@ -310,12 +308,12 @@ def test_compute_realized_return_none_without_technical_signal():
 
 
 def test_compute_realized_return_none_with_zero_weight_allocation():
-    """A decision allocated 0% has no position to reconcile, matching no allocation at all.
+    """A decision allocated 0% has no position to reconcile.
 
-    Regression test for LD-1: filtering 0%-weight positions belongs at the
-    reconciliation boundary, not at graph.py's decision-building step (which
-    would break the audit trail of "we evaluated this ticker and chose not
-    to hold").
+    Same as a decision with no allocation at all. Regression test: filtering
+    0%-weight positions belongs at the reconciliation boundary,
+    not at graph.py's decision-building step (which would break the audit
+    trail of "we evaluated this ticker and chose not to hold").
     """
     decision = ARGUSDecision(
         ticker="TEST",
@@ -354,7 +352,7 @@ def test_compute_realized_return_none_when_horizon_not_yet_reached():
 
 
 def test_reconcile_decision_stores_outcome_with_ablated_primary_driver():
-    """Reconciling a decision stores the realized outcome tagged with its credited driver."""
+    """Reconciling a decision stores its outcome tagged with the credited driver."""
     start = datetime(2026, 1, 1)
     decision = _aggregated_decision(
         _technical(Signal.BULLISH, 0.9, price=100.0),
@@ -469,7 +467,7 @@ def test_reconcile_decisions_fetches_each_ticker_price_history_once():
 
 
 def test_load_decisions_from_checkpoints_round_trips_a_real_graph_run(tmp_path):
-    """Checkpoints round-trip real ARGUSDecision objects, not degraded dicts, per ticker."""
+    """Checkpoints round-trip real ARGUSDecision objects, not degraded dicts."""
     universe = ["AAPL", "MSFT", "NVDA", "GOOGL", "JPM", "XOM"]
 
     def per_ticker_llm(fixture_file: str) -> FixtureLLMClient:
@@ -541,7 +539,7 @@ def test_load_decisions_from_checkpoints_round_trips_a_real_graph_run(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# compact_decisions_jsonl (COL-1)
+# compact_decisions_jsonl
 # ---------------------------------------------------------------------------
 
 
@@ -581,14 +579,17 @@ def test_compact_decisions_jsonl_nothing_to_drop_leaves_the_file_untouched(tmp_p
 
 
 # ---------------------------------------------------------------------------
-# prune_checkpoints (RE-13)
+# prune_checkpoints
 # ---------------------------------------------------------------------------
 
 
 def _put_checkpoint(
     db_path: str, thread_id: str, ts: datetime, decisions: list[ARGUSDecision] | None = None
 ) -> None:
-    """Writes one checkpoint for `thread_id` stamped with `ts`, carrying `decisions` if given."""
+    """Writes one checkpoint for `thread_id` stamped with `ts`.
+
+    Carries `decisions` if given.
+    """
     config: RunnableConfig = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
     checkpoint: Checkpoint = {
         "v": 1,
@@ -609,7 +610,10 @@ def _put_checkpoint(
 
 
 def test_prune_checkpoints_deletes_only_threads_older_than_cutoff(tmp_path):
-    """A thread whose newest checkpoint predates cutoff is deleted; a newer one survives."""
+    """A thread whose newest checkpoint predates cutoff is deleted.
+
+    A newer thread survives.
+    """
     db_path = str(tmp_path / "argus_graph.db")
     _put_checkpoint(db_path, "stale-thread", datetime(2026, 1, 1))
     _put_checkpoint(db_path, "fresh-thread", datetime(2026, 1, 20))
@@ -641,12 +645,13 @@ def test_prune_checkpoints_nothing_stale_deletes_nothing(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# run_reconciliation_pass (issue #77)
+# run_reconciliation_pass: the end-to-end pass that reads decisions, reconciles
+# them, and bounds every store it touches.
 # ---------------------------------------------------------------------------
 
 
 def _matured_decision(ticker: str, start: datetime, price: float = 100.0) -> ARGUSDecision:
-    """A decision that took a position and has cleared a 5-day horizon by `start` + 5 days."""
+    """A decision with a position that has cleared a 5-day horizon by `start` + 5 days."""
     return ARGUSDecision(
         ticker=ticker,
         session_timestamp=start,
@@ -656,7 +661,7 @@ def _matured_decision(ticker: str, start: datetime, price: float = 100.0) -> ARG
 
 
 def _autospec_cultural(expired: int = 0) -> mock.MagicMock:
-    """An autospec CulturalMemoryManager with the return values reconcile_decisions and expiry need."""
+    """An autospec CulturalMemoryManager stubbed for reconcile_decisions and expiry."""
     cultural = mock.create_autospec(CulturalMemoryManager, instance=True)
     cultural.already_reconciled.return_value = set()
     cultural.expire_pending_snapshots.return_value = expired
@@ -664,7 +669,10 @@ def _autospec_cultural(expired: int = 0) -> mock.MagicMock:
 
 
 def test_run_reconciliation_pass_over_matured_decisions_produces_outcome_and_equity(tmp_path):
-    """A full pass over matured decisions stores the outcome and compounds its return onto paper equity."""
+    """A full pass over matured decisions stores the outcome and updates paper equity.
+
+    The decision's realized return is compounded onto paper equity.
+    """
     start = datetime(2026, 1, 1)
     decisions_log = _write_decisions_log(
         tmp_path / "decisions.jsonl", _matured_decision("TEST", start)
@@ -725,7 +733,10 @@ def test_run_reconciliation_pass_reading_from_checkpoints_bounds_checkpoints(tmp
 
 
 def test_run_reconciliation_pass_given_both_paths_bounds_both(tmp_path):
-    """With both paths given, the decisions log wins as the read source and both stores are bounded."""
+    """With both paths given, the decisions log wins as the read source.
+
+    Both stores — the decisions log and the checkpoint database — are bounded.
+    """
     start = datetime(2026, 1, 1)
     decisions_log = _write_decisions_log(
         tmp_path / "decisions.jsonl", _matured_decision("TEST", start)
@@ -755,7 +766,10 @@ def test_run_reconciliation_pass_given_both_paths_bounds_both(tmp_path):
 
 
 def test_run_reconciliation_pass_one_store_failing_leaves_the_others_bounded_and_names_it(tmp_path):
-    """A corrupt checkpoint database fails that one store without skipping decisions.jsonl compaction."""
+    """A corrupt checkpoint database fails only that store.
+
+    decisions.jsonl compaction still runs.
+    """
     start = datetime(2026, 1, 1)
     decisions_log = _write_decisions_log(
         tmp_path / "decisions.jsonl", _matured_decision("TEST", start)
@@ -787,7 +801,10 @@ def test_run_reconciliation_pass_one_store_failing_leaves_the_others_bounded_and
 def test_run_reconciliation_pass_paper_book_not_partially_applied_when_its_step_fails(
     tmp_path, monkeypatch
 ):
-    """A paper-book save failure leaves the persisted book exactly as it was, and names the failure."""
+    """A paper-book save failure leaves the persisted book exactly as it was.
+
+    The failure is named in the report's errors.
+    """
     start = datetime(2026, 1, 1)
     decisions_log = _write_decisions_log(
         tmp_path / "decisions.jsonl", _matured_decision("TEST", start)

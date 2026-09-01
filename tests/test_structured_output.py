@@ -1,7 +1,7 @@
-"""
-Tests for argus/structured_output.py's decode() — fence-stripping, the
-retry/repair loop, and typed-error reporting. No agent is migrated onto
-this decoder yet (issue #69 is expand-only), so these tests exercise it
+"""Tests argus/structured_output.py's decode() function.
+
+Covers fence-stripping, the retry/repair loop, and typed-error reporting.
+No agent is wired onto this decoder yet, so these tests exercise it
 directly against a mocked LLMClient rather than through any agent.
 """
 

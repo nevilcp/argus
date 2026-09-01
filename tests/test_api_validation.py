@@ -1,9 +1,7 @@
-"""
-tests/test_api_validation.py
+"""Tests for AnalysisRequest's ticker validation and /analyze's error redaction.
 
-Tests for PR5a: AnalysisRequest's ticker validation, normalization, and
-dedupe (API-1, API-6 gateway half), and /analyze's redaction of internal
-exception details behind a correlation ref (API-7).
+Covers ticker validation, normalization, and dedupe on AnalysisRequest, and
+/analyze's redaction of internal exception details behind a correlation ref.
 
 These exercise the route function directly via FastAPI's TestClient rather
 than going through the app's lifespan, so no MFT pipeline, collector, or
@@ -84,11 +82,11 @@ def test_analyze_rejects_malformed_ticker_with_422(client, ticker):
 
 
 def test_analyze_accepts_share_class_tickers(client, monkeypatch):
-    """Dotted and hyphenated share-class symbols pass validation and reach the pipeline.
+    """Dotted/hyphenated share-class tickers validate and reach the pipeline.
 
     Market is open here (rather than closed) because register_tickers now only
-    runs once the market-hours gate clears (API-12) — a rejected request must
-    not mutate pipeline state.
+    runs once the market-hours gate clears — a rejected request must not
+    mutate pipeline state.
     """
     fake_pipeline = _pipeline(monkeypatch, market_hours=True)
     response = client.post("/analyze", json=_payload("BRK.B", "BRK-B"))
@@ -105,7 +103,7 @@ def test_analyze_upcases_and_dedupes_tickers(client, monkeypatch):
 
 
 def test_analyze_redacts_internal_exception_details(client, monkeypatch):
-    """A raw graph exception never reaches the client; only a correlation ref does (API-7)."""
+    """A raw graph exception never reaches the client; only a correlation ref does."""
     _pipeline(monkeypatch, market_hours=True)
     _seed_cache("AAPL", bar_age_seconds=5, write_age_seconds=5)
     fake_graph = mock.Mock()
