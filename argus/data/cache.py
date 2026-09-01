@@ -220,7 +220,7 @@ class OHLCVBuffer:
             )
 
     def insert_candle(self, ticker: str, candle: dict) -> None:
-        """Inserts a single candlestick entry and prunes historical values exceeding the buffer limit.
+        """Inserts a single candlestick entry and prunes history past the buffer limit.
 
         Args:
             ticker: Equity ticker symbol; case-insensitive, normalized to upper.
@@ -317,7 +317,7 @@ class OHLCVBuffer:
         return [r[0] for r in rows]
 
     def prune_untracked(self, tracked_tickers: set[str]) -> int:
-        """Deletes every row for a ticker outside the given tracked set (API-9/API-10).
+        """Deletes every row for a ticker outside the given tracked set.
 
         Without this, a ticker fetched once (e.g. a one-off `/analyze` request)
         keeps being swept and compressed forever, since `compress_all` used to
@@ -464,7 +464,7 @@ class DailyBarCache:
     def put(self, ticker: str, df: pd.DataFrame) -> None:
         """Stores a ticker's freshly fetched daily bars and marks it refreshed for today.
 
-        Also prunes any rows older than the fetched window (RE-14) — each
+        Also prunes any rows older than the fetched window — each
         `fetch_ohlcv_daily(ticker, period=...)` call re-supplies a full
         trailing window, but INSERT OR REPLACE never removed the prior
         window's now-stale rows, so daily_ohlcv grew by one row per ticker

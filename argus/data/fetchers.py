@@ -158,6 +158,7 @@ def _with_retry(fn: F) -> F:
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
+        """Calls fn, retrying retryable failures and re-raising as DataFetchError once exhausted."""
         last_exc: Exception = RuntimeError("unreachable")
         for attempt in range(1, _RETRY_ATTEMPTS + 1):
             try:
@@ -602,7 +603,7 @@ class _NewsApiBudget:
     anything Groq imposes — so this is checked before every request rather
     than discovered from a 426/429 response.
 
-    Persisted under ARGUS_DATA_DIR (GOV-14): the Actions collector starts a
+    Persisted under ARGUS_DATA_DIR: the Actions collector starts a
     fresh container on every tick, so an in-memory-only counter always read
     zero used and never actually enforced the daily ceiling in that
     deployment.
