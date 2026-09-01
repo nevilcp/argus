@@ -1,17 +1,16 @@
-"""
-argus/agents/technical.py
-
-Statistical technical analysis agent executing offline metric calculations.
+"""Statistical technical analysis agent executing offline metric calculations.
 
 Responsibilities:
-  - Consume compressed multi-frequency data frames (rsi, macd, bollinger, adx, vwap, momentum)
-  - Compute a consolidated score per ticker using configurable indicator weights
-  - Map directional trade postures without LLM cost or remote API dependency
+  - Consume compressed multi-frequency data frames (rsi, macd, bollinger, adx,
+    vwap, momentum).
+  - Compute a consolidated score per ticker using configurable indicator
+    weights.
+  - Map directional trade postures without LLM cost or remote API dependency.
 
 Not responsible for:
-  - Fetching or buffering raw price data (see data/pipeline.py)
-  - Risk constraint enforcement (see agents/risk.py)
-  - Signal aggregation across agents (see orchestration/aggregator.py)
+  - Fetching or buffering raw price data (see data/pipeline.py).
+  - Risk constraint enforcement (see agents/risk.py).
+  - Signal aggregation across agents (see orchestration/aggregator.py).
 
 Dependencies:
   - numpy
@@ -83,7 +82,7 @@ def _score_rsi(s: dict) -> float:
     if bullish_transition <= rsi < neutral_low:
         return bullish_transition_score * (1.0 - (rsi - bullish_transition) / (neutral_low - bullish_transition))
 
-    # Bearish transition band: RSI in (neutral_high, bearish_transition] (implicit else-branch)
+    # Bearish transition band: RSI in (neutral_high, bearish_transition] (implicit else-branch).
     return -bullish_transition_score * (rsi - neutral_high) / (bearish_transition - neutral_high)
 
 
@@ -183,7 +182,7 @@ def _score_momentum(s: dict) -> float:
     m30 = float(s.get("momentum_30m", 0.0))
     m1d = float(s.get("momentum_1d", 0.0))
 
-    # Positive product means both values share the same sign (directional confluence)
+    # Positive product means both values share the same sign (directional confluence).
     if m30 * m1d > 0.0:
         combined = m30 * TECHNICAL.momentum_30m_weight + m1d * TECHNICAL.momentum_1d_weight
         return float(np.clip(combined / TECHNICAL.momentum_saturation_bound, -1.0, 1.0))
@@ -196,6 +195,10 @@ class TechnicalStatisticalAgent:
 
     Calculates all indicators locally without remote API dependency or LLM inference,
     making it the cheapest and fastest specialist in the ARGUS pipeline.
+
+    Attributes:
+        WEIGHTS: Per-indicator weights used to combine scores into net_score,
+          sourced from settings.TECHNICAL_INDICATOR_WEIGHTS.
     """
 
     WEIGHTS: dict[str, float] = dict(settings.TECHNICAL_INDICATOR_WEIGHTS)
@@ -234,7 +237,7 @@ class TechnicalStatisticalAgent:
         vwap_score = _score_vwap(s)
         mom_score = _score_momentum(s)
 
-        # Base direction derived from primary indicators drives ADX amplification
+        # Base direction derived from primary indicators drives ADX amplification.
         w = self.WEIGHTS
         base_weight_sum = w["rsi"] + w["macd"] + w["bb"]
         base_direction = (
@@ -296,7 +299,7 @@ class TechnicalStatisticalAgent:
             signal = Signal.NEUTRAL
             conviction = TECHNICAL.neutral_conviction_floor + abs_score
         else:
-            # Direction splits BULLISH from BEARISH; conviction scales off the magnitude alone
+            # Direction splits BULLISH from BEARISH; conviction scales off the magnitude alone.
             signal = Signal.BULLISH if net_score > 0 else Signal.BEARISH
             conviction = min(
                 TECHNICAL.conviction_base + abs_score * TECHNICAL.conviction_score_multiplier,

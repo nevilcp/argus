@@ -58,10 +58,10 @@ def _make_ks(risk_tolerance: str = "MODERATE", inception: float = 100_000.0) -> 
 def _expire_vix_cache(ks: KillSwitch) -> None:
     """Forces the next _fetch_vix_cached() call to hit fetch_vix rather than the cache.
 
-    KS-11's cache (TTL _VIX_CACHE_TTL_SECONDS) means back-to-back _check()
-    calls in a test would otherwise reuse the first mocked reading instead of
-    observing the next one — call this between _check() calls that mock a
-    different fetch_vix outcome.
+    The VIX reading cache (TTL _VIX_CACHE_TTL_SECONDS) means back-to-back
+    _check() calls in a test would otherwise reuse the first mocked reading
+    instead of observing the next one — call this between _check() calls
+    that mock a different fetch_vix outcome.
     """
     ks._vix_cache_value = None
     ks._vix_cache_fetched_at = None
@@ -88,7 +88,7 @@ def _seed_persisted_halt() -> KillSwitch:
 
 
 # ---------------------------------------------------------------------------
-# Drawdown thresholds (KS-4, KS-5)
+# Drawdown thresholds
 # ---------------------------------------------------------------------------
 
 
@@ -116,7 +116,7 @@ def test_drawdown_does_not_halt_below_threshold(mock_vix):
 
 @mock.patch(_FETCH_VIX, return_value=15.0)
 def test_zero_portfolio_value_registers_as_real_drawdown(mock_vix):
-    """KS-4: a literal 0.0 portfolio value must be treated as a real value, not 'unset'."""
+    """A literal 0.0 portfolio value must be treated as a real value, not 'unset'."""
     ks = _make_ks("CONSERVATIVE", inception=100_000.0)
     ks.update_portfolio_value(0.0)
     ks._check()
@@ -126,7 +126,7 @@ def test_zero_portfolio_value_registers_as_real_drawdown(mock_vix):
 
 @mock.patch(_FETCH_VIX, return_value=15.0)
 def test_peak_to_trough_drawdown_not_inception_relative(mock_vix):
-    """KS-5: drawdown is measured from the running peak, not the stale inception value.
+    """Drawdown is measured from the running peak, not the stale inception value.
 
     100k -> 150k (new peak, no drawdown) -> 105k: -5% vs inception (a gain,
     wouldn't halt under the old logic) but -30% vs the $150k peak, well past
@@ -159,7 +159,7 @@ def test_reset_clears_halt_and_reseeds_high_water_mark():
 
 
 # ---------------------------------------------------------------------------
-# VIX blackout gate (KS-3)
+# VIX blackout gate
 # ---------------------------------------------------------------------------
 
 
@@ -175,7 +175,7 @@ def test_vix_blackout_sets_and_clears_on_genuine_readings():
 
 
 def test_vix_reading_is_cached_within_the_ttl():
-    """KS-11: a second _check() inside the TTL reuses the cached reading, not a new fetch."""
+    """A second _check() inside the TTL reuses the cached reading, not a new fetch."""
     ks = _make_ks("MODERATE")
     with mock.patch(_FETCH_VIX, return_value=15.0) as mock_vix:
         ks._check()
@@ -184,7 +184,7 @@ def test_vix_reading_is_cached_within_the_ttl():
 
 
 def test_vix_fetch_failure_does_not_clear_an_active_blackout():
-    """KS-3: a fetch failure must never clear a blackout that's already set."""
+    """A fetch failure must never clear a blackout that's already set."""
     ks = _make_ks("MODERATE")
     _check_at_vix(ks, 40.0)
     assert not ks.new_positions_allowed
@@ -196,7 +196,7 @@ def test_vix_fetch_failure_does_not_clear_an_active_blackout():
 
 
 def test_vix_fetch_failure_sets_blackout_after_n_consecutive_failures():
-    """KS-3: repeated fetch failures fail closed instead of silently trusting a stale reading."""
+    """Repeated fetch failures fail closed instead of silently trusting a stale reading."""
     ks = _make_ks("MODERATE")
     assert ks.new_positions_allowed
 
@@ -259,13 +259,13 @@ def test_initialize_kill_switch_restores_halt_on_reinit(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Collector gate (KS-2)
+# Collector gate
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_collector_skips_when_kill_switch_halted():
-    """KS-2: run_collection_cycle refuses to run while this process's kill switch is halted."""
+    """run_collection_cycle refuses to run while this process's kill switch is halted."""
     ks = _make_ks("MODERATE")
     ks._halted.set()
     ks._halt_reason = "test halt"
@@ -447,7 +447,7 @@ def test_compute_run_returns_skips_decisions_that_took_no_position():
 
 
 def test_compute_run_returns_skips_runs_inside_the_previous_kept_runs_horizon():
-    """KS-14: a run timestamped inside the previous kept run's horizon is omitted, not compounded."""
+    """A run timestamped inside the previous kept run's horizon is omitted, not compounded."""
     run1 = datetime(2026, 1, 1)
     run2 = run1 + timedelta(days=2)  # inside run1's 5-day horizon
     d1 = _decision("AAA", run1, price=100.0, pct=0.1)
@@ -473,7 +473,7 @@ def test_compute_run_returns_keeps_runs_exactly_horizon_days_apart():
 
 
 def test_compute_run_returns_and_paperbook_survive_the_audit_simulation():
-    """KS-14: 120 daily runs at -0.1%/day must compound to their true cumulative decline,
+    """120 daily runs at -0.1%/day must compound to their true cumulative decline,
     not a MODERATE-halt-tripping blowup from compounding ~24x overlapping 5-day windows."""
     start = datetime(2026, 1, 1)
     decay = 0.999
@@ -549,7 +549,7 @@ def test_paperbook_save_load_round_trip(tmp_path):
 
 
 def test_paperbook_rebase_sets_equity_and_hwm_and_leaves_runs_applied():
-    """KS-15: rebase() replaces equity/high_water_mark but leaves runs_applied untouched,
+    """rebase() replaces equity/high_water_mark but leaves runs_applied untouched,
     so a run already compounded into the old curve is never re-applied against the new base."""
     book = PaperBook(
         equity=88_000.0, high_water_mark=100_000.0, runs_applied={"2026-01-01T00:00:00"}
@@ -565,7 +565,7 @@ def test_paperbook_rebase_sets_equity_and_hwm_and_leaves_runs_applied():
 
 def test_paperbook_rebase_then_reapplying_an_already_applied_run_is_a_noop():
     """After a rebase, re-running compute_run_returns over old decisions can't drag the
-    rebased equity back down, since the run is already in runs_applied (KS-15)."""
+    rebased equity back down, since the run is already in runs_applied."""
     book = PaperBook(equity=100_000.0, high_water_mark=100_000.0)
     ts = datetime(2026, 1, 1)
     book.apply_run(ts, -0.12)
@@ -600,7 +600,7 @@ def test_paperbook_load_missing_file_starts_fresh_at_total_wealth(tmp_path):
 
 
 def test_paperbook_prune_runs_applied_drops_only_entries_older_than_cutoff():
-    """COL-1: entries before cutoff are dropped; entries at or after it survive."""
+    """Entries before cutoff are dropped; entries at or after it survive."""
     book = PaperBook(
         equity=100_000.0,
         high_water_mark=100_000.0,
@@ -629,7 +629,7 @@ def test_paperbook_prune_runs_applied_leaves_equity_and_hwm_untouched():
 
 
 # ---------------------------------------------------------------------------
-# Lifecycle: stop() and idempotent start() (KS-10)
+# Lifecycle: stop() and idempotent start()
 # ---------------------------------------------------------------------------
 
 
@@ -669,13 +669,13 @@ def test_stop_joins_the_monitor_thread(mock_vix):
 
 
 def test_risk_tolerance_must_be_a_string():
-    """KS-12: a non-string risk_tolerance raises a typed error, not an incidental one."""
+    """A non-string risk_tolerance raises a typed error, not an incidental one."""
     with pytest.raises(TypeError):
         KillSwitch(123)
 
 
 # ---------------------------------------------------------------------------
-# reset() deletes persisted halt dumps (KS-9)
+# reset() deletes persisted halt dumps
 # ---------------------------------------------------------------------------
 
 
@@ -694,7 +694,7 @@ def test_reset_deletes_persisted_halt_dumps(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Halt-dump pruning and content-based sort (KS-13)
+# Halt-dump pruning and content-based sort
 # ---------------------------------------------------------------------------
 
 
@@ -736,7 +736,7 @@ def test_prune_halt_dumps_keeps_only_the_most_recent_n(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# VIX surfaced on status (KS-8)
+# VIX surfaced on status
 # ---------------------------------------------------------------------------
 
 

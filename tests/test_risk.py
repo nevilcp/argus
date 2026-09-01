@@ -1,7 +1,3 @@
-"""
-Tests for the Risk Statistical Engine (argus/agents/risk.py).
-"""
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -25,13 +21,13 @@ def _prices_from_returns(returns: np.ndarray, dates: pd.DatetimeIndex) -> pd.Ser
 
 
 def _random_prices(dates: pd.DatetimeIndex, mean: float, vol: float) -> pd.Series:
-    """Builds a price series from N(mean, vol) daily returns drawn off the active numpy seed."""
+    """Builds a price series from N(mean, vol) daily returns off the active numpy seed."""
     return _prices_from_returns(np.random.normal(mean, vol, len(dates)), dates)
 
 
 @pytest.fixture
 def price_history():
-    """Create a simulated price history dictionary for tests.
+    """Builds a simulated price history dictionary for tests.
 
     Returns:
         Mapping of ticker (plus "SPY" benchmark) to a one-year daily price series.
@@ -59,8 +55,8 @@ def test_vix_blackout(risk_engine: RiskStatisticalEngine, price_history: dict) -
 
     assert result.verdict == RiskVerdict.VETO
     assert any("blackout" in r.lower() for r in result.veto_reasons)
-    # RE-9: a structural-violation short-circuit never computed correlation, so
-    # it must report None ("not measured"), not a fabricated 0.0
+    # A structural-violation short-circuit never computed correlation, so it
+    # must report None ("not measured"), not a fabricated 0.0.
     assert result.avg_correlation is None
 
 
@@ -118,8 +114,8 @@ def test_approve_healthy_portfolio(risk_engine: RiskStatisticalEngine, price_his
 def test_slsqp_covariance_uses_unweighted_returns(price_history: dict) -> None:
     """The optimizer's w^T*cov*w term is built from raw returns, not pre-weighted ones.
 
-    Regression test for RE-2: cov used to come from compute_portfolio_returns,
-    whose series are already multiplied by weight, so w^T*cov*w applied the
+    Regression test: cov used to come from compute_portfolio_returns, whose
+    series are already multiplied by weight, so w^T*cov*w applied the
     weight a second time — variance came out ~1/weight^2 too small.
     """
     tickers = ["AAPL", "MSFT", "GOOGL", "META", "AMZN", "TSLA", "JPM", "BAC"]
@@ -154,7 +150,7 @@ def test_zero_api_calls(risk_engine: RiskStatisticalEngine, price_history: dict)
 def test_small_universe_is_noted_not_vetoed(
     risk_engine: RiskStatisticalEngine, price_history: dict
 ) -> None:
-    """RE-4 regression: a 2-4 ticker universe is informational, not a hard VETO.
+    """Regression: a 2-4 ticker universe is informational, not a hard VETO.
 
     Before the fix, a book below the 5-position diversification floor was
     structurally VETOed regardless of its actual risk profile, returning
@@ -168,7 +164,7 @@ def test_small_universe_is_noted_not_vetoed(
 
 
 def test_per_ticker_var_normalized_to_full_weight() -> None:
-    """RE-7 regression: a volatile single ticker at weight=0.15 must REDUCE, not APPROVE.
+    """Regression: a volatile ticker at weight=0.15 must REDUCE, not APPROVE.
 
     Before the fix, var99/cvar were computed from the weight-diluted return series
     (0.15x), so the same var_limit was ~6.7x looser for a per-ticker call than for
@@ -189,7 +185,7 @@ def test_per_ticker_var_normalized_to_full_weight() -> None:
 
 
 def test_ols_portfolio_beta_uses_lookback_window() -> None:
-    """RE-14 regression: beta must come from RISK.returns_lookback_days, not the full series.
+    """Regression: beta must use RISK.returns_lookback_days, not the full series.
 
     Without .tail(lookback), a DailyBarCache holding more than a year of
     history would silently widen beta's window, diluting a recent, real
@@ -220,7 +216,7 @@ def test_ols_portfolio_beta_uses_lookback_window() -> None:
 
 
 def test_compute_asset_returns_drops_short_history_ticker_without_shrinking_others() -> None:
-    """RE-15 regression: one short-history ticker must not truncate the joint returns matrix.
+    """Regression: one short-history ticker must not truncate the returns matrix.
 
     Before the fix, pd.DataFrame(returns_dict).dropna() intersected on the
     short ticker's handful of overlapping dates, shrinking every other
@@ -245,9 +241,10 @@ def test_compute_asset_returns_drops_short_history_ticker_without_shrinking_othe
 
 
 def test_evaluate_excludes_short_history_ticker_from_covariance(monkeypatch) -> None:
-    """RE-15 regression: evaluate() surfaces the excluded ticker as a Covariance veto_reason
-    note (picked up by graph.py's error-surfacing filter) rather than silently degrading
-    every other ticker's covariance.
+    """Regression: evaluate() surfaces the excluded ticker as a veto_reason note.
+
+    Picked up by graph.py's error-surfacing filter, rather than silently
+    degrading every other ticker's covariance.
     """
     monkeypatch.setattr("argus.agents.risk.get_sector", lambda ticker: "Diversified")
     engine = RiskStatisticalEngine()
@@ -266,8 +263,10 @@ def test_evaluate_excludes_short_history_ticker_from_covariance(monkeypatch) -> 
 
 
 def test_evaluate_skips_optimizer_on_non_finite_covariance(monkeypatch) -> None:
-    """RE-15 regression: a non-finite covariance (e.g. a zero-price data glitch producing an
-    infinite return that survives dropna()) must not reach SLSQP silently.
+    """Regression: a non-finite covariance must not reach SLSQP silently.
+
+    E.g. a zero-price data glitch producing an infinite return that survives
+    dropna().
     """
     monkeypatch.setattr("argus.agents.risk.get_sector", lambda ticker: "Diversified")
     engine = RiskStatisticalEngine()

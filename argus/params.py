@@ -18,9 +18,9 @@ Provenance categories:
                 (e.g. RSI 30/70 bands, half-Kelly sizing).
   CALIBRATED  — tuned against ARGUS's own data or backtests. As of this
                 writing there is no honest instance of this category: the
-                Phase 1/2 calibration harness measured a constant and PR 7
-                deletes it. Any future value in this category must point at
-                real evidence.
+                Phase 1/2 calibration harness measured a constant that has
+                since been removed. Any future value in this category must
+                point at real evidence.
   ARBITRARY   — a guess with no basis beyond "seemed reasonable". Writing
                 ARBITRARY where it is arbitrary is the point of this
                 module: it is a to-do list for what needs real evaluation.
@@ -39,7 +39,10 @@ PARAMS_VERSION = 16
 
 
 class Provenance(str, Enum):
-    """Where a parameter's value came from: see the module docstring for definitions."""
+    """Where a parameter's value came from.
+
+    See the module docstring for the category definitions.
+    """
 
     LITERATURE = "literature"
     CONVENTION = "convention"
@@ -68,7 +71,7 @@ def p(value: Any, provenance: Provenance, note: str = "") -> Any:
 
 @dataclass(frozen=True)
 class SystemParams:
-    """Timing, universe, and hard-limit parameters formerly inline in config.py."""
+    """Timing, universe, and hard-limit parameters moved out of config.py."""
 
     candle_buffer_days_retained: int = p(
         2,
@@ -131,12 +134,13 @@ class SystemParams:
 
 @dataclass(frozen=True)
 class KillSwitchParams:
-    """Drawdown circuit-breaker tiers and halt-dump retention (argus/risk/kill_switch.py).
+    """Drawdown circuit-breaker tiers and halt-dump retention.
 
-    The three tiers previously lived as a hardcoded dict in kill_switch.py
-    alongside an unrelated, unused SystemParams.max_drawdown_halt = 0.15 that
-    silently contradicted the AGGRESSIVE tier's 0.18 — this group is now the
-    single source of truth for all three.
+    Used by risk/kill_switch.py. The three tiers previously lived as a
+    hardcoded dict there, alongside an unrelated, unused
+    SystemParams.max_drawdown_halt = 0.15 that silently contradicted the
+    AGGRESSIVE tier's 0.18 — this group is now the single source of truth
+    for all three.
     """
 
     conservative_drawdown_halt: float = p(
@@ -167,7 +171,10 @@ class TechnicalIndicatorWeights:
 
 @dataclass(frozen=True)
 class TechnicalParams:
-    """Thresholds and curve shapes used by TechnicalStatisticalAgent (agents/technical.py)."""
+    """Thresholds and curve shapes used by TechnicalStatisticalAgent.
+
+    See agents/technical.py.
+    """
 
     rsi_oversold: float = p(25, Provenance.CONVENTION, "RSI < 30 is the standard oversold convention; 25 used as the max-bullish anchor")
     rsi_bullish_transition: float = p(30, Provenance.CONVENTION, "standard RSI oversold boundary")
@@ -239,7 +246,10 @@ class PortfolioParams:
 
 @dataclass(frozen=True)
 class RiskParams:
-    """VaR/CVaR, optimization, and structural-gate parameters (agents/risk.py)."""
+    """VaR/CVaR, optimization, and structural-gate parameters.
+
+    See agents/risk.py.
+    """
 
     sector_cache_ttl_seconds: int = p(86400, Provenance.ARBITRARY, "24h cache lifetime; GICS classifications rarely change")
     returns_lookback_days: int = p(252, Provenance.LITERATURE, "252 = standard US trading days per year")
@@ -263,7 +273,10 @@ class RiskParams:
 
 @dataclass(frozen=True)
 class MacroParams:
-    """RegimeClassifier windowed-inference parameters (agents/macro.py, data/macro_features.py)."""
+    """RegimeClassifier windowed-inference parameters.
+
+    See agents/macro.py and data/macro_features.py.
+    """
 
     inference_window_months: int = p(
         36,
@@ -360,7 +373,10 @@ class ReconciliationParams:
 
 @dataclass(frozen=True)
 class MemoryParams:
-    """Reliability-weighting parameters (memory/cultural.py, orchestration/aggregator.py)."""
+    """Reliability-weighting parameters.
+
+    See memory/cultural.py and orchestration/aggregator.py.
+    """
 
     accuracy_shrinkage_k: float = p(
         10.0,
@@ -372,13 +388,13 @@ class MemoryParams:
 
 @dataclass(frozen=True)
 class StructuredOutputParams:
-    """Retry/back-off controls for the structured-output decoder (structured_output.py).
+    """Retry/back-off controls for the structured-output decoder.
 
-    One attempt budget replacing the three per-agent copies of ``range(3)`` +
-    ``time.sleep(2**attempt)`` this decoder consolidates (fundamental.py,
-    sentiment.py, portfolio.py) — none of those three had any basis beyond
-    "seemed reasonable" either, so the value carries forward unchanged rather
-    than being re-guessed.
+    See structured_output.py. One attempt budget replacing the three
+    per-agent copies of ``range(3)`` + ``time.sleep(2**attempt)`` this
+    decoder consolidates (fundamental.py, sentiment.py, portfolio.py) —
+    none of those three had any basis beyond "seemed reasonable" either,
+    so the value carries forward unchanged rather than being re-guessed.
     """
 
     max_attempts: int = p(
@@ -434,7 +450,8 @@ def all_params() -> list[dict[str, Any]]:
 
     Each entry: group name, field name, current value, Provenance, note.
     Used by tests/test_params.py to assert every field carries provenance
-    metadata (i.e. nobody added a bare `float = 0.5` field and skipped `p(...)`).
+    metadata (i.e. nobody added a bare `float = 0.5` field and skipped
+    `p(...)`).
     """
     return [
         {

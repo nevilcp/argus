@@ -1,8 +1,6 @@
-"""
-tests/test_api_freshness.py
+"""Route-level tests for /analyze's freshness gate.
 
-Route-level tests for /analyze's freshness gate (issue #78). The four
-freshness clauses themselves — absent/stalled/stale/malformed/naive/
+The four freshness clauses themselves — absent/stalled/stale/malformed/naive/
 one-full-interval-old — now live at the LiveSessionCache seam (see
 tests/test_live_session_cache.py) and are verified there with an explicit
 clock, no HTTP client required.
@@ -59,7 +57,7 @@ def _pipeline(monkeypatch, *, market_hours: bool, interval_minutes: int = 1):
 
 
 def test_analyze_market_closed_outranks_bar_age(client, monkeypatch):
-    """A hopelessly stale bar still surfaces as market-closed, not stale, outside session hours (issue #78)."""
+    """A hopelessly stale bar still surfaces as market-closed, not stale, outside session hours."""
     _pipeline(monkeypatch, market_hours=False)
     now = datetime.now(api_main._ET) - timedelta(days=9)
     api_main._live_cache.publish({"AAPL": {"timestamp": now.isoformat()}}, ["AAPL"], now=now)
@@ -93,7 +91,7 @@ def test_analyze_maps_each_admission_group_to_its_own_response_text(
 
 
 def test_analyze_market_closed_skips_ticker_registration(client, monkeypatch):
-    """A rejected-by-market-hours request must not mutate pipeline state (API-12)."""
+    """A rejected-by-market-hours request must not mutate pipeline state."""
     fake_pipeline = _pipeline(monkeypatch, market_hours=False)
 
     response = client.post("/analyze", json=_PAYLOAD)

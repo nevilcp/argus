@@ -1,7 +1,4 @@
-"""
-argus/agents/fundamental.py
-
-Generative fundamental analysis agent powered by Groq.
+"""Generative fundamental analysis agent powered by Groq.
 
 Responsibilities:
   - Ingest and evaluate financial ratio payloads (valuation multiples, capital efficiency, growth rates)
@@ -272,6 +269,12 @@ class FundamentalAgent:
     MarketDataProvider, applying local caches, the client's remaining-capacity
     reserve, and the shared structured-output decoder's parse/validate/retry
     (with repair).
+
+    Attributes:
+        llm_client: Injected LLM backend used to generate verdicts.
+        market_data: Injected provider used to fetch fundamentals.
+        cache: TTL-bounded cache of prior signals, keyed by
+            ``(ticker, session_seed)``.
     """
 
     def __init__(

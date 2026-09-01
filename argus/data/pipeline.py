@@ -64,7 +64,7 @@ _FETCH_PERIOD = f"{_FETCH_PERIOD_DAYS}d"
 # needs to catch the candles written since the last one — "1d" (yfinance's
 # shortest supported intraday period) comfortably covers one _FETCH_INTERVAL
 # gap, and insert_candles' INSERT OR REPLACE makes the overlap with what's
-# already buffered a no-op rather than a duplicate (MFT-15)
+# already buffered a no-op rather than a duplicate
 _STEADY_STATE_FETCH_PERIOD = "1d"
 
 # RSI/MACD/BB/ATR/ADX/VWAP/volume-ratio are computed on bars resampled to this
@@ -359,11 +359,11 @@ def _resample_ohlcv(df: pd.DataFrame, interval_minutes: int, target_minutes: int
 
 
 class MFTDataPipeline:
-    """Asynchronous mid-frequency data pipeline coordinating candlestick updates and feature extraction.
+    """Asynchronous pipeline coordinating candlestick updates and feature extraction across tickers.
 
     Runs a single asyncio loop that periodically fetches intraday candles for
     all tracked tickers, then republishes compressed session state from the
-    same pass (MFT-14) — publication used to sit on its own, much longer
+    same pass — publication used to sit on its own, much longer
     timer, so a live-cache entry was fresh for only a fraction of each cycle.
     The loop only runs during US equity market hours.
     """
@@ -397,17 +397,17 @@ class MFTDataPipeline:
         self._stop_event = asyncio.Event()
         # Held for the full body of every to_thread-run, buffer-touching worker
         # (_fetch_and_insert, compress_all) so close_buffer can wait out one that's
-        # still running after its owning task was cancelled rather than joined (MFT-16)
+        # still running after its owning task was cancelled rather than joined
         self._buffer_op_lock = threading.Lock()
         # Routed through register_tickers rather than a bare assignment, so the
         # ticker-shape and universe-cap invariants apply uniformly here, to
         # run_collection_cycle, and to collect_session.py's --universe CLI arg
-        # (API-1) — not just to /analyze's already-validated request tickers
+        # — not just to /analyze's already-validated request tickers
         self.tickers: list[str] = []
         self.last_requested_at: dict[str, datetime] = {}
         self.register_tickers(tickers)
         # The constructor's own universe is pinned against _evict_stale_tickers
-        # (API-12) — the unattended collector never calls register_tickers to
+        # — the unattended collector never calls register_tickers to
         # "touch" these, so a TTL applied uniformly would silently starve the
         # universe it exists to track
         self._pinned_tickers: frozenset[str] = frozenset(self.tickers)
@@ -424,7 +424,7 @@ class MFTDataPipeline:
 
         Args:
             on_session_ready: Async callback invoked with compressed session states
-                after each sweep during market hours (MFT-14).
+                after each sweep during market hours.
         """
         self.running = True
         logger.info("MFTDataPipeline.start: launching fetch loop")
@@ -445,7 +445,7 @@ class MFTDataPipeline:
         Safe to call while the pipeline is running. The ``_fetch_loop`` reads
         ``self.tickers`` on every iteration, so new entries are picked up within
         ``_FETCH_INTERVAL`` seconds. This is the single enforcement point for
-        ticker-shape validation and the SYSTEM.max_tracked_tickers cap (API-1):
+        ticker-shape validation and the SYSTEM.max_tracked_tickers cap:
         __init__ routes its initial universe through here too.
 
         Args:
@@ -480,7 +480,7 @@ class MFTDataPipeline:
             )
 
         # Touches every already-tracked ticker too, not just newly-accepted
-        # ones (API-12) — a repeatedly-requested ticker must never look
+        # ones — a repeatedly-requested ticker must never look
         # unused to _evict_stale_tickers just because it was already tracked
         now = datetime.now(_ET)
         for ticker in valid:
@@ -488,7 +488,7 @@ class MFTDataPipeline:
                 self.last_requested_at[ticker] = now
 
     def _evict_stale_tickers(self) -> None:
-        """Drops tracked tickers unused beyond SYSTEM.tracked_ticker_ttl_seconds (API-12).
+        """Drops tracked tickers unused beyond SYSTEM.tracked_ticker_ttl_seconds.
 
         Without this, `register_tickers` only ever appends: repeated one-off
         `/analyze` requests for different tickers permanently saturate
@@ -521,7 +521,7 @@ class MFTDataPipeline:
         logger.info("MFTDataPipeline.stop: shutdown requested")
 
     async def close_buffer(self) -> None:
-        """Closes the candle buffer, waiting out any still-running buffer worker first (MFT-16).
+        """Closes the candle buffer, waiting out any still-running buffer worker first.
 
         Cancelling the fetch/collector loops' asyncio tasks unwinds their
         coroutines but can't interrupt a `to_thread` call already executing on
@@ -580,7 +580,7 @@ class MFTDataPipeline:
     async def _fetch_loop(self, on_session_ready: Callable) -> None:
         """Periodically downloads intraday candlesticks and republishes compressed session state.
 
-        Publication is merged into this loop (MFT-14) rather than living on
+        Publication is merged into this loop rather than living on
         a separate, much longer timer: the old split meant a live-cache entry
         was only fresh for a fraction of each publish cycle, since
         ``max_bar_age_seconds`` was sized off the fetch cadence while
@@ -670,7 +670,7 @@ class MFTDataPipeline:
 
         Fetches the full `_FETCH_PERIOD` only while the ticker's buffer is
         still cold (a new ticker, or the first sweep after a restart);
-        otherwise fetches just `_STEADY_STATE_FETCH_PERIOD`'s worth (MFT-15).
+        otherwise fetches just `_STEADY_STATE_FETCH_PERIOD`'s worth.
         Re-downloading and re-upserting two full days of 1-minute candles
         every `_FETCH_INTERVAL` regardless of how warm the buffer already is
         multiplies out to ~15,600 row upserts per sweep at 20 tickers, almost
@@ -707,7 +707,7 @@ class MFTDataPipeline:
         dict" mean the same thing as "usable" to a caller that never learns
         what an indicator is.
 
-        Only iterates tickers still in `self.tickers` (API-10) — the buffer
+        Only iterates tickers still in `self.tickers` — the buffer
         can otherwise hold rows for a ticker fetched once by a past `/analyze`
         request and never tracked again. Also prunes the buffer of any such
         untracked rows (API-9's underlying leak), at this method's cadence.
@@ -804,7 +804,7 @@ class MFTDataPipeline:
         }
 
     def _is_market_hours(self) -> bool:
-        """Checks if current Eastern Time falls within regular US stock market hours (09:30 - 16:00 ET).
+        """Checks whether current Eastern Time is within regular US market hours (09:30-16:00 ET).
 
         Returns:
             True during weekday trading hours in America/New_York timezone.

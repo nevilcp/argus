@@ -1,10 +1,3 @@
-"""
-tests/test_governor.py
-
-Tests for the RateLimitGovernor: rolling-window admission, Groq header
-observation, usage recording, and reservation release.
-"""
-
 import threading
 import time
 from unittest.mock import patch
@@ -29,8 +22,10 @@ MODEL = next(iter(REGISTERED_MODELS))
 
 
 def _tokens_this_window(usage) -> int:
-    """Sums the rolling token window's entries — the window-based replacement for
-    the old tokens_this_minute scalar."""
+    """Sums the rolling token window's entries.
+
+    The window-based replacement for the old tokens_this_minute scalar.
+    """
     return sum(tok for _, tok in usage.tokens_window)
 
 
@@ -78,10 +73,10 @@ def _rate_limit_headers(
 def test_governor_admits_after_window_rolls_over(monkeypatch, governor):
     """Exceeding the rolling window's request budget sleeps, then admits once entries age out.
 
-    Regression coverage for GOV-4: a fixed-minute bucket could admit 2x budget
-    across a boundary straddle; the rolling window instead tracks each
-    admission's own timestamp; the request is only clear to retry once
-    _WINDOW_SECONDS has actually elapsed since the oldest entry.
+    A fixed-minute bucket could admit 2x budget across a boundary straddle;
+    the rolling window instead tracks each admission's own timestamp, so the
+    request is only clear to retry once _WINDOW_SECONDS has actually elapsed
+    since the oldest entry.
     """
     req_limit = BOOTSTRAP_LIMITS[MODEL]["requests_per_minute"]
 
@@ -363,7 +358,7 @@ def test_release_reservation_unregistered_model_raises(governor):
 
 
 def test_observe_headers_updates_token_axis_without_request_axis(governor):
-    """A response carrying only token-axis headers still updates that axis (GOV-6)."""
+    """A response carrying only token-axis headers still updates that axis."""
     headers = {
         "x-ratelimit-limit-tokens": "50000",
         "x-ratelimit-remaining-tokens": "40000",
@@ -380,7 +375,7 @@ def test_observe_headers_updates_token_axis_without_request_axis(governor):
 
 
 def test_observe_headers_updates_request_axis_without_token_axis(governor):
-    """A response carrying only request-axis headers still updates that axis (GOV-6)."""
+    """A response carrying only request-axis headers still updates that axis."""
     headers = {
         "x-ratelimit-limit-requests": "14400",
         "x-ratelimit-remaining-requests": "14000",
@@ -397,7 +392,7 @@ def test_observe_headers_updates_request_axis_without_token_axis(governor):
 
 
 def test_observe_headers_malformed_reset_still_applies_limit_and_remaining(governor):
-    """An unparseable reset duration still applies the separately-parsed ints (GOV-9)."""
+    """An unparseable reset duration still applies the separately-parsed ints."""
     governor.observe_headers(MODEL, _rate_limit_headers(reset_tokens="not-a-duration"))
 
     usage = governor._get_usage(MODEL)

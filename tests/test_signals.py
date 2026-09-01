@@ -1,8 +1,7 @@
 """
 tests/test_signals.py
 
-Tests for schema-level validators in argus/schemas/signals.py that aren't
-already covered end to end by the modules exercising them.
+Tests schema-level validators in signals.py not already covered elsewhere.
 """
 
 from datetime import datetime
@@ -28,7 +27,7 @@ def _position(ticker: str) -> PositionAllocation:
 def test_portfolio_allocation_rejects_a_duplicate_ticker():
     """A repeated ticker in the portfolio list is rejected.
 
-    Regression test for LD-6: node_log_decisions and risk cap enforcement key
+    Regression test: node_log_decisions and risk cap enforcement key
     positions by ticker, so a duplicate would silently overwrite one of the
     two allocations rather than raising.
     """

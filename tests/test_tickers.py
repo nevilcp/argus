@@ -1,8 +1,9 @@
 """
 tests/test_tickers.py
 
-Tests for argus/data/tickers.py's is_valid_ticker, the shared validator
-behind AnalysisRequest and MFTDataPipeline.register_tickers (PR5a, API-1).
+Tests is_valid_ticker, the shared validator behind ticker input handling.
+
+Used by both AnalysisRequest and MFTDataPipeline.register_tickers.
 """
 
 from __future__ import annotations

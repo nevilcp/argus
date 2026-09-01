@@ -12,7 +12,7 @@ matured decision's outcome is known, then compounded onto the running equity
 curve. A run with only some decisions matured is not diluted with fabricated
 zeros for the rest — it's averaged over the matured subset only. Runs are
 compounded at most once per horizon_days window, so a decision made every
-session doesn't compound the same overlapping days many times over (KS-14).
+session doesn't compound the same overlapping days many times over.
 
 Responsibilities:
   - compute_run_returns: group decisions by run (shared session_timestamp),
@@ -139,7 +139,7 @@ def compute_run_returns(
         matured decisions yet, or whose tickers all failed to fetch, is
         omitted rather than reported as a 0.0 return. Runs falling inside a
         previously kept run's horizon window are also omitted (not zeroed) so
-        overlapping runs are never compounded together (KS-14).
+        overlapping runs are never compounded together.
     """
     by_run: dict[datetime, list[ARGUSDecision]] = defaultdict(list)
     for decision in decisions:
@@ -166,17 +166,26 @@ def compute_run_returns(
 
 @dataclass
 class PaperBook:
-    """A synthetic, run-compounded equity curve fed by matured decision outcomes."""
+    """A synthetic, run-compounded equity curve fed by matured decision outcomes.
+
+    Attributes:
+        equity: Current notional equity value.
+        high_water_mark: Highest equity value observed so far.
+        last_run_timestamp: session_timestamp of the most recently applied
+            run, or None if no run has been applied yet.
+        runs_applied: ISO-formatted session_timestamps of runs already
+            compounded in, so a re-run of compute_run_returns over a growing
+            decision history doesn't double-apply one already reflected in
+            equity.
+        rebased_at: When this book was last manually rebased via rebase(),
+            if ever.
+    """
 
     equity: float
     high_water_mark: float
     last_run_timestamp: Optional[datetime] = None
     runs_applied: set[str] = field(default_factory=set)
-    """ISO-formatted session_timestamps of runs already compounded in, so a
-    re-run of compute_run_returns over a growing decision history doesn't
-    double-apply one already reflected in equity."""
     rebased_at: Optional[datetime] = None
-    """When this book was last manually rebased via reset() (KS-15), if ever."""
 
     def apply_run(self, run_timestamp: datetime, run_return: float) -> bool:
         """Compounds one run's weighted return onto the curve, unless already applied.
@@ -206,7 +215,7 @@ class PaperBook:
         return max(0.0, (self.high_water_mark - self.equity) / self.high_water_mark)
 
     def rebase(self, new_inception_value: float, rebased_at: Optional[datetime] = None) -> None:
-        """Rebases equity and high-water mark to a new inception value in place (KS-15).
+        """Rebases equity and high-water mark to a new inception value in place.
 
         Called alongside KillSwitch.reset() so an operator's manual reset is
         reflected in the persisted curve, not just the in-memory kill switch —
@@ -224,7 +233,7 @@ class PaperBook:
         self.rebased_at = rebased_at or datetime.now()  # noqa: DTZ005
 
     def prune_runs_applied(self, cutoff: datetime) -> int:
-        """Drops runs_applied entries older than cutoff, so the set doesn't grow forever (COL-1).
+        """Drops runs_applied entries older than cutoff, so the set doesn't grow forever.
 
         Safe to prune independently of equity/high_water_mark: runs_applied
         exists only to make apply_run idempotent against re-processing a run

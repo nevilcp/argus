@@ -1,7 +1,3 @@
-"""
-Tests for the Macro-Economic Agent (argus/agents/macro.py).
-"""
-
 import logging
 import tempfile
 from datetime import datetime
@@ -89,7 +85,7 @@ def test_agent_multipliers_expansion(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_vix_regime_buckets_from_level_not_percentile(monkeypatch: pytest.MonkeyPatch) -> None:
     """vix_regime is bucketed from the absolute VIX level, not its trailing percentile.
 
-    Regression test for C3: a low VIX level sitting at a high trailing percentile
+    Regression test: a low VIX level sitting at a high trailing percentile
     must still bucket LOW, and a high VIX level at a low trailing percentile must
     still bucket HIGH.
     """
@@ -260,8 +256,8 @@ def test_save_load_round_trip(tmp_path: Path) -> None:
 def test_committed_artifact_loads_and_discriminates_regimes() -> None:
     """The shipped artifact loads under the pinned libraries and discriminates regimes.
 
-    DEP-3 and DEP-4: this is the guard that would have caught a library version
-    mismatch silently degrading production to the rule-based fallback.
+    This is the guard that would have caught a library version mismatch
+    silently degrading production to the rule-based fallback.
     """
     classifier = RegimeClassifier.load(settings.ARGUS_HMM_MODEL_PATH)
 

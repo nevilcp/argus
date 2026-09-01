@@ -1,14 +1,11 @@
-"""
-tests/test_portfolio_enforcement.py
+"""Regression tests for PortfolioManagerAgent.allocate()'s in-code enforcement.
 
-Regression tests for PA-1: PortfolioManagerAgent.allocate() must enforce risk
-verdicts and caps in code, not merely display them in the prompt. Reproduces
-the audit's finding that an over-cap allocation, a VETO'd ticker, and a
-fabricated ticker all validated cleanly.
-
-Also covers PA-6: when the structured-output decoder exhausts its retries,
-allocate() must say which stage was failing (JSON parse or schema validation),
-not a single generic message regardless of cause.
+Risk verdicts and per-position caps must be enforced in code, not merely
+displayed in the prompt — the audit found an over-cap allocation, a VETO'd
+ticker, and a fabricated ticker all validated cleanly. Also, when the
+structured-output decoder exhausts its retries, allocate() must say which
+stage failed (JSON parse or schema validation), not a single generic message
+regardless of cause.
 """
 
 import json
@@ -86,6 +83,7 @@ def _position(
 
 
 def _llm_response(portfolio: list[dict]) -> FixtureLLMClient:
+    """Wraps `portfolio` positions in a full allocator response body, keyed "only"."""
     body = {
         "portfolio": portfolio,
         "cash_reserve_pct": 0.5,
@@ -96,11 +94,12 @@ def _llm_response(portfolio: list[dict]) -> FixtureLLMClient:
 
 
 def test_allocate_reraises_on_governor_exhaustion_without_retrying():
-    """A RateLimitExceeded from the LLM client propagates immediately, unlike fundamental/sentiment.
+    """A RateLimitExceeded from the LLM client propagates immediately.
 
-    There is no per-ticker fallback for a whole-portfolio call: a session either
-    produces the entire allocation or none of it, so the caller needs the
-    rate-limit signal itself rather than a swallowed None.
+    Unlike fundamental/sentiment, there is no per-ticker fallback for a
+    whole-portfolio call: a session either produces the entire allocation or
+    none of it, so the caller needs the rate-limit signal itself rather than
+    a swallowed None.
     """
 
     class _RateLimitedLLMClient:
@@ -121,7 +120,7 @@ def test_allocate_reraises_on_governor_exhaustion_without_retrying():
 
 
 def test_allocate_does_not_repair_a_bad_response(monkeypatch):
-    """Repair stays disabled: an invalid response is not re-prompted with the failure appended."""
+    """Repair stays disabled: an invalid response isn't re-prompted with its failure."""
     monkeypatch.setattr("argus.structured_output.time.sleep", lambda *_: None)
     llm_client = _CapturingLLMClient({"cash_reserve_pct": 0.5})
 
@@ -175,7 +174,7 @@ def test_allocate_enforces_caps_vetoes_and_fabrications_in_code():
 
 
 def test_allocate_names_the_json_parse_stage_on_exhausted_retries(monkeypatch):
-    """A response that never parses as JSON is reported as a json_parse failure, not generic."""
+    """A response that never parses as JSON is reported as json_parse, not generic."""
     monkeypatch.setattr("argus.structured_output.time.sleep", lambda *_: None)
     llm_client = FixtureLLMClient({"only": "not valid json"}, key_fn=lambda _prompt: "only")
 
@@ -193,7 +192,10 @@ def test_allocate_names_the_json_parse_stage_on_exhausted_retries(monkeypatch):
 
 
 def test_allocate_names_the_schema_validation_stage_on_exhausted_retries(monkeypatch):
-    """Valid JSON failing the proposal schema is reported as schema_validation, not json_parse."""
+    """Valid JSON failing the proposal schema is reported as schema_validation.
+
+    Not as json_parse, which the prior test covers.
+    """
     monkeypatch.setattr("argus.structured_output.time.sleep", lambda *_: None)
     # Missing the required "rebalance_trigger" field -> model_validate raises, json.loads does not
     llm_client = FixtureLLMClient(
@@ -214,9 +216,10 @@ def test_allocate_names_the_schema_validation_stage_on_exhausted_retries(monkeyp
 
 
 def test_allocation_pct_cap_matches_system_max_single_position_pct():
-    """PA-6 regression: PositionAllocation.allocation_pct's upper bound must track
-    SYSTEM.max_single_position_pct rather than duplicate it as a bare literal that a
-    param change would silently stop enforcing.
+    """Regression: allocation_pct's cap must track SYSTEM.max_single_position_pct.
+
+    Rather than duplicate it as a bare literal that a param change would
+    silently stop enforcing.
     """
     le_constraint = next(
         m for m in PositionAllocation.model_fields["allocation_pct"].metadata if hasattr(m, "le")
@@ -225,18 +228,22 @@ def test_allocation_pct_cap_matches_system_max_single_position_pct():
 
 
 def test_portfolio_allocation_has_no_expected_sharpe_field():
-    """PA-5 regression: expected_sharpe used to pass through from the LLM's raw JSON with no
-    enforcement, unlike every other numeric field on this schema. Dropped rather than left
-    unenforced — no agent in the system produces a genuine expected-return estimate to
-    compute a real Sharpe figure from.
+    """Regression: expected_sharpe is dropped rather than left unenforced.
+
+    It used to pass through from the LLM's raw JSON with no validation,
+    unlike every other numeric field on this schema. No agent in the system
+    produces a genuine expected-return estimate to compute a real Sharpe
+    figure from, so the field is dropped instead.
     """
     assert "expected_sharpe" not in PortfolioAllocation.model_fields
 
 
 def test_allocate_clamps_cash_reserve_to_schema_floor_at_high_deployment():
-    """PA-4 regression: cash_reserve_pct must clamp to PORTFOLIO.cash_reserve_floor_pct rather
-    than leave a residual just under the schema's floor, which used to fail model_validate
-    (and surface as a 500) on a near-fully-deployed session.
+    """Regression: cash_reserve_pct must clamp to the schema's floor.
+
+    Rather than leave a residual just under PORTFOLIO.cash_reserve_floor_pct,
+    which used to fail model_validate (and surface as a 500) on a
+    near-fully-deployed session.
     """
     caps = {f"T{i}": 0.15 for i in range(6)}
     caps["T6"] = 0.051
@@ -259,9 +266,11 @@ def test_allocate_clamps_cash_reserve_to_schema_floor_at_high_deployment():
 
 
 def test_allocate_states_achievable_deployment_ceiling_not_raw_invest_pct():
-    """PA-4 regression: the prompt must state the achievable deployment ceiling
-    (min(invest_pct, sum of approved Caps)), not raw invest_pct, so ALLOCATION RULE 3's
-    target is reachable for a small approved universe under per-position caps.
+    """Regression: the prompt must state the achievable deployment ceiling.
+
+    min(invest_pct, sum of approved caps), not raw invest_pct, so ALLOCATION
+    RULE 3's target is reachable for a small approved universe under
+    per-position caps.
     """
     llm_client = _CapturingLLMClient(
         {"portfolio": [], "cash_reserve_pct": 1.0, "rebalance_trigger": "MONTHLY"}

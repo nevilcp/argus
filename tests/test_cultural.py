@@ -1,10 +1,9 @@
-"""
-tests/test_cultural.py
+"""Tests for CulturalMemoryManager.
 
-Unit tests for CulturalMemoryManager. Builds the manager via object.__new__ plus a
-stub .collection rather than the real constructor, which pulls in chromadb +
-sentence-transformers (the optional [models] extra) just to exercise arithmetic
-and query-shaping over already-stored metadata.
+Builds the manager via object.__new__ plus a stub .collection rather than
+the real constructor, which pulls in chromadb and sentence-transformers
+(the optional [models] extra) just to exercise arithmetic and query-shaping
+over already-stored metadata.
 """
 
 from datetime import datetime
@@ -112,8 +111,9 @@ def test_large_sample_converges_to_the_raw_win_rate():
 def test_flat_outcomes_count_as_non_wins_in_the_denominator():
     """A FLAT-tagged trade lowers accuracy, not vanishes from the sample.
 
-    Regression test for C7: get_agent_accuracy's win rate must be P(win | stored),
-    not P(win | |return| > 1%) — a FLAT trade must inflate n without inflating wins.
+    get_agent_accuracy's win rate must be P(win | stored), not
+    P(win | |return| > 1%) — a FLAT trade must inflate n without inflating
+    wins.
     """
     metadatas = [
         {"outcome": "SUCCESSFUL", "primary_driver": "technical"},
@@ -147,10 +147,7 @@ def test_get_agent_accuracy_as_of_filters_on_timestamp():
 
 
 def test_store_trade_outcome_persists_flat_returns_instead_of_dropping_them():
-    """A |return| <= 1% trade is stored as FLAT, not silently discarded.
-
-    Regression test for C7.
-    """
+    """A |return| <= 1% trade is stored as FLAT, not silently discarded."""
     manager = _manager_with_metadatas([])
     decision = ARGUSDecision(ticker="AAPL", session_timestamp=datetime.now())
 
@@ -170,9 +167,9 @@ def test_store_trade_outcome_persists_flat_returns_instead_of_dropping_them():
 def test_store_trade_outcome_writes_vix_regime_value_not_enum_repr():
     """The stored document text uses VixRegime's .value, not its str(Enum) repr.
 
-    Regression test for C6: Python >= 3.11 includes the class name in a
-    str-Enum's default __format__, so an f-string without .value would write
-    "VixRegime.HIGH" into the document instead of "HIGH".
+    Python >= 3.11 includes the class name in a str-Enum's default
+    __format__, so an f-string without .value would write "VixRegime.HIGH"
+    into the document instead of "HIGH".
     """
     manager = _manager_with_metadatas([])
     decision = ARGUSDecision(
@@ -197,9 +194,9 @@ def test_store_trade_outcome_writes_vix_regime_value_not_enum_repr():
 def test_store_trade_outcome_deletes_the_settled_pending_snapshot():
     """Storing a trade outcome removes the snapshot_{id} row it settles.
 
-    Regression test for LD-5: leaving the PENDING snapshot in place after the
-    trade settles double-counts the decision in summary_stats via the
-    snapshot's zero return_pct.
+    Leaving the PENDING snapshot in place after the trade settles would
+    double-count the decision in summary_stats via the snapshot's zero
+    return_pct.
     """
     manager = _manager_with_metadatas([])
     decision = ARGUSDecision(ticker="AAPL", session_timestamp=datetime.now())
@@ -218,9 +215,8 @@ def test_store_trade_outcome_deletes_the_settled_pending_snapshot():
 def test_already_reconciled_returns_ids_with_a_stored_trade_row():
     """Only decision_ids with a trade_{id} row come back, stripped of the prefix.
 
-    Regression test for X-6: reconcile_decisions() calls this once per batch,
-    before touching market data, to skip decisions already reconciled on a
-    prior run.
+    reconcile_decisions() calls this once per batch, before touching market
+    data, to skip decisions already reconciled on a prior run.
     """
     manager = _manager_with_metadatas([])
     manager.collection.get.return_value = {"ids": ["trade_abc", "trade_def"]}
@@ -242,9 +238,8 @@ def test_already_reconciled_empty_input_skips_the_query():
 def test_summary_stats_averages_return_over_settled_rows_only():
     """avg_return_pct excludes PENDING rows from both the numerator and denominator.
 
-    Regression test for MEM-2: PENDING snapshots carry no return_pct, so
-    dividing by total_stored (which includes them) structurally biases the
-    average toward 0.0.
+    PENDING snapshots carry no return_pct, so dividing by total_stored
+    (which includes them) would structurally bias the average toward 0.0.
     """
     manager = _manager_with_metadatas(
         [
@@ -279,7 +274,7 @@ def test_summary_stats_all_pending_reports_zero_average_without_dividing_by_zero
 
 
 def test_expire_pending_snapshots_deletes_only_entries_before_cutoff():
-    """MEM-3: a snapshot older than cutoff is deleted; one at or after it survives."""
+    """A snapshot older than cutoff is deleted; one at or after it survives."""
     manager = _manager_with_pending(
         ids=["snapshot_old", "snapshot_new"],
         timestamps=["2026-01-01T00:00:00", "2026-01-20T00:00:00"],
@@ -321,9 +316,9 @@ def test_store_decision_snapshot_returns_true_on_success():
 def test_store_decision_snapshot_returns_false_on_failure():
     """A failed upsert reports failure instead of silently swallowing it.
 
-    Regression test for LD-3: store_decision_snapshot previously returned None
-    unconditionally, so node_log_decisions logged every built decision as
-    "logged to cultural memory" even when the write itself failed.
+    Without this, store_decision_snapshot would return None unconditionally,
+    so node_log_decisions would log every built decision as "logged to
+    cultural memory" even when the write itself failed.
     """
     manager = _manager_with_metadatas([])
     manager.collection.upsert.side_effect = RuntimeError("chroma write failed")
@@ -335,8 +330,8 @@ def test_store_decision_snapshot_returns_false_on_failure():
 def test_retrieve_wisdom_and_retrieve_warnings_apply_a_symmetric_regime_filter():
     """retrieve_wisdom filters on regime exactly like retrieve_warnings does.
 
-    Regression test for C5: successes shouldn't be drawn from every regime while
-    failures are confined to the current one.
+    Successes shouldn't be drawn from every regime while failures are
+    confined to the current one.
     """
     macro = _macro(regime=Regime.CONTRACTION)
 
@@ -371,8 +366,8 @@ def test_retrieve_wisdom_as_of_filters_on_timestamp():
 def test_get_cultural_memory_ignores_a_later_persist_dir_and_warns(monkeypatch, caplog, tmp_path):
     """A later persist_dir cannot reconfigure the already-constructed singleton.
 
-    Regression test for C8: the second call now logs a warning instead of
-    silently ignoring the new directory.
+    The second call logs a warning instead of silently ignoring the new
+    directory.
     """
     fake_manager = mock.Mock(persist_dir=str(tmp_path / "first"))
     monkeypatch.setattr(cultural_module, "_cultural_memory", fake_manager)
