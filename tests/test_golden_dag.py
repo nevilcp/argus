@@ -1,10 +1,8 @@
-"""
-tests/test_golden_dag.py
+"""Runs the complete ARGUS LangGraph DAG (build_graph()).
 
-Runs the complete ARGUS LangGraph DAG (build_graph()) with every network and
-LLM boundary served from tests/fixtures/ — zero network calls, zero LLM API
-calls, zero torch/transformers import — and asserts the output is stable
-across repeated runs.
+Every network and LLM boundary is served from tests/fixtures/ — zero
+network calls, zero LLM API calls, zero torch/transformers import — and
+the output must be stable across repeated runs.
 
 Cultural memory is mocked, not fixture-backed: it isn't part of the
 MarketDataProvider/LLMClient seam (it's inherently stateful, not a
@@ -113,7 +111,7 @@ def _build_fixture_graph(
     """Compiles the DAG with every seam fixture-backed.
 
     Args:
-        tmp_path: Per-test checkpoint directory (X-5) — keeps this run's
+        tmp_path: Per-test checkpoint directory — keeps this run's
             checkpoints out of the real argus_graph.db, not just the fixture
             autouse `_isolated_data_dir` build_graph()'s default would also
             resolve against.
@@ -173,10 +171,10 @@ class _NoneMacroMarketData(FixtureMarketDataProvider):
 def test_macro_context_none_still_produces_a_degraded_allocation(tmp_path):
     """A None macro_context must not gate the three specialists or the allocator.
 
-    Regression test for X1: no specialist agent consumes MacroContext, so a FRED
-    outage must not zero out a session that needs no FRED data. The three
-    specialists, aggregation, risk evaluation, and portfolio allocation must all
-    still run, degraded rather than empty, with the gap named in errors.
+    No specialist agent consumes MacroContext, so a FRED outage must not
+    zero out a session that needs no FRED data. The three specialists,
+    aggregation, risk evaluation, and portfolio allocation must all still
+    run, degraded rather than empty, with the gap named in errors.
     """
     final_state = _invoke(_build_fixture_graph(tmp_path, market_data=_NoneMacroMarketData()))
 
@@ -197,10 +195,11 @@ def test_macro_context_none_still_produces_a_degraded_allocation(tmp_path):
 class _SpyCountingMarketData(FixtureMarketDataProvider):
     """Wraps the fixture provider to count ``ohlcv_daily`` calls and fabricate a SPY series.
 
-    The shared price_history fixture predates RE-5 and has no "SPY" entry, and adding
-    one there would perturb every other golden_dag test's carefully-tuned VETO/REDUCE
-    expectations (real beta feeding risk.py's beta gate). Fabricating it only here keeps
-    this test's SPY data isolated from the rest of the fixture-backed suite.
+    The shared price_history fixture has no "SPY" entry, and adding one
+    there would perturb every other golden_dag test's carefully-tuned
+    VETO/REDUCE expectations (real beta feeding risk.py's beta gate).
+    Fabricating it only here keeps this test's SPY data isolated from the
+    rest of the fixture-backed suite.
     """
 
     def __init__(self) -> None:
@@ -226,12 +225,13 @@ class _SpyCountingMarketData(FixtureMarketDataProvider):
 
 
 def test_spy_fetched_once_per_graph_run_not_once_per_risk_call(tmp_path):
-    """RE-5 regression: SPY rides along with node_fetch_price_history's universe fetch.
+    """SPY rides along with node_fetch_price_history's universe fetch.
 
-    Before the fix, node_fetch_price_history never carried SPY in price_history, so
-    risk.py's ols_portfolio_beta fell back to its own live fetch on every one of the
-    N+1 risk_engine.evaluate() calls a session makes (one portfolio-level plus one per
-    ticker) — 7 fetches for this 6-ticker universe instead of 1.
+    Without this, node_fetch_price_history never carries SPY in
+    price_history, so risk.py's ols_portfolio_beta falls back to its own
+    live fetch on every one of the N+1 risk_engine.evaluate() calls a
+    session makes (one portfolio-level plus one per ticker) — 7 fetches for
+    this 6-ticker universe instead of 1.
     """
     provider = _SpyCountingMarketData()
     _invoke(_build_fixture_graph(tmp_path, market_data=provider))
@@ -253,12 +253,12 @@ class _CountingVixMarketData(_NoneMacroMarketData):
 
 
 def test_macro_context_none_still_reaches_a_real_vix_reading(tmp_path):
-    """RE-6 regression: a FRED outage must not silently default the blackout gate to 20.0.
+    """A FRED outage must not silently default the blackout gate to 20.0.
 
-    _NoneMacroMarketData forces macro_bundle() (hence macro_context) to None but leaves
-    vix() — read straight from yfinance in production, independent of FRED — intact, so
-    the risk engine's blackout gate should reach a real VIX reading via one explicit call
-    rather than defaulting.
+    _NoneMacroMarketData forces macro_bundle() (hence macro_context) to None
+    but leaves vix() — read straight from yfinance in production, independent
+    of FRED — intact, so the risk engine's blackout gate should reach a real
+    VIX reading via one explicit call rather than defaulting.
     """
     provider = _CountingVixMarketData()
     final_state = _invoke(_build_fixture_graph(tmp_path, market_data=provider))
@@ -280,8 +280,8 @@ def test_golden_dag_runs_offline_and_produces_a_valid_allocation(tmp_path):
     assert all(agg.model_healthy is True for agg in final_state["aggregated_signals"].values())
 
     # The fixture LLM response proposes allocations for three VETO'd tickers;
-    # code-level enforcement (PR 4, PA-1) zeroes them rather than trusting the
-    # prompt, and records each correction here instead of leaving errors empty.
+    # code-level enforcement zeroes them rather than trusting the prompt, and
+    # records each correction here instead of leaving errors empty.
     errors = final_state.get("errors")
     assert errors is not None and len(errors) == 3
     for ticker in ("MSFT", "JPM", "GOOGL"):
@@ -346,9 +346,10 @@ def test_missing_indicator_still_reaches_aggregation_with_evidence_surfaced(tmp_
 def test_cultural_memory_import_error_degrades_instead_of_crashing_the_run(tmp_path):
     """A missing sentence-transformers/torch [models] extra must not abort the session.
 
-    Regression test for C1: get_cultural_memory() raising ImportError must degrade
-    retrieve_cultural_memory to an empty result and signal_aggregation's reliability
-    lookup to the 0.5 prior, rather than crashing the whole graph run.
+    get_cultural_memory() raising ImportError must degrade
+    retrieve_cultural_memory to an empty result and signal_aggregation's
+    reliability lookup to the 0.5 prior, rather than crashing the whole
+    graph run.
     """
     graph = _build_fixture_graph(tmp_path)
     config = {"configurable": {"thread_id": str(uuid4())}}
@@ -361,7 +362,7 @@ def test_cultural_memory_import_error_degrades_instead_of_crashing_the_run(tmp_p
     assert final_state.get("portfolio_allocation") is not None
     assert len(final_state["portfolio_allocation"].portfolio) == len(UNIVERSE)
 
-    # SA-5: reliability fell back to the 0.5 prior because cultural memory was
+    # Reliability fell back to the 0.5 prior because cultural memory was
     # unavailable, not because no outcome history exists yet — model_healthy
     # must say so rather than carrying full multiplier authority silently.
     aggs = final_state.get("aggregated_signals") or {}

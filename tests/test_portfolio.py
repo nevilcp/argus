@@ -1,7 +1,3 @@
-"""
-Tests for the Portfolio Manager Agent and its pure-Python helpers.
-"""
-
 from datetime import datetime
 
 import pytest
@@ -41,7 +37,7 @@ def test_half_kelly_weight_moderate():
 class MockSignal:
     """Minimal stand-in for a per-agent Signal result.
 
-    Args:
+    Attributes:
         signal: Signal direction.
         conviction: Confidence score for the signal.
         agents_present: Specialists that contributed, for an aggregated signal.
@@ -76,7 +72,10 @@ def _risk(
 
 
 def test_build_signal_table():
-    """Vetoed positions are excluded from the table; others render with their approved weight."""
+    """Vetoed positions are excluded from the table.
+
+    Others render with their approved weight.
+    """
     macro = MacroContext(
         fed_funds=5.25,
         cpi_yoy=3.2,

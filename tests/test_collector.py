@@ -1,14 +1,11 @@
-"""
-tests/test_collector.py
+"""Tests for collector.py's `analyze_lock` parameter.
 
-Tests for argus/orchestration/collector.py's `analyze_lock` parameter (PR5b,
-API-3): the unattended collector shares /analyze's concurrency slot rather
-than invoking the graph alongside a live /analyze run, and skips rather than
+The unattended collector shares /analyze's concurrency slot rather than
+invoking the graph alongside a live /analyze run, and skips rather than
 waits when the slot is already held.
 
-Not responsible for:
-  - The kill-switch gate (KS-2), covered in tests/test_kill_switch.py's
-    "Collector gate" section
+The kill-switch gate is not covered here; see tests/test_kill_switch.py's
+"Collector gate" section for that.
 """
 
 from __future__ import annotations
