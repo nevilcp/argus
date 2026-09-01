@@ -1,12 +1,12 @@
 """
 argus/seams.py
 
-Dependency-injection seam between agent logic and two external boundaries:
-network market-data fetches (argus/data/fetchers.py) and Groq LLM calls
-(inline `ChatGroq` construction previously duplicated in fundamental.py,
-sentiment.py, and portfolio.py).
+Dependency-injection seam between agent logic and two external boundaries.
 
-Each boundary gets one Protocol and two implementations:
+The two boundaries are network market-data fetches (argus/data/fetchers.py)
+and Groq LLM calls (inline `ChatGroq` construction previously duplicated in
+fundamental.py, sentiment.py, and portfolio.py). Each gets one Protocol and
+two implementations:
   - `MarketDataProvider` / `LiveMarketDataProvider` (delegates to
     argus/data/fetchers.py, unchanged behavior) / `FixtureMarketDataProvider`
     (serves pre-captured JSON from tests/fixtures/market_data/).
@@ -211,7 +211,7 @@ class LLMClient(Protocol):
 
 
 class RetryableTransportError(Exception):
-    """Signals that an LLMClient.complete() attempt failed transiently and is worth retrying.
+    """An LLMClient.complete() attempt failed transiently and is worth retrying.
 
     Raised by an LLMClient implementation, not by callers. A caller with its
     own attempt budget (argus/structured_output.py's decode()) catches this
@@ -219,7 +219,7 @@ class RetryableTransportError(Exception):
     exceptions are retryable — that classification stays with the adapter
     that raises this.
 
-    Args:
+    Attributes:
         cause: The underlying transport exception.
         retry_after: Seconds the provider explicitly said to wait before
             retrying (e.g. a 429's Retry-After header), or None if the
@@ -228,7 +228,13 @@ class RetryableTransportError(Exception):
     """
 
     def __init__(self, cause: Exception, retry_after: Optional[float] = None) -> None:
-        """Wraps the underlying transport exception with an optional retry hint."""
+        """Wraps the underlying transport exception with an optional retry hint.
+
+        Args:
+            cause: The underlying transport exception.
+            retry_after: Seconds the provider explicitly said to wait before
+                retrying, or None if the provider gave no hint.
+        """
         self.cause = cause
         self.retry_after = retry_after
         super().__init__(str(cause))

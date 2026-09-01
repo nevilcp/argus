@@ -1,9 +1,9 @@
-"""
-Tests for argus/schemas/prompting.py's field_list() and schema_block() — the
-two render functions that turn a Pydantic model's PromptText markers into the
-literal text an LLM prompt shows. No agent is migrated onto this module yet
-(issue #76 is expand-only), so these tests exercise it directly against
-throwaway models built for each case.
+"""Tests for schemas/prompting.py's field_list() and schema_block().
+
+These are the two render functions that turn a Pydantic model's PromptText
+markers into the literal text an LLM prompt shows. No agent is migrated onto
+this module yet, so these tests exercise it directly against throwaway
+models built for each case.
 """
 
 from typing import Annotated
@@ -90,7 +90,7 @@ def test_schema_block_wraps_list_of_nested_model_in_brackets():
 
 
 def test_schema_block_raises_on_scalar_field_with_no_marker():
-    """A scalar field with no PromptText marker fails loudly rather than rendering blank."""
+    """A scalar field with no PromptText marker fails loudly, not blank."""
     with pytest.raises(TypeError):
         schema_block(_MissingMarker)
 

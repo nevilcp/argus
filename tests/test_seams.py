@@ -1,9 +1,9 @@
-"""
-Tests exercising argus/seams.py's fixture-backed implementations against the
-real agent classes — the point of the injection seam is that
-FundamentalAgent/SentimentAgent produce a real, schema-valid signal from
-fixture data with zero network or LLM calls. If these fixtures ever go
-stale or the seam breaks, these tests fail; nothing here is decorative.
+"""Exercises argus/seams.py's fixture-backed implementations against real agents.
+
+The point of the injection seam is that FundamentalAgent/SentimentAgent
+produce a real, schema-valid signal from fixture data with zero network or
+LLM calls. If these fixtures ever go stale or the seam breaks, these tests
+fail; nothing here is decorative.
 """
 
 import json
@@ -144,8 +144,10 @@ def _fake_success_response(prompt_tokens: int = 10, completion_tokens: int = 5):
     """Minimal stand-in for a ChatGroq.invoke() return value.
 
     Args:
-        prompt_tokens: Value reported under response_metadata["token_usage"].
-        completion_tokens: Value reported under response_metadata["token_usage"].
+        prompt_tokens: Prompt token count reported under
+            response_metadata["token_usage"]["prompt_tokens"].
+        completion_tokens: Completion token count reported under
+            response_metadata["token_usage"]["completion_tokens"].
 
     Returns:
         A Mock exposing the ``content``/``response_metadata`` attributes complete() reads.
@@ -224,7 +226,7 @@ def test_groq_llm_client_terminal_error_raises_without_retry():
 
 
 def test_groq_llm_client_releases_reservation_on_terminal_error():
-    """A terminal error releases the pre-flight reservation instead of leaking it (GOV-1)."""
+    """A terminal error releases the pre-flight reservation instead of leaking it."""
     client = _client_with_mocked_llm()
     client._llm.invoke.side_effect = _synthetic_auth_error()
 
@@ -237,7 +239,7 @@ def test_groq_llm_client_releases_reservation_on_terminal_error():
 
 
 def test_groq_llm_client_releases_reservation_on_retryable_error():
-    """A retryable error also releases the reservation instead of leaking it (GOV-1)."""
+    """A retryable error also releases the reservation instead of leaking it."""
     client = _client_with_mocked_llm()
     client._llm.invoke.side_effect = _synthetic_connection_error()
 

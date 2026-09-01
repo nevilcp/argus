@@ -1,9 +1,7 @@
-"""
-tests/test_api_kill_switch.py
+"""Tests for the kill-switch-facing surface on api/main.py.
 
-Tests for the kill-switch-facing surface added to api/main.py in PR2: the
-ARGUS_API_KEY auth dependency (KS-9), GET /kill-switch/status (KS-8), and
-POST /kill-switch/reset's input validation (KS-9).
+Covers the ARGUS_API_KEY auth dependency, GET /kill-switch/status, and
+POST /kill-switch/reset's input validation.
 
 These exercise the route functions directly via FastAPI's TestClient rather
 than going through the app's lifespan, so no MFT pipeline, collector, or
@@ -79,9 +77,11 @@ def test_kill_switch_reset_accepts_matching_api_key(client, monkeypatch):
 
 
 def test_kill_switch_reset_rebases_the_persisted_paper_book(client, monkeypatch, tmp_path):
-    """KS-15: reset rebases paper_equity.json, not just the in-memory kill switch —
-    otherwise the next reconcile pass would feed the stale, drawn-down equity back in
-    and re-halt within check_interval_seconds."""
+    """Reset rebases paper_equity.json, not just the in-memory kill switch.
+
+    Otherwise the next reconcile pass would feed the stale, drawn-down equity
+    back in and re-halt within check_interval_seconds.
+    """
     monkeypatch.setattr(api_main.settings, "ARGUS_API_KEY", "")
     kill_switch_module._kill_switch = KillSwitch("MODERATE")
     book_path = tmp_path / "paper_equity.json"  # ARGUS_DATA_DIR is this tmp_path (conftest)
@@ -98,7 +98,7 @@ def test_kill_switch_reset_rebases_the_persisted_paper_book(client, monkeypatch,
 
 
 def test_kill_switch_reset_rejects_value_at_or_below_floor(client, monkeypatch):
-    """KS-9: new_inception_value must exceed 1000, matching AnalysisRequest.total_wealth."""
+    """new_inception_value must exceed 1000, matching AnalysisRequest.total_wealth."""
     monkeypatch.setattr(api_main.settings, "ARGUS_API_KEY", "")
     kill_switch_module._kill_switch = KillSwitch("MODERATE")
     response = client.post("/kill-switch/reset", params={"new_inception_value": 500})
@@ -112,7 +112,7 @@ def test_kill_switch_status_404_when_uninitialized(client):
 
 
 def test_kill_switch_status_reports_gate_state(client):
-    """GET /kill-switch/status surfaces the halt state and last-observed VIX (KS-8)."""
+    """GET /kill-switch/status surfaces the halt state and last-observed VIX."""
     ks = KillSwitch("MODERATE")
     ks._portfolio_inception_value = 100_000.0
     ks._current_portfolio_value = 100_000.0

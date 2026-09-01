@@ -1,7 +1,3 @@
-"""
-Tests for the Fundamental Agent and its pure-Python helpers.
-"""
-
 import json
 from datetime import datetime
 
@@ -106,7 +102,10 @@ def test_session_seed_to_date_parses_yyyymmdd_stamp():
 
 
 def test_analyze_overwrites_llm_echoed_ratios_with_measured_data():
-    """Every measured ratio in the persisted signal comes from the fetched payload, never the LLM's echo."""
+    """Every measured ratio in the persisted signal comes from the fetched payload.
+
+    None of it comes from the LLM's echo of those same values.
+    """
     measured = {
         "pe_ttm": 31.5,
         "revenue_growth_yoy": 0.02,
@@ -150,7 +149,10 @@ def test_analyze_overwrites_llm_echoed_ratios_with_measured_data():
 
 
 def test_analyze_anonymizes_and_derives_as_of_date_from_session_seed():
-    """A seeded backtest call anonymizes the ticker and stamps data_as_of_date from session_seed, not today."""
+    """A seeded backtest call anonymizes the ticker and stamps data_as_of_date from session_seed.
+
+    Not from today's date.
+    """
     market_data = _StubMarketData(_MINIMAL_FUNDAMENTALS)
     llm = _RecordingLLMClient(_VALID_LLM_RESPONSE)
     agent = FundamentalAgent(llm_client=llm, market_data=market_data)
@@ -207,7 +209,10 @@ def test_analyze_degrades_the_ticker_on_governor_exhaustion_without_retrying():
 
 
 def test_analyze_degrades_the_ticker_when_measured_data_fails_signal_validation():
-    """A schema violation in the merged-in measured data (not the verdict) must not crash the batch."""
+    """A schema violation in the merged-in measured data must not crash the batch.
+
+    The violation is in the measured data, not the LLM's verdict.
+    """
     market_data = _StubMarketData(
         {**_MINIMAL_FUNDAMENTALS, "debt_to_equity": -1.5}  # FundamentalSignal requires ge=0.0
     )
@@ -223,9 +228,10 @@ def test_analyze_degrades_the_ticker_when_measured_data_fails_signal_validation(
 
 
 def test_analyze_does_not_skip_every_ticker_at_a_low_configured_rpm(monkeypatch):
-    """A low ARGUS_GROQ_RPM must not make the pre-flight capacity reserve exceed
-    the budget itself (GOV-13) — a client reporting that full budget as remaining
-    capacity should still admit the call.
+    """A low ARGUS_GROQ_RPM must not make the pre-flight capacity reserve exceed the budget.
+
+    A client reporting that full budget as remaining capacity should still
+    admit the call.
     """
     monkeypatch.setattr(fundamental_module.settings, "ARGUS_GROQ_RPM", 10)
 

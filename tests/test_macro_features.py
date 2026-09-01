@@ -1,7 +1,3 @@
-"""
-Tests for shared macro feature construction (argus/data/macro_features.py).
-"""
-
 import numpy as np
 import pandas as pd
 import pytest

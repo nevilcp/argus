@@ -1,6 +1,6 @@
-"""
-Tests for argus/backtesting/replay.py, which replaces the deleted walk-forward engine.
-See argus/backtesting/replay.py's docstring for what a "session" is.
+"""Tests for argus/backtesting/replay.py, the walk-forward engine's replacement.
+
+See argus/backtesting/replay.py's own docstring for what a "session" is.
 """
 
 import json
@@ -41,7 +41,7 @@ def test_replay_sessions_preserves_order():
 
 
 def test_replay_session_never_touches_the_production_checkpoint_db(tmp_path, monkeypatch):
-    """Regression test for X4: replay must checkpoint into a temp db, never argus_graph.db.
+    """Regression: replay must checkpoint into a temp db, never argus_graph.db.
 
     build_graph()'s checkpoint_db_path defaults to the production store; replay
     previously omitted the argument, so replayed sessions (with their rebased,
@@ -56,9 +56,9 @@ def test_replay_session_never_touches_the_production_checkpoint_db(tmp_path, mon
 
 
 def test_replay_session_stamps_decisions_with_the_fixture_capture_date():
-    """Every replayed decision's session_timestamp is the fixture's own capture date.
+    """Every decision's session_timestamp is the fixture's own capture date.
 
-    Regression test for LD-2: node_log_decisions previously stamped
+    Regression test: node_log_decisions previously stamped
     datetime.now() regardless of as_of, so a closed_loop=True replay wrote
     wall-clock dates straight into the real ./chroma_db via
     store_decision_snapshot before any post-hoc rebase could run. as_of is
@@ -77,9 +77,8 @@ def test_replay_session_stamps_decisions_with_the_fixture_capture_date():
 def test_replay_session_closed_loop_scopes_cultural_memory_to_the_session_date():
     """closed_loop=True must pass the fixture's own capture date as `as_of`.
 
-    Regression test for the PR 7 plan's closed-loop item: without it, replayed
-    sessions could read outcomes that, relative to the fixture's point in time,
-    haven't happened yet.
+    Regression test: without it, replayed sessions could read outcomes that,
+    relative to the fixture's point in time, haven't happened yet.
     """
     mock_memory = mock.Mock(
         retrieve_wisdom=mock.Mock(return_value=[]),
@@ -98,9 +97,12 @@ def test_replay_session_closed_loop_scopes_cultural_memory_to_the_session_date()
 
 
 def test_normalize_as_of_strips_tzinfo_from_an_aware_timestamp():
-    """An aware fixture timestamp (as a canonical-timestamp buffer would now produce) is
-    converted to ET wall-clock and returned naive, so it can't mix with a naive
-    datetime.now() fallback in node_log_decisions and break compute_run_returns' sort.
+    """An aware timestamp normalizes to naive ET wall-clock time.
+
+    A canonical-timestamp buffer could now produce an aware fixture timestamp;
+    this converts it to ET wall-clock and returns it naive, so it can't mix
+    with a naive datetime.now() fallback in node_log_decisions and break
+    compute_run_returns' sort.
     """
     aware_utc = datetime(2024, 1, 2, 14, 30, tzinfo=ZoneInfo("UTC"))
 

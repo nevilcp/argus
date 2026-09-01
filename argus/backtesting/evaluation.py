@@ -68,7 +68,16 @@ def signed_conviction(decision: ARGUSDecision) -> Optional[float]:
 
 @dataclass(frozen=True)
 class PairedOutcome:
-    """One decision's signed conviction paired with its realized forward return."""
+    """One decision's signed conviction paired with its realized forward return.
+
+    Attributes:
+        ticker: Equity ticker symbol.
+        signed_conviction: Conviction magnitude signed by direction (see
+            signed_conviction).
+        forward_return: Realized forward return over the evaluation horizon,
+            as a percentage.
+        holding_days: Actual number of calendar days held before exit.
+    """
 
     ticker: str
     signed_conviction: float
@@ -213,7 +222,22 @@ def bootstrap_ci(
 
 @dataclass(frozen=True)
 class EvaluationResult:
-    """One session/condition's evaluation: rank IC and hit-rate, each with a bootstrap CI."""
+    """One session/condition's evaluation: rank IC and hit-rate, each with a bootstrap CI.
+
+    Attributes:
+        n: Number of paired outcomes the evaluation ran over.
+        rank_ic: Spearman rank correlation between signed conviction and
+            forward return, or None if undefined (see
+            rank_information_coefficient).
+        rank_ic_p_value: Two-sided p-value for rank_ic, or None alongside it.
+        rank_ic_ci: (lower, upper) bootstrap percentile CI for rank_ic.
+        hit_rate: Fraction of dead-band-scored decisions with the correct
+            sign, or None if none were scored (see hit_rate_with_deadband).
+        hit_rate_n: Number of decisions scored for hit_rate.
+        hit_rate_ci: (lower, upper) bootstrap percentile CI for hit_rate.
+        pairs: The underlying paired outcomes the metrics above were computed
+            from.
+    """
 
     n: int
     rank_ic: Optional[float]
@@ -301,8 +325,29 @@ def trade_level_win_loss_stats(pairs: Sequence[PairedOutcome]) -> dict:
 
 @dataclass(frozen=True)
 class SystemBehaviorReport:
-    """System-behavior metrics for one replayed session — reported separately from
-    (never blended into) EvaluationResult's predictive metrics.
+    """System-behavior metrics for one replayed session.
+
+    Reported separately from, and never blended into, EvaluationResult's
+    predictive metrics.
+
+    Attributes:
+        tickers_total: Number of tickers in the replayed session's universe.
+        decisions_built: Number of tickers that produced a completed
+            ARGUSDecision.
+        schema_validity: decisions_built / tickers_total, or 0.0 if
+            tickers_total is 0.
+        errors: Error messages accumulated in the session's final state.
+        reduce_verdicts: Number of decisions whose risk verdict was REDUCE.
+        constraint_violations: Always 0 — RiskAssessment's model_validator
+            makes a violating instance unconstructable (see
+            system_behavior_report).
+        total_api_calls: Sum of total_api_calls across all decisions.
+        api_calls_per_decision: total_api_calls / decisions_built, or None
+            if no decisions were built.
+        retries_instrumented: Whether retry counts are tracked; always False
+            since retries aren't currently instrumented.
+        tokens_instrumented: Whether token counts are tracked; always False
+            since tokens aren't currently instrumented.
     """
 
     tickers_total: int
@@ -355,12 +400,13 @@ def system_behavior_report(session_result: SessionResult) -> SystemBehaviorRepor
 
 
 def check_replay_determinism(session_dir: Path) -> bool:
-    """Replays the same fixture session twice, open-loop, and checks for bit-for-bit
-    agreement on each decision's signal/conviction/total_api_calls.
+    """Replays the same fixture session twice, open-loop, and diffs the results.
 
-    closed_loop=True is intentionally not checked here — it reads live
-    chroma_db state, which reconciliation can mutate between runs, so
-    determinism isn't a property closed-loop replay is expected to have.
+    Checks for bit-for-bit agreement on each decision's
+    signal/conviction/total_api_calls. closed_loop=True is intentionally not
+    checked here — it reads live chroma_db state, which reconciliation can
+    mutate between runs, so determinism isn't a property closed-loop replay
+    is expected to have.
 
     Args:
         session_dir: Directory shaped like tests/fixtures/.
@@ -369,6 +415,7 @@ def check_replay_determinism(session_dir: Path) -> bool:
         True if both replays produced identical decisions for every ticker.
     """
     def fingerprint(result: SessionResult) -> list[tuple]:
+        """Sorted (ticker, signal, conviction, total_api_calls) tuples for comparison."""
         decisions: list[ARGUSDecision] = result.final_state.get("decisions") or []
         return sorted(
             (

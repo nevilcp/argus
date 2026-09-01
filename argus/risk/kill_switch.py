@@ -45,7 +45,18 @@ def _drawdown_fraction(high_water_mark: float, current_value: float) -> float:
 
 @dataclass
 class KillSwitchStatus:
-    """Snapshot of the active kill switch status and calculated indicators."""
+    """Snapshot of the active kill switch status and calculated indicators.
+
+    Attributes:
+        halted: Whether the drawdown circuit breaker has triggered.
+        new_positions_blocked: Whether the VIX blackout gate is currently
+            blocking new positions.
+        reason: Human-readable halt reason, or None if not halted.
+        triggered_at: When the halt was triggered, or None if not halted.
+        realized_drawdown: Current peak-to-trough drawdown as a fraction.
+        current_vix: Most recently observed VIX level, or 0.0 if none has
+            been fetched yet.
+    """
 
     halted: bool
     new_positions_blocked: bool
@@ -68,7 +79,16 @@ class KillSwitch:
     ARGUS serves every /analyze request from the same process, so this gate
     is intentionally process-global rather than per-request: a request whose
     own ``risk_tolerance`` differs from the configured one is still governed
-    by the configured threshold, not its own (KS-6).
+    by the configured threshold, not its own.
+
+    Attributes:
+        risk_tolerance: Risk tier this instance was configured with
+            ('CONSERVATIVE', 'MODERATE', or 'AGGRESSIVE'); an unrecognized
+            value passed to the constructor is normalized to 'MODERATE'.
+        check_interval: Seconds between monitor loop iterations.
+        vix_blackout: VIX level at or above which new positions are blocked.
+        DRAWDOWN_THRESHOLDS: Per-risk-tolerance drawdown fraction that
+            triggers a halt.
     """
 
     DRAWDOWN_THRESHOLDS = {
@@ -117,7 +137,7 @@ class KillSwitch:
         self._stop_event = threading.Event()
 
         # Guards _halt_reason/_halt_time so a reader never observes one half
-        # of a halt update torn from the other (KS-12)
+        # of a halt update torn from the other
         self._state_lock = threading.Lock()
         self._halt_reason: Optional[str] = None
         self._halt_time: Optional[datetime] = None
@@ -197,7 +217,7 @@ class KillSwitch:
         """Records the halt reason/time under the state lock, then raises the halt flag.
 
         The flag is set last so a reader that sees ``halted`` always sees the
-        matching reason and timestamp with it (KS-12).
+        matching reason and timestamp with it.
         """
         with self._state_lock:
             self._halt_reason = reason
@@ -294,7 +314,7 @@ class KillSwitch:
 
         The dump includes a mandatory manual intervention instruction so operators
         cannot accidentally restart the system without reviewing the halt reason.
-        Also prunes dumps beyond KILL_SWITCH.max_halt_dumps_retained (KS-13), so a
+        Also prunes dumps beyond KILL_SWITCH.max_halt_dumps_retained, so a
         long-lived deployment with many halt/reset cycles doesn't grow runs/
         unbounded.
 
@@ -394,7 +414,7 @@ class KillSwitch:
 
         Clears all halt flags and deletes any persisted halt dumps, so a
         process restart can't silently resurrect a halt the operator already
-        reviewed and resolved through this call (KS-9).
+        reviewed and resolved through this call.
 
         Args:
             new_inception_value: Replacement inception portfolio value (USD).
@@ -420,7 +440,7 @@ _kill_switch: Optional[KillSwitch] = None
 def _list_halt_dumps(runs_dir: Optional[str] = None) -> list[Path]:
     """Lists halt-event dumps oldest-to-newest by their own ``halt_time`` field.
 
-    Ranks by content rather than the filename's embedded timestamp (KS-13) —
+    Ranks by content rather than the filename's embedded timestamp —
     lexicographic filename sort only coincidentally matches chronological
     order. Falls back to file mtime for a dump that fails to parse.
 

@@ -1,12 +1,13 @@
 """
 tests/test_technical_properties.py
 
-Property-based tests (Hypothesis) on the pure scoring functions in
-argus/agents/technical.py — these have no I/O and a well-defined input
-domain, so they're a better fit for property tests than example-based ones:
-the invariants below (monotonicity, boundedness, antisymmetry) are what the
-functions' docstrings already claim, and a property test checks the claim
-across the whole domain rather than at a handful of hand-picked points.
+Property-based tests (Hypothesis) on the pure scoring functions in technical.py.
+
+These functions have no I/O and a well-defined input domain, making them a
+better fit for property tests than example-based ones: the invariants below
+(monotonicity, boundedness, antisymmetry) are what the functions'
+docstrings already claim, and a property test checks the claim across the
+whole domain rather than at a handful of hand-picked points.
 """
 
 from hypothesis import given

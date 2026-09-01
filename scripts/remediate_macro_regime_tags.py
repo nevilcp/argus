@@ -1,12 +1,12 @@
 """
 scripts/remediate_macro_regime_tags.py
 
-One-off remediation for the degenerate macro regime tag (issue #10, Stage 6):
-every stored cultural-memory row was tagged EXPANSION by the old, always-picks-
-a-state HMM, so the regime field currently carries zero information. Rewrites
-it to "unknown" rather than deleting the rows, since the rest of each
-document (technical/fundamental/sentiment signals, outcome, return) is still
-valid evidence.
+One-off remediation for the degenerate macro regime tag: every stored
+cultural-memory row was tagged EXPANSION by the old, always-picks-a-state
+HMM, so the regime field currently carries zero information. Rewrites it to
+"unknown" rather than deleting the rows, since the rest of each document
+(technical/fundamental/sentiment signals, outcome, return) is still valid
+evidence.
 
 Not wired into any schedule — run manually, once:
 
@@ -51,8 +51,8 @@ def main() -> None:
     # Opening the collection with its configured embedding_function (rather than
     # bare chromadb.get_or_create_collection, which falls back to Chroma's default
     # ONNX function) matters here: update() below re-embeds every document it
-    # touches (MEM-1) — the wrong function would silently corrupt the very rows
-    # this script means to fix.
+    # touches, so the wrong function would silently corrupt the very rows this
+    # script means to fix.
     manager = CulturalMemoryManager(persist_dir=args.persist_dir)
     collection = manager.collection
 

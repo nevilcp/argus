@@ -1,12 +1,13 @@
 """
 argus/structured_output.py
 
-The expand half of the LLM seam refactor (issue #67): one structured-output
-call replacing the three near-identical fence-strip/parse/validate/retry
-blocks in agents/fundamental.py, agents/sentiment.py, and agents/portfolio.py.
-Composed over the existing LLMClient transport port rather than widening it —
-see argus/seams.py's LLMClient docstring. Used by agents/fundamental.py,
-agents/sentiment.py, and agents/portfolio.py.
+Decodes and validates an LLM's raw JSON response against a Pydantic schema.
+
+Replaces the three near-identical fence-strip/parse/validate/retry blocks
+that used to live in agents/fundamental.py, agents/sentiment.py, and
+agents/portfolio.py, which now all call in here instead. Composed over the
+existing LLMClient transport port rather than widening it — see
+argus/seams.py's LLMClient docstring.
 
 Responsibilities:
   - Strip a markdown code fence from a raw LLM response, in any of its four
@@ -54,9 +55,9 @@ T = TypeVar("T", bound=BaseModel)
 
 
 class StructuredOutputError(Exception):
-    """Raised when every decode attempt is exhausted, naming which stage kept failing.
+    """Every decode attempt was exhausted; names which stage kept failing.
 
-    Args:
+    Attributes:
         stage: "json_parse" if the response was never valid JSON,
             "schema_validation" if it parsed but never matched the target
             schema, or "transport" if the LLMClient call itself kept failing
@@ -66,7 +67,14 @@ class StructuredOutputError(Exception):
     """
 
     def __init__(self, stage: str, attempts: int, cause: Exception) -> None:
-        """Builds the error message from stage, attempt count, and underlying cause."""
+        """Builds the error message from stage, attempt count, and underlying cause.
+
+        Args:
+            stage: Which decode stage kept failing — "json_parse",
+                "schema_validation", or "transport".
+            attempts: Number of attempts made before giving up.
+            cause: The last attempt's underlying exception.
+        """
         self.stage = stage
         self.attempts = attempts
         self.cause = cause
