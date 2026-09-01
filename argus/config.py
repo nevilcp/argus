@@ -48,10 +48,10 @@ class Settings(BaseSettings):
     degrades gracefully when optional keys (e.g. FRED_API_KEY, NEWSAPI_KEY) are absent.
     """
 
-    # env_file is relative to the working directory for the same reason
-    # load_dotenv() above is (DEP-7). That call already populated os.environ
-    # from this same file, so this is mostly a fallback for keys present in
-    # .env but not yet exported to the environment.
+    # env_file is relative to the working directory, for the same reason
+    # load_dotenv() above is. That call already populated os.environ from
+    # this same file, so this is mostly a fallback for keys present in .env
+    # but not yet exported to the environment.
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -65,7 +65,7 @@ class Settings(BaseSettings):
 
     newsapi_key: str = Field(default="", description="NewsAPI.org key")
 
-    # Broadened to 20 tickers across 7 GICS sectors to reduce sector concentration risk
+    # Broadened to 20 tickers across 7 GICS sectors to reduce sector concentration risk.
     ARGUS_UNIVERSE: Annotated[list[str], NoDecode] = Field(
         default=[
             "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN",
@@ -77,15 +77,15 @@ class Settings(BaseSettings):
     )
 
     # Numeric defaults live in argus/params.py, tagged with provenance; this class
-    # only adds env-var override capability on top of them
+    # only adds env-var override capability on top of them.
     #
     # yfinance's chart endpoint returns the whole requested period in one HTTP
     # call regardless of interval granularity, so 1m candles cost nothing extra
     # against any rate limit — see data/pipeline.py for how coarser resolutions
-    # are derived locally via resampling rather than fetched separately
+    # are derived locally via resampling rather than fetched separately.
     MFT_CANDLE_INTERVAL: str = "1m"
     # None means "derive from MFT_CANDLE_INTERVAL" (see data/pipeline.py's
-    # _derive_buffer_size); set explicitly only to override that derivation
+    # _derive_buffer_size); set explicitly only to override that derivation.
     CANDLE_BUFFER_SIZE: Optional[int] = None
 
     # ─── Unattended operation ────────────────────────────────────────────────
@@ -95,7 +95,7 @@ class Settings(BaseSettings):
     # None means "derive as <ARGUS_DATA_DIR>/chroma_db" / "<ARGUS_DATA_DIR>/runs"
     # (see memory/cultural.py's get_cultural_memory and risk/kill_switch.py) —
     # set explicitly only to point at a directory outside ARGUS_DATA_DIR, e.g.
-    # a dedicated named volume as docker-compose.yml does
+    # a dedicated named volume as docker-compose.yml does.
     ARGUS_CHROMA_DIR: Optional[str] = Field(
         default=None, description="Directory backing the ChromaDB cultural-memory store"
     )
@@ -201,16 +201,16 @@ class Settings(BaseSettings):
         "momentum": _TECHNICAL_WEIGHTS.momentum,
     }
 
-    # Portfolio hard limits enforced by RiskStatisticalEngine
+    # Portfolio hard limits enforced by RiskStatisticalEngine.
     MAX_SINGLE_POSITION_PCT: float = SYSTEM.max_single_position_pct
     MAX_SECTOR_CONCENTRATION: float = SYSTEM.max_sector_concentration
     MAX_PORTFOLIO_BETA: float = SYSTEM.max_portfolio_beta
 
     VIX_BLACKOUT_THRESHOLD: float = SYSTEM.vix_blackout_threshold
 
-    # Historical lookback window used in rolling indicator calculations
+    # Historical lookback window used in rolling indicator calculations.
     LOOKBACK_DAYS: int = SYSTEM.lookback_days
 
 
-# Module-level singleton — import this everywhere rather than instantiating locally
+# Module-level singleton — import this everywhere rather than instantiating locally.
 settings = Settings()
