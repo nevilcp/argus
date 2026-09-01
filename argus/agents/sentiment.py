@@ -1,23 +1,16 @@
-"""
-argus/agents/sentiment.py
+"""Multi-tier media sentiment analysis agent for the ARGUS platform.
 
-Multi-tier media sentiment analysis agent for the ARGUS platform.
-
-Responsibilities:
-  - Fetch and aggregate raw financial news data
-  - Classify news headlines locally using a HuggingFace FinBERT pipeline
-  - Synthesize discrete sentiment metrics into a unified SentimentSignal via LLM
+Fetches and aggregates raw financial news data, classifies headlines locally
+using a HuggingFace FinBERT pipeline, and synthesizes the resulting metrics
+into a unified SentimentSignal via LLM.
 
 Not responsible for:
-  - Technical indicator computation (see agents/technical.py)
-  - Fundamental ratio analysis (see agents/fundamental.py)
-  - Portfolio allocation decisions (see agents/portfolio.py)
+  - Technical indicator computation (see agents/technical.py).
+  - Fundamental ratio analysis (see agents/fundamental.py).
+  - Portfolio allocation decisions (see agents/portfolio.py).
 
-Dependencies:
-  - transformers >= 4.0 (ProsusAI/finbert)
-  - langchain_groq
-  - yfinance (for catalyst event detection)
-  - GROQ_API_KEY env var must be set (see .env.example)
+Depends on transformers>=4.0 (ProsusAI/finbert), langchain_groq, and yfinance
+(for catalyst event detection); GROQ_API_KEY must be set (see .env.example).
 """
 
 from __future__ import annotations
@@ -67,15 +60,18 @@ _TICKER_COMPANY_NAMES: dict[str, str] = {
     "CVX": "Chevron",
 }
 
-# Module-level singleton prevents repeated model initialization (~30s first load)
+# Module-level singleton prevents repeated model initialization (~30s first load).
 _FINBERT_PIPELINE = None
 
 
 def get_finbert():
-    """Returns the singleton FinBERT text-classification pipeline, initializing it on first call.
+    """Returns the singleton FinBERT text-classification pipeline.
+
+    Initializes the pipeline on first call; later calls reuse it.
 
     Returns:
-        A HuggingFace transformers Pipeline configured for CPU sentiment classification.
+        A HuggingFace transformers Pipeline configured for CPU sentiment
+        classification.
     """
     global _FINBERT_PIPELINE
     if _FINBERT_PIPELINE is None:
@@ -86,7 +82,7 @@ def get_finbert():
             task="text-classification",
             model="ProsusAI/finbert",
             tokenizer="ProsusAI/finbert",
-            # CPU forces broad compatibility; GPU acceleration requires explicit opt-in
+            # CPU forces broad compatibility; GPU acceleration requires explicit opt-in.
             device=-1,
             max_length=512,
             truncation=True,
@@ -96,7 +92,7 @@ def get_finbert():
 
 
 def score_headlines_with_finbert(articles: list[dict]) -> list[dict]:
-    """Classifies headline articles using FinBERT and returns signed numeric scores.
+    """Classifies headlines with FinBERT and returns signed numeric scores.
 
     Processes up to 25 articles, in the order given, to bound CPU blocking time
     on large fetches. Positive labels map to +score, negative to -score, neutral
@@ -214,7 +210,7 @@ def _check_earnings_calendar(ticker: str) -> bool:
     return False
 
 
-# Maps metric keys to human-readable descriptions used in the LLM synthesis prompt
+# Maps metric keys to human-readable descriptions used in the LLM synthesis prompt.
 _SENTIMENT_METRIC_LABELS: dict[str, str] = {
     "net_finbert_score": "[-1.0 to +1.0]  weighted average FinBERT score across headlines "
     "(+1.0 = fully positive, -1.0 = fully negative, 0.0 = neutral)",
@@ -312,12 +308,16 @@ SYSTEM_PROMPT = (
 
 
 class SentimentAgent:
-    """LLM-backed sentiment analysis agent combining FinBERT headline scores with
-    LLM synthesis.
+    """LLM-backed sentiment agent combining FinBERT scores with LLM synthesis.
 
     Uses a daily cache to prevent redundant inference for the same ticker within a
     trading session. Obtains its verdict via the shared structured-output decoder
     with repair disabled — see analyze()'s docstring for why.
+
+    Attributes:
+        llm_client: LLM backend used for verdict synthesis.
+        market_data: Provider used for news and earnings-calendar lookups.
+        cache: Per-ticker TTL cache of previously computed signals.
     """
 
     def __init__(
@@ -354,14 +354,7 @@ class SentimentAgent:
         company_name: Optional[str] = None,
         errors: Optional[list[str]] = None,
     ) -> Optional[SentimentSignal]:
-        """Generates a SentimentSignal for a single ticker using FinBERT + LLM synthesis.
-
-        Args:
-            ticker: Equity ticker symbol.
-            company_name: Optional display name used in news queries (defaults to ticker).
-            errors: If given, a reason is appended here on every path that
-                returns None, so callers can surface the failure instead of
-                only logging it.
+        """Generates a ticker's SentimentSignal via FinBERT and LLM synthesis.
 
         Decodes a SentimentVerdict from the LLM via argus.structured_output.decode
         with repair disabled: a failed decode degrades this ticker rather than
@@ -369,6 +362,13 @@ class SentimentAgent:
         token spend for a ticker whose measured completion peak already sits close
         to its budget, against a governor that is the binding constraint on the
         whole system (see #71).
+
+        Args:
+            ticker: Equity ticker symbol.
+            company_name: Optional display name used in news queries (defaults to ticker).
+            errors: If given, a reason is appended here on every path that
+                returns None, so callers can surface the failure instead of
+                only logging it.
 
         Returns:
             A validated SentimentSignal, or None if decoding ultimately fails.
@@ -422,7 +422,7 @@ class SentimentAgent:
         return signal
 
     def _news_metrics(self, ticker: str, company_name: Optional[str]) -> dict:
-        """Fetches this ticker's recent news and reduces it to the metrics the LLM sees.
+        """Fetches this ticker's news and reduces it to LLM-facing metrics.
 
         A failed fetch is reported as ``news_data_available: False`` with placeholder
         counts rather than as a genuine absence of news.
