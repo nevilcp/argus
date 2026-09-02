@@ -1,0 +1,37 @@
+name: Debug yfinance probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Probe yfinance from inside the published image
+        run: |
+          docker run --rm "ghcr.io/${{ github.repository }}:latest" python -c "
+          import logging
+          logging.basicConfig(level=logging.DEBUG)
+          import yfinance as yf
+          import curl_cffi
+          print('yfinance', yf.__version__)
+          print('curl_cffi', curl_cffi.__version__)
+          try:
+              df = yf.download('AAPL', period='5d', progress=False)
+              print('OHLCV OK')
+              print(df.tail())
+          except Exception as e:
+              print('OHLCV FAILED:', type(e).__name__, e)
+          try:
+              info = yf.Ticker('AAPL').info
+              print('INFO OK, keys:', len(info))
+          except Exception as e:
+              print('INFO FAILED:', type(e).__name__, e)
+          "
