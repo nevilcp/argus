@@ -30,22 +30,11 @@ jobs:
   collect:
     runs-on: ubuntu-latest
     steps:
-      - name: Restore prior state
+      - name: Check out repository
         uses: actions/checkout@v4
-        continue-on-error: true # first-ever run: the argus-data branch doesn't exist yet
-        with:
-          ref: argus-data
-          path: state
 
-      - name: Seed working directories from prior state
-        run: |
-          mkdir -p data chroma_db
-          [ -d state/chroma_db ] && cp -r state/chroma_db/. ./chroma_db/ || echo "no prior chroma_db"
-          [ -f state/decisions.jsonl ] && cp state/decisions.jsonl data/decisions.jsonl || echo "no prior decisions.jsonl"
-          [ -f state/newsapi_budget.json ] && cp state/newsapi_budget.json data/newsapi_budget.json || echo "no prior newsapi_budget.json"
-          # World-writable so the image's non-root `argus` user (uid 1000) can
-          # write here regardless of the runner's own uid
-          chmod -R a+rwX data chroma_db
+      - name: Restore prior state
+        uses: ./.github/actions/restore-argus-state
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -62,37 +51,23 @@ jobs:
         run: |
           docker run --rm \
             -v "$PWD/data:/app/data" \
-            -v "$PWD/chroma_db:/app/chroma_db" \
             -e GROQ_API_KEY -e FRED_API_KEY -e NEWSAPI_KEY \
             "ghcr.io/${{ github.repository }}:latest" \
             argus-collect
 
-      - name: Publish updated state
+      - name: Compute status update
+        id: status
         run: |
-          mkdir -p publish
-          cp -r chroma_db publish/chroma_db
-          if [ -f data/decisions.jsonl ]; then
-            cp data/decisions.jsonl publish/decisions.jsonl
-          else
+          if [ ! -f data/decisions.jsonl ]; then
             echo "::warning::decisions.jsonl absent after this cycle — nothing has ever been logged"
           fi
-          [ -f data/newsapi_budget.json ] && cp data/newsapi_budget.json publish/newsapi_budget.json || echo "no newsapi_budget.json to publish"
-          # Merge rather than overwrite — reconcile.yml writes to the same
-          # status.json on the same branch and its field must survive this
-          ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           reason="$(jq -r '.reason // "unknown"' data/collector_result.json 2>/dev/null || echo unknown)"
-          if [ -f state/status.json ]; then
-            jq --arg t "$ts" --arg r "$reason" '. + {last_run: $t, last_reason: $r}' state/status.json > publish/status.json
-          else
-            jq -n --arg t "$ts" --arg r "$reason" '{last_run: $t, last_reason: $r}' > publish/status.json
-          fi
-          rm -rf state
-          cd publish
-          git init -q -b argus-data
-          git config user.name "argus-collector"
-          git config user.email "actions@users.noreply.github.com"
-          git add -A
-          git commit -q -m "Update collected state ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
-          git push -q --force \
-            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" \
-            argus-data:argus-data
+          json="$(jq -nc --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg r "$reason" '{last_run: $t, last_reason: $r}')"
+          echo "json=$json" >> "$GITHUB_OUTPUT"
+
+      - name: Publish updated state
+        uses: ./.github/actions/publish-argus-state
+        with:
+          status-update: ${{ steps.status.outputs.json }}
+          commit-message: "Update collected state"
+          github-token: ${{ secrets.GITHUB_TOKEN }}
