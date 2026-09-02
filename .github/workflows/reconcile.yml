@@ -28,6 +28,22 @@ jobs:
       - name: Restore prior state
         uses: ./.github/actions/restore-argus-state
 
+      - name: Check out pinned image tag
+        uses: actions/checkout@v4
+        continue-on-error: true # first-ever run: the argus-deploy branch doesn't exist yet
+        with:
+          ref: argus-deploy
+          path: deploy
+
+      - name: Read pinned image tag
+        # See image.yml's "Pin scheduled jobs to this build" step: falls back
+        # to :latest only if the argus-deploy branch has never been published
+        # (e.g. before this repo's first build under issue #95).
+        id: image
+        run: |
+          tag="$(cat deploy/image-tag.txt 2>/dev/null || echo latest)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -46,7 +62,7 @@ jobs:
         run: |
           docker run --rm \
             -v "$PWD/data:/app/data" \
-            "ghcr.io/${{ github.repository }}:latest" \
+            "ghcr.io/${{ github.repository }}:${{ steps.image.outputs.tag }}" \
             argus-reconcile --decisions-log data/decisions.jsonl
 
       - name: Compute status update

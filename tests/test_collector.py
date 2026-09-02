@@ -17,7 +17,8 @@ from unittest import mock
 
 import pytest
 
-from argus.orchestration.collector import CycleOutcome, run_collection_cycle
+from argus.config import settings
+from argus.orchestration.collector import CycleOutcome, append_decisions_jsonl, run_collection_cycle
 from argus.params import COLLECTOR
 from argus.schemas.signals import ARGUSDecision, PositionAllocation
 
@@ -153,3 +154,17 @@ async def test_run_collection_cycle_reports_degraded_when_no_decision_has_alloca
     assert result.degraded_inputs["fundamental"] == 20
     assert result.degraded_inputs["sentiment"] == 20
     assert result.degraded_inputs["risk"] == 20
+
+
+def test_append_decisions_jsonl_stamps_running_image_tag(tmp_path, monkeypatch):
+    """Issue #95: every logged decision carries the tag of the image that produced it."""
+    monkeypatch.setattr(settings, "ARGUS_IMAGE_TAG", "sha-abc123def456")
+    log_path = tmp_path / "decisions.jsonl"
+    decision = _decision()
+    assert decision.image_tag is None
+
+    append_decisions_jsonl([decision], str(log_path))
+
+    logged = [ARGUSDecision.model_validate_json(line) for line in log_path.read_text().splitlines()]
+    assert logged[0].image_tag == "sha-abc123def456"
+    assert decision.image_tag is None  # the caller's own object is left untouched

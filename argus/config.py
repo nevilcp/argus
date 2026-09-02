@@ -136,6 +136,14 @@ class Settings(BaseSettings):
     )
     ARGUS_LOG_LEVEL: str = Field(default="INFO", description="Root log level for argus.* loggers")
 
+    ARGUS_IMAGE_TAG: str = Field(
+        default="unknown",
+        description=(
+            "Commit-identified image tag baked in at build time via Dockerfile.api's "
+            "ARGUS_IMAGE_TAG build arg (see image.yml); 'unknown' outside a built image"
+        ),
+    )
+
     # Conservative free-tier bootstrap floor for the rate governor (see
     # argus/orchestration/governor.py), applied uniformly to every registered
     # model until Groq's own response headers correct it per-model for the
