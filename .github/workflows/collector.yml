@@ -29,6 +29,9 @@ permissions:
 jobs:
   collect:
     runs-on: ubuntu-latest
+    # Observed: under 1-3 min per tick. 15 min covers a slow image pull or
+    # sluggish NewsAPI/yfinance calls without leaving room for a hung run.
+    timeout-minutes: 15
     steps:
       - name: Verify required secrets are present
         # GROQ_API_KEY is required: fundamental, sentiment, and portfolio are
@@ -54,13 +57,13 @@ jobs:
 
       - name: Check out repository
         id: checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Restore prior state
         uses: ./.github/actions/restore-argus-state
 
       - name: Check out pinned image tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         continue-on-error: true # first-ever run: the argus-deploy branch doesn't exist yet
         with:
           ref: argus-deploy
@@ -76,7 +79,7 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
