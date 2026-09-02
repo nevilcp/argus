@@ -320,7 +320,10 @@ def reconcile_decisions(
                 prices_by_ticker[decision.ticker] = market_data.ohlcv_daily(decision.ticker)["close"]
             except Exception as exc:
                 logger.warning(
-                    "[Reconcile] failed to fetch price history for %s: %s", decision.ticker, exc
+                    "[Reconcile] failed to fetch price history for %s (%s): %s",
+                    decision.ticker,
+                    type(exc).__name__,
+                    exc,
                 )
                 prices_by_ticker[decision.ticker] = None
 

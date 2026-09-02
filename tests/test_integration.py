@@ -24,13 +24,17 @@ from argus.agents.portfolio import half_kelly_weight
 from argus.agents.risk import RiskStatisticalEngine
 from argus.agents.technical import TechnicalStatisticalAgent
 from argus.data.pipeline import MFTDataPipeline
+from argus.memory.cultural import CulturalMemoryManager
 from argus.orchestration.governor import BOOTSTRAP_LIMITS, REGISTERED_MODELS, governor
 from argus.orchestration.graph import build_graph
+from argus.orchestration.reconciliation import reconcile_decision
 from argus.orchestration.state import ARGUSState
 from argus.schemas.signals import (
+    ARGUSDecision,
     FundamentalSignal,
     MacroContext,
     PortfolioAllocation,
+    PositionAllocation,
     Regime,
     RiskAssessment,
     SectorSignal,
@@ -40,6 +44,7 @@ from argus.schemas.signals import (
     VixRegime,
     YieldCurve,
 )
+from argus.seams import LiveMarketDataProvider
 
 
 class TestEndToEnd:
@@ -88,6 +93,63 @@ class TestEndToEnd:
         r_sig = risk.evaluate([{"ticker": "AAPL", "weight": 0.1}], price_history, m_ctx.vix_level)
         assert isinstance(r_sig, RiskAssessment)
         assert r_sig.api_calls_used == 0
+
+    def test_reconcile_decision_resolves_a_matured_decision_against_live_prices(self):
+        """A decision old enough to have matured reconciles end to end against real Yahoo prices.
+
+        Regression coverage for issue #93 (yfinance 401 "Invalid Crumb"): this
+        is the one place the reconciliation path — compute_realized_return's
+        market_data.ohlcv_daily() call through to reconcile_decision — runs
+        against LiveMarketDataProvider instead of a fixture/fake, so a crumb
+        handshake failure here would fail this test rather than only surface
+        in production.
+        """
+        horizon_days = 5
+        session_timestamp = datetime.now() - pd.Timedelta(days=30)
+        technical = TechnicalSignal(
+            ticker="AAPL",
+            current_price=150.0,
+            rsi_14=50.0,
+            macd_histogram=0.0,
+            bb_percent_b=0.5,
+            atr_pct=0.02,
+            adx_14=20.0,
+            vwap_distance=0.0,
+            volume_ratio=1.0,
+            momentum_30m=0.0,
+            momentum_1d=0.0,
+            signal=Signal.BULLISH,
+            conviction=0.6,
+            net_score=0.0,
+            timestamp=session_timestamp,
+        )
+        decision = ARGUSDecision(
+            ticker="AAPL",
+            session_timestamp=session_timestamp,
+            technical=technical,
+            allocation=PositionAllocation(
+                ticker="AAPL",
+                allocation_pct=0.10,
+                allocation_usd=10_000.0,
+                stop_loss=140.0,
+                thesis="test thesis",
+                composite_conviction=0.6,
+                time_horizon="30 days",
+            ),
+        )
+        cultural = mock.create_autospec(CulturalMemoryManager, instance=True)
+
+        stored = reconcile_decision(
+            decision, LiveMarketDataProvider(), cultural, horizon_days=horizon_days
+        )
+
+        assert stored is True
+        cultural.store_trade_outcome.assert_called_once()
+        kwargs = cultural.store_trade_outcome.call_args.kwargs
+        assert kwargs["decision"] is decision
+        assert isinstance(kwargs["actual_return_pct"], float)
+        assert kwargs["holding_days"] >= horizon_days
+        assert f"{horizon_days}d" in kwargs["exit_reason"]
 
     @pytest.mark.asyncio
     @mock.patch("argus.agents.portfolio.PortfolioManagerAgent.allocate")
