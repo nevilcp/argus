@@ -524,6 +524,18 @@ def compact_decisions_jsonl(
     return CompactionResult(retained=len(kept), retired_unresolved=retired_unresolved)
 
 
+def default_checkpoint_retention_cutoff() -> datetime:
+    """The prune_checkpoints cutoff at RECONCILIATION's declared default horizon.
+
+    Shared by collector.py's per-cycle pruning and this module's own
+    run_reconciliation_pass (whenever its horizon_days is left at the default), so
+    the two prune paths can't silently drift onto different windows.
+    """
+    return datetime.now() - timedelta(  # noqa: DTZ005
+        days=RECONCILIATION.horizon_days + RECONCILIATION.retention_margin_days
+    )
+
+
 def prune_checkpoints(db_path: str, cutoff: datetime) -> int:
     """Deletes every checkpoint thread whose most recent checkpoint predates cutoff, then VACUUMs.
 
