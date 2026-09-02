@@ -223,6 +223,11 @@ def _reconcile_once() -> None:
         )
     if report.decisions_compacted is not None:
         logger.info("[Reconcile] decisions.jsonl compacted: %d retained", report.decisions_compacted)
+    if report.decisions_retired_unresolved:
+        logger.info(
+            "[Reconcile] retired %d decision(s) as permanently unresolved",
+            report.decisions_retired_unresolved,
+        )
     if report.checkpoints_pruned is not None:
         logger.info("[Reconcile] checkpoint threads pruned: %d", report.checkpoints_pruned)
     logger.info("[Reconcile] PENDING snapshots expired: %d", report.pending_snapshots_expired)

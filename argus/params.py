@@ -369,6 +369,15 @@ class ReconciliationParams:
         "a delayed reconcile pass still finds it first, no basis for this "
         "specific width",
     )
+    unresolved_retirement_days: int = p(
+        30,
+        Provenance.ARBITRARY,
+        "age beyond horizon_days at which a decision that has never received "
+        "a reconciled outcome is retired anyway, so the store stays bounded "
+        "even though it was never scored — scheduled reconcile ticks can be "
+        "dropped by the platform for days at a time, so this must comfortably "
+        "outlast that, but no basis for this specific width",
+    )
 
 
 @dataclass(frozen=True)
