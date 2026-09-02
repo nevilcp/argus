@@ -7,7 +7,7 @@ name: Daily reconciliation
 
 on:
   schedule:
-    - cron: "30 22 * * 1-5" # 22:30 UTC — after the last hourly collector tick
+    - cron: "30 22 * * 1-5" # 22:30 UTC — after the last two-hourly collector tick
   workflow_dispatch:
 
 concurrency:
