@@ -55,6 +55,17 @@ class DataFetchError(Exception):
     """Raised when a data fetch fails after all retry attempts."""
 
 
+class YahooCrumbHandshakeError(DataFetchError):
+    """Yahoo Finance rejected every attempt with an invalid/expired crumb.
+
+    yfinance mints an anonymous session cookie + crumb per process and caches
+    it for reuse; this is not a credential problem (there is no API key to be
+    wrong), it is Yahoo's anti-bot layer invalidating that handshake — which
+    then poisons every subsequent call in the process until a fresh crumb is
+    minted. See GH issue #93.
+    """
+
+
 F = TypeVar("F", bound=Callable[..., Any])
 
 _RETRY_ATTEMPTS = 3
@@ -117,6 +128,42 @@ def _is_retryable(exc: Exception) -> bool:
     return status_code in (429, 423) or status_code >= 500
 
 
+def _is_crumb_handshake_failure(exc: Exception) -> bool:
+    """Distinguishes Yahoo's "Invalid Crumb" 401 from a genuine credential 401.
+
+    FRED and NewsAPI 401s mean a bad/missing API key and retrying is pointless
+    (see _is_retryable). A yfinance 401 is different: yfinance has no key at
+    all, so a 401 there means Yahoo rejected the anonymous crumb it minted —
+    a session handshake a fresh mint can often fix, not a permanent failure.
+
+    Args:
+        exc: The exception a fetch attempt raised.
+
+    Returns:
+        True if this looks like Yahoo's crumb rejection specifically.
+    """
+    return _status_code_of(exc) == 401 and "crumb" in str(exc).lower()
+
+
+def _reset_yfinance_session() -> None:
+    """Forces yfinance's singleton client to mint a fresh cookie and crumb next call.
+
+    yfinance caches the crumb it mints for the life of the process; once Yahoo
+    invalidates it, every subsequent call reuses the same broken crumb and
+    fails identically. Clearing only the in-memory _cookie/_crumb isn't
+    enough: yfinance also persists the cookie to an on-disk cache keyed
+    'curlCffi' (see its data.py's _load_cookie_curlCffi), and reloads it
+    before ever attempting a new network handshake — so a stale, Yahoo-
+    rejected cookie would otherwise survive the reset and get reused
+    immediately. Clearing both is what lets a retry attempt an actual new
+    handshake instead of repeating the failed one.
+    """
+    data_client = yf.data.YfData()
+    data_client._cookie = None
+    data_client._crumb = None
+    yf.cache.get_cookie_cache().store("curlCffi", None)
+
+
 def _retry_after_seconds(exc: Exception) -> Optional[float]:
     """Reads a Retry-After response header off an exception, if one is attached.
 
@@ -147,7 +194,10 @@ def _with_retry(fn: F) -> F:
     Re-raises DataFetchError immediately without re-wrapping to avoid stacking.
     A terminal (non-retryable) failure raises DataFetchError on the first
     attempt rather than burning the full retry budget on a call that would
-    fail identically every time.
+    fail identically every time. A Yahoo crumb/cookie handshake failure (see
+    _is_crumb_handshake_failure) is retried with the yfinance session reset
+    first, since retrying without a reset would just repeat the same failure;
+    exhausting the budget there raises YahooCrumbHandshakeError instead.
 
     Args:
         fn: The function to wrap.
@@ -167,6 +217,24 @@ def _with_retry(fn: F) -> F:
                 raise
             except Exception as exc:
                 last_exc = exc
+                if _is_crumb_handshake_failure(exc):
+                    if attempt >= _RETRY_ATTEMPTS:
+                        raise YahooCrumbHandshakeError(
+                            f"{fn.__name__}: Yahoo Finance rejected every crumb/cookie "
+                            f"handshake attempt ({_RETRY_ATTEMPTS}); price data "
+                            f"unavailable. Last error: {exc}"
+                        ) from exc
+                    _reset_yfinance_session()
+                    logger.warning(
+                        "%s attempt %d/%d failed with a crumb/cookie handshake error; "
+                        "resetting the yfinance session and retrying: %s",
+                        fn.__name__,
+                        attempt,
+                        _RETRY_ATTEMPTS,
+                        exc,
+                    )
+                    time.sleep(random.uniform(0.0, _RETRY_BASE_DELAY * (2 ** (attempt - 1))))
+                    continue
                 if not _is_retryable(exc):
                     logger.warning(
                         "%s failed with a non-retryable error (%s: %s); not retrying",
