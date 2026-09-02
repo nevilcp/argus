@@ -10,6 +10,9 @@ jobs:
   test:
     name: Integration Test Suite (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    # Observed: ~2-3.5 min per matrix leg. 15 min covers a slow PyPI mirror
+    # without leaving room for a truly hung run.
+    timeout-minutes: 15
 
     # pyproject.toml declares requires-python = ">=3.11", but only 3.11 was ever
     # exercised — so a 3.12-only failure would reach a developer running 3.12
@@ -21,10 +24,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
           cache: "pip"
@@ -56,17 +59,20 @@ jobs:
   clean-install:
     name: Clean Install (pyproject.toml only, no pip cache)
     runs-on: ubuntu-latest
+    # Observed: ~2-3.5 min. 15 min covers an uncached resolve against a slow
+    # PyPI mirror without leaving room for a truly hung run.
+    timeout-minutes: 15
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # No `cache: "pip"` here on purpose (DEP-5): the `test` job's cache can
       # mask a dependency resolution that only works because a stale wheel is
       # already sitting in the cache. This job resolves from pyproject.toml
       # alone, the same way a fresh clone or a Docker build does.
       - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 

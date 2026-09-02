@@ -8,7 +8,7 @@ runs:
   using: composite
   steps:
     - name: Check out prior state
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       continue-on-error: true # first-ever run: the argus-data branch doesn't exist yet
       with:
         ref: argus-data
