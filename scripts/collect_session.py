@@ -10,8 +10,12 @@ decisions to a JSONL log.
 
 This is the same cycle api/main.py's background collector loop runs on a
 timer; this script is what the scheduled GitHub Actions workflow invokes
-once per cron tick. Exits 0 whether or not the graph actually ran — a market
-holiday or an off-hours cron tick is a normal outcome, not a failure.
+once per cron tick. Exits 0 for a no-op (market holiday, off-hours tick) or
+a successful cycle — neither is a failure. Exits 1 for a DEGRADED cycle: the
+graph ran but too few decisions came back with a real allocation to be worth
+reconciling (see argus.orchestration.collector.CycleOutcome and
+params.COLLECTOR), the same "ran but produced nothing" failure the secrets
+preflight in collector.yml catches upfront, caught here after the fact.
 """
 
 from __future__ import annotations
@@ -21,11 +25,12 @@ import asyncio
 import dataclasses
 import json
 import logging
+import sys
 from pathlib import Path
 
 from argus.config import settings
 from argus.data.pipeline import MFTDataPipeline
-from argus.orchestration.collector import run_collection_cycle
+from argus.orchestration.collector import CycleOutcome, run_collection_cycle
 from argus.orchestration.graph import build_graph
 
 logger = logging.getLogger("argus.collect_session")
@@ -88,6 +93,7 @@ def main() -> None:
             pipeline=pipeline,
             compiled_graph=compiled_graph,
             decisions_log_path=args.decisions_log,
+            checkpoint_db_path=args.checkpoint_db,
         )
     )
     pipeline.buffer.close()
@@ -96,12 +102,24 @@ def main() -> None:
     result_path.parent.mkdir(parents=True, exist_ok=True)
     result_path.write_text(json.dumps(dataclasses.asdict(result)))
 
-    print(f"ran={result.ran} reason={result.reason!r}")
+    print(f"ran={result.ran} reason={result.reason!r} outcome={result.outcome.value}")
     if result.ran:
         print(
             f"tickers_with_session_data={result.tickers_with_session_data} "
-            f"decisions_logged={result.decisions_logged} macro_regime={result.macro_regime}"
+            f"decisions_logged={result.decisions_logged} "
+            f"decisions_with_allocation={result.decisions_with_allocation} "
+            f"macro_regime={result.macro_regime}"
         )
+        if result.degraded_inputs:
+            print(f"degraded_inputs={result.degraded_inputs}")
+
+    if result.outcome is CycleOutcome.DEGRADED:
+        print(
+            "::error::collection cycle DEGRADED — "
+            f"only {result.decisions_with_allocation}/{result.decisions_logged} "
+            "decision(s) carried a real allocation; nothing worth reconciling this cycle"
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":

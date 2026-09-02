@@ -683,6 +683,15 @@ class ARGUSDecision(BaseModel):
     aggregated: AggregatedSignal | None = Field(None)
     allocation: PositionAllocation | None = Field(None)
 
+    image_tag: str | None = Field(
+        None,
+        description=(
+            "Commit-identified image tag of the build that produced this decision "
+            "(argus.config.settings.ARGUS_IMAGE_TAG); stamped by append_decisions_jsonl, "
+            "None until then"
+        ),
+    )
+
     @computed_field  # type: ignore[misc]
     @property
     def total_api_calls(self) -> int:

@@ -187,6 +187,7 @@ async def _collector_loop(pipeline: MFTDataPipeline, compiled_graph) -> None:
                 pipeline=pipeline,
                 compiled_graph=compiled_graph,
                 decisions_log_path=_data_path("decisions.jsonl"),
+                checkpoint_db_path=_data_path("argus_graph.db"),
                 analyze_lock=_analyze_semaphore,
             )
             logger.info("[Collector] cycle result: %s", _last_collection_result)
@@ -223,6 +224,11 @@ def _reconcile_once() -> None:
         )
     if report.decisions_compacted is not None:
         logger.info("[Reconcile] decisions.jsonl compacted: %d retained", report.decisions_compacted)
+    if report.decisions_retired_unresolved:
+        logger.info(
+            "[Reconcile] retired %d decision(s) as permanently unresolved",
+            report.decisions_retired_unresolved,
+        )
     if report.checkpoints_pruned is not None:
         logger.info("[Reconcile] checkpoint threads pruned: %d", report.checkpoints_pruned)
     logger.info("[Reconcile] PENDING snapshots expired: %d", report.pending_snapshots_expired)

@@ -35,7 +35,7 @@ from dataclasses import dataclass, field, fields
 from enum import Enum
 from typing import Any
 
-PARAMS_VERSION = 16
+PARAMS_VERSION = 17
 
 
 class Provenance(str, Enum):
@@ -369,6 +369,15 @@ class ReconciliationParams:
         "a delayed reconcile pass still finds it first, no basis for this "
         "specific width",
     )
+    unresolved_retirement_days: int = p(
+        30,
+        Provenance.ARBITRARY,
+        "age beyond horizon_days at which a decision that has never received "
+        "a reconciled outcome is retired anyway, so the store stays bounded "
+        "even though it was never scored — scheduled reconcile ticks can be "
+        "dropped by the platform for days at a time, so this must comfortably "
+        "outlast that, but no basis for this specific width",
+    )
 
 
 @dataclass(frozen=True)
@@ -418,6 +427,27 @@ class StructuredOutputParams:
     )
 
 
+@dataclass(frozen=True)
+class CollectorParams:
+    """Thresholds the unattended collector uses to judge a completed cycle's health.
+
+    See orchestration/collector.py's CycleOutcome: a cycle that ran but produced
+    too few usable allocations is DEGRADED, not SUCCESS, even though nothing
+    raised — the LLM agents' "degrade, never fabricate" behavior means a dead
+    upstream (issue #90's missing-secret case, or any other) shows up as null
+    fields on every decision rather than an exception.
+    """
+
+    min_decisions_with_allocation: int = p(
+        1,
+        Provenance.ARBITRARY,
+        "a completed cycle needs at least one decision with a real allocation "
+        "to have produced anything worth reconciling; below this the cycle is "
+        "reported DEGRADED and the job fails. 1 is a floor, not a fraction — "
+        "not tuned against real degraded-run data",
+    )
+
+
 SYSTEM = SystemParams()
 KILL_SWITCH = KillSwitchParams()
 TECHNICAL_INDICATOR_WEIGHTS = TechnicalIndicatorWeights()
@@ -429,6 +459,7 @@ MACRO = MacroParams()
 RECONCILIATION = ReconciliationParams()
 MEMORY = MemoryParams()
 STRUCTURED_OUTPUT = StructuredOutputParams()
+COLLECTOR = CollectorParams()
 
 _ALL_GROUPS: dict[str, Any] = {
     "SYSTEM": SYSTEM,
@@ -442,6 +473,7 @@ _ALL_GROUPS: dict[str, Any] = {
     "RECONCILIATION": RECONCILIATION,
     "MEMORY": MEMORY,
     "STRUCTURED_OUTPUT": STRUCTURED_OUTPUT,
+    "COLLECTOR": COLLECTOR,
 }
 
 

@@ -69,7 +69,12 @@ def _close_prices(
         try:
             cache[ticker] = market_data.ohlcv_daily(ticker)["close"]
         except Exception as exc:
-            logger.warning("[PaperBook] failed to fetch price history for %s: %s", ticker, exc)
+            logger.warning(
+                "[PaperBook] failed to fetch price history for %s (%s): %s",
+                ticker,
+                type(exc).__name__,
+                exc,
+            )
             cache[ticker] = None
     return cache[ticker]
 

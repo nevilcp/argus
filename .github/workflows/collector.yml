@@ -11,11 +11,23 @@ name: Unattended collector
 
 on:
   schedule:
-    # Every 2 hours, 13:05-21:05 UTC covers 09:00-17:00 ET across both EST
-    # and EDT — 5 ticks/weekday (GOV-14), matching NewsAPI's free-tier
-    # 100 request/day budget at 20 requests per 20-ticker sweep (see
-    # README.md's stated 5-run/day ceiling)
-    - cron: "5 13-21/2 * * 1-5"
+    # Every 2 hours, 09:05-17:05 ET (GOV-14) — a fixed UTC cron can't track
+    # DST itself, so this is two schedules, one per offset, switched by
+    # calendar month rather than the exact (year-varying) changeover date:
+    #   - Mar-Oct: always EDT (UTC-4) -> 13:05-21:05 UTC
+    #   - Nov-Feb: always EST (UTC-5) -> 14:05-22:05 UTC
+    # March runs the EDT times, which land an hour early in ET for the
+    # roughly one-to-two weeks before the changeover (second Sunday); the
+    # window still brackets the trading session, just off by an hour at
+    # the open and close. Same trade-off in reverse is impossible in
+    # November, since DST always ends by the first Sunday.
+    #
+    # This is a candidate trigger list, not a budget throttle: NewsAPI's
+    # 100 request/day free-tier cap is enforced by the persisted ledger in
+    # argus/data/fetchers.py (_NewsApiBudget), which counts actual requests
+    # across process restarts, so dropped or extra ticks can't breach it.
+    - cron: "5 13-21/2 * 3-10 1-5"
+    - cron: "5 14-22/2 * 11,12,1,2 1-5"
   workflow_dispatch:
 
 concurrency:
@@ -29,70 +41,116 @@ permissions:
 jobs:
   collect:
     runs-on: ubuntu-latest
+    # Observed: under 1-3 min per tick. 15 min covers a slow image pull or
+    # sluggish NewsAPI/yfinance calls without leaving room for a hung run.
+    timeout-minutes: 15
     steps:
-      - name: Restore prior state
-        uses: actions/checkout@v4
-        continue-on-error: true # first-ever run: the argus-data branch doesn't exist yet
-        with:
-          ref: argus-data
-          path: state
-
-      - name: Seed working directories from prior state
+      - name: Verify required secrets are present
+        # GROQ_API_KEY is required: fundamental, sentiment, and portfolio are
+        # all LLM agents, and every decision comes out with those fields (plus
+        # risk and allocation) null without it — a run that starts without
+        # this key cannot produce anything of value, so fail before checkout
+        # or the docker pull rather than report a false green. FRED_API_KEY
+        # and NEWSAPI_KEY only degrade the macro agent and sentiment's
+        # catalyst detection respectively (see argus/config.py), so their
+        # absence is a warning, not a failure.
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
         run: |
-          mkdir -p data chroma_db
-          [ -d state/chroma_db ] && cp -r state/chroma_db/. ./chroma_db/ || echo "no prior chroma_db"
-          [ -f state/decisions.jsonl ] && cp state/decisions.jsonl data/decisions.jsonl || echo "no prior decisions.jsonl"
-          [ -f state/newsapi_budget.json ] && cp state/newsapi_budget.json data/newsapi_budget.json || echo "no prior newsapi_budget.json"
-          # World-writable so the image's non-root `argus` user (uid 1000) can
-          # write here regardless of the runner's own uid
-          chmod -R a+rwX data chroma_db
+          if [ -z "$GROQ_API_KEY" ]; then
+            echo "::error::GROQ_API_KEY secret is not set — fundamental, sentiment, and portfolio all need it, so this run cannot produce a decision. Configure it under Settings > Secrets and variables > Actions before the collector can run."
+            exit 1
+          fi
+          [ -z "$FRED_API_KEY" ] && echo "::warning::FRED_API_KEY secret is not set — the macro agent will degrade to single-observation inference this run."
+          [ -z "$NEWSAPI_KEY" ] && echo "::warning::NEWSAPI_KEY secret is not set — sentiment will run without news-based catalyst detection this run."
+          exit 0
+
+      - name: Check out repository
+        id: checkout
+        uses: actions/checkout@v7
+
+      - name: Restore prior state
+        uses: ./.github/actions/restore-argus-state
+
+      - name: Check out pinned image tag
+        uses: actions/checkout@v7
+        continue-on-error: true # first-ever run: the argus-deploy branch doesn't exist yet
+        with:
+          ref: argus-deploy
+          path: deploy
+
+      - name: Read pinned image tag
+        # See image.yml's "Pin scheduled jobs to this build" step: falls back
+        # to :latest only if the argus-deploy branch has never been published
+        # (e.g. before this repo's first build under issue #95).
+        id: image
+        run: |
+          tag="$(cat deploy/image-tag.txt 2>/dev/null || echo latest)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run collection cycle
+        # Exits non-zero (failing this step, and the job) when the cycle ran
+        # but came back DEGRADED — decisions logged with no usable allocation,
+        # see argus/orchestration/collector.py's CycleOutcome and
+        # params.COLLECTOR.min_decisions_with_allocation. The steps below
+        # still run via if: always() so a degraded cycle's detail reaches
+        # status.json instead of being lost with the failed step.
+        #
+        # Removes the prior cycle's collector_result.json first: restore-state
+        # brought it back along with the rest of data/, and without this an
+        # unrelated failure here (e.g. GHCR login, image pull, a crash before
+        # argus-collect writes its own result) would leave that stale file
+        # behind for "Compute status update" to republish under a fresh
+        # last_run, misreporting an infra outage as an ordinary past cycle.
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
         run: |
+          rm -f data/collector_result.json
           docker run --rm \
             -v "$PWD/data:/app/data" \
-            -v "$PWD/chroma_db:/app/chroma_db" \
             -e GROQ_API_KEY -e FRED_API_KEY -e NEWSAPI_KEY \
-            "ghcr.io/${{ github.repository }}:latest" \
+            "ghcr.io/${{ github.repository }}:${{ steps.image.outputs.tag }}" \
             argus-collect
 
-      - name: Publish updated state
+      - name: Compute status update
+        id: status
+        # always() so a DEGRADED "Run collection cycle" step (see above) doesn't
+        # skip this — but gated on checkout having succeeded, so a preflight
+        # failure (no secrets — see the first step) still skips straight past
+        # this and Publish rather than pushing state for a run that never
+        # touched data/.
+        if: always() && steps.checkout.outcome == 'success'
         run: |
-          mkdir -p publish
-          cp -r chroma_db publish/chroma_db
-          if [ -f data/decisions.jsonl ]; then
-            cp data/decisions.jsonl publish/decisions.jsonl
+          if [ -f data/collector_result.json ]; then
+            json="$(jq -c --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{
+              last_run: $t,
+              last_reason: (.reason // "unknown"),
+              last_outcome: (.outcome // "unknown"),
+              last_decisions_logged: (.decisions_logged // 0),
+              last_decisions_with_allocation: (.decisions_with_allocation // 0),
+              last_degraded_inputs: (.degraded_inputs // {})
+            }' data/collector_result.json)"
           else
-            echo "::warning::decisions.jsonl absent after this cycle — nothing has ever been logged"
+            echo "::warning::collector_result.json absent after this cycle — nothing has ever been logged"
+            json="$(jq -nc --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{last_run: $t, last_reason: "unknown", last_outcome: "unknown"}')"
           fi
-          [ -f data/newsapi_budget.json ] && cp data/newsapi_budget.json publish/newsapi_budget.json || echo "no newsapi_budget.json to publish"
-          # Merge rather than overwrite — reconcile.yml writes to the same
-          # status.json on the same branch and its field must survive this
-          ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          reason="$(jq -r '.reason // "unknown"' data/collector_result.json 2>/dev/null || echo unknown)"
-          if [ -f state/status.json ]; then
-            jq --arg t "$ts" --arg r "$reason" '. + {last_run: $t, last_reason: $r}' state/status.json > publish/status.json
-          else
-            jq -n --arg t "$ts" --arg r "$reason" '{last_run: $t, last_reason: $r}' > publish/status.json
-          fi
-          rm -rf state
-          cd publish
-          git init -q -b argus-data
-          git config user.name "argus-collector"
-          git config user.email "actions@users.noreply.github.com"
-          git add -A
-          git commit -q -m "Update collected state ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
-          git push -q --force \
-            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" \
-            argus-data:argus-data
+          echo "json=$json" >> "$GITHUB_OUTPUT"
+
+      - name: Publish updated state
+        if: always() && steps.checkout.outcome == 'success'
+        uses: ./.github/actions/publish-argus-state
+        with:
+          status-update: ${{ steps.status.outputs.json }}
+          commit-message: "Update collected state"
+          github-token: ${{ secrets.GITHUB_TOKEN }}

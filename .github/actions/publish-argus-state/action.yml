@@ -1,0 +1,41 @@
+name: Publish ARGUS state
+description: >
+  Publishes the whole persistent data directory back to the argus-data branch
+  as a single unit, so nothing a sibling scheduled workflow wrote is lost.
+
+inputs:
+  status-update:
+    description: Compact JSON object merged into the branch's status.json
+    required: true
+  commit-message:
+    description: Commit message prefix; a UTC timestamp is appended
+    required: true
+  github-token:
+    description: Token used to push to the argus-data branch
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Publish updated state
+      shell: bash
+      env:
+        STATUS_UPDATE: ${{ inputs.status-update }}
+      run: |
+        mkdir -p publish
+        cp -r data publish/data
+        if [ -f state/status.json ]; then
+          jq --argjson add "$STATUS_UPDATE" '. + $add' state/status.json > publish/status.json
+        else
+          echo "$STATUS_UPDATE" | jq '.' > publish/status.json
+        fi
+        rm -rf state
+        cd publish
+        git init -q -b argus-data
+        git config user.name "argus-collector"
+        git config user.email "actions@users.noreply.github.com"
+        git add -A
+        git commit -q -m "${{ inputs.commit-message }} ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+        git push -q --force \
+          "https://x-access-token:${{ inputs.github-token }}@github.com/${{ github.repository }}.git" \
+          argus-data:argus-data

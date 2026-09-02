@@ -5,11 +5,17 @@ Integration tests for ARGUS: the statistical-agent pipeline, the orchestrator
 graph end to end, signal-schema serialization, and the shared Governor's
 rate limits.
 
-TestEndToEnd exercises live yfinance/FRED calls and needs FRED_API_KEY; every
-LLM boundary it crosses is mocked.
+Three of TestEndToEnd's methods exercise live yfinance calls and are skipped
+with a visible reason, via the `requires_live_network` marker below, when
+that network is unreachable — see `_live_network_skip_reason`'s docstring.
+FRED is not a hard prerequisite: MacroStatisticalAgent.analyze() degrades to
+STABLE/0.0 defaults rather than raising when FRED_API_KEY is absent, so none
+of these tests need it to pass. The rest of the class, and every LLM boundary
+any test crosses, run offline.
 """
 
 import asyncio
+import socket
 import time
 from datetime import date, datetime
 from unittest import mock
@@ -24,13 +30,17 @@ from argus.agents.portfolio import half_kelly_weight
 from argus.agents.risk import RiskStatisticalEngine
 from argus.agents.technical import TechnicalStatisticalAgent
 from argus.data.pipeline import MFTDataPipeline
+from argus.memory.cultural import CulturalMemoryManager
 from argus.orchestration.governor import BOOTSTRAP_LIMITS, REGISTERED_MODELS, governor
 from argus.orchestration.graph import build_graph
+from argus.orchestration.reconciliation import reconcile_decision
 from argus.orchestration.state import ARGUSState
 from argus.schemas.signals import (
+    ARGUSDecision,
     FundamentalSignal,
     MacroContext,
     PortfolioAllocation,
+    PositionAllocation,
     Regime,
     RiskAssessment,
     SectorSignal,
@@ -40,11 +50,36 @@ from argus.schemas.signals import (
     VixRegime,
     YieldCurve,
 )
+from argus.seams import LiveMarketDataProvider
+
+
+def _live_network_skip_reason() -> str | None:
+    """Returns why the live-network tests should skip, or None if the network is reachable.
+
+    Checked once at collection time rather than per-test so a run with no
+    network access pays the reachability probe's timeout only once.
+
+    Returns:
+        A human-readable skip reason, or None if Yahoo Finance is reachable.
+    """
+    try:
+        with socket.create_connection(("query1.finance.yahoo.com", 443), timeout=3.0):
+            return None
+    except OSError as exc:
+        return f"no live network access to Yahoo Finance ({exc})"
+
+
+_LIVE_NETWORK_SKIP_REASON = _live_network_skip_reason()
+
+requires_live_network = pytest.mark.skipif(
+    _LIVE_NETWORK_SKIP_REASON is not None, reason=_LIVE_NETWORK_SKIP_REASON or ""
+)
 
 
 class TestEndToEnd:
     """Integration tests exercising real agents, the orchestrator graph, and shared state."""
 
+    @requires_live_network
     def test_statistical_agents_pipeline(self):
         """TechnicalAgent -> MacroAgent -> RiskEngine chain runs with zero LLM calls."""
         pipeline = MFTDataPipeline(["AAPL"])
@@ -89,6 +124,65 @@ class TestEndToEnd:
         assert isinstance(r_sig, RiskAssessment)
         assert r_sig.api_calls_used == 0
 
+    @requires_live_network
+    def test_reconcile_decision_resolves_a_matured_decision_against_live_prices(self):
+        """A decision old enough to have matured reconciles end to end against real Yahoo prices.
+
+        Regression coverage for issue #93 (yfinance 401 "Invalid Crumb"): this
+        is the one place the reconciliation path — compute_realized_return's
+        market_data.ohlcv_daily() call through to reconcile_decision — runs
+        against LiveMarketDataProvider instead of a fixture/fake, so a crumb
+        handshake failure here would fail this test rather than only surface
+        in production.
+        """
+        horizon_days = 5
+        session_timestamp = datetime.now() - pd.Timedelta(days=30)
+        technical = TechnicalSignal(
+            ticker="AAPL",
+            current_price=150.0,
+            rsi_14=50.0,
+            macd_histogram=0.0,
+            bb_percent_b=0.5,
+            atr_pct=0.02,
+            adx_14=20.0,
+            vwap_distance=0.0,
+            volume_ratio=1.0,
+            momentum_30m=0.0,
+            momentum_1d=0.0,
+            signal=Signal.BULLISH,
+            conviction=0.6,
+            net_score=0.0,
+            timestamp=session_timestamp,
+        )
+        decision = ARGUSDecision(
+            ticker="AAPL",
+            session_timestamp=session_timestamp,
+            technical=technical,
+            allocation=PositionAllocation(
+                ticker="AAPL",
+                allocation_pct=0.10,
+                allocation_usd=10_000.0,
+                stop_loss=140.0,
+                thesis="test thesis",
+                composite_conviction=0.6,
+                time_horizon="30 days",
+            ),
+        )
+        cultural = mock.create_autospec(CulturalMemoryManager, instance=True)
+
+        stored = reconcile_decision(
+            decision, LiveMarketDataProvider(), cultural, horizon_days=horizon_days
+        )
+
+        assert stored is True
+        cultural.store_trade_outcome.assert_called_once()
+        kwargs = cultural.store_trade_outcome.call_args.kwargs
+        assert kwargs["decision"] is decision
+        assert isinstance(kwargs["actual_return_pct"], float)
+        assert kwargs["holding_days"] >= horizon_days
+        assert f"{horizon_days}d" in kwargs["exit_reason"]
+
+    @requires_live_network
     @pytest.mark.asyncio
     @mock.patch("argus.agents.portfolio.PortfolioManagerAgent.allocate")
     @mock.patch("argus.orchestration.graph.get_cultural_memory")

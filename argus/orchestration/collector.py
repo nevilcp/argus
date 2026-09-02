@@ -18,6 +18,13 @@ Responsibilities:
     (append_decisions_jsonl is also called directly by api/main.py's
     /analyze, the loop's other entry point into the graph, so the log
     reflects both)
+  - Classify the cycle's outcome (CycleOutcome: no-op, success, or
+    degraded) so a run that produced only unusable decisions is
+    distinguishable from one that produced real ones
+  - Prune stale LangGraph checkpoint threads from the checkpoint database
+    before returning (see _prune_stale_checkpoints), so whatever a caller
+    publishes next — the scheduled collector force-pushes the whole data
+    directory to argus-data every cycle — is already bounded (issue #99)
 
 Not responsible for:
   - Scheduling (see api/main.py's collector loop and scripts/collect_session.py)
@@ -31,14 +38,37 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 
+from argus.config import settings
 from argus.data.pipeline import MFTDataPipeline
+from argus.orchestration.reconciliation import default_checkpoint_retention_cutoff, prune_checkpoints
 from argus.orchestration.state import ARGUSState
+from argus.params import COLLECTOR
 from argus.risk.kill_switch import get_kill_switch
 from argus.schemas.signals import ARGUSDecision
 
 logger = logging.getLogger("argus.collector")
+
+# Decision fields whose absence marks a degraded input; checked on every
+# decision the graph produced so a cycle summary can say which upstream
+# signal(s) went missing rather than just "some things were null".
+_DECISION_SIGNAL_FIELDS = ("technical", "macro", "fundamental", "sentiment", "risk", "allocation")
+
+
+class CycleOutcome(str, Enum):
+    """What a completed run_collection_cycle() call actually achieved.
+
+    The three outcomes issue #91 asks the collector to tell apart — market
+    closed (NO_OP), a normal run (SUCCESS), and a run that produced only
+    decisions with no usable allocation (DEGRADED) — look identical from a
+    green exit code otherwise.
+    """
+
+    NO_OP = "no_op"
+    SUCCESS = "success"
+    DEGRADED = "degraded"
 
 
 @dataclass
@@ -49,9 +79,18 @@ class CollectionResult:
         ran: False when the cycle skipped the graph entirely (no session
             data yet).
         reason: Human-readable explanation, e.g. "market closed", "collected".
+        outcome: NO_OP when `ran` is False; otherwise SUCCESS or DEGRADED
+            depending on whether decisions_with_allocation clears
+            params.COLLECTOR.min_decisions_with_allocation.
         tickers_with_session_data: Tickers the MFT sweep actually populated
             session data for this cycle.
         decisions_logged: Count of decisions appended to the JSONL log.
+        decisions_with_allocation: Of those, how many carry a real
+            (non-null) allocation — the ones actually worth reconciling.
+        degraded_inputs: Counts, per signal name, of decisions produced
+            without that signal (e.g. {"fundamental": 20} means every
+            decision this cycle came back with fundamental=None). Only
+            signals that degraded at least once are included.
         macro_regime: The macro agent's regime classification for this
             cycle, or None if the graph didn't run or produced no macro
             context.
@@ -61,8 +100,11 @@ class CollectionResult:
 
     ran: bool
     reason: str
+    outcome: CycleOutcome = CycleOutcome.NO_OP
     tickers_with_session_data: list[str] = field(default_factory=list)
     decisions_logged: int = 0
+    decisions_with_allocation: int = 0
+    degraded_inputs: dict[str, int] = field(default_factory=dict)
     macro_regime: str | None = None
     errors: list[str] = field(default_factory=list)
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())  # noqa: DTZ005
@@ -75,6 +117,10 @@ def append_decisions_jsonl(decisions: list[ARGUSDecision], path: str) -> int:
     entry points into the graph — so decisions.jsonl (the source
     reconciliation reads, see orchestration/reconciliation.py) reflects
     both instead of only the unattended collector's.
+
+    Each decision is stamped with the running process's image tag (issue #95)
+    before it's written, so a logged decision can be traced back to the build
+    that produced it regardless of which docker tag was pulled to run it.
 
     Args:
         decisions: Decisions produced by this cycle's graph invocation.
@@ -90,8 +136,46 @@ def append_decisions_jsonl(decisions: list[ARGUSDecision], path: str) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "a", encoding="utf-8") as f:
         for decision in decisions:
-            f.write(decision.model_dump_json() + "\n")
+            stamped = decision.model_copy(update={"image_tag": settings.ARGUS_IMAGE_TAG})
+            f.write(stamped.model_dump_json() + "\n")
     return len(decisions)
+
+
+def _summarize_degraded_inputs(decisions: list[ARGUSDecision]) -> dict[str, int]:
+    """Counts, per signal name, how many of this cycle's decisions came back without it.
+
+    Args:
+        decisions: Decisions produced by this cycle's graph invocation.
+
+    Returns:
+        {signal_name: count}, omitting any signal that degraded zero times.
+    """
+    counts = {
+        name: sum(1 for d in decisions if getattr(d, name) is None) for name in _DECISION_SIGNAL_FIELDS
+    }
+    return {name: count for name, count in counts.items() if count > 0}
+
+
+def _prune_stale_checkpoints(checkpoint_db_path: str) -> None:
+    """Best-effort prunes checkpoint threads older than the reconciliation retention window.
+
+    Uses default_checkpoint_retention_cutoff() — the same window
+    reconciliation.py's own daily pass prunes to — so a checkpoint thread
+    survives exactly as long under either path. Called on every collector
+    cycle (issue #99) so the state each cycle publishes to argus-data is
+    already bounded, rather than relying solely on the once-daily reconcile
+    job to catch up after the fact.
+
+    Failures are logged and swallowed: pruning is housekeeping independent of
+    this cycle's actual result, and must never turn a successful collection
+    into a failed one.
+    """
+    try:
+        pruned = prune_checkpoints(checkpoint_db_path, default_checkpoint_retention_cutoff())
+        if pruned:
+            logger.info("run_collection_cycle: pruned %d stale checkpoint thread(s)", pruned)
+    except Exception:
+        logger.exception("run_collection_cycle: checkpoint pruning failed")
 
 
 async def run_collection_cycle(
@@ -103,6 +187,7 @@ async def run_collection_cycle(
     pipeline: MFTDataPipeline,
     compiled_graph,
     decisions_log_path: str = "data/decisions.jsonl",
+    checkpoint_db_path: str | None = None,
     analyze_lock: asyncio.Semaphore | None = None,
 ) -> CollectionResult:
     """Runs one unattended fetch → analyze → log cycle for the given universe.
@@ -137,6 +222,13 @@ async def run_collection_cycle(
             still opens its own checkpoint connection — see
             graph.py's ``_CheckpointedGraph``.
         decisions_log_path: JSONL file each cycle's decisions are appended to.
+        checkpoint_db_path: LangGraph checkpoint database this cycle's
+            compiled_graph checkpoints to. When given, stale checkpoint
+            threads are pruned (see _prune_stale_checkpoints) before this
+            call returns, regardless of whether the graph ran this cycle —
+            so whatever a caller publishes afterward (the scheduled
+            collector force-pushes the whole data directory to argus-data
+            every tick) is already bounded. None skips pruning entirely.
         analyze_lock: The same semaphore api/main.py's `/analyze` guards its
             graph invocation with — the collector is a third caller of
             the same graph and governor, so it shares the slot rather than
@@ -149,6 +241,9 @@ async def run_collection_cycle(
     Returns:
         A CollectionResult summarizing what happened.
     """
+    if checkpoint_db_path is not None:
+        _prune_stale_checkpoints(checkpoint_db_path)
+
     ks = get_kill_switch()
     if ks is not None and ks.is_halted:
         reason = f"halted: {ks.status.reason}"
@@ -216,14 +311,30 @@ async def run_collection_cycle(
     macro_context = final_state.get("macro_context")
     macro_regime = macro_context.macro_regime.value if macro_context else None
 
+    decisions_with_allocation = sum(1 for d in decisions if d.allocation is not None)
+    degraded_inputs = _summarize_degraded_inputs(decisions)
+    outcome = (
+        CycleOutcome.SUCCESS
+        if decisions_with_allocation >= COLLECTOR.min_decisions_with_allocation
+        else CycleOutcome.DEGRADED
+    )
+
     logger.info(
-        "run_collection_cycle: logged %d decision(s), macro_regime=%s", logged, macro_regime
+        "run_collection_cycle: logged %d decision(s) (%d with allocation), "
+        "macro_regime=%s, outcome=%s",
+        logged,
+        decisions_with_allocation,
+        macro_regime,
+        outcome.value,
     )
     return CollectionResult(
         ran=True,
         reason="collected",
+        outcome=outcome,
         tickers_with_session_data=tickers_with_data,
         decisions_logged=logged,
+        decisions_with_allocation=decisions_with_allocation,
+        degraded_inputs=degraded_inputs,
         macro_regime=macro_regime,
         errors=errors,
     )

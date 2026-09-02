@@ -53,6 +53,12 @@ ENV PATH="/opt/venv/bin:$PATH" \
     HF_HOME=/opt/model-cache \
     PYTHONUNBUFFERED=1
 
+# Baked in at build time (see image.yml) rather than read from the pulled tag,
+# so a decision's provenance survives even when the container was invoked as
+# :latest or a rolled-back pin — see argus.config.settings.ARGUS_IMAGE_TAG.
+ARG ARGUS_IMAGE_TAG=unknown
+ENV ARGUS_IMAGE_TAG=${ARGUS_IMAGE_TAG}
+
 RUN mkdir -p /app/data /app/chroma_db /app/runs && chown -R argus:argus /app
 USER argus
 

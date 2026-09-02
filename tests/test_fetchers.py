@@ -10,6 +10,7 @@ from unittest import mock
 import pandas as pd
 import pytest
 import requests
+import yfinance as yf
 import yfinance.exceptions as yf_exceptions
 from newsapi.newsapi_exception import NewsAPIException
 
@@ -21,6 +22,15 @@ def _http_error(status_code: int, headers: dict | None = None) -> requests.excep
     """Builds an HTTPError whose .response mimics a real requests response."""
     response = mock.Mock(status_code=status_code, headers=headers or {})
     return requests.exceptions.HTTPError(response=response)
+
+
+def _crumb_error() -> requests.exceptions.HTTPError:
+    """Builds a 401 HTTPError matching Yahoo's actual "Invalid Crumb" response body."""
+    response = mock.Mock(status_code=401, headers={})
+    return requests.exceptions.HTTPError(
+        '{"finance":{"result":null,"error":{"code":"Unauthorized","description":"Invalid Crumb"}}}',
+        response=response,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +73,53 @@ def test_is_retryable_http_status_codes(status_code, expected):
 def test_is_retryable_defaults_true_for_unclassified_exceptions():
     """An exception outside the known taxonomy defaults to retryable, matching prior behavior."""
     assert fetchers._is_retryable(ValueError("unexpected")) is True
+
+
+# ---------------------------------------------------------------------------
+# _is_crumb_handshake_failure
+# ---------------------------------------------------------------------------
+
+
+def test_is_crumb_handshake_failure_detects_yahoo_invalid_crumb():
+    """Yahoo's actual 401 body is recognized as a crumb handshake failure."""
+    assert fetchers._is_crumb_handshake_failure(_crumb_error()) is True
+
+
+def test_is_crumb_handshake_failure_false_for_credential_401():
+    """A plain 401 with no crumb mention (e.g. a bad FRED/NewsAPI key) is not a crumb failure."""
+    assert fetchers._is_crumb_handshake_failure(_http_error(401)) is False
+
+
+def test_is_crumb_handshake_failure_false_for_non_401_status():
+    """The "crumb" text alone, on a different status code, does not qualify."""
+    response = mock.Mock(status_code=500, headers={})
+    exc = requests.exceptions.HTTPError("Invalid Crumb", response=response)
+    assert fetchers._is_crumb_handshake_failure(exc) is False
+
+
+# ---------------------------------------------------------------------------
+# _reset_yfinance_session
+# ---------------------------------------------------------------------------
+
+
+def test_reset_yfinance_session_clears_in_memory_and_persisted_cookie():
+    """Reset clears both the singleton's in-memory crumb/cookie and the on-disk cookie cache.
+
+    Regression test: clearing only _cookie/_crumb isn't enough — yfinance
+    reloads a persisted cookie from disk before ever attempting a new
+    network handshake (see _reset_yfinance_session's docstring), so a stale
+    cookie there would survive an in-memory-only reset and get reused.
+    """
+    data_client = yf.data.YfData()
+    data_client._cookie = "stale-cookie"
+    data_client._crumb = "stale-crumb"
+    yf.cache.get_cookie_cache().store("curlCffi", {"stale": "cookie-jar"})
+
+    fetchers._reset_yfinance_session()
+
+    assert data_client._cookie is None
+    assert data_client._crumb is None
+    assert yf.cache.get_cookie_cache().lookup("curlCffi") is None
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +209,41 @@ def test_with_retry_succeeds_without_sleeping_on_first_attempt(monkeypatch):
         return "value"
 
     assert ok() == "value"
+
+
+def test_with_retry_resets_yfinance_session_and_retries_crumb_handshake_failures(monkeypatch):
+    """A crumb handshake failure resets yfinance's session and gets retried, unlike a plain 401."""
+    monkeypatch.setattr(fetchers.time, "sleep", lambda _s: None)
+    reset_calls = mock.Mock()
+    monkeypatch.setattr(fetchers, "_reset_yfinance_session", reset_calls)
+    calls = {"n": 0}
+
+    @fetchers._with_retry
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 2:
+            raise _crumb_error()
+        return "ok"
+
+    assert flaky() == "ok"
+    assert calls["n"] == 2
+    reset_calls.assert_called_once()
+
+
+def test_with_retry_raises_named_error_after_exhausting_crumb_handshake_retries(monkeypatch):
+    """Persistent crumb failures raise YahooCrumbHandshakeError, not a bare upstream 401."""
+    monkeypatch.setattr(fetchers.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(fetchers, "_reset_yfinance_session", mock.Mock())
+    calls = {"n": 0}
+
+    @fetchers._with_retry
+    def flaky():
+        calls["n"] += 1
+        raise _crumb_error()
+
+    with pytest.raises(fetchers.YahooCrumbHandshakeError):
+        flaky()
+    assert calls["n"] == fetchers._RETRY_ATTEMPTS
 
 
 # ---------------------------------------------------------------------------
