@@ -11,16 +11,51 @@ The kill-switch gate is not covered here; see tests/test_kill_switch.py's
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+import sqlite3
+from datetime import datetime, timedelta
 from typing import Any
 from unittest import mock
 
 import pytest
+from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata
+from langgraph.checkpoint.sqlite import SqliteSaver
 
 from argus.config import settings
 from argus.orchestration.collector import CycleOutcome, append_decisions_jsonl, run_collection_cycle
-from argus.params import COLLECTOR
+from argus.orchestration.graph import build_checkpoint_serde
+from argus.params import COLLECTOR, RECONCILIATION
 from argus.schemas.signals import ARGUSDecision, PositionAllocation
+
+
+def _put_checkpoint(db_path: str, thread_id: str, ts: datetime) -> None:
+    """Writes one empty checkpoint for `thread_id` stamped with `ts`."""
+    config: RunnableConfig = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    checkpoint: Checkpoint = {
+        "v": 1,
+        "ts": ts.isoformat(),
+        "id": thread_id,
+        "channel_values": {},
+        "channel_versions": {},
+        "versions_seen": {},
+        "updated_channels": None,
+    }
+    metadata: CheckpointMetadata = {"source": "input", "step": 1}
+
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    try:
+        SqliteSaver(conn, serde=build_checkpoint_serde()).put(config, checkpoint, metadata, {})
+    finally:
+        conn.close()
+
+
+def _checkpoint_thread_ids(db_path: str) -> set[str]:
+    """Returns the distinct thread_ids currently in the checkpoint database."""
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    try:
+        return {row[0] for row in conn.execute("SELECT DISTINCT thread_id FROM checkpoints")}
+    finally:
+        conn.close()
 
 _SESSION_STATES = {"AAPL": {"timestamp": "2024-01-02T09:30:00-05:00"}}
 
@@ -154,6 +189,57 @@ async def test_run_collection_cycle_reports_degraded_when_no_decision_has_alloca
     assert result.degraded_inputs["fundamental"] == 20
     assert result.degraded_inputs["sentiment"] == 20
     assert result.degraded_inputs["risk"] == 20
+
+
+@pytest.mark.asyncio
+async def test_run_collection_cycle_prunes_stale_checkpoints_even_when_the_cycle_is_skipped(
+    tmp_path,
+):
+    """Issue #99: a stale checkpoint thread is pruned regardless of whether this cycle's
+    graph actually ran, so whatever gets published to argus-data afterward is bounded.
+    """
+    db_path = str(tmp_path / "argus_graph.db")
+    retention_days = RECONCILIATION.horizon_days + RECONCILIATION.retention_margin_days
+    _put_checkpoint(db_path, "stale-thread", datetime.now() - timedelta(days=retention_days + 1))
+    _put_checkpoint(db_path, "fresh-thread", datetime.now() - timedelta(days=1))
+
+    lock = asyncio.Semaphore(1)
+    await lock.acquire()
+    graph = _graph()
+    graph.invoke.side_effect = AssertionError("must not run while the lock is held")
+
+    result = await _run_cycle(graph, analyze_lock=lock, checkpoint_db_path=db_path)
+
+    assert result.ran is False
+    assert _checkpoint_thread_ids(db_path) == {"fresh-thread"}
+
+
+@pytest.mark.asyncio
+async def test_run_collection_cycle_without_checkpoint_db_path_skips_pruning(monkeypatch):
+    """The default (no checkpoint_db_path) leaves pruning out of the cycle entirely."""
+    prune = mock.Mock()
+    monkeypatch.setattr("argus.orchestration.collector.prune_checkpoints", prune)
+    graph = _graph()
+
+    result = await _run_cycle(graph)
+
+    assert result.ran is True
+    prune.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_collection_cycle_survives_a_checkpoint_pruning_failure(tmp_path, monkeypatch):
+    """A prune_checkpoints failure is logged and swallowed, not left to fail the cycle."""
+    db_path = str(tmp_path / "argus_graph.db")
+    monkeypatch.setattr(
+        "argus.orchestration.collector.prune_checkpoints",
+        mock.Mock(side_effect=RuntimeError("boom")),
+    )
+    graph = _graph()
+
+    result = await _run_cycle(graph, checkpoint_db_path=db_path)
+
+    assert result.ran is True
 
 
 def test_append_decisions_jsonl_stamps_running_image_tag(tmp_path, monkeypatch):

@@ -761,6 +761,40 @@ def test_prune_checkpoints_nothing_stale_deletes_nothing(tmp_path):
     assert deleted == 0
 
 
+def test_checkpoint_pruning_stabilizes_the_published_file_size_across_successive_cycles(
+    tmp_path,
+):
+    """Repeated collector cycles, each adding one thread and pruning to the retention
+    window, leave the file published to argus-data at a constant size once the window
+    fills — not one that keeps growing with the number of cycles run (issue #99).
+
+    Each thread carries a real decisions payload (rather than an empty checkpoint) so a
+    growing thread count actually moves the file size, the way a real collector cycle's
+    checkpoint does.
+    """
+    db_path = str(tmp_path / "argus_graph.db")
+    retention_days = RECONCILIATION.horizon_days + RECONCILIATION.retention_margin_days
+    sim_now = datetime(2026, 1, 1)
+    payload = [_matured_decision(f"TICK{i}", sim_now) for i in range(20)]
+
+    sizes = []
+    total_cycles = 3 * retention_days
+    for cycle in range(total_cycles):
+        _put_checkpoint(db_path, f"collector-{cycle:04d}", sim_now, decisions=payload)
+        prune_checkpoints(db_path, cutoff=sim_now - timedelta(days=retention_days))
+        sizes.append(Path(db_path).stat().st_size)
+        sim_now += timedelta(days=1)
+
+    # While the retention window is still filling, every cycle's new thread grows the file.
+    assert sizes[retention_days] > sizes[0]
+
+    # Once the window is full, each cycle's new thread displaces exactly one aged-out
+    # thread, so the file stops growing instead of continuing to track cycle count.
+    plateau = sizes[retention_days + 2 :]
+    assert plateau, "test needs more cycles than the retention window to reach a plateau"
+    assert all(size == plateau[0] for size in plateau)
+
+
 # ---------------------------------------------------------------------------
 # run_reconciliation_pass: the end-to-end pass that reads decisions, reconciles
 # them, and bounds every store it touches.

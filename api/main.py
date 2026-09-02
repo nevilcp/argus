@@ -187,6 +187,7 @@ async def _collector_loop(pipeline: MFTDataPipeline, compiled_graph) -> None:
                 pipeline=pipeline,
                 compiled_graph=compiled_graph,
                 decisions_log_path=_data_path("decisions.jsonl"),
+                checkpoint_db_path=_data_path("argus_graph.db"),
                 analyze_lock=_analyze_semaphore,
             )
             logger.info("[Collector] cycle result: %s", _last_collection_result)

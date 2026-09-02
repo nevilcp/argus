@@ -21,6 +21,10 @@ Responsibilities:
   - Classify the cycle's outcome (CycleOutcome: no-op, success, or
     degraded) so a run that produced only unusable decisions is
     distinguishable from one that produced real ones
+  - Prune stale LangGraph checkpoint threads from the checkpoint database
+    before returning (see _prune_stale_checkpoints), so whatever a caller
+    publishes next — the scheduled collector force-pushes the whole data
+    directory to argus-data every cycle — is already bounded (issue #99)
 
 Not responsible for:
   - Scheduling (see api/main.py's collector loop and scripts/collect_session.py)
@@ -39,6 +43,7 @@ from pathlib import Path
 
 from argus.config import settings
 from argus.data.pipeline import MFTDataPipeline
+from argus.orchestration.reconciliation import default_checkpoint_retention_cutoff, prune_checkpoints
 from argus.orchestration.state import ARGUSState
 from argus.params import COLLECTOR
 from argus.risk.kill_switch import get_kill_switch
@@ -151,6 +156,28 @@ def _summarize_degraded_inputs(decisions: list[ARGUSDecision]) -> dict[str, int]
     return {name: count for name, count in counts.items() if count > 0}
 
 
+def _prune_stale_checkpoints(checkpoint_db_path: str) -> None:
+    """Best-effort prunes checkpoint threads older than the reconciliation retention window.
+
+    Uses default_checkpoint_retention_cutoff() — the same window
+    reconciliation.py's own daily pass prunes to — so a checkpoint thread
+    survives exactly as long under either path. Called on every collector
+    cycle (issue #99) so the state each cycle publishes to argus-data is
+    already bounded, rather than relying solely on the once-daily reconcile
+    job to catch up after the fact.
+
+    Failures are logged and swallowed: pruning is housekeeping independent of
+    this cycle's actual result, and must never turn a successful collection
+    into a failed one.
+    """
+    try:
+        pruned = prune_checkpoints(checkpoint_db_path, default_checkpoint_retention_cutoff())
+        if pruned:
+            logger.info("run_collection_cycle: pruned %d stale checkpoint thread(s)", pruned)
+    except Exception:
+        logger.exception("run_collection_cycle: checkpoint pruning failed")
+
+
 async def run_collection_cycle(
     universe: list[str],
     total_wealth: float,
@@ -160,6 +187,7 @@ async def run_collection_cycle(
     pipeline: MFTDataPipeline,
     compiled_graph,
     decisions_log_path: str = "data/decisions.jsonl",
+    checkpoint_db_path: str | None = None,
     analyze_lock: asyncio.Semaphore | None = None,
 ) -> CollectionResult:
     """Runs one unattended fetch → analyze → log cycle for the given universe.
@@ -194,6 +222,13 @@ async def run_collection_cycle(
             still opens its own checkpoint connection — see
             graph.py's ``_CheckpointedGraph``.
         decisions_log_path: JSONL file each cycle's decisions are appended to.
+        checkpoint_db_path: LangGraph checkpoint database this cycle's
+            compiled_graph checkpoints to. When given, stale checkpoint
+            threads are pruned (see _prune_stale_checkpoints) before this
+            call returns, regardless of whether the graph ran this cycle —
+            so whatever a caller publishes afterward (the scheduled
+            collector force-pushes the whole data directory to argus-data
+            every tick) is already bounded. None skips pruning entirely.
         analyze_lock: The same semaphore api/main.py's `/analyze` guards its
             graph invocation with — the collector is a third caller of
             the same graph and governor, so it shares the slot rather than
@@ -206,6 +241,9 @@ async def run_collection_cycle(
     Returns:
         A CollectionResult summarizing what happened.
     """
+    if checkpoint_db_path is not None:
+        _prune_stale_checkpoints(checkpoint_db_path)
+
     ks = get_kill_switch()
     if ks is not None and ks.is_halted:
         reason = f"halted: {ks.status.reason}"

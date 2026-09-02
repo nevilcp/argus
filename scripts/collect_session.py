@@ -93,6 +93,7 @@ def main() -> None:
             pipeline=pipeline,
             compiled_graph=compiled_graph,
             decisions_log_path=args.decisions_log,
+            checkpoint_db_path=args.checkpoint_db,
         )
     )
     pipeline.buffer.close()
