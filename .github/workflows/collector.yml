@@ -53,6 +53,7 @@ jobs:
           exit 0
 
       - name: Check out repository
+        id: checkout
         uses: actions/checkout@v4
 
       - name: Restore prior state
@@ -66,11 +67,25 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run collection cycle
+        # Exits non-zero (failing this step, and the job) when the cycle ran
+        # but came back DEGRADED — decisions logged with no usable allocation,
+        # see argus/orchestration/collector.py's CycleOutcome and
+        # params.COLLECTOR.min_decisions_with_allocation. The steps below
+        # still run via if: always() so a degraded cycle's detail reaches
+        # status.json instead of being lost with the failed step.
+        #
+        # Removes the prior cycle's collector_result.json first: restore-state
+        # brought it back along with the rest of data/, and without this an
+        # unrelated failure here (e.g. GHCR login, image pull, a crash before
+        # argus-collect writes its own result) would leave that stale file
+        # behind for "Compute status update" to republish under a fresh
+        # last_run, misreporting an infra outage as an ordinary past cycle.
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
         run: |
+          rm -f data/collector_result.json
           docker run --rm \
             -v "$PWD/data:/app/data" \
             -e GROQ_API_KEY -e FRED_API_KEY -e NEWSAPI_KEY \
@@ -79,15 +94,30 @@ jobs:
 
       - name: Compute status update
         id: status
+        # always() so a DEGRADED "Run collection cycle" step (see above) doesn't
+        # skip this — but gated on checkout having succeeded, so a preflight
+        # failure (no secrets — see the first step) still skips straight past
+        # this and Publish rather than pushing state for a run that never
+        # touched data/.
+        if: always() && steps.checkout.outcome == 'success'
         run: |
-          if [ ! -f data/decisions.jsonl ]; then
-            echo "::warning::decisions.jsonl absent after this cycle — nothing has ever been logged"
+          if [ -f data/collector_result.json ]; then
+            json="$(jq -c --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{
+              last_run: $t,
+              last_reason: (.reason // "unknown"),
+              last_outcome: (.outcome // "unknown"),
+              last_decisions_logged: (.decisions_logged // 0),
+              last_decisions_with_allocation: (.decisions_with_allocation // 0),
+              last_degraded_inputs: (.degraded_inputs // {})
+            }' data/collector_result.json)"
+          else
+            echo "::warning::collector_result.json absent after this cycle — nothing has ever been logged"
+            json="$(jq -nc --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{last_run: $t, last_reason: "unknown", last_outcome: "unknown"}')"
           fi
-          reason="$(jq -r '.reason // "unknown"' data/collector_result.json 2>/dev/null || echo unknown)"
-          json="$(jq -nc --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg r "$reason" '{last_run: $t, last_reason: $r}')"
           echo "json=$json" >> "$GITHUB_OUTPUT"
 
       - name: Publish updated state
+        if: always() && steps.checkout.outcome == 'success'
         uses: ./.github/actions/publish-argus-state
         with:
           status-update: ${{ steps.status.outputs.json }}
