@@ -36,6 +36,13 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run reconciliation
+        # No API secrets are required here, audited: reconciliation only reads
+        # live prices via yfinance (keyless — see argus/seams.py's
+        # LiveMarketDataProvider) and stores outcomes through a local
+        # sentence-transformer embedding model (argus/memory/cultural.py). It
+        # never builds the graph, so none of GROQ_API_KEY, FRED_API_KEY, or
+        # NEWSAPI_KEY — all consumed only at collection time, see
+        # collector.yml's preflight — need to be plumbed into this container.
         run: |
           docker run --rm \
             -v "$PWD/data:/app/data" \
