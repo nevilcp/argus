@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -421,33 +421,86 @@ def load_decisions_from_jsonl(path: str) -> list[ARGUSDecision]:
     return decisions
 
 
-def compact_decisions_jsonl(path: str, cutoff: datetime) -> int:
-    """Rewrites a decisions.jsonl log, dropping sessions older than cutoff.
+@dataclass
+class CompactionResult:
+    """Outcome of one compact_decisions_jsonl() call.
+
+    Attributes:
+        retained: Count of decisions written back to the log.
+        retired_unresolved: Count of decisions dropped for aging past
+            RECONCILIATION.unresolved_retirement_days without ever having
+            received an outcome — distinct from `retained`'s complement,
+            which also includes decisions dropped as routine, already-resolved
+            cleanup.
+    """
+
+    retained: int
+    retired_unresolved: int = 0
+
+
+def compact_decisions_jsonl(
+    path: str,
+    cutoff: datetime,
+    unresolved_cutoff: datetime,
+    resolved_ids: Collection[str],
+) -> CompactionResult:
+    """Rewrites a decisions.jsonl log, dropping resolved sessions older than cutoff.
+
+    A decision is resolved once it has a stored outcome (its decision_id is in
+    resolved_ids) or could never produce one (see _needs_reconciliation) —
+    anything else has no recorded outcome yet and is not eligible for this
+    routine prune, however old it is: a reconcile pass that never ran, or
+    never found a matured price, must not cost it the evidence it would
+    otherwise have produced. Such a decision is instead retired once it also
+    passes the much wider `unresolved_cutoff`, at which point it is declared
+    permanently unresolvable and dropped anyway, counted separately from a
+    routine, resolved prune.
 
     Meant to run right after a reconcile_decisions() pass over the same log
-    (see api/main.py's _reconcile_once and scripts/reconcile_outcomes.py) with
-    a cutoff at or before that pass's horizon: a decision that old has already
-    had its one chance at reconciliation, so dropping it here only stops the
-    log growing forever, it does not cost a delayed reconcile pass anything.
+    (see api/main.py's _reconcile_once and scripts/reconcile_outcomes.py),
+    with resolved_ids reflecting that same pass's outcome stores.
 
     Args:
         path: decisions.jsonl path.
-        cutoff: Decisions with session_timestamp before this are dropped. Should
-            be tz-naive, matching the naive timestamps this log stores.
+        cutoff: Resolved decisions with session_timestamp before this are
+            dropped. Should be tz-naive, matching the naive timestamps this
+            log stores.
+        unresolved_cutoff: Unresolved decisions with session_timestamp before
+            this are retired anyway. Should be tz-naive and at or before
+            cutoff (i.e. further in the past), so an unresolved decision
+            always gets at least as long as a resolved one.
+        resolved_ids: decision_id values that already have a stored outcome.
 
     Returns:
-        Count of decisions retained. 0 (and no file written) if the file
-        doesn't exist yet.
+        A CompactionResult. Both fields are 0 (and no file written) if the
+        file doesn't exist yet.
     """
     file_path = Path(path)
     if not file_path.exists():
-        return 0
+        return CompactionResult(retained=0)
 
     decisions = load_decisions_from_jsonl(path)
     cutoff_naive = _as_naive_timestamp(cutoff)
-    kept = [d for d in decisions if _as_naive_timestamp(d.session_timestamp) >= cutoff_naive]
+    unresolved_cutoff_naive = _as_naive_timestamp(unresolved_cutoff)
+
+    kept: list[ARGUSDecision] = []
+    retired_unresolved = 0
+    for decision in decisions:
+        session_ts = _as_naive_timestamp(decision.session_timestamp)
+        if session_ts >= cutoff_naive:
+            kept.append(decision)
+            continue
+
+        resolved = decision.decision_id in resolved_ids or not _needs_reconciliation(decision)
+        if resolved:
+            continue
+        if session_ts >= unresolved_cutoff_naive:
+            kept.append(decision)
+        else:
+            retired_unresolved += 1
+
     if len(kept) == len(decisions):
-        return len(kept)
+        return CompactionResult(retained=len(kept), retired_unresolved=retired_unresolved)
 
     tmp_path = file_path.with_suffix(file_path.suffix + ".tmp")
     with open(tmp_path, "w", encoding="utf-8") as f:
@@ -456,13 +509,16 @@ def compact_decisions_jsonl(path: str, cutoff: datetime) -> int:
     tmp_path.replace(file_path)
 
     logger.info(
-        "compact_decisions_jsonl: kept %d/%d decision(s) in %s (cutoff=%s)",
+        "compact_decisions_jsonl: kept %d/%d decision(s) in %s (cutoff=%s, retired %d "
+        "unresolved past %s)",
         len(kept),
         len(decisions),
         path,
         cutoff_naive.isoformat(),
+        retired_unresolved,
+        unresolved_cutoff_naive.isoformat(),
     )
-    return len(kept)
+    return CompactionResult(retained=len(kept), retired_unresolved=retired_unresolved)
 
 
 def prune_checkpoints(db_path: str, cutoff: datetime) -> int:
@@ -541,6 +597,12 @@ class ReconciliationReport:
             snapshots expired by this pass.
         decisions_compacted: Retained decisions.jsonl count, or None if
             decisions_log_path wasn't given.
+        decisions_retired_unresolved: Count of decisions.jsonl decisions
+            dropped for aging past RECONCILIATION.unresolved_retirement_days
+            without ever receiving an outcome, or None if decisions_log_path
+            wasn't given. Distinct from decisions_compacted, which counts what
+            survived — this counts a deliberate, unresolved retirement rather
+            than a routine, resolved prune.
         checkpoints_pruned: Deleted checkpoint-thread count, or None if
             checkpoint_db_path wasn't given.
         errors: One entry per independent step that failed; every other
@@ -555,6 +617,7 @@ class ReconciliationReport:
     runs_applied_pruned: int = 0
     pending_snapshots_expired: int = 0
     decisions_compacted: Optional[int] = None
+    decisions_retired_unresolved: Optional[int] = None
     checkpoints_pruned: Optional[int] = None
     errors: list[str] = field(default_factory=list)
 
@@ -655,6 +718,9 @@ def run_reconciliation_pass(
     cutoff = datetime.now() - timedelta(  # noqa: DTZ005
         days=horizon_days + RECONCILIATION.retention_margin_days
     )
+    unresolved_cutoff = datetime.now() - timedelta(  # noqa: DTZ005
+        days=horizon_days + RECONCILIATION.unresolved_retirement_days
+    )
 
     with _pass_step(report, "paper-book update"):
         book = paper_book.load(paper_book_path)
@@ -662,7 +728,12 @@ def run_reconciliation_pass(
             decisions, market_data, horizon_days
         ):
             book.apply_run(run_timestamp, run_return)
-        report.runs_applied_pruned = book.prune_runs_applied(cutoff)
+        # unresolved_cutoff, not cutoff: an unresolved decision can now outlive
+        # cutoff in decisions.jsonl (see compact_decisions_jsonl), so a run
+        # sharing its session_timestamp must stay in runs_applied at least as
+        # long — otherwise a later pass that recomputes the run from the
+        # decisions still on disk would compound it onto equity a second time.
+        report.runs_applied_pruned = book.prune_runs_applied(unresolved_cutoff)
         paper_book.save(book, paper_book_path)
         report.equity = book.equity
         report.drawdown = book.drawdown_from_peak()
@@ -670,7 +741,12 @@ def run_reconciliation_pass(
 
     if decisions_log_path:
         with _pass_step(report, "decisions.jsonl compaction"):
-            report.decisions_compacted = compact_decisions_jsonl(decisions_log_path, cutoff)
+            resolved_ids = cultural.already_reconciled([d.decision_id for d in decisions])
+            compaction = compact_decisions_jsonl(
+                decisions_log_path, cutoff, unresolved_cutoff, resolved_ids
+            )
+            report.decisions_compacted = compaction.retained
+            report.decisions_retired_unresolved = compaction.retired_unresolved
 
     if checkpoint_db_path:
         with _pass_step(report, "checkpoint pruning"):
