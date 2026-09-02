@@ -37,6 +37,7 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
+from argus.config import settings
 from argus.data.pipeline import MFTDataPipeline
 from argus.orchestration.state import ARGUSState
 from argus.params import COLLECTOR
@@ -112,6 +113,10 @@ def append_decisions_jsonl(decisions: list[ARGUSDecision], path: str) -> int:
     reconciliation reads, see orchestration/reconciliation.py) reflects
     both instead of only the unattended collector's.
 
+    Each decision is stamped with the running process's image tag (issue #95)
+    before it's written, so a logged decision can be traced back to the build
+    that produced it regardless of which docker tag was pulled to run it.
+
     Args:
         decisions: Decisions produced by this cycle's graph invocation.
         path: Destination file; parent directories are created if missing.
@@ -126,7 +131,8 @@ def append_decisions_jsonl(decisions: list[ARGUSDecision], path: str) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "a", encoding="utf-8") as f:
         for decision in decisions:
-            f.write(decision.model_dump_json() + "\n")
+            stamped = decision.model_copy(update={"image_tag": settings.ARGUS_IMAGE_TAG})
+            f.write(stamped.model_dump_json() + "\n")
     return len(decisions)
 
 
