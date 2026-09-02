@@ -431,7 +431,7 @@ With the default `.env`, this alone gives the same unattended behavior — hourl
 
 ## Testing
 
-ARGUS includes a suite of deterministic unit tests covering core agents, rate limit governors, and the intraday MFT pipeline. Every LLM boundary is fixture-backed or mocked (via `argus/seams.py` and `pytest-mock`), so no test ever calls Groq. One class — `tests/test_integration.py::TestEndToEnd` — deliberately exercises live yfinance and FRED calls; everything else runs offline.
+ARGUS includes a suite of deterministic unit tests covering core agents, rate limit governors, and the intraday MFT pipeline. Every LLM boundary is fixture-backed or mocked (via `argus/seams.py` and `pytest-mock`), so no test ever calls Groq. Three methods on `tests/test_integration.py::TestEndToEnd` deliberately exercise live yfinance calls, skipping with a clear reason when network access is unavailable; everything else runs offline.
 
 **Run the full test suite:**
 ```bash
@@ -449,7 +449,7 @@ pytest tests/ --cov=argus --cov-report=term-missing
 ```
 
 - **Categories**: Tests cover Pydantic validation boundaries, mathematical boundaries (e.g., Half-Kelly position sizing constraints), caching TTL expiration logic, and thread-safe rate limit assertions.
-- **Approximate Run Time**: ~150 seconds for 432 tests across 35 files. No Groq key is needed — LLM agents are always fixture-backed or mocked. `TestEndToEnd` needs network access and a `FRED_API_KEY`; the rest of the suite needs neither.
+- **Approximate Run Time**: ~150 seconds for 432 tests across 35 files. No Groq key is needed — LLM agents are always fixture-backed or mocked. `TestEndToEnd`'s live-network tests need network access and skip cleanly when it's absent; the rest of the suite needs none.
 - **CI gate**: `.github/workflows/ci.yml` additionally runs `ruff check .` and `mypy argus/` (pinned `ruff==0.16.2`, `mypy==2.3.0`) before the test step, and runs the suite on both Python 3.11 and 3.12 so the `requires-python = ">=3.11"` floor is actually exercised.
 
 ## Contributing
