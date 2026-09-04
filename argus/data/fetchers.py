@@ -26,6 +26,7 @@ Dependencies:
 
 from __future__ import annotations
 
+import fcntl
 import functools
 import json
 import logging
@@ -671,66 +672,85 @@ class _NewsApiBudget:
     anything Groq imposes — so this is checked before every request rather
     than discovered from a 426/429 response.
 
-    Persisted under ARGUS_DATA_DIR: the Actions collector starts a
-    fresh container on every tick, so an in-memory-only counter always read
-    zero used and never actually enforced the daily ceiling in that
-    deployment.
+    Persisted under ARGUS_DATA_DIR and read fresh on every reservation rather
+    than cached in memory: the long-lived API server and the Actions
+    collector's once-per-tick container both read-modify-write the same
+    file, so a process-local cache of "today's count" would go stale the
+    moment the other process wrote. An flock on a sidecar lock file
+    serializes that read-modify-write cycle across processes (tmp-then-replace
+    alone only makes each individual write atomic, not the cycle around it).
+    Any disk error during that cycle is treated as a failed reservation
+    rather than raised, so a full or read-only volume degrades the caller
+    instead of crashing it.
     """
 
     def __init__(self, daily_limit: int = _NEWSAPI_DAILY_LIMIT) -> None:
-        """Initializes an empty budget tracker.
+        """Initializes a budget tracker backed by ARGUS_DATA_DIR.
 
         Args:
             daily_limit: Maximum requests permitted per UTC day.
         """
         self._daily_limit = daily_limit
         self._lock = Lock()
-        self._requests_today = 0
-        self._date = datetime.now(timezone.utc).date()
-        self._loaded_from_disk = False
 
     def _persist_path(self) -> Path:
         """Returns the counter's path, read lazily so it honors the current ARGUS_DATA_DIR."""
         return Path(settings.ARGUS_DATA_DIR) / "newsapi_budget.json"
 
-    def _load_from_disk(self) -> None:
-        """Restores today's persisted request count, if any, once per process."""
+    @staticmethod
+    def _read_count(path: Path, today: date) -> int:
+        """Returns today's persisted request count, or 0 if absent, stale, or corrupt."""
         try:
-            raw = json.loads(self._persist_path().read_text())
-            if date.fromisoformat(raw["date"]) == self._date:
-                self._requests_today = raw["requests_today"]
+            raw = json.loads(path.read_text())
+            if date.fromisoformat(raw["date"]) == today:
+                return int(raw["requests_today"])
         except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError):
             pass
+        return 0
 
-    def _save_to_disk(self) -> None:
-        """Writes the current count to disk, tmp-file-then-replace for atomicity."""
-        path = self._persist_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
+    @staticmethod
+    def _write_count(path: Path, today: date, requests_today: int) -> None:
+        """Writes the count, tmp-file-then-replace for atomicity."""
         tmp_path = path.with_suffix(path.suffix + ".tmp")
-        tmp_path.write_text(
-            json.dumps({"date": self._date.isoformat(), "requests_today": self._requests_today})
-        )
+        tmp_path.write_text(json.dumps({"date": today.isoformat(), "requests_today": requests_today}))
         tmp_path.replace(path)
 
+    def _reserve_under_file_lock(self) -> bool:
+        """Reads, checks, and (if room remains) increments the persisted count.
+
+        Holds an flock on a sidecar file for the whole read-modify-write
+        cycle, so a concurrent process can't interleave its own cycle
+        in between — the source of the undercounting an in-process Lock
+        alone can't stop.
+        """
+        path = self._persist_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = path.with_suffix(path.suffix + ".lock")
+        with open(lock_path, "w") as lock_file:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            try:
+                today = datetime.now(timezone.utc).date()
+                requests_today = self._read_count(path, today)
+                if requests_today >= self._daily_limit:
+                    return False
+                self._write_count(path, today, requests_today + 1)
+                return True
+            finally:
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
+
     def try_reserve(self) -> bool:
-        """Reserves one request against today's budget if any remains.
+        """Reserves one request against today's UTC budget if any remains.
 
         Returns:
-            True if a request was reserved, False if today's budget is spent.
+            True if a request was reserved, False if today's budget is
+            spent or the reservation could not be safely persisted.
         """
         with self._lock:
-            if not self._loaded_from_disk:
-                self._load_from_disk()
-                self._loaded_from_disk = True
-            today = datetime.now(timezone.utc).date()
-            if today != self._date:
-                self._requests_today = 0
-                self._date = today
-            if self._requests_today >= self._daily_limit:
+            try:
+                return self._reserve_under_file_lock()
+            except OSError as exc:
+                logger.warning("_NewsApiBudget.try_reserve: disk error — %s", exc)
                 return False
-            self._requests_today += 1
-            self._save_to_disk()
-            return True
 
 
 _NEWSAPI_BUDGET = _NewsApiBudget()
