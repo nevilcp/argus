@@ -127,7 +127,9 @@ def compute_portfolio_returns(
     return asset_returns.mul(weights)
 
 
-def historical_var(portfolio_returns: pd.Series, confidence: float = RISK.var_confidence) -> float:
+def historical_var(
+    portfolio_returns: pd.Series, confidence: float = RISK.var_confidence
+) -> Optional[float]:
     """Evaluates historical Value-at-Risk (VaR) at a target confidence percentile.
 
     Args:
@@ -135,16 +137,20 @@ def historical_var(portfolio_returns: pd.Series, confidence: float = RISK.var_co
         confidence: Confidence level for VaR calculation (default 0.99 = 99%).
 
     Returns:
-        Positive VaR value representing the worst-case daily loss at the given confidence.
+        Positive VaR value representing the worst-case daily loss at the given
+        confidence, or None when there is no return history to measure it from —
+        a zero would trivially clear every downstream threshold.
     """
     if portfolio_returns.empty:
-        return 0.0
+        return None
     percentile = (1.0 - confidence) * 100.0
     val = float(np.percentile(portfolio_returns.dropna(), percentile))
     return abs(val)
 
 
-def conditional_var(portfolio_returns: pd.Series, confidence: float = RISK.cvar_confidence) -> float:
+def conditional_var(
+    portfolio_returns: pd.Series, confidence: float = RISK.cvar_confidence
+) -> Optional[float]:
     """Calculates Conditional Value-at-Risk (CVaR / Expected Shortfall) in the tail distribution.
 
     Args:
@@ -152,11 +158,13 @@ def conditional_var(portfolio_returns: pd.Series, confidence: float = RISK.cvar_
         confidence: Confidence level (default 0.99).
 
     Returns:
-        Positive CVaR value, or the VaR value if no returns fall below the VaR threshold.
+        Positive CVaR value, the VaR value if no returns fall below the VaR
+        threshold, or None when there is no return history to measure it from.
     """
     if portfolio_returns.empty:
-        return 0.0
+        return None
     var = historical_var(portfolio_returns, confidence)
+    assert var is not None  # non-empty series always yields a VaR value
     tail = portfolio_returns[portfolio_returns <= -var]
     return abs(float(tail.mean())) if len(tail) > 0 else var
 
@@ -225,20 +233,24 @@ def ols_portfolio_beta(
     return float(np.average(betas, weights=weights))
 
 
-def avg_pairwise_correlation(returns_matrix: pd.DataFrame) -> float:
+def avg_pairwise_correlation(returns_matrix: pd.DataFrame) -> Optional[float]:
     """Computes the mean pairwise correlation coefficients for a matrix of asset returns.
 
     Args:
         returns_matrix: DataFrame where each column is a weighted return series for one asset.
 
     Returns:
-        Mean upper-triangle pairwise correlation, or 0.0 for single-asset portfolios.
+        Mean upper-triangle pairwise correlation; 0.0 for single-asset portfolios;
+        None when the positions share no overlapping return history (e.g. a
+        newly-listed ticker), which leaves every pairwise correlation undefined
+        rather than a fabricated 0.0.
     """
     if returns_matrix.shape[1] < 2:
         return 0.0
     corr = returns_matrix.corr()
     upper = corr.where(np.triu(np.ones(corr.shape), k=1).astype(bool))
-    return float(upper.stack().mean())
+    mean_corr = float(upper.stack().mean())
+    return mean_corr if not np.isnan(mean_corr) else None
 
 
 def atr_stop_losses(
@@ -484,34 +496,39 @@ class RiskStatisticalEngine:
 
     def _statistical_violations(
         self,
-        var99: float,
-        cvar: float,
+        var99: Optional[float],
+        cvar: Optional[float],
         beta: float,
-        corr: float,
+        corr: Optional[float],
         sector_weights: dict[str, float],
         has_sector_violation: bool,
     ) -> list[str]:
         """Runs gate 3: the VaR, CVaR, beta, correlation, and sector-cap thresholds.
 
         Args:
-            var99: Portfolio 99% historical Value-at-Risk, normalized to a full book.
-            cvar: Portfolio Conditional Value-at-Risk, normalized to a full book.
+            var99: Portfolio 99% historical Value-at-Risk, normalized to a full book,
+                or None when there was no return history to measure it from — that
+                gate is skipped rather than passed on a fabricated 0.0.
+            cvar: Portfolio Conditional Value-at-Risk, normalized to a full book, or
+                None for the same reason as var99.
             beta: Weighted OLS portfolio beta against the benchmark.
-            corr: Mean pairwise correlation across the proposed positions.
+            corr: Mean pairwise correlation across the proposed positions, or None
+                when the positions share no overlapping return history.
             sector_weights: Mapping of GICS sector → summed proposed weight.
             has_sector_violation: Whether any sector exceeds the concentration cap.
 
         Returns:
-            List of breached thresholds, empty when every statistical gate passes.
+            List of breached thresholds, empty when every statistical gate passes
+            or was unmeasurable.
         """
         stat_violations: list[str] = []
-        if var99 > RISK.var_limit:
+        if var99 is not None and var99 > RISK.var_limit:
             stat_violations.append(f"VaR 99%: {var99:.2%} > {RISK.var_limit:.0%} limit")
-        if cvar > RISK.cvar_limit:
+        if cvar is not None and cvar > RISK.cvar_limit:
             stat_violations.append(f"CVaR: {cvar:.2%} > {RISK.cvar_limit:.0%} limit")
         if beta > self.max_port_beta:
             stat_violations.append(f"Beta {beta:.2f} > {self.max_port_beta:.2f}")
-        if corr > RISK.correlation_limit:
+        if corr is not None and corr > RISK.correlation_limit:
             stat_violations.append(f"Avg correlation > {RISK.correlation_limit} — reduce overlap")
         if has_sector_violation:
             for sec, w in sector_weights.items():
@@ -594,6 +611,18 @@ class RiskStatisticalEngine:
         beta = ols_portfolio_beta(proposed_positions, price_history, market_data=self.market_data)
         corr = avg_pairwise_correlation(returns)
 
+        # Informational, not a violation — an unmeasurable stat must not silently
+        # pass its threshold check by being fabricated as 0.0 (RE-102).
+        degraded_notes: list[str] = []
+        if var99 is None or cvar is None:
+            degraded_notes.append(
+                "VaR/CVaR not measurable — insufficient return history for this book"
+            )
+        if corr is None:
+            degraded_notes.append(
+                "Average correlation not measurable — positions share no overlapping return history"
+            )
+
         stat_violations = self._statistical_violations(
             var99, cvar, beta, corr, sector_weights, has_sector_violation
         )
@@ -604,7 +633,7 @@ class RiskStatisticalEngine:
                 verdict=RiskVerdict.REDUCE,
                 approved_weight=min(total_weight * RISK.reduce_weight_multiplier, total_weight),
                 proposed_weight=total_weight,
-                veto_reasons=stat_violations + diversification_notes + optimizer_notes,
+                veto_reasons=stat_violations + diversification_notes + optimizer_notes + degraded_notes,
                 optimal_weights=optimal_weights,
                 optimizer_converged=optimizer_converged,
                 var_99=var99,
@@ -624,12 +653,16 @@ class RiskStatisticalEngine:
         stop_val = stops.get(primary_ticker, 0.0)
         mvar_val = mvar.get(primary_ticker, 0.0)
 
-        logger.debug("Risk evaluate: APPROVE (VaR99: %.2f%%, Beta: %.2f)", var99 * 100, beta)
+        logger.debug(
+            "Risk evaluate: APPROVE (VaR99: %s, Beta: %.2f)",
+            f"{var99:.2%}" if var99 is not None else "not measurable",
+            beta,
+        )
         return RiskAssessment(
             verdict=RiskVerdict.APPROVE,
             approved_weight=total_weight,
             proposed_weight=total_weight,
-            veto_reasons=diversification_notes + optimizer_notes,
+            veto_reasons=diversification_notes + optimizer_notes + degraded_notes,
             optimal_weights=optimal_weights,
             optimizer_converged=optimizer_converged,
             var_99=var99,
