@@ -118,11 +118,12 @@ def build_signal_table(snapshots: dict[str, TickerSnapshot], macro: Optional[Mac
         ssig = f"{s.signal.value}({s.conviction:.2f})" if s else "N/A"
         asig = f"{agg.signal.value}({agg.conviction:.2f})" if agg else "N/A"
         stop_display = f"{risk.stop_loss:.2f}" if isinstance(risk.stop_loss, float) else "N/A"
+        var_display = f"{risk.var_99:.2%}" if isinstance(risk.var_99, float) else "N/A"
         evidence = f"{len(agg.agents_present)}/3" if agg else "0/3"
 
         line = (
             f"{ticker}: FUND={fsig} TECH={tsig} SENT={ssig} AGG={asig} Evidence={evidence} "
-            f"VaR={risk.var_99:.2%} Beta={risk.portfolio_beta:.2f} Stop={stop_display} Cap={risk.approved_weight:.1%}"
+            f"VaR={var_display} Beta={risk.portfolio_beta:.2f} Stop={stop_display} Cap={risk.approved_weight:.1%}"
         )
         lines.append(line)
 
@@ -240,7 +241,8 @@ class PortfolioManagerAgent:
             cultural_warnings: Optional list of failed-trade pattern strings from
                 cultural memory, scoped to the current macro regime.
             adjustments: Optional list that receives one human-readable entry per
-                clamped, zeroed, or dropped position — the caller's record of
+                clamped, zeroed, or dropped position, and one when the cash
+                reserve was forced to its residual value — the caller's record of
                 where the LLM's proposal disagreed with risk enforcement. Also
                 receives one entry naming which stage failed if allocation
                 ultimately fails: the decoder's ``json_parse``/``schema_validation``
@@ -325,6 +327,11 @@ class PortfolioManagerAgent:
             cash_reserve_pct = round(
                 max(PORTFOLIO.cash_reserve_floor_pct, 1.0 - total_equity), 6
             )
+            if abs(cash_reserve_pct - proposal.cash_reserve_pct) > 1e-6:
+                record(
+                    "portfolio_allocation: cash_reserve_pct forced to residual "
+                    f"{cash_reserve_pct:.4f} (LLM proposed {proposal.cash_reserve_pct:.4f})"
+                )
 
             data = {
                 "session_id": str(uuid4()),

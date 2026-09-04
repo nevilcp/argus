@@ -527,7 +527,10 @@ class ProposedPosition(BaseModel):
 
     ticker: Annotated[str, PromptText('""')] = Field(..., description="Equity ticker symbol")
     allocation_pct: Annotated[float, PromptText("0.0")] = Field(
-        0.0, description="Proposed target portfolio weight"
+        0.0,
+        ge=0.0,
+        le=SYSTEM.max_single_position_pct,
+        description="Proposed target portfolio weight",
     )
     stop_loss: Annotated[float | None, PromptText("0.0")] = Field(
         None, description="Model's own stop-loss estimate"
