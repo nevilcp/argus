@@ -207,7 +207,11 @@ class PaperBook:
         key = run_timestamp.isoformat()
         if key in self.runs_applied:
             return False
-        self.equity *= 1.0 + run_return
+        # Floored at 0: run_return is bounded at -1.0 by compute_realized_return
+        # (a price can't go below zero), so this is a defensive floor against a
+        # data anomaly rather than an expected path — equity is safety-critical
+        # state the drawdown gate reads, and it must never go negative.
+        self.equity = max(0.0, self.equity * (1.0 + run_return))
         self.high_water_mark = max(self.high_water_mark, self.equity)
         self.last_run_timestamp = run_timestamp
         self.runs_applied.add(key)
@@ -233,8 +237,8 @@ class PaperBook:
             new_inception_value: Replacement equity and high-water-mark value.
             rebased_at: Timestamp of the rebase; defaults to now.
         """
-        self.equity = new_inception_value
-        self.high_water_mark = new_inception_value
+        self.equity = max(0.0, new_inception_value)
+        self.high_water_mark = self.equity
         self.rebased_at = rebased_at or datetime.now()  # noqa: DTZ005
 
     def prune_runs_applied(self, cutoff: datetime) -> int:
@@ -272,39 +276,49 @@ def _fresh_book() -> PaperBook:
 def load(path: str) -> PaperBook:
     """Loads a persisted PaperBook, or starts a fresh one at ARGUS_TOTAL_WEALTH.
 
-    A missing or unparseable file is treated as "no history yet" rather than
-    an error — the first-ever reconcile pass on a fresh deployment has
-    nothing to load.
+    A missing file is "no history yet" — the first-ever reconcile pass on a
+    fresh deployment has nothing to load — and returns a fresh book. A file
+    that *exists* but fails to parse is not: its presence means a book was
+    persisted at some point, so treating it as "no history" would silently
+    reset equity (erasing the drawdown history the kill switch's drawdown
+    gate reads) and empty runs_applied (so every run still in
+    decisions.jsonl gets compounded onto equity a second time). That case is
+    left to raise instead.
 
     Args:
         path: Path a prior save() wrote to.
 
     Returns:
-        The loaded PaperBook, or a fresh one seeded at settings.ARGUS_TOTAL_WEALTH.
+        The loaded PaperBook, or a fresh one seeded at settings.ARGUS_TOTAL_WEALTH
+        when no file exists yet.
+
+    Raises:
+        Exception: The file exists but its contents can't be parsed into a PaperBook.
     """
     file_path = Path(path)
     if not file_path.exists():
         return _fresh_book()
 
-    try:
-        with open(file_path, encoding="utf-8") as f:
-            raw = json.load(f)
-        last_run_raw = raw.get("last_run_timestamp")
-        rebased_at_raw = raw.get("rebased_at")
-        return PaperBook(
-            equity=raw["equity"],
-            high_water_mark=raw["high_water_mark"],
-            last_run_timestamp=datetime.fromisoformat(last_run_raw) if last_run_raw else None,
-            runs_applied=set(raw.get("runs_applied", [])),
-            rebased_at=datetime.fromisoformat(rebased_at_raw) if rebased_at_raw else None,
-        )
-    except Exception as exc:
-        logger.warning("[PaperBook] failed to load %s, starting fresh: %s", path, exc)
-        return _fresh_book()
+    with open(file_path, encoding="utf-8") as f:
+        raw = json.load(f)
+    last_run_raw = raw.get("last_run_timestamp")
+    rebased_at_raw = raw.get("rebased_at")
+    return PaperBook(
+        equity=raw["equity"],
+        high_water_mark=raw["high_water_mark"],
+        last_run_timestamp=datetime.fromisoformat(last_run_raw) if last_run_raw else None,
+        runs_applied=set(raw.get("runs_applied", [])),
+        rebased_at=datetime.fromisoformat(rebased_at_raw) if rebased_at_raw else None,
+    )
 
 
 def save(book: PaperBook, path: str) -> None:
     """Persists a PaperBook to JSON, creating parent directories as needed.
+
+    Writes tmp-file-then-replace so a crash mid-write can never leave a
+    reader observing a partially written file — the same durability standard
+    argus/data/fetchers.py's NewsAPI ledger already uses, now applied to
+    ARGUS's most safety-critical persisted file.
 
     Args:
         book: The PaperBook to persist.
@@ -321,5 +335,7 @@ def save(book: PaperBook, path: str) -> None:
         "runs_applied": sorted(book.runs_applied),
         "rebased_at": book.rebased_at.isoformat() if book.rebased_at else None,
     }
-    with open(file_path, "w", encoding="utf-8") as f:
+    tmp_path = file_path.with_suffix(file_path.suffix + ".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
+    tmp_path.replace(file_path)
