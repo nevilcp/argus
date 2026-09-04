@@ -820,6 +820,7 @@ class MacroStatisticalAgent:
             )
             return None
 
+        vix_defaulted = vix is None
         if vix is None:
             logger.warning("analyze: vix is None from FRED bundle; proceeding with regime classification only.")
             vix = 20.0
@@ -846,14 +847,22 @@ class MacroStatisticalAgent:
         regime = Regime(regime_str)
         model_healthy = self.classifier.is_fitted
 
+        # Neutral placeholder — left as-is when vix itself was defaulted, since a
+        # percentile computed against a substituted level would look measured
+        # while actually being derived from a fabricated input.
         vix_percentile = 50.0
-        try:
-            vix_hist = self.market_data.ohlcv_daily("^VIX", period="2y")
-            closes = vix_hist["close"].dropna()
-            if not closes.empty:
-                vix_percentile = float((closes < vix).mean() * 100.0)
-        except Exception as exc:
-            logger.warning("Failed to fetch VIX history for percentile: %s", exc)
+        if vix_defaulted:
+            logger.warning(
+                "analyze: vix was defaulted; skipping percentile computation, using neutral 50.0"
+            )
+        else:
+            try:
+                vix_hist = self.market_data.ohlcv_daily("^VIX", period="2y")
+                closes = vix_hist["close"].dropna()
+                if not closes.empty:
+                    vix_percentile = float((closes < vix).mean() * 100.0)
+            except Exception as exc:
+                logger.warning("Failed to fetch VIX history for percentile: %s", exc)
 
         # Buckets on absolute VIX, not percentile — EXTREME is the governor's kill-switch zone by level.
         if vix < 15:

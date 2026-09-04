@@ -73,3 +73,20 @@ def test_strong_track_record_measurably_outweighs_a_poor_one():
     assert reweighted.weighted_votes["fundamental"] < baseline.weighted_votes["fundamental"]
     assert reweighted.signal == Signal.BULLISH
     assert reweighted.conviction > baseline.conviction
+
+
+def test_aggregate_with_every_input_signal_absent():
+    """No specialist signal at all degrades to a neutral, zero-conviction result.
+
+    Every input absent must complete and report a visibly unmeasured
+    result — NEUTRAL at zero conviction with no agents present — rather
+    than raise or fabricate a directional call.
+    """
+    aggregator = HybridSignalAggregator()
+
+    result = aggregator.aggregate(None, None, None, None)
+
+    assert result.signal == Signal.NEUTRAL
+    assert result.conviction == 0.0
+    assert result.agents_present == []
+    assert result.weighted_votes == {"fundamental": 0.0, "technical": 0.0, "sentiment": 0.0}

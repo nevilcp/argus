@@ -20,6 +20,7 @@ from argus.params import PORTFOLIO, SYSTEM
 from argus.schemas.signals import (
     PortfolioAllocation,
     PositionAllocation,
+    ProposedPosition,
     RiskAssessment,
     RiskVerdict,
 )
@@ -170,7 +171,11 @@ def test_allocate_enforces_caps_vetoes_and_fabrications_in_code():
     )
     assert any("zeroed VETOED allocation (risk verdict VETO)" in a for a in adjustments)
     assert any("dropped FABRICATED" in a for a in adjustments)
-    assert len(adjustments) == 3
+    assert any(
+        "cash_reserve_pct forced to residual 0.9000 (LLM proposed 0.5000)" in a
+        for a in adjustments
+    )
+    assert len(adjustments) == 4
 
 
 def test_allocate_names_the_json_parse_stage_on_exhausted_retries(monkeypatch):
@@ -225,6 +230,33 @@ def test_allocation_pct_cap_matches_system_max_single_position_pct():
         m for m in PositionAllocation.model_fields["allocation_pct"].metadata if hasattr(m, "le")
     )
     assert le_constraint.le == SYSTEM.max_single_position_pct
+
+
+def test_proposed_position_allocation_pct_bounded_at_proposal():
+    """Regression: allocation_pct is bounded on the LLM's own proposal, not just
+    on the risk-enforced PositionAllocation downstream.
+
+    Before the fix, ProposedPosition.allocation_pct was unbounded, so a
+    negative value (never "too high" and therefore never clamped by
+    _enforce_risk's cap check) survived enforcement and only failed the
+    final PortfolioAllocation schema — turning a value that should have been
+    caught at the point of proposal into a whole-run failure instead.
+    """
+    base = {
+        "ticker": "AAPL",
+        "thesis": "Bullish",
+        "composite_conviction": 0.5,
+        "time_horizon": "3-6 months",
+    }
+
+    with pytest.raises(Exception):
+        ProposedPosition(**base, allocation_pct=-0.01)
+
+    with pytest.raises(Exception):
+        ProposedPosition(**base, allocation_pct=SYSTEM.max_single_position_pct + 0.01)
+
+    # Within bounds still validates.
+    ProposedPosition(**base, allocation_pct=SYSTEM.max_single_position_pct)
 
 
 def test_portfolio_allocation_has_no_expected_sharpe_field():

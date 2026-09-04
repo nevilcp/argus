@@ -4,6 +4,7 @@ import pytest
 
 from argus.agents.risk import (
     RiskStatisticalEngine,
+    avg_pairwise_correlation,
     compute_asset_returns,
     compute_portfolio_returns,
     ols_portfolio_beta,
@@ -260,6 +261,57 @@ def test_evaluate_excludes_short_history_ticker_from_covariance(monkeypatch) -> 
 
     assert any(r.startswith("Covariance: excluded NEWCO") for r in result.veto_reasons)
     assert "NEWCO" not in result.optimal_weights
+
+
+def test_avg_pairwise_correlation_returns_none_without_overlap() -> None:
+    """No overlapping dates leaves correlation undefined, not a fabricated NaN.
+
+    Regression: pandas' .corr() on a zero-row frame yields NaN, which
+    satisfies neither bound of avg_correlation's [-1, 1] field.
+    """
+    disjoint_dates = pd.date_range(start="2010-01-01", periods=len(_TRADING_YEAR), freq="B")
+    np.random.seed(1)
+    returns_matrix = pd.DataFrame(
+        {
+            "AAPL": pd.Series(
+                np.random.normal(0.001, 0.01, len(_TRADING_YEAR)), index=_TRADING_YEAR
+            ),
+            "NEWCO": pd.Series(
+                np.random.normal(0.001, 0.01, len(disjoint_dates)), index=disjoint_dates
+            ),
+        }
+    )
+    assert avg_pairwise_correlation(returns_matrix) is None
+
+
+def test_evaluate_completes_when_a_ticker_has_no_price_history_overlap(monkeypatch) -> None:
+    """Regression: a newly-listed ticker with zero date overlap must degrade, not raise.
+
+    Before the fix, avg_pairwise_correlation's NaN result violated
+    RiskAssessment.avg_correlation's [-1, 1] bound, so evaluate() raised
+    instead of completing with a degraded (None) assessment. VaR/CVaR must
+    likewise report None rather than a fabricated 0.0, since the same
+    zero-row intersection empties the portfolio return series too.
+    """
+    monkeypatch.setattr("argus.agents.risk.get_sector", lambda ticker: "Diversified")
+    engine = RiskStatisticalEngine()
+
+    np.random.seed(9)
+    disjoint_dates = pd.date_range(start="2010-01-01", periods=len(_TRADING_YEAR), freq="B")
+    hist = {
+        "AAPL": _random_prices(_TRADING_YEAR, 0.0005, 0.01),
+        "SPY": _random_prices(_TRADING_YEAR, 0.0005, 0.01),
+        "NEWCO": _random_prices(disjoint_dates, 0.0005, 0.01),
+    }
+    positions = [{"ticker": "AAPL", "weight": 0.1}, {"ticker": "NEWCO", "weight": 0.1}]
+
+    result = engine.evaluate(positions, hist, current_vix=20.0)
+
+    assert result.verdict in (RiskVerdict.APPROVE, RiskVerdict.REDUCE)
+    assert result.avg_correlation is None
+    assert result.var_99 is None
+    assert result.cvar is None
+    assert any("not measurable" in r for r in result.veto_reasons)
 
 
 def test_evaluate_skips_optimizer_on_non_finite_covariance(monkeypatch) -> None:

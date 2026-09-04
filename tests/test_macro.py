@@ -31,7 +31,7 @@ class _StubMarketData:
             the VIX percentile calculation.
     """
 
-    def __init__(self, vix: float = 15.0, historical_closes: list[float] | None = None) -> None:
+    def __init__(self, vix: float | None = 15.0, historical_closes: list[float] | None = None) -> None:
         self._vix = vix
         self._closes = historical_closes if historical_closes is not None else _DEFAULT_VIX_CLOSES
 
@@ -111,6 +111,29 @@ def test_vix_regime_buckets_from_level_not_percentile(monkeypatch: pytest.Monkey
     high_vix_ctx = high_vix_agent.analyze()
     assert high_vix_ctx.vix_percentile == pytest.approx(25.0)
     assert high_vix_ctx.vix_regime == VixRegime.HIGH
+
+
+def test_vix_defaulted_skips_percentile_computation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A defaulted VIX must not produce a derived percentile presented as measured.
+
+    Regression: the substituted VIX default used to be compared against real
+    trailing history to compute a plausible-looking percentile, promoting a
+    fabricated level into what looked like a measured statistic and feeding it
+    into the agent multipliers.
+    """
+    # Historical closes chosen so a computed percentile would clearly differ
+    # from the neutral 50.0 placeholder if the fabricated VIX were used.
+    agent = MacroStatisticalAgent(
+        market_data=_StubMarketData(vix=None, historical_closes=[10.0] * 17 + [50.0] * 3)
+    )
+    monkeypatch.setattr(
+        agent.classifier, "predict", lambda current_values: (Regime.EXPANSION.value, 0.9)
+    )
+
+    ctx = agent.analyze()
+
+    assert ctx.vix_level == 20.0  # the documented substitute
+    assert ctx.vix_percentile == 50.0  # neutral placeholder, not derived from history
 
 
 def test_cache(monkeypatch: pytest.MonkeyPatch) -> None:

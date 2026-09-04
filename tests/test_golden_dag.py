@@ -281,11 +281,15 @@ def test_golden_dag_runs_offline_and_produces_a_valid_allocation(tmp_path):
 
     # The fixture LLM response proposes allocations for three VETO'd tickers;
     # code-level enforcement zeroes them rather than trusting the prompt, and
-    # records each correction here instead of leaving errors empty.
+    # records each correction here instead of leaving errors empty. It also
+    # forces cash_reserve_pct to its residual, which itself records an
+    # adjustment since the fixture's proposed value no longer matches once
+    # those three positions are zeroed.
     errors = final_state.get("errors")
-    assert errors is not None and len(errors) == 3
+    assert errors is not None and len(errors) == 4
     for ticker in ("MSFT", "JPM", "GOOGL"):
         assert any(f"zeroed {ticker} allocation (risk verdict VETO)" in e for e in errors)
+    assert any("cash_reserve_pct forced to residual" in e for e in errors)
 
     alloc = final_state.get("portfolio_allocation")
     assert alloc is not None
