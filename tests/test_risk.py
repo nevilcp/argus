@@ -7,6 +7,7 @@ from argus.agents.risk import (
     avg_pairwise_correlation,
     compute_asset_returns,
     compute_portfolio_returns,
+    get_sector,
     ols_portfolio_beta,
 )
 from argus.params import RISK
@@ -247,7 +248,7 @@ def test_evaluate_excludes_short_history_ticker_from_covariance(monkeypatch) -> 
     Picked up by graph.py's error-surfacing filter, rather than silently
     degrading every other ticker's covariance.
     """
-    monkeypatch.setattr("argus.agents.risk.get_sector", lambda ticker: "Diversified")
+    monkeypatch.setattr("argus.agents.risk.get_sector", lambda ticker, market_data: "Diversified")
     engine = RiskStatisticalEngine()
 
     np.random.seed(5)
@@ -293,7 +294,7 @@ def test_evaluate_completes_when_a_ticker_has_no_price_history_overlap(monkeypat
     likewise report None rather than a fabricated 0.0, since the same
     zero-row intersection empties the portfolio return series too.
     """
-    monkeypatch.setattr("argus.agents.risk.get_sector", lambda ticker: "Diversified")
+    monkeypatch.setattr("argus.agents.risk.get_sector", lambda ticker, market_data: "Diversified")
     engine = RiskStatisticalEngine()
 
     np.random.seed(9)
@@ -320,7 +321,7 @@ def test_evaluate_skips_optimizer_on_non_finite_covariance(monkeypatch) -> None:
     E.g. a zero-price data glitch producing an infinite return that survives
     dropna().
     """
-    monkeypatch.setattr("argus.agents.risk.get_sector", lambda ticker: "Diversified")
+    monkeypatch.setattr("argus.agents.risk.get_sector", lambda ticker, market_data: "Diversified")
     engine = RiskStatisticalEngine()
 
     np.random.seed(11)
@@ -338,3 +339,34 @@ def test_evaluate_skips_optimizer_on_non_finite_covariance(monkeypatch) -> None:
     assert result.optimal_weights == {}
     assert result.optimizer_converged is None
     assert any(r.startswith("Covariance: non-finite") for r in result.veto_reasons)
+
+
+class _StubTickerInfoMarketData:
+    """Minimal MarketDataProvider stub returning a fixed sector for ticker_info."""
+
+    def __init__(self, sector: str) -> None:
+        self._sector = sector
+        self.calls = 0
+
+    def ticker_info(self, ticker: str) -> dict:
+        self.calls += 1
+        return {"sector": self._sector}
+
+
+def test_get_sector_does_not_cache_across_non_live_providers(monkeypatch) -> None:
+    """A non-live provider's sector must never leak into a later, different provider's lookup.
+
+    Regression: argus/backtesting/replay.py constructs a fresh
+    FixtureMarketDataProvider per session in the same process — a
+    provider-agnostic cache would let session 1's sector for a ticker
+    silently answer session 2's lookup for the same ticker.
+    """
+    monkeypatch.setattr("argus.agents.risk._SECTOR_CACHE", {})
+
+    session_one = _StubTickerInfoMarketData("Technology")
+    session_two = _StubTickerInfoMarketData("Energy")
+
+    assert get_sector("AAPL", session_one) == "Technology"
+    assert get_sector("AAPL", session_two) == "Energy"
+    assert session_one.calls == 1
+    assert session_two.calls == 1

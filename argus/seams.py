@@ -87,6 +87,14 @@ class MarketDataProvider(Protocol):
         """Returns the current CBOE VIX level."""
         ...
 
+    def ticker_info(self, ticker: str) -> dict:
+        """Returns yfinance's raw ``.info`` dict for a ticker (e.g. GICS sector)."""
+        ...
+
+    def ticker_calendar(self, ticker: str) -> Any:
+        """Returns yfinance's raw ``.calendar`` object for a ticker (e.g. earnings date)."""
+        ...
+
 
 class LiveMarketDataProvider:
     """Thin delegating wrapper around argus/data/fetchers.py. No behavior change."""
@@ -118,6 +126,14 @@ class LiveMarketDataProvider:
     def vix(self) -> float:
         """Delegates to fetchers.fetch_vix."""
         return fetchers.fetch_vix()
+
+    def ticker_info(self, ticker: str) -> dict:
+        """Delegates to fetchers.fetch_ticker_info."""
+        return fetchers.fetch_ticker_info(ticker)
+
+    def ticker_calendar(self, ticker: str) -> Any:
+        """Delegates to fetchers.fetch_ticker_calendar."""
+        return fetchers.fetch_ticker_calendar(ticker)
 
 
 class FixtureMarketDataProvider:
@@ -178,6 +194,14 @@ class FixtureMarketDataProvider:
     def vix(self) -> float:
         """Returns the cached VIX level from the macro_bundle fixture."""
         return float(self._load("macro_bundle")["vix"])
+
+    def ticker_info(self, ticker: str) -> dict:
+        """Returns the cached yfinance .info dict from the ticker_info fixture."""
+        return dict(self._load("ticker_info")[ticker])
+
+    def ticker_calendar(self, ticker: str) -> Any:
+        """Returns the cached yfinance .calendar dict from the ticker_calendar fixture."""
+        return dict(self._load("ticker_calendar")[ticker])
 
 
 # ---------------------------------------------------------------------------
