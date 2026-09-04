@@ -915,13 +915,26 @@ async def reset_kill_switch(new_inception_value: float = Query(gt=1000)):
     Raises:
         HTTPException 401: If ARGUS_API_KEY is set and the X-API-Key header doesn't match.
         HTTPException 404: If the kill switch has not been initialized.
+        HTTPException 500: If the persisted paper-equity file exists but is
+            corrupt. Rebasing a book paper_book.load() couldn't actually read
+            would silently drop its runs_applied, letting a run already
+            reflected in the old (unreadable) equity get double-applied by
+            the next reconcile pass — so this is refused rather than papered
+            over. Move the corrupt file aside and retry.
     """
     ks = get_kill_switch()
     if ks is None:
         raise HTTPException(404, "Kill switch not initialized")
 
     book_path = _data_path("paper_equity.json")
-    book = paper_book.load(book_path)
+    try:
+        book = paper_book.load(book_path)
+    except Exception as exc:
+        raise HTTPException(
+            500,
+            f"{book_path} exists but could not be read ({exc}); move it aside and retry "
+            "— rebasing over unreadable state risks double-applying an already-applied run.",
+        ) from exc
     book.rebase(new_inception_value)
     paper_book.save(book, book_path)
     ks.reset(new_inception_value)

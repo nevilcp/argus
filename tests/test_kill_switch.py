@@ -246,6 +246,39 @@ def test_halt_restores_from_a_persisted_dump(tmp_path, monkeypatch):
     assert restored._halt_reason == seed._halt_reason
 
 
+def test_halt_restores_from_a_corrupt_dump(tmp_path, monkeypatch):
+    """A halt dump that exists but fails to parse still engages the halt.
+
+    Its mere existence is the evidence a halt occurred — treating an
+    unreadable dump as "no halt" would let a crash silently clear a real one.
+    """
+    monkeypatch.chdir(tmp_path)
+    _seed_persisted_halt()
+    halt_file = kill_switch_module._find_latest_halt_file()
+    assert halt_file is not None
+    halt_file.write_text("{not valid json")  # corrupt it after the seed wrote it cleanly
+
+    restored = KillSwitch("MODERATE")
+    restored._restore_halt_from_file(halt_file)
+
+    assert restored.is_halted
+
+
+def test_halt_restores_from_a_truncated_dump(tmp_path, monkeypatch):
+    """A halt dump truncated mid-write (e.g. by a crash) still engages the halt."""
+    monkeypatch.chdir(tmp_path)
+    _seed_persisted_halt()
+    halt_file = kill_switch_module._find_latest_halt_file()
+    assert halt_file is not None
+    original = halt_file.read_text()
+    halt_file.write_text(original[: len(original) // 2])
+
+    restored = KillSwitch("MODERATE")
+    restored._restore_halt_from_file(halt_file)
+
+    assert restored.is_halted
+
+
 def test_initialize_kill_switch_restores_halt_on_reinit(tmp_path, monkeypatch):
     """initialize_kill_switch() re-applies a leftover halt file rather than starting clean."""
     monkeypatch.chdir(tmp_path)
@@ -506,6 +539,25 @@ def test_compute_run_returns_and_paperbook_survive_the_audit_simulation():
 # ---------------------------------------------------------------------------
 
 
+def test_paperbook_apply_run_floors_equity_at_zero():
+    """A run_return that would drive equity negative floors it at 0 instead."""
+    book = PaperBook(equity=100_000.0, high_water_mark=100_000.0)
+
+    book.apply_run(datetime(2026, 1, 1), -1.5)
+
+    assert book.equity == 0.0
+
+
+def test_paperbook_rebase_floors_equity_and_hwm_at_zero():
+    """rebase() to a negative inception value floors equity/high_water_mark at 0."""
+    book = PaperBook(equity=50_000.0, high_water_mark=50_000.0)
+
+    book.rebase(-1.0)
+
+    assert book.equity == 0.0
+    assert book.high_water_mark == 0.0
+
+
 def test_paperbook_apply_run_idempotent():
     """Re-applying the same run_timestamp is a no-op the second time."""
     book = PaperBook(equity=100_000.0, high_water_mark=100_000.0)
@@ -597,6 +649,34 @@ def test_paperbook_load_missing_file_starts_fresh_at_total_wealth(tmp_path):
     assert book.equity == pytest.approx(settings.ARGUS_TOTAL_WEALTH)
     assert book.high_water_mark == pytest.approx(settings.ARGUS_TOTAL_WEALTH)
     assert book.runs_applied == set()
+
+
+def test_paperbook_load_truncated_existing_file_raises(tmp_path):
+    """An existing-but-unparseable file is a hard failure, not a silent fresh start.
+
+    Silently starting fresh here would reset equity (erasing the drawdown
+    history the kill switch's drawdown gate reads) and empty runs_applied
+    (so an already-applied run in decisions.jsonl gets compounded again).
+    """
+    path = tmp_path / "paper_equity.json"
+    good_book = PaperBook(equity=95_000.0, high_water_mark=110_000.0)
+    good_book.apply_run(datetime(2026, 1, 1), -0.05)
+    paper_book.save(good_book, str(path))
+    original = path.read_bytes()
+    path.write_bytes(original[: len(original) // 2])  # simulate a crash mid-write
+
+    with pytest.raises(Exception):
+        paper_book.load(str(path))
+
+
+def test_paperbook_save_is_crash_safe_no_leftover_tmp_file(tmp_path):
+    """save() leaves no .tmp artifact behind — readers only ever see the final file or nothing."""
+    path = tmp_path / "paper_equity.json"
+
+    paper_book.save(PaperBook(equity=100_000.0, high_water_mark=100_000.0), str(path))
+
+    assert path.exists()
+    assert not path.with_suffix(path.suffix + ".tmp").exists()
 
 
 def test_paperbook_prune_runs_applied_drops_only_entries_older_than_cutoff():

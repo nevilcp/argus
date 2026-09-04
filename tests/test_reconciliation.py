@@ -1093,6 +1093,43 @@ def test_run_reconciliation_pass_one_store_failing_leaves_the_others_bounded_and
     assert "checkpoint" in report.errors[0]
 
 
+def test_run_reconciliation_pass_truncated_paper_equity_file_neither_resets_nor_double_applies(
+    tmp_path,
+):
+    """A truncated paper_equity.json fails the paper-book step instead of silently starting
+    fresh — which would both reset equity and re-apply a run already reflected in it."""
+    start = datetime(2026, 1, 1)
+    decisions_log = _write_decisions_log(
+        tmp_path / "decisions.jsonl", _matured_decision("TEST", start)
+    )
+
+    book_path = tmp_path / "paper_equity.json"
+    good_book = PaperBook(equity=12_345.0, high_water_mark=15_000.0)
+    good_book.apply_run(start, -0.05)  # this run is already reflected in equity and runs_applied
+    paper_book.save(good_book, str(book_path))
+    full = book_path.read_bytes()
+    truncated = full[: len(full) // 2]
+    book_path.write_bytes(truncated)
+
+    market_data = _ten_day_series(start, start_price=100.0)
+    cultural = _autospec_cultural()
+
+    report = run_reconciliation_pass(
+        market_data,
+        cultural,
+        str(book_path),
+        decisions_log_path=str(decisions_log),
+        horizon_days=5,
+    )
+
+    assert report.paper_book_updated is False
+    assert report.equity == 0.0  # unset default — neither reset to fresh, nor double-applied
+    assert len(report.errors) == 1
+    assert "paper-book update failed" in report.errors[0]
+    # The persisted file is untouched: still truncated, not silently overwritten by a fresh book.
+    assert book_path.read_bytes() == truncated
+
+
 def test_run_reconciliation_pass_paper_book_not_partially_applied_when_its_step_fails(
     tmp_path, monkeypatch
 ):

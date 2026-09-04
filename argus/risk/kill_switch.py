@@ -70,9 +70,21 @@ class KillSwitch:
     """Monitors portfolio drawdown and market volatility limits to trigger circuit breakers.
 
     Runs a background daemon thread that evaluates portfolio value and VIX every
-    ``check_interval_seconds``. Two independent gates exist:
-      1. VIX blackout: blocks *new* positions when VIX ≥ VIX_BLACKOUT_THRESHOLD.
-      2. Drawdown halt: freezes all activity when realized drawdown ≥ risk threshold.
+    ``check_interval_seconds``. Two independent gates exist, with deliberately
+    different recovery semantics:
+      1. VIX blackout: blocks *new* positions when VIX ≥ VIX_BLACKOUT_THRESHOLD,
+         and clears itself automatically once VIX next reads below that
+         threshold. VIX is an external market read, not a symptom of anything
+         ARGUS did — once the input normalizes there is nothing to review, so
+         self-clearing is safe and a stuck blackout would just be noise.
+      2. Drawdown halt: freezes all activity when realized drawdown ≥ risk
+         threshold, and stays halted — surviving even a process restart, see
+         initialize_kill_switch — until an operator calls reset() (typically
+         via POST /kill-switch/reset). Drawdown reflects ARGUS's own realized
+         losses, which don't un-happen when the market ticks back up;
+         auto-clearing it would let a losing strategy keep running unreviewed,
+         so it requires a human to confirm the loss was understood before
+         capital is put back to work.
 
     The drawdown threshold is fixed at construction from a single
     ``risk_tolerance`` (see api/main.py's ``settings.ARGUS_RISK_TOLERANCE``).
@@ -377,20 +389,30 @@ class KillSwitch:
     def _restore_halt_from_file(self, path: Path) -> None:
         """Re-applies a previously persisted halt so a process restart can't silently clear it.
 
+        A dump that exists but fails to parse (or fails partway through)
+        still engages the halt with whatever fields were recovered, falling
+        back to a generic reason/time for the rest — the dump's mere
+        existence is itself the evidence a halt occurred, so a corrupt or
+        truncated file must not be read as "no halt".
+
         Args:
             path: Path to a halt-event JSON file written by ``_persist_halt_event``.
         """
+        reason = f"Restored from unreadable halt dump {path.name}"
+        halt_time = datetime.now()  # noqa: DTZ005
         try:
             with open(path) as f:
                 dump = json.load(f)
+            reason = dump.get("reason") or f"Restored from {path.name}"
+            halt_time_raw = dump.get("halt_time")
+            # Naive local if no persisted halt_time — matches fromisoformat's naive parse of halt_time_raw
+            if halt_time_raw:
+                halt_time = datetime.fromisoformat(halt_time_raw)  # noqa: DTZ005
         except Exception as e:
-            logger.error("Failed to read halt event file %s: %s", path, e)
-            return
+            logger.error(
+                "Halt event file %s could not be fully read (%s); halting anyway.", path, e
+            )
 
-        reason = dump.get("reason") or f"Restored from {path.name}"
-        halt_time_raw = dump.get("halt_time")
-        # Naive local if no persisted halt_time — matches fromisoformat's naive parse of halt_time_raw
-        halt_time = datetime.fromisoformat(halt_time_raw) if halt_time_raw else datetime.now()  # noqa: DTZ005
         self._engage_halt(reason, halt_time)
         logger.warning(
             "Kill switch restored HALTED state from %s: %s. Call POST /kill-switch/reset "
