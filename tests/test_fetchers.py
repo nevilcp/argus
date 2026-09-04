@@ -4,7 +4,9 @@ Covers retry classification, NewsAPI budget enforcement, and the "None
 means unavailable, not neutral" contract for NewsAPI.
 """
 
-from datetime import timedelta
+import json
+import multiprocessing
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 import pandas as pd
@@ -259,14 +261,54 @@ def test_newsapi_budget_exhausts_after_daily_limit():
     assert budget.try_reserve() is False
 
 
-def test_newsapi_budget_resets_on_new_day():
-    """Rolling over to a new UTC date resets the counter."""
+def test_newsapi_budget_resets_on_new_day_within_one_instance(monkeypatch):
+    """A single long-lived instance rolls its counter over at UTC midnight.
+
+    The API server's _NEWSAPI_BUDGET singleton lives for the process's whole
+    lifetime and spans midnight UTC — this proves the rollover holds across
+    two calls on one instance, not just across two freshly constructed ones.
+    """
+
+    class _FixedDatetime(datetime):
+        _now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls._now
+
+    monkeypatch.setattr(fetchers, "datetime", _FixedDatetime)
     budget = fetchers._NewsApiBudget(daily_limit=1)
     assert budget.try_reserve() is True
     assert budget.try_reserve() is False
 
-    budget._date = budget._date - timedelta(days=1)
+    _FixedDatetime._now = datetime(2026, 1, 2, tzinfo=timezone.utc)
     assert budget.try_reserve() is True
+
+
+def test_newsapi_budget_treats_wrong_typed_persisted_fields_as_absent():
+    """A syntactically valid but wrong-typed persisted count degrades to 0, not a raise.
+
+    A `requests_today` of null (int(None) raises TypeError) is a plausible
+    partial-write shape, not just outright-invalid JSON.
+    """
+    budget = fetchers._NewsApiBudget(daily_limit=1)
+    today = datetime.now(timezone.utc).date()
+    budget._persist_path().write_text(json.dumps({"date": today.isoformat(), "requests_today": None}))
+
+    assert budget.try_reserve() is True
+
+
+def test_newsapi_budget_ignores_a_stale_persisted_date():
+    """A persisted count from a prior UTC day is not carried into today's."""
+    budget = fetchers._NewsApiBudget(daily_limit=2)
+    yesterday = datetime.now(timezone.utc).date() - timedelta(days=1)
+    budget._persist_path().write_text(
+        json.dumps({"date": yesterday.isoformat(), "requests_today": 2})
+    )
+
+    assert budget.try_reserve() is True
+    assert budget.try_reserve() is True
+    assert budget.try_reserve() is False
 
 
 def test_newsapi_budget_survives_a_fresh_process():
@@ -284,17 +326,66 @@ def test_newsapi_budget_survives_a_fresh_process():
     assert second.try_reserve() is False
 
 
-def test_newsapi_budget_ignores_a_stale_persisted_date():
-    """A persisted count from a prior UTC day is not carried into a new process's day."""
-    stale = fetchers._NewsApiBudget(daily_limit=2)
-    assert stale.try_reserve() is True
-    stale._date = stale._date - timedelta(days=1)
-    stale._save_to_disk()
+def _reserve_n_times(data_dir: str, daily_limit: int, attempts: int, result_queue: "multiprocessing.Queue[int]") -> None:
+    """Worker for test_newsapi_budget_enforces_cap_across_processes.
 
-    fresh = fetchers._NewsApiBudget(daily_limit=2)
-    assert fresh.try_reserve() is True
-    assert fresh.try_reserve() is True
-    assert fresh.try_reserve() is False
+    Runs in its own forked process (a separate Python interpreter for the
+    purposes of file locking) and reports how many of its attempts were
+    reserved, so the test can sum successes across processes.
+    """
+    from argus.data import fetchers as _fetchers
+
+    _fetchers.settings.ARGUS_DATA_DIR = data_dir
+    budget = _fetchers._NewsApiBudget(daily_limit=daily_limit)
+    result_queue.put(sum(1 for _ in range(attempts) if budget.try_reserve()))
+
+
+def test_newsapi_budget_enforces_cap_across_processes(tmp_path):
+    """Two independent OS processes racing on the same state dir don't jointly exceed the cap.
+
+    This is the API server / collector scenario the ticket describes: both
+    read-modify-write the same on-disk counter, so serializing only within
+    one process's threads isn't enough.
+    """
+    daily_limit = 20
+    ctx = multiprocessing.get_context("fork")
+    result_queue: "multiprocessing.Queue[int]" = ctx.Queue()
+    procs = [
+        ctx.Process(target=_reserve_n_times, args=(str(tmp_path), daily_limit, daily_limit, result_queue))
+        for _ in range(2)
+    ]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join()
+
+    total_reserved = sum(result_queue.get() for _ in procs)
+    assert total_reserved == daily_limit
+
+
+def _raise_os_error(*_args: object, **_kwargs: object) -> None:
+    raise OSError("simulated disk error")
+
+
+def test_newsapi_budget_degrades_on_disk_error(monkeypatch):
+    """A disk error during the reserve cycle (e.g. a read-only volume) returns False, not a raise."""
+    monkeypatch.setattr(fetchers, "open", _raise_os_error, raising=False)
+
+    budget = fetchers._NewsApiBudget(daily_limit=5)
+    assert budget.try_reserve() is False
+
+
+def test_fetch_news_returns_none_when_reservation_hits_a_disk_error(monkeypatch):
+    """A disk error while reserving a budget slot degrades fetch_news to None instead of raising."""
+    monkeypatch.setattr(fetchers.settings, "newsapi_key", "test-key")
+    monkeypatch.setattr(fetchers, "_NEWSAPI_BUDGET", fetchers._NewsApiBudget())
+    monkeypatch.setattr(fetchers, "open", _raise_os_error, raising=False)
+
+    with mock.patch("newsapi.NewsApiClient") as mock_client_cls:
+        result = fetchers.fetch_news("AAPL", "Apple Inc")
+
+    assert result is None
+    mock_client_cls.assert_not_called()
 
 
 def test_fetch_news_returns_none_without_api_key(monkeypatch):
