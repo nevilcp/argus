@@ -261,6 +261,43 @@ def test_newsapi_budget_exhausts_after_daily_limit():
     assert budget.try_reserve() is False
 
 
+def test_newsapi_budget_resets_on_new_day_within_one_instance(monkeypatch):
+    """A single long-lived instance rolls its counter over at UTC midnight.
+
+    The API server's _NEWSAPI_BUDGET singleton lives for the process's whole
+    lifetime and spans midnight UTC — this proves the rollover holds across
+    two calls on one instance, not just across two freshly constructed ones.
+    """
+
+    class _FixedDatetime(datetime):
+        _now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls._now
+
+    monkeypatch.setattr(fetchers, "datetime", _FixedDatetime)
+    budget = fetchers._NewsApiBudget(daily_limit=1)
+    assert budget.try_reserve() is True
+    assert budget.try_reserve() is False
+
+    _FixedDatetime._now = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    assert budget.try_reserve() is True
+
+
+def test_newsapi_budget_treats_wrong_typed_persisted_fields_as_absent():
+    """A syntactically valid but wrong-typed persisted count degrades to 0, not a raise.
+
+    A `requests_today` of null (int(None) raises TypeError) is a plausible
+    partial-write shape, not just outright-invalid JSON.
+    """
+    budget = fetchers._NewsApiBudget(daily_limit=1)
+    today = datetime.now(timezone.utc).date()
+    budget._persist_path().write_text(json.dumps({"date": today.isoformat(), "requests_today": None}))
+
+    assert budget.try_reserve() is True
+
+
 def test_newsapi_budget_ignores_a_stale_persisted_date():
     """A persisted count from a prior UTC day is not carried into today's."""
     budget = fetchers._NewsApiBudget(daily_limit=2)

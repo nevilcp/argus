@@ -691,7 +691,6 @@ class _NewsApiBudget:
             daily_limit: Maximum requests permitted per UTC day.
         """
         self._daily_limit = daily_limit
-        self._lock = Lock()
 
     def _persist_path(self) -> Path:
         """Returns the counter's path, read lazily so it honors the current ARGUS_DATA_DIR."""
@@ -704,7 +703,7 @@ class _NewsApiBudget:
             raw = json.loads(path.read_text())
             if date.fromisoformat(raw["date"]) == today:
                 return int(raw["requests_today"])
-        except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError):
+        except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
             pass
         return 0
 
@@ -719,24 +718,25 @@ class _NewsApiBudget:
         """Reads, checks, and (if room remains) increments the persisted count.
 
         Holds an flock on a sidecar file for the whole read-modify-write
-        cycle, so a concurrent process can't interleave its own cycle
-        in between — the source of the undercounting an in-process Lock
-        alone can't stop.
+        cycle, so a concurrent thread or process can't interleave its own
+        cycle in between — the source of the undercounting a Python-level
+        Lock alone can't stop, since flock is scoped to the open file
+        description and so already serializes both. The lock is released by
+        closing `lock_file` on the `with` block's exit; no explicit unlock,
+        since one that raised after a successful write would discard the
+        `True` below and report a reservation that had, in fact, persisted.
         """
         path = self._persist_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = path.with_suffix(path.suffix + ".lock")
         with open(lock_path, "w") as lock_file:
             fcntl.flock(lock_file, fcntl.LOCK_EX)
-            try:
-                today = datetime.now(timezone.utc).date()
-                requests_today = self._read_count(path, today)
-                if requests_today >= self._daily_limit:
-                    return False
-                self._write_count(path, today, requests_today + 1)
-                return True
-            finally:
-                fcntl.flock(lock_file, fcntl.LOCK_UN)
+            today = datetime.now(timezone.utc).date()
+            requests_today = self._read_count(path, today)
+            if requests_today >= self._daily_limit:
+                return False
+            self._write_count(path, today, requests_today + 1)
+            return True
 
     def try_reserve(self) -> bool:
         """Reserves one request against today's UTC budget if any remains.
@@ -745,12 +745,11 @@ class _NewsApiBudget:
             True if a request was reserved, False if today's budget is
             spent or the reservation could not be safely persisted.
         """
-        with self._lock:
-            try:
-                return self._reserve_under_file_lock()
-            except OSError as exc:
-                logger.warning("_NewsApiBudget.try_reserve: disk error — %s", exc)
-                return False
+        try:
+            return self._reserve_under_file_lock()
+        except OSError as exc:
+            logger.warning("_NewsApiBudget.try_reserve: disk error — %s", exc)
+            return False
 
 
 _NEWSAPI_BUDGET = _NewsApiBudget()
@@ -815,7 +814,13 @@ def fetch_news(
         return None
 
     if not _NEWSAPI_BUDGET.try_reserve():
-        logger.warning("fetch_news: daily budget of %d requests exhausted", _NEWSAPI_DAILY_LIMIT)
+        # Exhaustion and a disk error both come back as False; try_reserve already
+        # logged the specific cause for a disk error, so this stays cause-agnostic.
+        logger.warning(
+            "fetch_news: no NewsAPI budget slot available (daily cap of %d reached, "
+            "or the reservation failed)",
+            _NEWSAPI_DAILY_LIMIT,
+        )
         return None
 
     try:
