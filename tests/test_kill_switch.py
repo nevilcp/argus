@@ -25,6 +25,7 @@ from argus.risk import paper_book
 from argus.risk.kill_switch import KillSwitch, initialize_kill_switch
 from argus.risk.paper_book import PaperBook, compute_run_returns
 from argus.schemas.signals import ARGUSDecision, PositionAllocation, Signal, TechnicalSignal
+from argus.seams import FixtureMarketDataProvider
 
 
 _FETCH_VIX = "argus.data.fetchers.fetch_vix"
@@ -224,6 +225,18 @@ def test_vix_fetch_success_resets_failure_counter():
         for _ in range(KillSwitch._VIX_FAILURE_HALT_THRESHOLD - 1):
             ks._check()
     assert ks.new_positions_allowed  # only 4 consecutive failures since the reset, not 5
+
+
+def test_vix_gate_driven_entirely_from_fixture_data():
+    """The VIX gate can be exercised off FixtureMarketDataProvider, with no network fetch."""
+    ks = _make_ks("MODERATE")
+    ks.market_data = FixtureMarketDataProvider()
+
+    with mock.patch(_FETCH_VIX, side_effect=AssertionError("must not reach the live fetcher")):
+        ks._check()
+
+    assert ks.status.current_vix == pytest.approx(16.799999237060547)
+    assert ks.new_positions_allowed  # fixture VIX is well below the 35.0 blackout threshold
 
 
 # ---------------------------------------------------------------------------

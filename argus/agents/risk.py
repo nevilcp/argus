@@ -12,7 +12,7 @@ Not responsible for:
 
 Dependencies:
   - scipy (SLSQP optimizer)
-  - yfinance, via data/fetchers.py (GICS sector lookup)
+  - yfinance, via the MarketDataProvider seam (GICS sector lookup)
 """
 
 from __future__ import annotations
@@ -26,7 +26,6 @@ import pandas as pd
 from scipy.optimize import minimize
 
 from argus.config import settings
-from argus.data import fetchers
 from argus.params import RISK
 from argus.schemas.signals import RiskAssessment, RiskVerdict
 from argus.seams import LiveMarketDataProvider, MarketDataProvider
@@ -38,34 +37,45 @@ _SECTOR_CACHE: dict[str, tuple[str, datetime]] = {}
 _SECTOR_CACHE_TTL_SECONDS = RISK.sector_cache_ttl_seconds  # 24 hours
 
 
-def get_sector(ticker: str) -> str:
+def get_sector(ticker: str, market_data: MarketDataProvider) -> str:
     """Dynamically retrieves and caches the GICS sector classification for a ticker.
 
     Uses a module-level dict with a 24-hour TTL to avoid redundant yfinance
     round-trips within a session while still reflecting corporate reclassifications
     (e.g. acquisitions, spin-offs) across multi-day server runs. Routes through
-    fetchers.fetch_ticker_info rather than calling yfinance directly, so this
+    the MarketDataProvider seam rather than calling yfinance directly, so this
     lookup gets the same retry/back-off classification as every other fetch.
+
+    Caching is skipped for a non-live provider: fixture reads are cheap and
+    deterministic, so there's no round-trip to save, and a shared cache would
+    otherwise leak one fixture session's sector into a later session's lookup
+    for the same ticker (see argus/backtesting/replay.py, which constructs a
+    fresh FixtureMarketDataProvider per session in the same process).
 
     Args:
         ticker: Equity ticker symbol.
+        market_data: Provider for the ticker-info lookup.
 
     Returns:
         GICS sector string (e.g. 'Technology'), or 'Unknown' on fetch failure.
     """
-    if ticker in _SECTOR_CACHE:
+    is_live = isinstance(market_data, LiveMarketDataProvider)
+
+    if is_live and ticker in _SECTOR_CACHE:
         sector, cached_at = _SECTOR_CACHE[ticker]
         if (datetime.now() - cached_at).total_seconds() < _SECTOR_CACHE_TTL_SECONDS:  # noqa: DTZ005
             return sector
 
     try:
-        info = fetchers.fetch_ticker_info(ticker)
+        info = market_data.ticker_info(ticker)
         sector = info.get("sector", "Unknown")
-        _SECTOR_CACHE[ticker] = (sector, datetime.now())  # noqa: DTZ005
+        if is_live:
+            _SECTOR_CACHE[ticker] = (sector, datetime.now())  # noqa: DTZ005
         return sector
     except Exception as exc:
         logger.warning("Failed to fetch sector for %s, defaulting to 'Unknown': %s", ticker, exc)
-        _SECTOR_CACHE[ticker] = ("Unknown", datetime.now())  # noqa: DTZ005
+        if is_live:
+            _SECTOR_CACHE[ticker] = ("Unknown", datetime.now())  # noqa: DTZ005
         return "Unknown"
 
 
@@ -591,7 +601,7 @@ class RiskStatisticalEngine:
         sector_weights: dict[str, float] = {}
         sector_to_tickers: dict[str, list] = {}
         for pos in proposed_positions:
-            sector = get_sector(pos["ticker"])
+            sector = get_sector(pos["ticker"], self.market_data)
             sector_weights[sector] = sector_weights.get(sector, 0.0) + pos["weight"]
             sector_to_tickers.setdefault(sector, []).append(pos["ticker"])
 

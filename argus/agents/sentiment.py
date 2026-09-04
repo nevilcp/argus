@@ -10,7 +10,8 @@ Not responsible for:
   - Portfolio allocation decisions (see agents/portfolio.py).
 
 Depends on transformers>=4.0 (ProsusAI/finbert), langchain_groq, and yfinance
-(for catalyst event detection); GROQ_API_KEY must be set (see .env.example).
+(for catalyst event detection, via the MarketDataProvider seam); GROQ_API_KEY
+must be set (see .env.example).
 """
 
 from __future__ import annotations
@@ -21,9 +22,9 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 import numpy as np
+import pandas as pd
 
 from argus.config import settings
-from argus.data import fetchers
 from argus.data.cache import TTLCache
 from argus.orchestration.governor import RateLimitExceeded, UnregisteredModel
 from argus.schemas.prompting import schema_block
@@ -176,24 +177,24 @@ def aggregate_finbert_scores(scored: list[dict], decay_rate: float = 0.95) -> di
     }
 
 
-def _check_earnings_calendar(ticker: str) -> bool:
+def _check_earnings_calendar(ticker: str, market_data: MarketDataProvider) -> bool:
     """Returns True if an earnings date falls within the next 14 days.
 
-    Uses yfinance's calendar API via fetchers.fetch_ticker_calendar (retried,
+    Uses yfinance's calendar API via the MarketDataProvider seam (retried,
     rate-limit-classified) rather than calling yfinance directly. The response
     shape (DataFrame or dict) varies across yfinance versions; both are parsed
     for cross-version compatibility.
 
     Args:
         ticker: Equity ticker symbol.
+        market_data: Provider for the ticker-calendar lookup.
 
     Returns:
         True if an upcoming earnings event is within 14 days, False otherwise
         (including when the calendar can't be fetched at all).
     """
     try:
-        cal = fetchers.fetch_ticker_calendar(ticker)
-        import pandas as pd
+        cal = market_data.ticker_calendar(ticker)
 
         if isinstance(cal, pd.DataFrame) and not cal.empty and "Earnings Date" in cal.index:
             earnings_dates = cal.loc["Earnings Date"]
@@ -456,7 +457,7 @@ class SentimentAgent:
             "news_volume_7d": len(news_list),
             "news_scored_count": len(scored),
             "news_data_available": news is not None,
-            "upcoming_catalyst": _check_earnings_calendar(ticker),
+            "upcoming_catalyst": _check_earnings_calendar(ticker, self.market_data),
         }
 
     def batch_analyze(self, tickers: list[str]) -> tuple[dict[str, SentimentSignal], list[str]]:

@@ -27,6 +27,7 @@ from typing import Optional
 
 from argus.config import settings
 from argus.params import KILL_SWITCH
+from argus.seams import LiveMarketDataProvider, MarketDataProvider
 
 logger = logging.getLogger("argus.kill_switch")
 
@@ -99,6 +100,7 @@ class KillSwitch:
             value passed to the constructor is normalized to 'MODERATE'.
         check_interval: Seconds between monitor loop iterations.
         vix_blackout: VIX level at or above which new positions are blocked.
+        market_data: Provider used for the VIX lookup.
         DRAWDOWN_THRESHOLDS: Per-risk-tolerance drawdown fraction that
             triggers a halt.
     """
@@ -117,13 +119,19 @@ class KillSwitch:
     # network load for a value that can't have moved
     _VIX_CACHE_TTL_SECONDS = 900
 
-    def __init__(self, user_risk_tolerance: str, check_interval_seconds: int = 900):
+    def __init__(
+        self,
+        user_risk_tolerance: str,
+        check_interval_seconds: int = 900,
+        market_data: Optional[MarketDataProvider] = None,
+    ):
         """Initializes the kill switch, deferring monitoring until start() is called.
 
         Args:
             user_risk_tolerance: Risk tier string ('CONSERVATIVE', 'MODERATE',
                 'AGGRESSIVE'); unrecognized values fall back to 'MODERATE'.
             check_interval_seconds: Seconds between monitor loop iterations.
+            market_data: Provider for the VIX lookup; defaults to live fetches.
 
         Raises:
             TypeError: If user_risk_tolerance isn't a string.
@@ -139,6 +147,7 @@ class KillSwitch:
             self.risk_tolerance = "MODERATE"
 
         self.check_interval = check_interval_seconds
+        self.market_data = market_data or LiveMarketDataProvider()
         # Read once from settings at construction, not at class-body import
         # time — the prior `getattr(settings, ..., 35.0)` default was
         # unreachable because settings always defines this field
@@ -259,9 +268,7 @@ class KillSwitch:
         ):
             return self._vix_cache_value
 
-        from argus.data.fetchers import fetch_vix
-
-        value = fetch_vix()
+        value = self.market_data.vix()
         self._vix_cache_value = value
         self._vix_cache_fetched_at = now
         return value
@@ -527,7 +534,10 @@ def _find_latest_halt_file(runs_dir: Optional[str] = None) -> Optional[Path]:
 
 
 def initialize_kill_switch(
-    risk_tolerance: str, portfolio_value: float, check_interval: int = 900
+    risk_tolerance: str,
+    portfolio_value: float,
+    check_interval: int = 900,
+    market_data: Optional[MarketDataProvider] = None,
 ) -> KillSwitch:
     """Initializes and starts the module-level KillSwitch singleton.
 
@@ -542,13 +552,14 @@ def initialize_kill_switch(
         check_interval: Seconds between monitor loop iterations (default 900,
             matching the VIX cache TTL — a shorter interval would just re-hit
             the cache without observing anything new).
+        market_data: Provider for the VIX lookup; defaults to live fetches.
 
     Returns:
         The active KillSwitch singleton.
     """
     global _kill_switch
     if _kill_switch is None:
-        _kill_switch = KillSwitch(risk_tolerance, check_interval)
+        _kill_switch = KillSwitch(risk_tolerance, check_interval, market_data=market_data)
         halt_file = _find_latest_halt_file()
         if halt_file is not None:
             _kill_switch._restore_halt_from_file(halt_file)
