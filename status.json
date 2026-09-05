@@ -1,0 +1,14 @@
+{
+  "last_run": "2026-09-04T23:02:53Z",
+  "last_reason": "collected",
+  "last_reconcile": "2026-09-05T00:15:06Z",
+  "last_outcome": "degraded",
+  "last_decisions_logged": 20,
+  "last_decisions_with_allocation": 0,
+  "last_degraded_inputs": {
+    "fundamental": 20,
+    "sentiment": 20,
+    "risk": 20,
+    "allocation": 20
+  }
+}
