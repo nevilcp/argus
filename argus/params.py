@@ -35,7 +35,7 @@ from dataclasses import dataclass, field, fields
 from enum import Enum
 from typing import Any
 
-PARAMS_VERSION = 18
+PARAMS_VERSION = 19
 
 
 class Provenance(str, Enum):
@@ -277,8 +277,11 @@ class RiskParams:
     var_confidence: float = p(0.99, Provenance.CONVENTION, "99% is a standard VaR/CVaR confidence level")
     cvar_confidence: float = p(0.99, Provenance.CONVENTION, "99% is a standard VaR/CVaR confidence level")
     min_beta_overlap_points: int = p(10, Provenance.ARBITRARY, "no basis for this specific minimum")
-    atr_multiplier: float = p(2.5, Provenance.CONVENTION, "2-3x ATR is a common stop-loss distance convention")
-    atr_period: int = p(14, Provenance.LITERATURE, "14 is the standard Wilder ATR period")
+    # These back close_to_close_stop_losses (agents/risk.py), which computes
+    # mean absolute close-to-close change, not true ATR — the period and
+    # multiplier are still borrowed from the standard ATR-14, 2-3x convention.
+    stop_multiplier: float = p(2.5, Provenance.CONVENTION, "2-3x ATR is a common stop-loss distance convention")
+    stop_lookback_period: int = p(14, Provenance.LITERATURE, "14 is the standard Wilder ATR period")
     min_positions_diversification: int = p(5, Provenance.ARBITRARY, "no basis for this specific minimum")
     max_positions: int = p(20, Provenance.ARBITRARY, "no basis for this specific maximum")
     slsqp_risk_aversion: float = p(1.0, Provenance.ARBITRARY, "equal weighting of conviction return vs variance; not tuned")
@@ -427,6 +430,13 @@ class StructuredOutputParams:
     so the value carries forward unchanged rather than being re-guessed.
     """
 
+    llm_temperature: float = p(
+        0.1,
+        Provenance.CONVENTION,
+        "near-zero temperature for reproducible structured output; used by "
+        "fundamental.py and sentiment.py — portfolio.py sets its own, lower "
+        "value in PortfolioParams.llm_temperature",
+    )
     max_attempts: int = p(
         3,
         Provenance.ARBITRARY,

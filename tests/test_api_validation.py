@@ -102,6 +102,20 @@ def test_analyze_upcases_and_dedupes_tickers(client, monkeypatch):
     fake_pipeline.register_tickers.assert_called_once_with(["AAPL", "MSFT"])
 
 
+def test_analyze_reports_a_missing_allocation_as_503_not_500(client, monkeypatch):
+    """A degraded (no-allocation) graph run is an upstream LLM outage, not a server bug."""
+    _pipeline(monkeypatch, market_hours=True)
+    _seed_cache("AAPL", bar_age_seconds=5, write_age_seconds=5)
+    fake_graph = mock.Mock()
+    fake_graph.invoke.return_value = {"decisions": [], "portfolio_allocation": None}
+    monkeypatch.setattr(api_main, "_graph", fake_graph)
+
+    response = client.post("/analyze", json=_payload("AAPL"))
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Portfolio allocation failed."
+
+
 def test_analyze_redacts_internal_exception_details(client, monkeypatch):
     """A raw graph exception never reaches the client; only a correlation ref does."""
     _pipeline(monkeypatch, market_hours=True)

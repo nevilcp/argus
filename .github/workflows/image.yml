@@ -13,8 +13,11 @@ on:
       - "scripts/**"
       - ".github/workflows/image.yml"
   schedule:
-    # Weekly rebuild so base-image and dependency security patches land even
-    # without a code push
+    # Weekly rebuild so pip-installed dependency security patches land even
+    # without a code push. Dockerfile.api now pins python:3.11-slim by
+    # digest for build reproducibility, so this alone no longer refreshes
+    # the base image itself — bumping that digest needs a manual PR, which
+    # lands here via the push trigger above once merged.
     - cron: "0 6 * * 1"
   workflow_dispatch:
 

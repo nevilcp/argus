@@ -44,7 +44,7 @@ def _data_path(filename: str) -> str:
 
 def main() -> None:
     """Parses CLI args, runs one reconciliation pass, and prints its report."""
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=settings.ARGUS_LOG_LEVEL)
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
