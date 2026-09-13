@@ -21,6 +21,8 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
+from argus.config import settings
+
 logger = logging.getLogger("argus.remediate_macro_regime_tags")
 
 STALE_REGIME = "EXPANSION"
@@ -29,7 +31,7 @@ REPLACEMENT_REGIME = "unknown"
 
 def main() -> None:
     """Backs up the ChromaDB sqlite file and rewrites stale regime tags to "unknown"."""
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=settings.ARGUS_LOG_LEVEL)
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--persist-dir", default="./chroma_db")

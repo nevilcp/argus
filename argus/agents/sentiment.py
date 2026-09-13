@@ -27,6 +27,7 @@ import pandas as pd
 from argus.config import settings
 from argus.data.cache import TTLCache
 from argus.orchestration.governor import RateLimitExceeded, UnregisteredModel
+from argus.params import STRUCTURED_OUTPUT
 from argus.schemas.prompting import schema_block
 from argus.schemas.signals import SentimentSignal, SentimentVerdict
 from argus.seams import GroqLLMClient, LiveMarketDataProvider, LLMClient, MarketDataProvider
@@ -340,7 +341,7 @@ class SentimentAgent:
                 )
             llm_client = GroqLLMClient(
                 model=settings.ARGUS_SENTIMENT_MODEL,
-                temperature=0.1,
+                temperature=STRUCTURED_OUTPUT.llm_temperature,
                 # gpt-oss-20b peaked at 417 completion tokens on fixture prompts; 550 leaves ~30% headroom.
                 max_tokens=550,
                 api_key=api_key,

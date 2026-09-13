@@ -28,6 +28,7 @@ from pydantic import ValidationError
 from argus.config import settings
 from argus.data.cache import TTLCache
 from argus.orchestration.governor import RateLimitExceeded, UnregisteredModel
+from argus.params import STRUCTURED_OUTPUT
 from argus.schemas.prompting import field_list
 from argus.schemas.signals import FundamentalSignal, FundamentalVerdict
 from argus.seams import GroqLLMClient, LiveMarketDataProvider, LLMClient, MarketDataProvider
@@ -296,7 +297,7 @@ class FundamentalAgent:
                 )
             llm_client = GroqLLMClient(
                 model=settings.ARGUS_FUNDAMENTAL_MODEL,
-                temperature=0.1,
+                temperature=STRUCTURED_OUTPUT.llm_temperature,
                 # gpt-oss-120b peaked at 327 completion tokens on fixture prompts; 450 leaves ~35% headroom.
                 max_tokens=450,
                 api_key=api_key,

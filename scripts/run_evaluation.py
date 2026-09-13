@@ -29,6 +29,7 @@ from argus.backtesting.evaluation import (
     trade_level_win_loss_stats,
 )
 from argus.backtesting.replay import replay_session
+from argus.config import settings
 from argus.params import RECONCILIATION
 from argus.seams import LiveMarketDataProvider
 
@@ -85,7 +86,7 @@ def _print_evaluation(label: str, result: EvaluationResult) -> None:
 
 def main() -> None:
     """Replays open-loop and closed-loop sessions and prints the evaluation report."""
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=settings.ARGUS_LOG_LEVEL)
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixtures-dir", type=Path, default=FIXTURES_DIR)

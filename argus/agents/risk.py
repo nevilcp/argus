@@ -267,31 +267,35 @@ def avg_pairwise_correlation(returns_matrix: pd.DataFrame) -> Optional[float]:
     return mean_corr if not np.isnan(mean_corr) else None
 
 
-def atr_stop_losses(
-    positions: list[dict], price_history: dict[str, pd.Series], atr_multiplier: float = RISK.atr_multiplier
+def close_to_close_stop_losses(
+    positions: list[dict], price_history: dict[str, pd.Series], stop_multiplier: float = RISK.stop_multiplier
 ) -> dict[str, float]:
-    """Derives dynamic stop-loss bounds using Average True Range (ATR-14) metrics.
+    """Derives dynamic stop-loss bounds from the mean absolute close-to-close change.
+
+    Not true ATR: real Average True Range needs high/low/prev-close data this
+    path doesn't have, so it understates volatility on large intraday gaps.
+    ``RISK.stop_lookback_period``/``stop_multiplier`` still borrow their values
+    from the standard ATR-14, 2-3x convention as a starting point.
 
     Args:
         positions: List of dicts with key ``ticker``.
         price_history: Mapping of ticker → daily close price Series.
-        atr_multiplier: Multiplier applied to ATR-14 to set the stop distance (default 2.5).
+        stop_multiplier: Multiplier applied to the mean absolute change to set
+            the stop distance (default 2.5).
 
     Returns:
-        Mapping of ticker → stop-loss price level. Tickers with fewer than 14 data points
-        are excluded.
+        Mapping of ticker → stop-loss price level. Tickers with fewer than
+        ``RISK.stop_lookback_period`` data points are excluded.
     """
     stops = {}
     for pos in positions:
         ticker = pos["ticker"]
         if ticker in price_history:
             series = price_history[ticker]
-            if len(series) > RISK.atr_period:
-                # NOTE: true_range is close-to-close, not H-L-Cprev — understates ATR on large intraday gaps.
-                true_range = series.diff().abs().dropna()
-                atr_14 = true_range.tail(RISK.atr_period).mean()
+            if len(series) > RISK.stop_lookback_period:
+                mean_abs_change = series.diff().abs().dropna().tail(RISK.stop_lookback_period).mean()
                 latest_close = float(series.iloc[-1])
-                stops[ticker] = max(0.0, latest_close - (atr_14 * atr_multiplier))
+                stops[ticker] = max(0.0, latest_close - (mean_abs_change * stop_multiplier))
     return stops
 
 
@@ -660,7 +664,7 @@ class RiskStatisticalEngine:
                 timestamp=datetime.now(),  # noqa: DTZ005
             )
 
-        stops = atr_stop_losses(proposed_positions, price_history)
+        stops = close_to_close_stop_losses(proposed_positions, price_history)
         mvar = component_var(returns, port_returns)
 
         primary_ticker = proposed_positions[0]["ticker"] if proposed_positions else ""

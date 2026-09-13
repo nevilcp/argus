@@ -451,7 +451,7 @@ class PortfolioManagerAgent:
             "Columns: FUND=fundamental_signal(conviction) TECH=technical_signal(conviction) "
             "SENT=sentiment_signal(conviction) AGG=aggregated_signal(conviction) "
             "Evidence=agents_present/3 (specialists that actually voted into AGG) "
-            "VaR=99%_VaR Beta=portfolio_beta Stop=ATR_stop_loss Cap=risk_engine_ceiling\n"
+            "VaR=99%_VaR Beta=portfolio_beta Stop=stop_loss_level Cap=risk_engine_ceiling\n"
             "AGG conviction is scaled against the full three-agent vote mass, not just the "
             "specialists present — it falls with disagreement or missing coverage rather than "
             "saturating near 1.0 whenever the agents who voted happen to agree.\n"

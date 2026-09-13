@@ -259,12 +259,26 @@ Required environment variables must be placed in a `.env` file at the project ro
 
 Every secret field defaults to an empty string (see `argus/config.py`) — the process starts without them, but the feature that depends on a missing key degrades or is skipped rather than failing outright (e.g. a missing `FRED_API_KEY` means the macro classifier's rule-based fallback is used instead of live indicators).
 
+### Production-Consequential
+
+`.env.example` ships both of these unset, which is deliberate for local development — a fresh
+deployment reachable outside a trusted network must set both before going live.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ARGUS_API_KEY` | (blank) | Shared secret required via the `X-API-Key` header on `POST /analyze` and `POST /kill-switch/reset`. Blank (the default) disables the check entirely. |
+| `ARGUS_CORS_ORIGINS` | `*` | Comma-separated allowed CORS origins for the FastAPI gateway. |
+
 ### Unattended Operation
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ARGUS_UNIVERSE` | built-in 20-ticker universe | Comma-separated tickers the collector tracks and analyzes. |
 | `ARGUS_DATA_DIR` | `data` | Directory for the persistent intraday buffer, checkpoint DB, and decision log. |
+| `ARGUS_CHROMA_DIR` | `<ARGUS_DATA_DIR>/chroma_db` | Directory backing the ChromaDB cultural-memory store. |
+| `ARGUS_RUNS_DIR` | `<ARGUS_DATA_DIR>/runs` | Directory for kill-switch halt-event dumps. |
+| `MFT_CANDLE_INTERVAL` | `1m` | Candle interval the MFT pipeline fetches; coarser resolutions are derived locally by resampling. |
+| `CANDLE_BUFFER_SIZE` | derived from `MFT_CANDLE_INTERVAL` | Override for the persistent intraday candle buffer's capacity. |
 | `ARGUS_COLLECTOR_ENABLED` | `false` | Run the graph automatically on a schedule during market hours. |
 | `ARGUS_COLLECTOR_INTERVAL_SECONDS` | `3600` | Seconds between automatic collection cycles. |
 | `ARGUS_RECONCILE_ENABLED` | `false` | Automatically reconcile matured decisions once a day. |
@@ -272,10 +286,35 @@ Every secret field defaults to an empty string (see `argus/config.py`) — the p
 | `ARGUS_TOTAL_WEALTH` | `100000` | Total wealth used by unattended collection cycles. |
 | `ARGUS_INVEST_PCT` | `0.6` | Invest fraction used by unattended collection cycles. |
 | `ARGUS_RISK_TOLERANCE` | `MODERATE` | Risk tolerance used by unattended collection cycles. |
-| `ARGUS_CORS_ORIGINS` | `*` | Comma-separated allowed CORS origins for the FastAPI gateway. |
-| `ARGUS_API_KEY` | (blank) | Shared secret required via the `X-API-Key` header on `POST /analyze` and `POST /kill-switch/reset`. Blank (the default) disables the check — set this before exposing the API beyond a trusted network. |
 | `ARGUS_LOG_LEVEL` | `INFO` | Root log level for `argus.*` loggers. |
 | `ARGUS_HMM_MODEL_PATH` | `argus/models/macro_hmm.joblib` | Path to the persisted macro `RegimeClassifier` artifact (see [Training the Macro Classifier](#training-the-macro-classifier)). |
+| `ARGUS_IMAGE_TAG` | `unknown` | Commit-identified image tag baked in at Docker build time (see `image.yml`); not meant to be set by hand. |
+
+### LLM Models & Rate Limits
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ARGUS_FUNDAMENTAL_MODEL` | `openai/gpt-oss-120b` | Model backing the fundamental agent. Must be a member of `REGISTERED_MODELS` in `argus/orchestration/governor.py`. |
+| `ARGUS_SENTIMENT_MODEL` | `openai/gpt-oss-20b` | Model backing the sentiment agent. Same registration requirement. |
+| `ARGUS_PORTFOLIO_MODEL` | `openai/gpt-oss-120b` | Model backing the portfolio manager agent. Same registration requirement. |
+| `ARGUS_GROQ_RPM` | `30` | Bootstrap requests-per-minute floor for the rate governor, before Groq's response headers correct it per-model. |
+| `ARGUS_GROQ_TPM` | `6000` | Bootstrap tokens-per-minute floor, same caveat. |
+| `ARGUS_ANALYZE_DEADLINE_SECONDS` | `360` | Server-side deadline for a single `/analyze` graph run. |
+
+### Risk Limits
+
+Enforced by `RiskStatisticalEngine`; see `argus/params.py` for provenance.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MAX_SINGLE_POSITION_PCT` | `0.15` | Ceiling on a single ticker's portfolio weight. |
+| `MAX_SECTOR_CONCENTRATION` | `0.40` | Ceiling on a single GICS sector's aggregate weight. |
+| `MAX_PORTFOLIO_BETA` | `1.50` | Ceiling on the portfolio's weighted beta. |
+| `VIX_BLACKOUT_THRESHOLD` | `35` | VIX level above which new positions are blocked. |
+| `LOOKBACK_DAYS` | `252` | Historical window used in rolling indicator calculations. |
+
+`TECHNICAL_INDICATOR_WEIGHTS` is also a config field, but it's a JSON object best edited directly
+in `argus/params.py` rather than overridden via `.env`.
 
 `docker-compose.yml` overrides `ARGUS_COLLECTOR_ENABLED`/`ARGUS_RECONCILE_ENABLED` to `true` unless you set them explicitly in `.env`.
 
@@ -451,7 +490,7 @@ pytest tests/ --cov=argus --cov-report=term-missing
 ```
 
 - **Categories**: Tests cover Pydantic validation boundaries, mathematical boundaries (e.g., Half-Kelly position sizing constraints), caching TTL expiration logic, and thread-safe rate limit assertions.
-- **Approximate Run Time**: ~150 seconds for 432 tests across 35 files. No Groq key is needed — LLM agents are always fixture-backed or mocked. `TestEndToEnd`'s live-network tests need network access and skip cleanly when it's absent; the rest of the suite needs none.
+- **Approximate Run Time**: ~150 seconds for 551 tests across 41 files. No Groq key is needed — LLM agents are always fixture-backed or mocked. `TestEndToEnd`'s live-network tests need network access and skip cleanly when it's absent; the rest of the suite needs none.
 - **CI gate**: `.github/workflows/ci.yml` additionally runs `ruff check .` and `mypy argus/` (pinned `ruff==0.16.2`, `mypy==2.3.0`) before the test step, and runs the suite on both Python 3.11 and 3.12 so the `requires-python = ">=3.11"` floor is actually exercised.
 
 ## Contributing

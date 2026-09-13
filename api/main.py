@@ -716,10 +716,12 @@ async def analyze(req: AnalysisRequest):
             threshold, the market is currently closed, the MFT cache has not yet
             been populated for all requested tickers, the cache hasn't been
             refreshed recently (pipeline stalled), the cached bars are older
-            than expected (stale data survived a restart), or a configured
-            model has no rate-limit profile (a misconfiguration, not a
-            transient condition).
-        HTTPException 500: If the LangGraph execution fails or produces no allocation.
+            than expected (stale data survived a restart), a configured model
+            has no rate-limit profile (a misconfiguration, not a transient
+            condition), or the portfolio agent's LLM call failed and correctly
+            degraded to no allocation rather than fabricating one.
+        HTTPException 500: If the LangGraph execution fails for a reason other
+            than the LLM call above.
     """
     ks = get_kill_switch()
     if ks:
@@ -864,7 +866,10 @@ async def analyze(req: AnalysisRequest):
 
     allocation = final_state.get("portfolio_allocation")
     if not allocation:
-        raise HTTPException(500, "Portfolio allocation failed.")
+        # Refusing to answer is correct here — see PortfolioManagerAgent.allocate's
+        # degrade-not-fabricate contract — so this is an upstream LLM outage, not
+        # a bug in this server; 503 says so rather than the generic 500.
+        raise HTTPException(503, "Portfolio allocation failed.")
 
     macro_context = final_state.get("macro_context")
     macro_regime = macro_context.macro_regime.value if macro_context else "unknown"
