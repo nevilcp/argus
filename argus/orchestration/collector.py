@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -286,7 +287,10 @@ async def run_collection_cycle(
         errors=[],
     )
 
-    thread_id = f"collector-{datetime.now().strftime('%Y%m%d%H%M%S')}"  # noqa: DTZ005
+    # A timestamp alone is only second-resolution: two cycles starting within the same
+    # second would share a thread_id, and the in-process lock guarding against that
+    # doesn't survive a restart mid-cycle. The uuid4 suffix makes it unique regardless.
+    thread_id = f"collector-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"  # noqa: DTZ005
     config = {"configurable": {"thread_id": thread_id}}
 
     logger.info(

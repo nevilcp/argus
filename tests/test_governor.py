@@ -277,6 +277,22 @@ def test_observed_daily_exhaustion_raises_immediately(governor):
     assert mock_sleep.call_count == 0, "a day-long reset must not be slept out"
 
 
+def test_unobserved_daily_budget_is_permissive_by_design(governor):
+    """Before any response headers arrive, the daily-request axis never blocks admission.
+
+    Intentional, not a gap: Groq publishes no bootstrap figure for requests-per-day
+    (see BOOTSTRAP_LIMITS), so inventing one would fabricate a cap nothing publishes.
+    The per-minute axes still gate every call, bounding the window this stays fully
+    permissive to roughly the first response's round trip.
+    """
+    assert governor._get_usage(MODEL).limits_observed is False
+
+    for _ in range(5):
+        governor.wait_if_needed(MODEL, 10)
+
+    assert governor._get_usage(MODEL).limits_observed is False
+
+
 def test_record_usage_applies_delta_to_bootstrap_counters(governor):
     """record_usage corrects the local today/window counters toward the actual token count."""
     governor.wait_if_needed(MODEL, 100)

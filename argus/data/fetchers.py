@@ -36,14 +36,14 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from threading import Lock
 from typing import Any, Optional, TypeVar
 
 import pandas as pd
 import yfinance as yf
 
 from argus.config import settings
-from argus.data.cache import DailyBarCache
+from argus.data.cache import DailyBarCache, TTLCache
+from argus.params import SYSTEM
 
 logger = logging.getLogger("argus.fetchers")
 
@@ -546,9 +546,9 @@ def fetch_ticker_calendar(ticker: str) -> Any:
     return yf.Ticker(ticker).calendar
 
 
-_FRED_CACHE: dict[str, tuple[datetime, pd.Series]] = {}
-_FRED_CACHE_LOCK = Lock()
-_FRED_CACHE_TTL = timedelta(hours=6)
+_FRED_CACHE: TTLCache[str, pd.Series] = TTLCache(
+    ttl=timedelta(hours=6), max_entries=SYSTEM.fred_cache_max_entries
+)
 
 
 @_with_retry
@@ -572,12 +572,10 @@ def fetch_fred_series(series_id: str, start: str = "2018-01-01") -> pd.Series:
         raise DataFetchError("FRED_API_KEY is not set — configure it in .env to use macro data.")
 
     cache_key = f"{series_id}::{start}"
-    with _FRED_CACHE_LOCK:
-        if cache_key in _FRED_CACHE:
-            cached_at, series = _FRED_CACHE[cache_key]
-            if datetime.now(timezone.utc).replace(tzinfo=None) - cached_at < _FRED_CACHE_TTL:
-                logger.debug("fetch_fred_series: cache hit for %s", series_id)
-                return series
+    cached = _FRED_CACHE.get(cache_key)
+    if cached is not None:
+        logger.debug("fetch_fred_series: cache hit for %s", series_id)
+        return cached
 
     logger.debug("fetch_fred_series: fetching %s from FRED", series_id)
     from fredapi import Fred  # Lazy import; only loaded when FRED is actually used
@@ -590,8 +588,7 @@ def fetch_fred_series(series_id: str, start: str = "2018-01-01") -> pd.Series:
     raw.index = pd.to_datetime(raw.index)
     raw = raw.sort_index().dropna()
 
-    with _FRED_CACHE_LOCK:
-        _FRED_CACHE[cache_key] = (datetime.now(timezone.utc).replace(tzinfo=None), raw)
+    _FRED_CACHE.set(cache_key, raw)
 
     logger.info("fetch_fred_series: %s → %d observations", series_id, len(raw))
     return raw

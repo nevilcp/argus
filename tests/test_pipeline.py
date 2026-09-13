@@ -28,6 +28,7 @@ from argus.data.pipeline import (
     _required_raw_bars,
     _resample_ohlcv,
     _return_since,
+    _volume_ratio,
 )
 from argus.params import SYSTEM
 from tests.helpers.candles import dst_straddling_candles, et_intraday_candles
@@ -325,6 +326,28 @@ def test_finite_or_none():
     assert _finite_or_none(float("nan")) is None
     assert _finite_or_none(float("inf")) is None
     assert _finite_or_none(float("-inf")) is None
+
+
+def test_volume_ratio_computes_latest_over_rolling_mean():
+    """A normal volume series returns the latest bar over its 20-bar rolling mean."""
+    volume_s = pd.Series([100.0] * 19 + [200.0])
+    assert _volume_ratio(volume_s) == pytest.approx(200.0 / 105.0)
+
+
+def test_volume_ratio_returns_none_for_an_exactly_zero_mean():
+    """An all-zero volume series has nothing to compute a ratio against."""
+    assert _volume_ratio(pd.Series([0.0] * 20)) is None
+
+
+def test_volume_ratio_returns_none_for_a_near_zero_mean_instead_of_an_outlier():
+    """A near-zero (but not exactly zero) mean is rejected rather than divided by.
+
+    A bare falsy check only catches an exact 0.0; a rolling mean of 1e-9 is
+    truthy and would otherwise produce a ratio computed against a statistically
+    meaningless divisor.
+    """
+    volume_s = pd.Series([1e-9] * 20)
+    assert _volume_ratio(volume_s) is None
 
 
 def test_required_indicator_bars_is_pinned_to_macd_warmup():

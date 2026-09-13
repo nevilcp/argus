@@ -6,7 +6,7 @@ computation, and reading decisions back out of the LangGraph checkpoint.
 
 import json
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -757,6 +757,24 @@ def test_prune_checkpoints_nothing_stale_deletes_nothing(tmp_path):
     _put_checkpoint(db_path, "fresh-thread", datetime.now())
 
     deleted = prune_checkpoints(db_path, cutoff=datetime.now() - timedelta(days=30))
+
+    assert deleted == 0
+
+
+def test_prune_checkpoints_normalizes_a_non_utc_offset_before_comparing(tmp_path):
+    """A checkpoint timestamped with a non-UTC offset is compared against cutoff in UTC.
+
+    Regression: discarding the offset instead of converting to UTC first shifts the
+    value by the offset's magnitude. This thread's ts is 2026-01-01T20:00:00-05:00
+    (2026-01-02T01:00:00 UTC), one hour *after* the UTC cutoff — it must survive.
+    Naively stripping the offset instead would compare 2026-01-01T20:00:00 (naive)
+    against the same cutoff and wrongly prune it as four hours stale.
+    """
+    db_path = str(tmp_path / "argus_graph.db")
+    non_utc_ts = datetime(2026, 1, 1, 20, 0, 0, tzinfo=timezone(timedelta(hours=-5)))
+    _put_checkpoint(db_path, "offset-thread", non_utc_ts)
+
+    deleted = prune_checkpoints(db_path, cutoff=datetime(2026, 1, 2))
 
     assert deleted == 0
 

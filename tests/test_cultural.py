@@ -12,7 +12,12 @@ from unittest import mock
 import pytest
 
 import argus.memory.cultural as cultural_module
-from argus.memory.cultural import CulturalMemoryManager, get_cultural_memory
+from argus.memory.cultural import (
+    CulturalMemoryManager,
+    EmbeddingModelMismatchError,
+    _check_embedding_model_identity,
+    get_cultural_memory,
+)
 from argus.params import MEMORY, RECONCILIATION
 from argus.schemas.signals import (
     ARGUSDecision,
@@ -72,6 +77,31 @@ def _macro(
         agent_multipliers={"fundamental": 1.0, "technical": 1.0, "sentiment": 1.0},
         timestamp=datetime.now(),
     )
+
+
+def test_embedding_identity_check_backfills_a_collection_with_no_recorded_model():
+    """A pre-existing collection with no `embedding_model` key gets one backfilled."""
+    result = _check_embedding_model_identity({"hnsw:space": "cosine"}, "all-MiniLM-L6-v2")
+    assert result == {"hnsw:space": "cosine", "embedding_model": "all-MiniLM-L6-v2"}
+
+
+def test_embedding_identity_check_is_a_noop_when_the_model_matches():
+    """A collection already recording the expected model needs no write-back."""
+    metadata = {"hnsw:space": "cosine", "embedding_model": "all-MiniLM-L6-v2"}
+    assert _check_embedding_model_identity(metadata, "all-MiniLM-L6-v2") is None
+
+
+def test_embedding_identity_check_raises_on_a_mismatched_model():
+    """A collection recorded under a different embedding model raises rather than degrading silently."""
+    metadata = {"hnsw:space": "cosine", "embedding_model": "all-mpnet-base-v2"}
+    with pytest.raises(EmbeddingModelMismatchError):
+        _check_embedding_model_identity(metadata, "all-MiniLM-L6-v2")
+
+
+def test_embedding_identity_check_handles_no_metadata_at_all():
+    """A collection with no metadata dict at all is treated the same as one missing the key."""
+    result = _check_embedding_model_identity(None, "all-MiniLM-L6-v2")
+    assert result == {"embedding_model": "all-MiniLM-L6-v2"}
 
 
 def test_zero_observations_returns_prior():
