@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -10,8 +12,10 @@ from argus.agents.risk import (
     get_sector,
     ols_portfolio_beta,
 )
+from argus.data.cache import TTLCache
 from argus.params import RISK
 from argus.schemas.signals import RiskVerdict
+from argus.seams import LiveMarketDataProvider
 
 
 _TRADING_YEAR = pd.date_range(start="2023-01-01", periods=253, freq="B")
@@ -361,7 +365,10 @@ def test_get_sector_does_not_cache_across_non_live_providers(monkeypatch) -> Non
     provider-agnostic cache would let session 1's sector for a ticker
     silently answer session 2's lookup for the same ticker.
     """
-    monkeypatch.setattr("argus.agents.risk._SECTOR_CACHE", {})
+    monkeypatch.setattr(
+        "argus.agents.risk._SECTOR_CACHE",
+        TTLCache(ttl=timedelta(seconds=RISK.sector_cache_ttl_seconds), max_entries=RISK.sector_cache_max_entries),
+    )
 
     session_one = _StubTickerInfoMarketData("Technology")
     session_two = _StubTickerInfoMarketData("Energy")
@@ -370,3 +377,35 @@ def test_get_sector_does_not_cache_across_non_live_providers(monkeypatch) -> Non
     assert get_sector("AAPL", session_two) == "Energy"
     assert session_one.calls == 1
     assert session_two.calls == 1
+
+
+class _StubLiveMarketData(LiveMarketDataProvider):
+    """A LiveMarketDataProvider whose ticker_info is a counted stub, not a real yfinance call."""
+
+    def __init__(self, sector: str) -> None:
+        self._sector = sector
+        self.calls = 0
+
+    def ticker_info(self, ticker: str) -> dict:
+        self.calls += 1
+        return {"sector": self._sector}
+
+
+def test_get_sector_cache_evicts_the_oldest_entry_at_capacity(monkeypatch) -> None:
+    """The live sector cache is bounded: a new ticker at capacity evicts the oldest one."""
+    monkeypatch.setattr(
+        "argus.agents.risk._SECTOR_CACHE",
+        TTLCache(ttl=timedelta(seconds=RISK.sector_cache_ttl_seconds), max_entries=2),
+    )
+    market_data = _StubLiveMarketData("Technology")
+
+    get_sector("AAPL", market_data)
+    get_sector("MSFT", market_data)
+    get_sector("GOOG", market_data)
+    assert market_data.calls == 3
+
+    get_sector("AAPL", market_data)
+    assert market_data.calls == 4, "AAPL was evicted to keep the cache at its cap"
+
+    get_sector("GOOG", market_data)
+    assert market_data.calls == 4, "GOOG is still cached"

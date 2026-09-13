@@ -274,7 +274,9 @@ def _volume_ratio(volume_s: pd.Series) -> Optional[float]:
         if len(volume_s) >= 20
         else float(volume_s.mean())
     )
-    if not mean:
+    # A falsy check here only catches an exact 0.0 — a near-zero mean is still
+    # truthy and would divide through to an extreme outlier, not a missing value.
+    if not math.isfinite(mean) or abs(mean) < SYSTEM.min_volume_mean_for_ratio:
         return None
     return _finite_or_none(float(volume_s.iloc[-1]) / mean)
 

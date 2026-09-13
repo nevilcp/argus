@@ -403,6 +403,11 @@ class RateLimitGovernor:
                 if usage.limits_observed and usage.remaining_requests is not None:
                     rpd_ok = usage.remaining_requests > 0
                 else:
+                    # No bootstrap figure exists for this axis (see BOOTSTRAP_LIMITS'
+                    # comment) — inventing one would fabricate a daily cap nothing
+                    # publishes. This is permissive only until the first response's
+                    # headers arrive; rpm_ok/tpm_ok above still gate every call in that
+                    # window, bounding it to roughly the process's first request.
                     rpd_ok = True
 
                 if rpm_ok and tpm_ok and rpd_ok:

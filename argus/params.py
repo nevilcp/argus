@@ -35,7 +35,7 @@ from dataclasses import dataclass, field, fields
 from enum import Enum
 from typing import Any
 
-PARAMS_VERSION = 17
+PARAMS_VERSION = 18
 
 
 class Provenance(str, Enum):
@@ -129,6 +129,20 @@ class SystemParams:
         Provenance.ARBITRARY,
         "Retry-After header value on /analyze's 429 when a run is already in "
         "progress; a guess at a graph run's typical duration, not measured",
+    )
+    fred_cache_max_entries: int = p(
+        32,
+        Provenance.ARBITRARY,
+        "cap on data/fetchers.py's in-process FRED series cache; the system only "
+        "ever requests a handful of fixed series ids, so this is headroom rather "
+        "than a measured ceiling — not evaluated against alternatives",
+    )
+    min_volume_mean_for_ratio: float = p(
+        1e-6,
+        Provenance.ARBITRARY,
+        "floor below which data/pipeline.py's rolling volume mean is treated as "
+        "unreliable rather than divided by; guards against a near-zero (but not "
+        "exactly zero) mean producing an extreme ratio outlier",
     )
 
 
@@ -252,6 +266,13 @@ class RiskParams:
     """
 
     sector_cache_ttl_seconds: int = p(86400, Provenance.ARBITRARY, "24h cache lifetime; GICS classifications rarely change")
+    sector_cache_max_entries: int = p(
+        500,
+        Provenance.ARBITRARY,
+        "headroom above SystemParams.max_tracked_tickers (100) for tickers whose "
+        "sector is still momentarily cached after falling out of the tracked "
+        "universe — not evaluated against alternatives",
+    )
     returns_lookback_days: int = p(252, Provenance.LITERATURE, "252 = standard US trading days per year")
     var_confidence: float = p(0.99, Provenance.CONVENTION, "99% is a standard VaR/CVaR confidence level")
     cvar_confidence: float = p(0.99, Provenance.CONVENTION, "99% is a standard VaR/CVaR confidence level")

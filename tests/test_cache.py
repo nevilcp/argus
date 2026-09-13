@@ -240,6 +240,23 @@ def test_insert_candles_is_a_noop_for_an_empty_list():
     assert buffer.get_all_tickers() == []
 
 
+def test_insert_candles_without_a_timestamp_do_not_collide_with_each_other():
+    """Several timestamp-less candles in one batch each get a distinct stored row.
+
+    The primary key is (ticker, timestamp); stamping every missing timestamp with
+    the same `datetime.now()` call would collide under the upsert and silently
+    keep only the last one.
+    """
+    buffer = _buffer(50)
+    candles = [{"open": i, "high": i, "low": i, "close": float(i), "volume": 100.0} for i in range(15)]
+
+    buffer.insert_candles("AAPL", candles)
+
+    df = buffer.get_candles("AAPL")
+    assert len(df) == 15
+    assert sorted(df["close"].tolist()) == [float(i) for i in range(15)]
+
+
 def test_insert_candle_delegates_to_insert_candles(monkeypatch):
     """The single-candle path is a thin wrapper over the bulk path."""
     buffer = _buffer()
@@ -382,3 +399,67 @@ def test_ttl_cache_set_refreshes_the_stored_timestamp():
     clock.now += timedelta(hours=23)
 
     assert cache.get("AAPL") == "neutral"
+
+
+def test_ttl_cache_get_drops_an_expired_entry_rather_than_leaving_it_in_place():
+    """An expired entry is removed from the underlying store on read, not just skipped."""
+    cache, clock = _clocked_ttl_cache()
+
+    cache.set("AAPL", "bullish")
+    clock.now += timedelta(days=1)
+    assert cache.get("AAPL") is None
+
+    assert "AAPL" not in cache._entries
+
+
+def test_ttl_cache_set_sweeps_expired_entries_before_storing():
+    """Storing a new key evicts every already-expired entry, not just the key being set."""
+    cache, clock = _clocked_ttl_cache()
+
+    cache.set("AAPL", "bullish")
+    clock.now += timedelta(days=1)
+    cache.set("MSFT", "neutral")
+
+    assert "AAPL" not in cache._entries
+    assert cache.get("MSFT") == "neutral"
+
+
+def test_ttl_cache_max_entries_evicts_the_oldest_entry_at_capacity():
+    """A new key at capacity evicts the single oldest surviving entry, not the whole store."""
+    clock = _FakeClock(datetime(2026, 1, 1, 12, 0, 0))
+    cache: TTLCache[str, str] = TTLCache(ttl=timedelta(days=1), clock=clock, max_entries=2)
+
+    cache.set("AAPL", "bullish")
+    clock.now += timedelta(minutes=1)
+    cache.set("MSFT", "neutral")
+    clock.now += timedelta(minutes=1)
+    cache.set("GOOG", "bearish")
+
+    assert cache.get("AAPL") is None
+    assert cache.get("MSFT") == "neutral"
+    assert cache.get("GOOG") == "bearish"
+
+
+def test_ttl_cache_max_entries_does_not_evict_when_refreshing_an_existing_key():
+    """Re-setting a key already in the store never triggers capacity eviction for it."""
+    clock = _FakeClock(datetime(2026, 1, 1, 12, 0, 0))
+    cache: TTLCache[str, str] = TTLCache(ttl=timedelta(days=1), clock=clock, max_entries=2)
+
+    cache.set("AAPL", "bullish")
+    cache.set("MSFT", "neutral")
+    cache.set("AAPL", "bearish")
+
+    assert cache.get("AAPL") == "bearish"
+    assert cache.get("MSFT") == "neutral"
+
+
+def test_ttl_cache_with_no_max_entries_stays_unbounded():
+    """Omitting max_entries preserves the prior unbounded behavior for existing callers."""
+    clock = _FakeClock(datetime(2026, 1, 1, 12, 0, 0))
+    cache: TTLCache[str, int] = TTLCache(ttl=timedelta(days=1), clock=clock)
+
+    for i in range(1000):
+        cache.set(f"T{i}", i)
+
+    assert cache.get("T0") == 0
+    assert cache.get("T999") == 999

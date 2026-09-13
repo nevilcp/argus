@@ -18,7 +18,7 @@ Dependencies:
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import numpy as np
@@ -26,21 +26,25 @@ import pandas as pd
 from scipy.optimize import minimize
 
 from argus.config import settings
+from argus.data.cache import TTLCache
 from argus.params import RISK
 from argus.schemas.signals import RiskAssessment, RiskVerdict
 from argus.seams import LiveMarketDataProvider, MarketDataProvider
 
 logger = logging.getLogger("argus.risk")
 
-# Stores (sector, cached_at) per ticker; 24h TTL reflects M&A/spin-off reclassification.
-_SECTOR_CACHE: dict[str, tuple[str, datetime]] = {}
-_SECTOR_CACHE_TTL_SECONDS = RISK.sector_cache_ttl_seconds  # 24 hours
+# 24h TTL reflects M&A/spin-off reclassification; max_entries bounds the store
+# independently of TTL rather than relying incidentally on the ticker universe's size.
+_SECTOR_CACHE: TTLCache[str, str] = TTLCache(
+    ttl=timedelta(seconds=RISK.sector_cache_ttl_seconds),
+    max_entries=RISK.sector_cache_max_entries,
+)
 
 
 def get_sector(ticker: str, market_data: MarketDataProvider) -> str:
     """Dynamically retrieves and caches the GICS sector classification for a ticker.
 
-    Uses a module-level dict with a 24-hour TTL to avoid redundant yfinance
+    Uses a module-level TTLCache with a 24-hour TTL to avoid redundant yfinance
     round-trips within a session while still reflecting corporate reclassifications
     (e.g. acquisitions, spin-offs) across multi-day server runs. Routes through
     the MarketDataProvider seam rather than calling yfinance directly, so this
@@ -61,21 +65,21 @@ def get_sector(ticker: str, market_data: MarketDataProvider) -> str:
     """
     is_live = isinstance(market_data, LiveMarketDataProvider)
 
-    if is_live and ticker in _SECTOR_CACHE:
-        sector, cached_at = _SECTOR_CACHE[ticker]
-        if (datetime.now() - cached_at).total_seconds() < _SECTOR_CACHE_TTL_SECONDS:  # noqa: DTZ005
-            return sector
+    if is_live:
+        cached = _SECTOR_CACHE.get(ticker)
+        if cached is not None:
+            return cached
 
     try:
         info = market_data.ticker_info(ticker)
         sector = info.get("sector", "Unknown")
         if is_live:
-            _SECTOR_CACHE[ticker] = (sector, datetime.now())  # noqa: DTZ005
+            _SECTOR_CACHE.set(ticker, sector)
         return sector
     except Exception as exc:
         logger.warning("Failed to fetch sector for %s, defaulting to 'Unknown': %s", ticker, exc)
         if is_live:
-            _SECTOR_CACHE[ticker] = ("Unknown", datetime.now())  # noqa: DTZ005
+            _SECTOR_CACHE.set(ticker, "Unknown")
         return "Unknown"
 
 

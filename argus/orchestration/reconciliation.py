@@ -138,9 +138,16 @@ def credit_primary_driver(
 
 
 def _as_naive_timestamp(value: datetime | pd.Timestamp) -> pd.Timestamp:
-    """Normalizes a datetime/Timestamp to tz-naive so entry/exit comparisons never raise."""
+    """Normalizes a datetime/Timestamp to tz-naive so entry/exit comparisons never raise.
+
+    A tz-aware value is converted to UTC before its tzinfo is dropped, rather than
+    simply discarding whatever offset it carries — the latter silently shifts the
+    value by that offset (e.g. prune_checkpoints' checkpoint `ts`, which LangGraph
+    stamps tz-aware) and produces a pruning decision that's early or late by the
+    offset's magnitude.
+    """
     ts = pd.Timestamp(value)
-    return ts.tz_localize(None) if ts.tzinfo is not None else ts
+    return ts.tz_convert("UTC").tz_localize(None) if ts.tzinfo is not None else ts
 
 
 def _needs_reconciliation(decision: ARGUSDecision) -> bool:

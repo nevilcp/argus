@@ -17,7 +17,7 @@ import yfinance.exceptions as yf_exceptions
 from newsapi.newsapi_exception import NewsAPIException
 
 from argus.data import fetchers
-from argus.data.cache import DailyBarCache
+from argus.data.cache import DailyBarCache, TTLCache
 
 
 def _http_error(status_code: int, headers: dict | None = None) -> requests.exceptions.HTTPError:
@@ -496,3 +496,39 @@ def test_daily_bar_cache_is_constructed_once_and_reused(monkeypatch):
     second = fetchers._daily_bar_cache()
 
     assert first is second
+
+
+class _FakeFred:
+    """Stub fredapi.Fred that counts calls instead of hitting the network."""
+
+    calls = 0
+
+    def __init__(self, api_key):
+        pass
+
+    def get_series(self, series_id, observation_start):
+        _FakeFred.calls += 1
+        return pd.Series([1.0, 2.0], index=pd.to_datetime(["2024-01-01", "2024-01-02"]))
+
+
+def test_fetch_fred_series_cache_evicts_the_oldest_entry_at_capacity(monkeypatch):
+    """The FRED series cache is bounded: a new series id at capacity evicts the oldest one.
+
+    Without an explicit cap, growth was bounded only incidentally by the small,
+    fixed set of series ids this system actually requests.
+    """
+    monkeypatch.setattr(fetchers.settings, "fred_api_key", "test-key")
+    monkeypatch.setattr(fetchers, "_FRED_CACHE", TTLCache(ttl=timedelta(hours=6), max_entries=2))
+    monkeypatch.setattr("fredapi.Fred", _FakeFred)
+    _FakeFred.calls = 0
+
+    fetchers.fetch_fred_series("A")
+    fetchers.fetch_fred_series("B")
+    fetchers.fetch_fred_series("C")
+    assert _FakeFred.calls == 3
+
+    fetchers.fetch_fred_series("A")
+    assert _FakeFred.calls == 4, "A was evicted to keep the cache at its cap, so this must refetch"
+
+    fetchers.fetch_fred_series("C")
+    assert _FakeFred.calls == 4, "C is still cached"

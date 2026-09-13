@@ -38,6 +38,52 @@ from argus.schemas.signals import ARGUSDecision, MacroContext
 
 logger = logging.getLogger("argus.cultural_memory")
 
+# Model downloaded once to ~/.cache/sentence-transformers on first invocation.
+_EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
+
+
+class EmbeddingModelMismatchError(RuntimeError):
+    """The persisted collection was embedded with a different model than this process uses."""
+
+
+def _check_embedding_model_identity(
+    persisted_metadata: Optional[dict[str, Any]], expected_model: str
+) -> Optional[dict[str, Any]]:
+    """Compares a collection's recorded embedding model against the one this process uses.
+
+    `get_or_create_collection` ignores the `metadata` argument for a collection that
+    already exists, so an existing collection's `embedding_model` — if ever
+    recorded — reflects whatever model actually produced its vectors, not this
+    process's current configuration.
+
+    Args:
+        persisted_metadata: The collection's current metadata, or None.
+        expected_model: The model name this process is configured to embed with.
+
+    Returns:
+        Metadata to backfill via `collection.modify` when the collection predates
+        this check (no `embedding_model` recorded yet), or None when nothing needs
+        writing back.
+
+    Raises:
+        EmbeddingModelMismatchError: The collection was embedded with a different
+            model. Its vectors are geometrically incomparable to anything this
+            process would add — similarity search would otherwise silently degrade
+            toward meaningless results rather than surfacing the mismatch.
+    """
+    persisted_metadata = persisted_metadata or {}
+    recorded_model = persisted_metadata.get("embedding_model")
+    if recorded_model is None:
+        return {**persisted_metadata, "embedding_model": expected_model}
+    if recorded_model != expected_model:
+        raise EmbeddingModelMismatchError(
+            f"Cultural memory collection was embedded with {recorded_model!r}, but this "
+            f"process is configured for {expected_model!r}. Vectors from different "
+            "embedding models are not comparable — point persist_dir at a fresh "
+            "directory or reindex the collection under the new model before continuing."
+        )
+    return None
+
 
 def _where(conditions: list[dict[str, Any]]) -> dict[str, Any]:
     """Combines metadata filter conditions into a single ChromaDB ``where`` clause."""
@@ -92,16 +138,25 @@ class CulturalMemoryManager:
             settings=chromadb.config.Settings(anonymized_telemetry=False),
         )
 
-        # Model downloaded once to ~/.cache/sentence-transformers on first invocation
         self.ef = embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name="all-MiniLM-L6-v2"
+            model_name=_EMBEDDING_MODEL_NAME
         )
 
         self.collection = self.client.get_or_create_collection(
             name="argus_wisdom",
             embedding_function=self.ef,  # type: ignore[arg-type]  # chromadb/sentence-transformers stub mismatch
-            metadata={"hnsw:space": "cosine"},
+            metadata={"hnsw:space": "cosine", "embedding_model": _EMBEDDING_MODEL_NAME},
         )
+        backfill_metadata = _check_embedding_model_identity(
+            self.collection.metadata, _EMBEDDING_MODEL_NAME
+        )
+        if backfill_metadata is not None:
+            self.collection.modify(metadata=backfill_metadata)
+            logger.info(
+                "[Memory] Backfilled embedding_model=%s onto a pre-existing collection "
+                "with no recorded model",
+                _EMBEDDING_MODEL_NAME,
+            )
         self.persist_dir = persist_dir
         logger.info("[Memory] Cultural Memory Manager initialized at %s", persist_dir)
 
