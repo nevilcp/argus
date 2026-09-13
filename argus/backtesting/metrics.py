@@ -85,8 +85,8 @@ def _return_and_drawdown_metrics(returns: pd.Series, risk_free_rate: float) -> d
     """Return, volatility, risk-adjusted-ratio and drawdown statistics of the strategy alone."""
     mean_ret = float(returns.mean())
     std_ret = float(returns.std())
-    downside_std = float(returns[returns < 0].std())
     daily_rf = risk_free_rate / _TRADING_DAYS_PER_YEAR
+    downside_deviation = float(np.sqrt(np.mean(np.minimum(returns - daily_rf, 0) ** 2)))
     annualized_return = mean_ret * _TRADING_DAYS_PER_YEAR
 
     cum_returns = (1 + returns).cumprod()
@@ -105,7 +105,9 @@ def _return_and_drawdown_metrics(returns: pd.Series, risk_free_rate: float) -> d
         "annualized_volatility": std_ret * _ANNUALIZATION if std_ret else 0.0,
         "sharpe_ratio": (mean_ret - daily_rf) / std_ret * _ANNUALIZATION if std_ret > 0 else 0.0,
         "sortino_ratio": (
-            (mean_ret - daily_rf) / downside_std * _ANNUALIZATION if downside_std > 0 else None
+            (mean_ret - daily_rf) / downside_deviation * _ANNUALIZATION
+            if downside_deviation > 0
+            else None
         ),
         "calmar_ratio": annualized_return / abs(max_drawdown) if max_drawdown < 0 else None,
         "max_drawdown": max_drawdown,
