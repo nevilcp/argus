@@ -20,12 +20,15 @@ Dependencies:
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Optional
 
 import numpy as np
 import pandas as pd
 from scipy import stats
+
+logger = logging.getLogger("argus.backtesting.metrics")
 
 _TRADING_DAYS_PER_YEAR = 252
 _ANNUALIZATION = math.sqrt(_TRADING_DAYS_PER_YEAR)
@@ -159,6 +162,7 @@ def _tail_risk_metrics(returns: pd.Series) -> dict:
         skewness = float(stats.skew(returns))
         kurtosis = float(stats.kurtosis(returns))
     except Exception:
+        logger.exception("Skew/kurtosis computation failed; defaulting both to 0.0")
         skewness = 0.0
         kurtosis = 0.0
 

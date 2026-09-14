@@ -28,7 +28,6 @@ from fastapi.testclient import TestClient
 
 import api.main as api_main
 import argus.risk.kill_switch as kill_switch_module
-from argus.data.live_session_cache import LiveSessionCache
 from argus.risk.kill_switch import KillSwitch
 from argus.schemas.signals import ARGUSDecision
 
@@ -36,14 +35,9 @@ _PAYLOAD = {"tickers": ["AAPL"], "total_wealth": 100_000, "invest_pct": 0.5}
 
 
 @pytest.fixture(autouse=True)
-def _reset_singletons(monkeypatch):
-    """Resets the kill-switch singleton and installs a fresh live session cache."""
-    kill_switch_module._kill_switch = None
-    monkeypatch.setattr(api_main, "_live_cache", LiveSessionCache(interval_minutes=1))
-    monkeypatch.setattr(api_main.settings, "ARGUS_API_KEY", "")
+def _reset_singletons(_fresh_live_cache, _no_api_key, monkeypatch):
+    """Resets the analyze semaphore for each test (kill switch and live cache handled in conftest)."""
     monkeypatch.setattr(api_main, "_analyze_semaphore", asyncio.Semaphore(1))
-    yield
-    kill_switch_module._kill_switch = None
 
 
 @pytest.fixture

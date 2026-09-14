@@ -19,15 +19,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 import api.main as api_main
-from argus.data.live_session_cache import LiveSessionCache
 
 _ET = ZoneInfo("America/New_York")
 
 
 @pytest.fixture(autouse=True)
-def _reset_singletons(monkeypatch):
-    """Installs a fresh live session cache for each test."""
-    monkeypatch.setattr(api_main, "_live_cache", LiveSessionCache(interval_minutes=1))
+def _reset_singletons(_fresh_live_cache):
+    """Installs a fresh live session cache for each test (see conftest.py)."""
 
 
 @pytest.fixture

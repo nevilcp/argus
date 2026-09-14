@@ -615,6 +615,7 @@ async def health():
     try:
         can_make_calls = governor.get_remaining_capacity(settings.ARGUS_PORTFOLIO_MODEL) > 0
     except Exception:
+        logger.exception("[API] /health governor capacity check failed")
         can_make_calls = False
 
     background_tasks = {
