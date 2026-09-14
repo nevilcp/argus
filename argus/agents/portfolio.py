@@ -21,7 +21,6 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from datetime import datetime
-from typing import Optional
 from uuid import uuid4
 
 import numpy as np
@@ -74,7 +73,7 @@ def half_kelly_weight(
     return float(np.clip(half_kelly, 0.0, max_position))
 
 
-def build_signal_table(snapshots: dict[str, TickerSnapshot], macro: Optional[MacroContext]) -> str:
+def build_signal_table(snapshots: dict[str, TickerSnapshot], macro: MacroContext | None) -> str:
     """Constructs a consolidated prompt table mapping approved specialist signal values.
 
     Only includes tickers with APPROVE or REDUCE risk verdicts. Signal values are
@@ -99,7 +98,9 @@ def build_signal_table(snapshots: dict[str, TickerSnapshot], macro: Optional[Mac
             f"{macro.sector_rotation_signal.value}"
         )
     else:
-        lines.append("MACRO: unavailable this session (data source failure) — allocate on specialist signals alone")
+        lines.append(
+            "MACRO: unavailable this session (data source failure) — allocate on specialist signals alone"
+        )
     lines.append("")
 
     for ticker, snap in snapshots.items():
@@ -147,11 +148,11 @@ SYSTEM_PROMPT = (
     "\n"
     "ALLOCATION RULES (non-negotiable):\n"
     "  1. Only allocate to tickers listed in the signal table.\n"
-    "  2. cash_reserve_pct = 1.0 − sum(all allocation_pct values). "
+    "  2. cash_reserve_pct = 1.0 - sum(all allocation_pct values). "
     "     It is the arithmetic residual, not a free variable.\n"
     "  3. Target equity deployment of deployment_ceiling (see portfolio_context — the achievable "
     "     ceiling given invest_pct and this universe's approved position caps, not raw invest_pct "
-    "     itself). Acceptable range: [deployment_ceiling − 0.15, deployment_ceiling]. "
+    "     itself). Acceptable range: [deployment_ceiling - 0.15, deployment_ceiling]. "
     "     Do not force allocations when dominant signals are BEARISH.\n"
     "  4. allocation_pct is a decimal fraction in [0.0, 0.15]. "
     "     e.g. 10% = 0.10, 15% = 0.15. Never output raw integers like 10 or 7.5.\n"
@@ -160,12 +161,12 @@ SYSTEM_PROMPT = (
     "  7. Signal priority: BULLISH → allocate up to Cap; NEUTRAL → reduced diversifier; "
     "     BEARISH → 0.0 unless required to reach minimum deployment target.\n"
     "  8. thesis: ≤20 words stating the single primary reason to hold "
-    '     (or \"Skipped: bearish signal\" for zero-allocation entries).\n'
-    "  9. advisor_note: 2–4 professional sentences for a non-expert client. "
+    '     (or "Skipped: bearish signal" for zero-allocation entries).\n'
+    "  9. advisor_note: 2-4 professional sentences for a non-expert client. "
     "     State the rationale, key risks, and what to monitor. "
     "     For zero-allocation entries, explain why the position was avoided. "
     "     Maximum 500 characters. Spell out all acronyms on first use.\n"
-    "  10. Before returning: verify cash_reserve_pct = 1.0 − sum(allocation_pct), "
+    "  10. Before returning: verify cash_reserve_pct = 1.0 - sum(allocation_pct), "
     "      all allocation_pct values are decimals in [0.0, 0.15], "
     "      and every approved ticker is present.\n"
     "  11. Evidence is agents_present/3 for that ticker's AGG signal. When Evidence is "
@@ -174,7 +175,6 @@ SYSTEM_PROMPT = (
     "\n"
     "OUTPUT: Return ONLY a valid JSON object — no preamble, no markdown, no trailing text."
 )
-
 
 
 class PortfolioManagerAgent:
@@ -193,7 +193,7 @@ class PortfolioManagerAgent:
             sourced from settings.MAX_SINGLE_POSITION_PCT.
     """
 
-    def __init__(self, llm_client: Optional[LLMClient] = None) -> None:
+    def __init__(self, llm_client: LLMClient | None = None) -> None:
         """Constructs a Groq client if none is injected.
 
         Args:
@@ -219,11 +219,11 @@ class PortfolioManagerAgent:
         self,
         user_profile: dict,
         snapshots: dict[str, TickerSnapshot],
-        macro: Optional[MacroContext],
-        cultural_wisdom: Optional[list[str]] = None,
-        cultural_warnings: Optional[list[str]] = None,
-        adjustments: Optional[list[str]] = None,
-    ) -> Optional[PortfolioAllocation]:
+        macro: MacroContext | None,
+        cultural_wisdom: list[str] | None = None,
+        cultural_warnings: list[str] | None = None,
+        adjustments: list[str] | None = None,
+    ) -> PortfolioAllocation | None:
         """Aggregates all specialist agent verdicts to construct a consolidated PortfolioAllocation.
 
         Computes Half-Kelly size suggestions as a mathematical anchor, constructs a
@@ -307,7 +307,9 @@ class PortfolioManagerAgent:
         )
 
         try:
-            proposal = decode(self.llm_client, SYSTEM_PROMPT, prompt, PortfolioProposal, repair=False)
+            proposal = decode(
+                self.llm_client, SYSTEM_PROMPT, prompt, PortfolioProposal, repair=False
+            )
         except StructuredOutputError as e:
             record(f"portfolio_allocation: {e}", "error")
             return None
@@ -324,9 +326,7 @@ class PortfolioManagerAgent:
 
             # Force residual exact and clamp to the schema floor (PA-4) rather than let model_validate 500.
             total_equity = sum(p["allocation_pct"] for p in enforced_portfolio)
-            cash_reserve_pct = round(
-                max(PORTFOLIO.cash_reserve_floor_pct, 1.0 - total_equity), 6
-            )
+            cash_reserve_pct = round(max(PORTFOLIO.cash_reserve_floor_pct, 1.0 - total_equity), 6)
             if abs(cash_reserve_pct - proposal.cash_reserve_pct) > 1e-6:
                 record(
                     "portfolio_allocation: cash_reserve_pct forced to residual "
@@ -397,8 +397,8 @@ class PortfolioManagerAgent:
         user_profile: dict,
         signal_table: str,
         kelly_suggestions: dict[str, float],
-        cultural_wisdom: Optional[list[str]],
-        cultural_warnings: Optional[list[str]],
+        cultural_wisdom: list[str] | None,
+        cultural_warnings: list[str] | None,
     ) -> str:
         """Assembles the human-turn allocation prompt from this session's state.
 
@@ -435,7 +435,7 @@ class PortfolioManagerAgent:
             )
 
         return (
-            f"<portfolio_context session=\"{self._session_count}\" as_of=\"intraday\">\n"
+            f'<portfolio_context session="{self._session_count}" as_of="intraday">\n'
             f"  capital_usd: ${investable:,.0f}\n"
             f"  invest_pct: {invest_pct:.0%}\n"
             f"  deployment_ceiling: {deployment_ceiling:.0%} (min of invest_pct and the sum of "
@@ -468,7 +468,7 @@ class PortfolioManagerAgent:
             "\n"
             "Step 1 — For each approved ticker: compare AGG signal against Half-Kelly anchor and Cap.\n"
             "Step 2 — Assign allocation_pct respecting all 11 ALLOCATION RULES from the system prompt.\n"
-            "Step 3 — Compute cash_reserve_pct = 1.0 − sum(allocation_pct). Do not set it independently.\n"
+            "Step 3 — Compute cash_reserve_pct = 1.0 - sum(allocation_pct). Do not set it independently.\n"
             "Step 4 — Verify: (1) all allocation_pct values are decimals in [0.0, Cap], "
             "(2) cash_reserve_pct + sum(allocation_pct) = 1.0, "
             "(3) every approved ticker appears in portfolio.\n"
@@ -515,8 +515,7 @@ class PortfolioManagerAgent:
                 if proposed_pct:
                     verdict = risk.verdict.value if risk else "MISSING"
                     record(
-                        f"portfolio_allocation: zeroed {ticker} allocation "
-                        f"(risk verdict {verdict})"
+                        f"portfolio_allocation: zeroed {ticker} allocation (risk verdict {verdict})"
                     )
                 pos_data["allocation_pct"] = 0.0
             else:
@@ -530,9 +529,11 @@ class PortfolioManagerAgent:
                     pos_data["allocation_pct"] = cap
 
             pos_data["allocation_usd"] = round(investable * pos_data["allocation_pct"], 2)
-            pos_data["thesis"] = pos_data["thesis"][:PORTFOLIO.thesis_char_limit]
+            pos_data["thesis"] = pos_data["thesis"][: PORTFOLIO.thesis_char_limit]
             if pos_data["advisor_note"] is not None:
-                pos_data["advisor_note"] = pos_data["advisor_note"][:PORTFOLIO.advisor_note_char_limit]
+                pos_data["advisor_note"] = pos_data["advisor_note"][
+                    : PORTFOLIO.advisor_note_char_limit
+                ]
             if risk is not None and risk.stop_loss is not None:
                 pos_data["stop_loss"] = float(risk.stop_loss)
 

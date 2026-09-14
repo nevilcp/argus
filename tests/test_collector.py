@@ -57,6 +57,7 @@ def _checkpoint_thread_ids(db_path: str) -> set[str]:
     finally:
         conn.close()
 
+
 _SESSION_STATES = {"AAPL": {"timestamp": "2024-01-02T09:30:00-05:00"}}
 
 
@@ -73,7 +74,9 @@ def _decision(ticker: str = "AAPL", *, with_allocation: bool = False) -> ARGUSDe
             composite_conviction=0.5,
             time_horizon="30 days",
         )
-    return ARGUSDecision(ticker=ticker, session_timestamp=datetime(2024, 1, 2), allocation=allocation)
+    return ARGUSDecision(
+        ticker=ticker, session_timestamp=datetime(2024, 1, 2), allocation=allocation
+    )
 
 
 def _graph() -> mock.Mock:
@@ -161,7 +164,9 @@ async def test_run_collection_cycle_reports_no_op_when_skipped():
 @pytest.mark.asyncio
 async def test_run_collection_cycle_reports_success_when_allocations_clear_threshold():
     """Enough decisions carry a real allocation: the cycle is SUCCESS, not DEGRADED."""
-    decisions = [_decision(with_allocation=True) for _ in range(COLLECTOR.min_decisions_with_allocation)]
+    decisions = [
+        _decision(with_allocation=True) for _ in range(COLLECTOR.min_decisions_with_allocation)
+    ]
     graph = _graph()
     graph.invoke.return_value = {"decisions": decisions, "errors": [], "macro_context": None}
 

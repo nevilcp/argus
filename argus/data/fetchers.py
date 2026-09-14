@@ -34,9 +34,9 @@ import random
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Optional, TypeVar
+from typing import Any, TypeVar
 
 import pandas as pd
 import yfinance as yf
@@ -74,7 +74,7 @@ _RETRY_ATTEMPTS = 3
 _RETRY_BASE_DELAY = 1.5
 
 
-def _status_code_of(exc: Exception) -> Optional[int]:
+def _status_code_of(exc: Exception) -> int | None:
     """Extracts an HTTP status code from an exception's attached response, if any.
 
     Args:
@@ -165,7 +165,7 @@ def _reset_yfinance_session() -> None:
     yf.cache.get_cookie_cache().store("curlCffi", None)
 
 
-def _retry_after_seconds(exc: Exception) -> Optional[float]:
+def _retry_after_seconds(exc: Exception) -> float | None:
     """Reads a Retry-After response header off an exception, if one is attached.
 
     Args:
@@ -386,7 +386,7 @@ _MULTI_DAILY_MAX_WORKERS = 5
 # import time — docker-compose mounts only data/ and chroma_db/, so the old
 # cwd-relative default silently landed on the ephemeral container layer and
 # was destroyed on every restart.
-_DAILY_BAR_CACHE: Optional[DailyBarCache] = None
+_DAILY_BAR_CACHE: DailyBarCache | None = None
 
 
 def _daily_bar_cache() -> DailyBarCache:
@@ -606,8 +606,8 @@ _MACRO_BUNDLE_SERIES = {
 def _latest_fred_value(
     key: str,
     series_id: str,
-    transform: Optional[Callable[[pd.Series], pd.Series]] = None,
-) -> Optional[float]:
+    transform: Callable[[pd.Series], pd.Series] | None = None,
+) -> float | None:
     """Reads the most recent observation of a FRED series, degrading to None on failure.
 
     Args:
@@ -637,8 +637,7 @@ def fetch_macro_bundle() -> dict:
         cpi_yoy, vix. Any key that fails to fetch is set to None.
     """
     bundle: dict[str, float | None] = {
-        key: _latest_fred_value(key, series_id)
-        for key, series_id in _MACRO_BUNDLE_SERIES.items()
+        key: _latest_fred_value(key, series_id) for key, series_id in _MACRO_BUNDLE_SERIES.items()
     }
     bundle["cpi_yoy"] = _latest_fred_value("cpi_yoy", "CPIAUCSL", lambda s: s.pct_change(12) * 100)
 
@@ -708,7 +707,9 @@ class _NewsApiBudget:
     def _write_count(path: Path, today: date, requests_today: int) -> None:
         """Writes the count, tmp-file-then-replace for atomicity."""
         tmp_path = path.with_suffix(path.suffix + ".tmp")
-        tmp_path.write_text(json.dumps({"date": today.isoformat(), "requests_today": requests_today}))
+        tmp_path.write_text(
+            json.dumps({"date": today.isoformat(), "requests_today": requests_today})
+        )
         tmp_path.replace(path)
 
     def _reserve_under_file_lock(self) -> bool:
@@ -728,7 +729,7 @@ class _NewsApiBudget:
         lock_path = path.with_suffix(path.suffix + ".lock")
         with open(lock_path, "w") as lock_file:
             fcntl.flock(lock_file, fcntl.LOCK_EX)
-            today = datetime.now(timezone.utc).date()
+            today = datetime.now(UTC).date()
             requests_today = self._read_count(path, today)
             if requests_today >= self._daily_limit:
                 return False
@@ -788,7 +789,7 @@ def fetch_news(
     ticker: str,
     company_name: str,
     days_back: int = 7,
-) -> Optional[list[dict]]:
+) -> list[dict] | None:
     """Retrieves recent news articles matching a ticker from NewsAPI.
 
     NewsAPI's free Developer tier delays article availability by roughly 24
@@ -824,7 +825,7 @@ def fetch_news(
         from newsapi import NewsApiClient  # Lazy import; only loaded when NewsAPI is used
 
         client = NewsApiClient(api_key=settings.newsapi_key)
-        from_date = (datetime.now(timezone.utc) - timedelta(days=days_back)).strftime("%Y-%m-%d")
+        from_date = (datetime.now(UTC) - timedelta(days=days_back)).strftime("%Y-%m-%d")
         query = f"{ticker} OR {company_name}"
 
         result = _fetch_news_page(client, query, from_date)

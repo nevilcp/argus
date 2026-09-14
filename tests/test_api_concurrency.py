@@ -36,7 +36,8 @@ _PAYLOAD = {"tickers": ["AAPL"], "total_wealth": 100_000, "invest_pct": 0.5}
 
 @pytest.fixture(autouse=True)
 def _reset_singletons(_fresh_live_cache, _no_api_key, monkeypatch):
-    """Resets the analyze semaphore for each test (kill switch and live cache handled in conftest)."""
+    """Resets the analyze semaphore for each test (kill switch and live cache handled
+    in conftest)."""
     monkeypatch.setattr(api_main, "_analyze_semaphore", asyncio.Semaphore(1))
 
 

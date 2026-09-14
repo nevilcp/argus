@@ -102,9 +102,11 @@ def test_all_negative_convictions_veto_not_reduce_at_zero() -> None:
     history = _price_history(_UNIVERSE, seed=7)
     tickers = _UNIVERSE[:5]
     positions = [{"ticker": t, "weight": 0.15} for t in tickers]
-    convictions = {t: -0.9 for t in tickers}
+    convictions = dict.fromkeys(tickers, -0.9)
 
-    portfolio_result = engine.evaluate(positions, history, current_vix=20.0, convictions=convictions)
+    portfolio_result = engine.evaluate(
+        positions, history, current_vix=20.0, convictions=convictions
+    )
 
     assert portfolio_result.optimizer_converged is True
     assert sum(portfolio_result.optimal_weights.values()) < RISK.slsqp_zero_cap_epsilon

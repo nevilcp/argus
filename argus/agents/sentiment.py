@@ -19,7 +19,6 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime, timedelta
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -255,7 +254,7 @@ def _build_synthesis_prompt(ticker: str, metrics: dict) -> str:
     metrics_str = "\n".join(lines)
 
     prompt = (
-        f"<sentiment_data ticker=\"{ticker}\" as_of=\"intraday\">\n"
+        f'<sentiment_data ticker="{ticker}" as_of="intraday">\n'
         f"{metrics_str}\n"
         "</sentiment_data>\n"
         "\n"
@@ -324,8 +323,8 @@ class SentimentAgent:
 
     def __init__(
         self,
-        llm_client: Optional[LLMClient] = None,
-        market_data: Optional[MarketDataProvider] = None,
+        llm_client: LLMClient | None = None,
+        market_data: MarketDataProvider | None = None,
     ) -> None:
         """Constructs Groq/live defaults for any provider not injected.
 
@@ -353,9 +352,9 @@ class SentimentAgent:
     def analyze(
         self,
         ticker: str,
-        company_name: Optional[str] = None,
-        errors: Optional[list[str]] = None,
-    ) -> Optional[SentimentSignal]:
+        company_name: str | None = None,
+        errors: list[str] | None = None,
+    ) -> SentimentSignal | None:
         """Generates a ticker's SentimentSignal via FinBERT and LLM synthesis.
 
         Decodes a SentimentVerdict from the LLM via argus.structured_output.decode
@@ -423,7 +422,7 @@ class SentimentAgent:
         self.cache.set(ticker, signal)
         return signal
 
-    def _news_metrics(self, ticker: str, company_name: Optional[str]) -> dict:
+    def _news_metrics(self, ticker: str, company_name: str | None) -> dict:
         """Fetches this ticker's news and reduces it to LLM-facing metrics.
 
         A failed fetch is reported as ``news_data_available: False`` with placeholder
@@ -494,9 +493,7 @@ class SentimentAgent:
             try:
                 res = self.analyze(ticker, company_name=company_name, errors=errors)
             except Exception as exc:
-                logger.warning(
-                    "batch_analyze: %s failed — %s: %s", ticker, type(exc).__name__, exc
-                )
+                logger.warning("batch_analyze: %s failed — %s: %s", ticker, type(exc).__name__, exc)
                 errors.append(f"sentiment_analysis[{ticker}]: {type(exc).__name__}: {exc}")
                 continue
             if res is not None:

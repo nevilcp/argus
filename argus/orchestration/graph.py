@@ -33,7 +33,6 @@ import logging
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 from chromadb.errors import ChromaError
@@ -97,7 +96,7 @@ def build_checkpoint_serde() -> JsonPlusSerializer:
     )
 
 
-def _open_checkpointer(checkpoint_db_path: str) -> Optional[SqliteSaver]:
+def _open_checkpointer(checkpoint_db_path: str) -> SqliteSaver | None:
     """Opens a fresh SqliteSaver connection, or None if the path can't be opened.
 
     Args:
@@ -132,7 +131,7 @@ class _CheckpointedGraph:
         self._builder = builder
         self._checkpoint_db_path = checkpoint_db_path
 
-    def invoke(self, state: ARGUSState, config: Optional[RunnableConfig] = None) -> dict:
+    def invoke(self, state: ARGUSState, config: RunnableConfig | None = None) -> dict:
         """Compiles with a fresh checkpointer and invokes the graph once.
 
         Args:
@@ -169,7 +168,9 @@ def _summarize_technical_posture(aggregated_signals: dict[str, AggregatedSignal]
     bullish = sum(1 for s in aggregated_signals.values() if s.signal == Signal.BULLISH)
     bearish = sum(1 for s in aggregated_signals.values() if s.signal == Signal.BEARISH)
     neutral = len(aggregated_signals) - bullish - bearish
-    avg_conviction = sum(s.conviction for s in aggregated_signals.values()) / len(aggregated_signals)
+    avg_conviction = sum(s.conviction for s in aggregated_signals.values()) / len(
+        aggregated_signals
+    )
     return (
         f"{bullish} bullish, {bearish} bearish, {neutral} neutral across "
         f"{len(aggregated_signals)} tickers (avg conviction {avg_conviction:.2f})"
@@ -177,7 +178,7 @@ def _summarize_technical_posture(aggregated_signals: dict[str, AggregatedSignal]
 
 
 def _session_reliability(
-    macro: Optional[MacroContext], as_of: Optional[datetime]
+    macro: MacroContext | None, as_of: datetime | None
 ) -> tuple[dict[str, float], dict[str, int], bool]:
     """Reads each specialist's per-regime historical win rate once for the whole session.
 
@@ -194,8 +195,8 @@ def _session_reliability(
         or with cultural memory unavailable, every agent falls back to the 0.5
         neutral prior at a zero sample count; only the latter is unhealthy.
     """
-    neutral_reliability = {name: 0.5 for name in _RELIABILITY_AGENTS}
-    neutral_counts = {name: 0 for name in _RELIABILITY_AGENTS}
+    neutral_reliability = dict.fromkeys(_RELIABILITY_AGENTS, 0.5)
+    neutral_counts = dict.fromkeys(_RELIABILITY_AGENTS, 0)
     if macro is None:
         return neutral_reliability, neutral_counts, True
 
@@ -219,8 +220,8 @@ def _session_reliability(
 
 
 def _resolve_vix(
-    macro_ctx: Optional[MacroContext], market_data: MarketDataProvider
-) -> tuple[float, Optional[str]]:
+    macro_ctx: MacroContext | None, market_data: MarketDataProvider
+) -> tuple[float, str | None]:
     """Resolves the VIX level the risk engine's blackout gate reads.
 
     Args:
@@ -265,10 +266,12 @@ def _apply_portfolio_cap(single: RiskAssessment, cap: float) -> dict:
         return {
             "verdict": RiskVerdict.VETO,
             "approved_weight": 0.0,
-            "veto_reasons": single.veto_reasons
-            + [
-                f"[Portfolio] SLSQP cap {cap:.2%} below the "
-                f"{RISK.slsqp_zero_cap_epsilon:.2%} allocation floor"
+            "veto_reasons": [
+                *single.veto_reasons,
+                (
+                    f"[Portfolio] SLSQP cap {cap:.2%} below the "
+                    f"{RISK.slsqp_zero_cap_epsilon:.2%} allocation floor"
+                ),
             ],
         }
     # Downgrade verdict monotonically: never upgrade a VETO to REDUCE or APPROVE
@@ -279,16 +282,19 @@ def _apply_portfolio_cap(single: RiskAssessment, cap: float) -> dict:
     return {
         "verdict": verdict,
         "approved_weight": min(cap, single.approved_weight),
-        "veto_reasons": single.veto_reasons + [f"[Portfolio] SLSQP cap: {cap:.1%}"],
+        "veto_reasons": [
+            *single.veto_reasons,
+            f"[Portfolio] SLSQP cap: {cap:.1%}",
+        ],
     }
 
 
 def build_graph(
-    market_data: Optional[MarketDataProvider] = None,
-    fundamental_llm: Optional[LLMClient] = None,
-    sentiment_llm: Optional[LLMClient] = None,
-    portfolio_llm: Optional[LLMClient] = None,
-    checkpoint_db_path: Optional[str] = None,
+    market_data: MarketDataProvider | None = None,
+    fundamental_llm: LLMClient | None = None,
+    sentiment_llm: LLMClient | None = None,
+    portfolio_llm: LLMClient | None = None,
+    checkpoint_db_path: str | None = None,
 ):
     """Constructs and compiles the ARGUS decision graph.
 
@@ -384,7 +390,9 @@ def build_graph(
             )
             return {
                 "macro_context": None,
-                "errors": ["macro_analysis: MacroStatisticalAgent returned None (FRED data unavailable)"],
+                "errors": [
+                    "macro_analysis: MacroStatisticalAgent returned None (FRED data unavailable)"
+                ],
             }
         return {"macro_context": macro_ctx}
 

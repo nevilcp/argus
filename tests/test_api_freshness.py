@@ -63,7 +63,7 @@ def test_analyze_market_closed_outranks_bar_age(client, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "admission_field, expected_substring",
+    ("admission_field", "expected_substring"),
     [
         ("absent", "warming up"),
         ("stalled", "stalled"),
@@ -73,7 +73,8 @@ def test_analyze_market_closed_outranks_bar_age(client, monkeypatch):
 def test_analyze_maps_each_admission_group_to_its_own_response_text(
     client, monkeypatch, admission_field, expected_substring
 ):
-    """Each of LiveSessionCache.admit()'s three rejection groups produces distinct response wording."""
+    """Each of LiveSessionCache.admit()'s three rejection groups produces distinct
+    response wording."""
     _pipeline(monkeypatch, market_hours=True)
     result = AdmissionResult(**{admission_field: ["AAPL"]})
     monkeypatch.setattr(api_main._live_cache, "admit", mock.Mock(return_value=result))

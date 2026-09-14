@@ -18,7 +18,6 @@ from argus.agents.macro import (
 from argus.config import settings
 from argus.schemas.signals import Regime, VixRegime
 
-
 _DEFAULT_VIX_CLOSES = [20.0, 20.0, 20.0, 20.0, 10.0]
 
 
@@ -31,7 +30,9 @@ class _StubMarketData:
             the VIX percentile calculation.
     """
 
-    def __init__(self, vix: float | None = 15.0, historical_closes: list[float] | None = None) -> None:
+    def __init__(
+        self, vix: float | None = 15.0, historical_closes: list[float] | None = None
+    ) -> None:
         self._vix = vix
         self._closes = historical_closes if historical_closes is not None else _DEFAULT_VIX_CLOSES
 
@@ -328,7 +329,8 @@ def test_load_corrupt_file_returns_unfitted_and_logs_error(
 def test_load_version_mismatch_returns_unfitted_and_logs_error(
     caplog: pytest.LogCaptureFixture, tmp_path: Path
 ) -> None:
-    """A hmmlearn/scikit-learn version mismatch in the artifact's metadata is treated as a failure."""
+    """A hmmlearn/scikit-learn version mismatch in the artifact's metadata is treated
+    as a failure."""
     classifier = _fit_synthetic_classifier()
     artifact_path = tmp_path / "macro_hmm.joblib"
     classifier.save(artifact_path)

@@ -8,8 +8,7 @@ shared by the fundamental and sentiment agents.
 
 import logging
 import sqlite3
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+from datetime import UTC, datetime, timedelta
 
 import pandas as pd
 import pytest
@@ -74,7 +73,7 @@ def test_get_returns_none_when_refreshed_before_today(cache):
     """A ticker refreshed on a prior UTC day is treated as stale, not served."""
     cache.put("AAPL", _bars(["2026-08-11"]))
 
-    yesterday = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
+    yesterday = (datetime.now(UTC).date() - timedelta(days=1)).isoformat()
     cache._conn.execute(
         "UPDATE daily_ohlcv_refresh SET refreshed_on = ? WHERE ticker = ?", (yesterday, "AAPL")
     )
@@ -126,7 +125,8 @@ def test_dst_straddling_insert_returns_a_monotonic_et_frame():
     padding = pd.date_range("2025-11-02 04:00:00", periods=4, freq="1min", tz="UTC")
     for i, ts in enumerate(padding):
         buffer.insert_candle(
-            "AAPL", {"timestamp": ts, "open": i, "high": i + 1, "low": i, "close": i, "volume": 1000}
+            "AAPL",
+            {"timestamp": ts, "open": i, "high": i + 1, "low": i, "close": i, "volume": 1000},
         )
 
     candles = dst_straddling_candles(n_per_side=6)
@@ -248,7 +248,9 @@ def test_insert_candles_without_a_timestamp_do_not_collide_with_each_other():
     keep only the last one.
     """
     buffer = _buffer(50)
-    candles = [{"open": i, "high": i, "low": i, "close": float(i), "volume": 100.0} for i in range(15)]
+    candles = [
+        {"open": i, "high": i, "low": i, "close": float(i), "volume": 100.0} for i in range(15)
+    ]
 
     buffer.insert_candles("AAPL", candles)
 
@@ -271,7 +273,8 @@ def test_insert_candle_delegates_to_insert_candles(monkeypatch):
 
 
 def test_row_counts_returns_per_ticker_counts_without_the_get_candles_floor():
-    """row_counts() reports real per-ticker counts, including below get_candles' own 14-row floor."""
+    """row_counts() reports real per-ticker counts, including below get_candles' own
+    14-row floor."""
     buffer = _buffer(50)
     for i in range(5):
         buffer.insert_candle("AAPL", {"timestamp": f"2024-01-02T09:{i:02d}:00", "close": float(i)})
@@ -379,7 +382,7 @@ def test_ttl_cache_keys_differing_only_in_one_component_do_not_share_a_value():
     sessions replaying the same ticker must not share a cached value, and a
     live call (session_seed=None) must not be conflated with either.
     """
-    cache: TTLCache[tuple[str, Optional[int]], str] = TTLCache(ttl=timedelta(days=7))
+    cache: TTLCache[tuple[str, int | None], str] = TTLCache(ttl=timedelta(days=7))
 
     cache.set(("AAPL", 20240101), "session 1")
     cache.set(("AAPL", 20240102), "session 2")

@@ -23,7 +23,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import ClassVar
 
 from argus.config import settings
 from argus.params import KILL_SWITCH
@@ -61,8 +61,8 @@ class KillSwitchStatus:
 
     halted: bool
     new_positions_blocked: bool
-    reason: Optional[str]
-    triggered_at: Optional[datetime]
+    reason: str | None
+    triggered_at: datetime | None
     realized_drawdown: float
     current_vix: float
 
@@ -105,7 +105,7 @@ class KillSwitch:
             triggers a halt.
     """
 
-    DRAWDOWN_THRESHOLDS = {
+    DRAWDOWN_THRESHOLDS: ClassVar[dict[str, float]] = {
         "CONSERVATIVE": KILL_SWITCH.conservative_drawdown_halt,
         "MODERATE": KILL_SWITCH.moderate_drawdown_halt,
         "AGGRESSIVE": KILL_SWITCH.aggressive_drawdown_halt,
@@ -123,7 +123,7 @@ class KillSwitch:
         self,
         user_risk_tolerance: str,
         check_interval_seconds: int = 900,
-        market_data: Optional[MarketDataProvider] = None,
+        market_data: MarketDataProvider | None = None,
     ):
         """Initializes the kill switch, deferring monitoring until start() is called.
 
@@ -143,7 +143,9 @@ class KillSwitch:
 
         self.risk_tolerance = user_risk_tolerance.upper()
         if self.risk_tolerance not in self.DRAWDOWN_THRESHOLDS:
-            logger.warning("Unknown risk tolerance %s, defaulting to MODERATE.", self.risk_tolerance)
+            logger.warning(
+                "Unknown risk tolerance %s, defaulting to MODERATE.", self.risk_tolerance
+            )
             self.risk_tolerance = "MODERATE"
 
         self.check_interval = check_interval_seconds
@@ -160,19 +162,19 @@ class KillSwitch:
         # Guards _halt_reason/_halt_time so a reader never observes one half
         # of a halt update torn from the other
         self._state_lock = threading.Lock()
-        self._halt_reason: Optional[str] = None
-        self._halt_time: Optional[datetime] = None
+        self._halt_reason: str | None = None
+        self._halt_time: datetime | None = None
 
-        self._portfolio_inception_value: Optional[float] = None
-        self._current_portfolio_value: Optional[float] = None
+        self._portfolio_inception_value: float | None = None
+        self._current_portfolio_value: float | None = None
         self._high_water_mark: float = 0.0
 
-        self._last_vix: Optional[float] = None
+        self._last_vix: float | None = None
         self._consecutive_vix_failures: int = 0
-        self._vix_cache_value: Optional[float] = None
-        self._vix_cache_fetched_at: Optional[float] = None
+        self._vix_cache_value: float | None = None
+        self._vix_cache_fetched_at: float | None = None
 
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
 
     def start(self, initial_portfolio_value: float) -> None:
         """Starts the background thread monitoring loop with the initial portfolio value.
@@ -199,7 +201,7 @@ class KillSwitch:
             f"{initial_portfolio_value:,.0f}",
         )
 
-    def stop(self, timeout: Optional[float] = None) -> None:
+    def stop(self, timeout: float | None = None) -> None:
         """Signals the monitor loop to exit and waits for the thread to finish.
 
         Args:
@@ -356,7 +358,9 @@ class KillSwitch:
             "halt_value": self._current_portfolio_value,
             "realized_drawdown": drawdown,
             "vix_at_halt": vix,
-            "instruction": "MANUAL INTERVENTION REQUIRED. Delete this file to allow system restart.",
+            "instruction": (
+                "MANUAL INTERVENTION REQUIRED. Delete this file to allow system restart."
+            ),
         }
 
         try:
@@ -412,18 +416,21 @@ class KillSwitch:
                 dump = json.load(f)
             reason = dump.get("reason") or f"Restored from {path.name}"
             halt_time_raw = dump.get("halt_time")
-            # Naive local if no persisted halt_time — matches fromisoformat's naive parse of halt_time_raw
+            # Naive local if no persisted halt_time — matches fromisoformat's
+            # naive parse of halt_time_raw
             if halt_time_raw:
-                halt_time = datetime.fromisoformat(halt_time_raw)  # noqa: DTZ005
+                halt_time = datetime.fromisoformat(halt_time_raw)
         except Exception as e:
             logger.error(
-                "Halt event file %s could not be fully read (%s); halting anyway.", path, e
+                "Halt event file %s could not be fully read (%s); halting anyway.",
+                path,
+                e,
             )
 
         self._engage_halt(reason, halt_time)
         logger.warning(
-            "Kill switch restored HALTED state from %s: %s. Call POST /kill-switch/reset "
-            "to resume (this also deletes the halt dump).",
+            "Kill switch restored HALTED state from %s: %s. Call POST /kill-switch/"
+            "reset to resume (this also deletes the halt dump).",
             path.name,
             reason,
         )
@@ -458,15 +465,13 @@ class KillSwitch:
         self._high_water_mark = new_inception_value
         self._consecutive_vix_failures = 0
         _delete_halt_dumps(_list_halt_dumps())
-        logger.info(
-            "Kill switch reset. New inception value: $%s", f"{new_inception_value:,.0f}"
-        )
+        logger.info("Kill switch reset. New inception value: $%s", f"{new_inception_value:,.0f}")
 
 
-_kill_switch: Optional[KillSwitch] = None
+_kill_switch: KillSwitch | None = None
 
 
-def _list_halt_dumps(runs_dir: Optional[str] = None) -> list[Path]:
+def _list_halt_dumps(runs_dir: str | None = None) -> list[Path]:
     """Lists halt-event dumps oldest-to-newest by their own ``halt_time`` field.
 
     Ranks by content rather than the filename's embedded timestamp —
@@ -492,7 +497,8 @@ def _list_halt_dumps(runs_dir: Optional[str] = None) -> list[Path]:
                 return datetime.fromisoformat(raw)
         except Exception:
             pass
-        # Naive local, matching the fromisoformat fallback above — must not mix aware/naive in the sort key
+        # Naive local, matching the fromisoformat fallback above — must not mix
+        # aware/naive in the sort key
         return datetime.fromtimestamp(path.stat().st_mtime)  # noqa: DTZ006
 
     return sorted(directory.glob("argus_halt_*.json"), key=_halt_time)
@@ -507,7 +513,7 @@ def _delete_halt_dumps(paths: list[Path]) -> None:
             logger.error("Failed to delete halt dump %s: %s", path, e)
 
 
-def _prune_halt_dumps(runs_dir: Optional[str] = None) -> None:
+def _prune_halt_dumps(runs_dir: str | None = None) -> None:
     """Deletes all but the most recent KILL_SWITCH.max_halt_dumps_retained halt dumps.
 
     Args:
@@ -519,7 +525,7 @@ def _prune_halt_dumps(runs_dir: Optional[str] = None) -> None:
     _delete_halt_dumps(dumps[:-keep] if keep > 0 else dumps)
 
 
-def _find_latest_halt_file(runs_dir: Optional[str] = None) -> Optional[Path]:
+def _find_latest_halt_file(runs_dir: str | None = None) -> Path | None:
     """Finds the most recently written halt-event dump, if any exist.
 
     Args:
@@ -537,7 +543,7 @@ def initialize_kill_switch(
     risk_tolerance: str,
     portfolio_value: float,
     check_interval: int = 900,
-    market_data: Optional[MarketDataProvider] = None,
+    market_data: MarketDataProvider | None = None,
 ) -> KillSwitch:
     """Initializes and starts the module-level KillSwitch singleton.
 
@@ -567,7 +573,7 @@ def initialize_kill_switch(
     return _kill_switch
 
 
-def get_kill_switch() -> Optional[KillSwitch]:
+def get_kill_switch() -> KillSwitch | None:
     """Retrieves the active KillSwitch singleton instance.
 
     Returns:

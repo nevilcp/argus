@@ -84,9 +84,11 @@ def test_schema_block_renders_nested_model_as_its_own_block():
 def test_schema_block_wraps_list_of_nested_model_in_brackets():
     """A list-of-nested-model field renders its block wrapped in brackets."""
     result = schema_block(_NestedList)
-    assert result == (
-        '{"ticker":"","positions":[{"signal":"BULLISH|BEARISH|NEUTRAL","conviction":<float 0.0-1.0>}]}'
+    expected = (
+        '{"ticker":"","positions":[{"signal":"BULLISH|BEARISH|NEUTRAL",'
+        '"conviction":<float 0.0-1.0>}]}'
     )
+    assert result == expected
 
 
 def test_schema_block_raises_on_scalar_field_with_no_marker():

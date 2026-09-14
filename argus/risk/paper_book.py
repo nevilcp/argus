@@ -37,7 +37,6 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 
@@ -52,8 +51,8 @@ logger = logging.getLogger("argus.paper_book")
 def _close_prices(
     ticker: str,
     market_data: MarketDataProvider,
-    cache: dict[str, Optional[pd.Series]],
-) -> Optional[pd.Series]:
+    cache: dict[str, pd.Series | None],
+) -> pd.Series | None:
     """Returns a ticker's daily close series, fetching each ticker at most once per cache.
 
     Args:
@@ -83,8 +82,8 @@ def _weighted_run_return(
     run_decisions: list[ARGUSDecision],
     market_data: MarketDataProvider,
     horizon_days: int,
-    prices_by_ticker: dict[str, Optional[pd.Series]],
-) -> Optional[float]:
+    prices_by_ticker: dict[str, pd.Series | None],
+) -> float | None:
     """Averages one run's matured decision outcomes, weighted by allocation_pct.
 
     Args:
@@ -152,9 +151,9 @@ def compute_run_returns(
             by_run[decision.session_timestamp].append(decision)
 
     horizon = timedelta(days=horizon_days)
-    prices_by_ticker: dict[str, Optional[pd.Series]] = {}
+    prices_by_ticker: dict[str, pd.Series | None] = {}
     results: list[tuple[datetime, float]] = []
-    last_kept_timestamp: Optional[datetime] = None
+    last_kept_timestamp: datetime | None = None
     for run_timestamp in sorted(by_run):
         if last_kept_timestamp is not None and run_timestamp < last_kept_timestamp + horizon:
             continue
@@ -188,9 +187,9 @@ class PaperBook:
 
     equity: float
     high_water_mark: float
-    last_run_timestamp: Optional[datetime] = None
+    last_run_timestamp: datetime | None = None
     runs_applied: set[str] = field(default_factory=set)
-    rebased_at: Optional[datetime] = None
+    rebased_at: datetime | None = None
 
     def apply_run(self, run_timestamp: datetime, run_return: float) -> bool:
         """Compounds one run's weighted return onto the curve, unless already applied.
@@ -223,7 +222,7 @@ class PaperBook:
             return 0.0
         return max(0.0, (self.high_water_mark - self.equity) / self.high_water_mark)
 
-    def rebase(self, new_inception_value: float, rebased_at: Optional[datetime] = None) -> None:
+    def rebase(self, new_inception_value: float, rebased_at: datetime | None = None) -> None:
         """Rebases equity and high-water mark to a new inception value in place.
 
         Called alongside KillSwitch.reset() so an operator's manual reset is

@@ -4,8 +4,8 @@ import pytest
 
 from argus.agents.sentiment import (
     SentimentAgent,
-    aggregate_finbert_scores,
     _check_earnings_calendar,
+    aggregate_finbert_scores,
 )
 from argus.orchestration.governor import RateLimitExceeded
 

@@ -35,7 +35,6 @@ import random
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -52,7 +51,7 @@ _BOOTSTRAP_SEED = 0
 _CI_ALPHA = 0.05
 
 
-def signed_conviction(decision: ARGUSDecision) -> Optional[float]:
+def signed_conviction(decision: ARGUSDecision) -> float | None:
     """Conviction signed by direction, or None if the decision has no aggregated signal.
 
     +conviction for BULLISH, -conviction for BEARISH, 0.0 for NEUTRAL.
@@ -130,7 +129,7 @@ def collect_paired_outcomes(
 
 def rank_information_coefficient(
     pairs: Sequence[PairedOutcome],
-) -> tuple[Optional[float], Optional[float]]:
+) -> tuple[float | None, float | None]:
     """Spearman rank correlation between signed conviction and forward return.
 
     Returns:
@@ -149,7 +148,7 @@ def rank_information_coefficient(
 
 def hit_rate_with_deadband(
     pairs: Sequence[PairedOutcome], deadband: float
-) -> tuple[Optional[float], int]:
+) -> tuple[float | None, int]:
     """Fraction of decisions outside the dead band where sign(conviction) == sign(return).
 
     Decisions whose forward return falls within +/-deadband are excluded —
@@ -174,11 +173,11 @@ def hit_rate_with_deadband(
 
 def bootstrap_ci(
     pairs: Sequence[PairedOutcome],
-    statistic_fn: Callable[[Sequence[PairedOutcome]], Optional[float]],
+    statistic_fn: Callable[[Sequence[PairedOutcome]], float | None],
     n_resamples: int = _BOOTSTRAP_RESAMPLES,
     alpha: float = _CI_ALPHA,
     seed: int = _BOOTSTRAP_SEED,
-) -> tuple[Optional[float], Optional[float]]:
+) -> tuple[float | None, float | None]:
     """Percentile bootstrap CI for a statistic over paired (conviction, return) outcomes.
 
     Paired resampling (each resample draws whole PairedOutcome tuples, with
@@ -240,12 +239,12 @@ class EvaluationResult:
     """
 
     n: int
-    rank_ic: Optional[float]
-    rank_ic_p_value: Optional[float]
-    rank_ic_ci: tuple[Optional[float], Optional[float]]
-    hit_rate: Optional[float]
+    rank_ic: float | None
+    rank_ic_p_value: float | None
+    rank_ic_ci: tuple[float | None, float | None]
+    hit_rate: float | None
     hit_rate_n: int
-    hit_rate_ci: tuple[Optional[float], Optional[float]]
+    hit_rate_ci: tuple[float | None, float | None]
     pairs: list[PairedOutcome] = field(default_factory=list)
 
 
@@ -357,7 +356,7 @@ class SystemBehaviorReport:
     reduce_verdicts: int
     constraint_violations: int
     total_api_calls: int
-    api_calls_per_decision: Optional[float]
+    api_calls_per_decision: float | None
     retries_instrumented: bool = False
     tokens_instrumented: bool = False
 
@@ -414,6 +413,7 @@ def check_replay_determinism(session_dir: Path) -> bool:
     Returns:
         True if both replays produced identical decisions for every ticker.
     """
+
     def fingerprint(result: SessionResult) -> list[tuple]:
         """Sorted (ticker, signal, conviction, total_api_calls) tuples for comparison."""
         decisions: list[ARGUSDecision] = result.final_state.get("decisions") or []

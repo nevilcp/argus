@@ -6,7 +6,7 @@ means unavailable, not neutral" contract for NewsAPI.
 
 import json
 import multiprocessing
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest import mock
 
 import pandas as pd
@@ -64,7 +64,7 @@ def test_is_retryable_timeout_and_connection_errors():
 
 
 @pytest.mark.parametrize(
-    "status_code,expected",
+    ("status_code", "expected"),
     [(401, False), (403, False), (404, False), (429, True), (423, True), (500, True), (503, True)],
 )
 def test_is_retryable_http_status_codes(status_code, expected):
@@ -270,7 +270,7 @@ def test_newsapi_budget_resets_on_new_day_within_one_instance(monkeypatch):
     """
 
     class _FixedDatetime(datetime):
-        _now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        _now = datetime(2026, 1, 1, tzinfo=UTC)
 
         @classmethod
         def now(cls, tz=None):
@@ -281,7 +281,7 @@ def test_newsapi_budget_resets_on_new_day_within_one_instance(monkeypatch):
     assert budget.try_reserve() is True
     assert budget.try_reserve() is False
 
-    _FixedDatetime._now = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    _FixedDatetime._now = datetime(2026, 1, 2, tzinfo=UTC)
     assert budget.try_reserve() is True
 
 
@@ -292,8 +292,10 @@ def test_newsapi_budget_treats_wrong_typed_persisted_fields_as_absent():
     partial-write shape, not just outright-invalid JSON.
     """
     budget = fetchers._NewsApiBudget(daily_limit=1)
-    today = datetime.now(timezone.utc).date()
-    budget._persist_path().write_text(json.dumps({"date": today.isoformat(), "requests_today": None}))
+    today = datetime.now(UTC).date()
+    budget._persist_path().write_text(
+        json.dumps({"date": today.isoformat(), "requests_today": None})
+    )
 
     assert budget.try_reserve() is True
 
@@ -301,7 +303,7 @@ def test_newsapi_budget_treats_wrong_typed_persisted_fields_as_absent():
 def test_newsapi_budget_ignores_a_stale_persisted_date():
     """A persisted count from a prior UTC day is not carried into today's."""
     budget = fetchers._NewsApiBudget(daily_limit=2)
-    yesterday = datetime.now(timezone.utc).date() - timedelta(days=1)
+    yesterday = datetime.now(UTC).date() - timedelta(days=1)
     budget._persist_path().write_text(
         json.dumps({"date": yesterday.isoformat(), "requests_today": 2})
     )
@@ -326,7 +328,9 @@ def test_newsapi_budget_survives_a_fresh_process():
     assert second.try_reserve() is False
 
 
-def _reserve_n_times(data_dir: str, daily_limit: int, attempts: int, result_queue: "multiprocessing.Queue[int]") -> None:
+def _reserve_n_times(
+    data_dir: str, daily_limit: int, attempts: int, result_queue: "multiprocessing.Queue[int]"
+) -> None:
     """Worker for test_newsapi_budget_enforces_cap_across_processes.
 
     Runs in its own forked process (a separate Python interpreter for the
@@ -349,9 +353,11 @@ def test_newsapi_budget_enforces_cap_across_processes(tmp_path):
     """
     daily_limit = 20
     ctx = multiprocessing.get_context("fork")
-    result_queue: "multiprocessing.Queue[int]" = ctx.Queue()
+    result_queue: multiprocessing.Queue[int] = ctx.Queue()
     procs = [
-        ctx.Process(target=_reserve_n_times, args=(str(tmp_path), daily_limit, daily_limit, result_queue))
+        ctx.Process(
+            target=_reserve_n_times, args=(str(tmp_path), daily_limit, daily_limit, result_queue)
+        )
         for _ in range(2)
     ]
     for p in procs:
@@ -368,7 +374,8 @@ def _raise_os_error(*_args: object, **_kwargs: object) -> None:
 
 
 def test_newsapi_budget_degrades_on_disk_error(monkeypatch):
-    """A disk error during the reserve cycle (e.g. a read-only volume) returns False, not a raise."""
+    """A disk error during the reserve cycle (e.g. a read-only volume) returns False,
+    not a raise."""
     monkeypatch.setattr(fetchers, "open", _raise_os_error, raising=False)
 
     budget = fetchers._NewsApiBudget(daily_limit=5)
@@ -414,7 +421,12 @@ def test_fetch_news_returns_articles_at_max_page_size(monkeypatch):
     mock_client = mock.Mock()
     mock_client.get_everything.return_value = {
         "articles": [
-            {"title": "Real headline", "description": "d", "publishedAt": "t", "source": {"name": "s"}},
+            {
+                "title": "Real headline",
+                "description": "d",
+                "publishedAt": "t",
+                "source": {"name": "s"},
+            },
             {"title": "", "description": "no title, dropped"},
         ]
     }
@@ -422,7 +434,9 @@ def test_fetch_news_returns_articles_at_max_page_size(monkeypatch):
     with mock.patch("newsapi.NewsApiClient", return_value=mock_client):
         result = fetchers.fetch_news("AAPL", "Apple Inc")
 
-    assert result == [{"title": "Real headline", "description": "d", "published_at": "t", "source": "s"}]
+    assert result == [
+        {"title": "Real headline", "description": "d", "published_at": "t", "source": "s"}
+    ]
     assert mock_client.get_everything.call_args.kwargs["page_size"] == 100
 
 

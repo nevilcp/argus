@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -39,7 +38,7 @@ def compute_all_metrics(
     strategy_returns: pd.Series,
     benchmark_returns: pd.Series,
     risk_free_rate: float = 0.05,
-    trade_log: Optional[list[dict]] = None,
+    trade_log: list[dict] | None = None,
 ) -> dict:
     """Computes return, drawdown, benchmark-adjusted, tail-risk, and trade-level statistics.
 

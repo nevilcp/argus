@@ -42,7 +42,7 @@ import json
 import logging
 import random
 import time
-from typing import Optional, TypeVar
+from typing import TypeVar
 
 from pydantic import BaseModel, ValidationError
 
@@ -175,10 +175,10 @@ def decode(
             (stage="json_parse"), schema-valid data (stage="schema_validation"),
             or a successful transport call (stage="transport").
     """
-    last_error: Optional[Exception] = None
-    last_content_error: Optional[Exception] = None
+    last_error: Exception | None = None
+    last_content_error: Exception | None = None
     stage = "json_parse"
-    retry_after: Optional[float] = None
+    retry_after: float | None = None
 
     for attempt in range(STRUCTURED_OUTPUT.max_attempts):
         prompt = user_prompt
