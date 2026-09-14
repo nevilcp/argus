@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -87,7 +86,7 @@ def compute_asset_returns(
     positions: list[dict],
     price_history: dict[str, pd.Series],
     lookback: int = RISK.returns_lookback_days,
-    dropped: Optional[list[str]] = None,
+    dropped: list[str] | None = None,
 ) -> pd.DataFrame:
     """Calculates raw (unweighted) daily historical returns per asset over a lookback window.
 
@@ -121,7 +120,9 @@ def compute_asset_returns(
 
 
 def compute_portfolio_returns(
-    positions: list[dict], price_history: dict[str, pd.Series], lookback: int = RISK.returns_lookback_days
+    positions: list[dict],
+    price_history: dict[str, pd.Series],
+    lookback: int = RISK.returns_lookback_days,
 ) -> pd.DataFrame:
     """Calculates daily historical returns adjusted by proposed weights over a lookback window.
 
@@ -134,7 +135,8 @@ def compute_portfolio_returns(
         DataFrame of weighted daily returns per ticker, with NaN rows dropped.
     """
     asset_returns = compute_asset_returns(positions, price_history, lookback)
-    # Reindexed to asset_returns' columns so a dropped ticker doesn't reappear as all-NaN via .mul().
+    # Reindexed to asset_returns' columns so a dropped ticker doesn't reappear as
+    # all-NaN via .mul().
     weights = pd.Series({pos["ticker"]: pos["weight"] for pos in positions}).reindex(
         asset_returns.columns
     )
@@ -143,7 +145,7 @@ def compute_portfolio_returns(
 
 def historical_var(
     portfolio_returns: pd.Series, confidence: float = RISK.var_confidence
-) -> Optional[float]:
+) -> float | None:
     """Evaluates historical Value-at-Risk (VaR) at a target confidence percentile.
 
     Args:
@@ -164,7 +166,7 @@ def historical_var(
 
 def conditional_var(
     portfolio_returns: pd.Series, confidence: float = RISK.cvar_confidence
-) -> Optional[float]:
+) -> float | None:
     """Calculates Conditional Value-at-Risk (CVaR / Expected Shortfall) in the tail distribution.
 
     Args:
@@ -187,7 +189,7 @@ def ols_portfolio_beta(
     positions: list[dict],
     price_history: dict[str, pd.Series],
     benchmark_ticker: str = "SPY",
-    market_data: Optional[MarketDataProvider] = None,
+    market_data: MarketDataProvider | None = None,
     lookback: int = RISK.returns_lookback_days,
 ) -> float:
     """Computes weighted Ordinary Least Squares (OLS) portfolio beta against a benchmark index.
@@ -247,7 +249,7 @@ def ols_portfolio_beta(
     return float(np.average(betas, weights=weights))
 
 
-def avg_pairwise_correlation(returns_matrix: pd.DataFrame) -> Optional[float]:
+def avg_pairwise_correlation(returns_matrix: pd.DataFrame) -> float | None:
     """Computes the mean pairwise correlation coefficients for a matrix of asset returns.
 
     Args:
@@ -268,7 +270,9 @@ def avg_pairwise_correlation(returns_matrix: pd.DataFrame) -> Optional[float]:
 
 
 def close_to_close_stop_losses(
-    positions: list[dict], price_history: dict[str, pd.Series], stop_multiplier: float = RISK.stop_multiplier
+    positions: list[dict],
+    price_history: dict[str, pd.Series],
+    stop_multiplier: float = RISK.stop_multiplier,
 ) -> dict[str, float]:
     """Derives dynamic stop-loss bounds from the mean absolute close-to-close change.
 
@@ -293,7 +297,9 @@ def close_to_close_stop_losses(
         if ticker in price_history:
             series = price_history[ticker]
             if len(series) > RISK.stop_lookback_period:
-                mean_abs_change = series.diff().abs().dropna().tail(RISK.stop_lookback_period).mean()
+                mean_abs_change = (
+                    series.diff().abs().dropna().tail(RISK.stop_lookback_period).mean()
+                )
                 latest_close = float(series.iloc[-1])
                 stops[ticker] = max(0.0, latest_close - (mean_abs_change * stop_multiplier))
     return stops
@@ -313,7 +319,7 @@ def component_var(returns_matrix: pd.DataFrame, portfolio_returns: pd.Series) ->
     mvar = {}
     port_std = portfolio_returns.std()
     if port_std == 0 or pd.isna(port_std):
-        return {col: 0.0 for col in returns_matrix.columns}
+        return dict.fromkeys(returns_matrix.columns, 0.0)
 
     for col in returns_matrix.columns:
         cov = np.cov(returns_matrix[col], portfolio_returns)[0, 1]
@@ -343,7 +349,7 @@ class RiskStatisticalEngine:
         market_data: Provider used for price and beta lookups.
     """
 
-    def __init__(self, market_data: Optional[MarketDataProvider] = None) -> None:
+    def __init__(self, market_data: MarketDataProvider | None = None) -> None:
         """Loads gate thresholds from settings.
 
         Args:
@@ -360,7 +366,7 @@ class RiskStatisticalEngine:
         proposed_positions: list[dict],
         current_vix: float,
         total_weight: float,
-    ) -> tuple[list[str], Optional[str]]:
+    ) -> tuple[list[str], str | None]:
         """Runs gate 1: per-position caps, book size, and the VIX blackout.
 
         Args:
@@ -373,16 +379,15 @@ class RiskStatisticalEngine:
             vetoes the book; ``diversification_note`` is informational and is None when
             the position count clears the diversification floor.
         """
-        violations = []
+        violations = [
+            f"{pos['ticker']} weight {pos['weight']:.1%} > limit {self.max_position_pct:.1%}"
+            for pos in proposed_positions
+            if pos["weight"] > self.max_position_pct
+        ]
 
-        for pos in proposed_positions:
-            if pos["weight"] > self.max_position_pct:
-                violations.append(
-                    f"{pos['ticker']} weight {pos['weight']:.1%} > limit {self.max_position_pct:.1%}"
-                )
-
-        # Below-floor diversification is informational, not a violation — small books aren't a VETO fault.
-        diversification_note: Optional[str] = None
+        # Below-floor diversification is informational, not a violation — small books
+        # aren't a VETO fault.
+        diversification_note: str | None = None
         if (
             len(proposed_positions) > 1
             and len(proposed_positions) < RISK.min_positions_diversification
@@ -394,9 +399,11 @@ class RiskStatisticalEngine:
             )
 
         if len(proposed_positions) > RISK.max_positions:
-            # Unreachable via the API (tickers capped at 20 there too); kept for direct callers.
+            # Unreachable via the API (tickers capped at 20 there too); kept for
+            # direct callers.
             violations.append(
-                f"Over-diversification: {len(proposed_positions)} positions (max {RISK.max_positions})"
+                f"Over-diversification: {len(proposed_positions)} positions "
+                f"(max {RISK.max_positions})"
             )
 
         if current_vix >= self.vix_blackout:
@@ -411,8 +418,8 @@ class RiskStatisticalEngine:
         proposed_positions: list[dict],
         price_history: dict[str, pd.Series],
         sector_to_tickers: dict[str, list],
-        convictions: Optional[dict[str, float]],
-    ) -> tuple[dict[str, float], Optional[bool], list[str]]:
+        convictions: dict[str, float] | None,
+    ) -> tuple[dict[str, float], bool | None, list[str]]:
         """Runs gate 2: the SLSQP solve for allocation ceilings under per-sector caps.
 
         Args:
@@ -448,7 +455,8 @@ class RiskStatisticalEngine:
 
         cov = returns_df.cov() * 252
         if not np.isfinite(cov.to_numpy()).all():
-            # Thin overlap can still leave a non-finite matrix even after the drop; SLSQP can't recover.
+            # Thin overlap can still leave a non-finite matrix even after the drop;
+            # SLSQP can't recover.
             optimizer_notes.append(
                 "Covariance: non-finite values in the covariance matrix — "
                 "SLSQP optimization skipped"
@@ -458,7 +466,7 @@ class RiskStatisticalEngine:
         tickers = list(returns_df.columns)
         n = len(tickers)
 
-        def _obj(w: np.ndarray, _conv: Optional[dict[str, float]] = convictions) -> float:
+        def _obj(w: np.ndarray, _conv: dict[str, float] | None = convictions) -> float:
             """Minimizes variance penalized by signed conviction.
 
             Signed conviction (passed from graph.py):
@@ -480,7 +488,7 @@ class RiskStatisticalEngine:
         bounds = tuple((0.0, self.max_position_pct) for _ in range(n))
 
         cons = []
-        for sec, sec_tickers in sector_to_tickers.items():
+        for sec_tickers in sector_to_tickers.values():
             idxs = [i for i, t in enumerate(tickers) if t in sec_tickers]
             cap = self.max_sector_pct
             cons.append(
@@ -514,10 +522,10 @@ class RiskStatisticalEngine:
 
     def _statistical_violations(
         self,
-        var99: Optional[float],
-        cvar: Optional[float],
+        var99: float | None,
+        cvar: float | None,
         beta: float,
-        corr: Optional[float],
+        corr: float | None,
         sector_weights: dict[str, float],
         has_sector_violation: bool,
     ) -> list[str]:
@@ -563,7 +571,7 @@ class RiskStatisticalEngine:
         proposed_positions: list[dict],
         price_history: dict[str, pd.Series],
         current_vix: float,
-        convictions: Optional[dict[str, float]] = None,
+        convictions: dict[str, float] | None = None,
     ) -> RiskAssessment:
         """Evaluates a proposed portfolio posture against structural, statistical, and sector caps.
 
@@ -651,7 +659,10 @@ class RiskStatisticalEngine:
                 verdict=RiskVerdict.REDUCE,
                 approved_weight=min(total_weight * RISK.reduce_weight_multiplier, total_weight),
                 proposed_weight=total_weight,
-                veto_reasons=stat_violations + diversification_notes + optimizer_notes + degraded_notes,
+                veto_reasons=stat_violations
+                + diversification_notes
+                + optimizer_notes
+                + degraded_notes,
                 optimal_weights=optimal_weights,
                 optimizer_converged=optimizer_converged,
                 var_99=var99,

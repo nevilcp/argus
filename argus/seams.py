@@ -31,7 +31,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any, Optional, Protocol
+from typing import Any, Protocol
 
 import groq
 import httpx
@@ -79,7 +79,7 @@ class MarketDataProvider(Protocol):
         """Returns the current macro indicator bundle."""
         ...
 
-    def news(self, ticker: str, company_name: str, days_back: int = 7) -> Optional[list[dict]]:
+    def news(self, ticker: str, company_name: str, days_back: int = 7) -> list[dict] | None:
         """Returns recent news articles for a ticker, or None if unavailable."""
         ...
 
@@ -119,7 +119,7 @@ class LiveMarketDataProvider:
         """Delegates to fetchers.fetch_macro_bundle."""
         return fetchers.fetch_macro_bundle()
 
-    def news(self, ticker: str, company_name: str, days_back: int = 7) -> Optional[list[dict]]:
+    def news(self, ticker: str, company_name: str, days_back: int = 7) -> list[dict] | None:
         """Delegates to fetchers.fetch_news."""
         return fetchers.fetch_news(ticker, company_name, days_back=days_back)
 
@@ -172,7 +172,11 @@ class FixtureMarketDataProvider:
 
     def multiple_daily(self, tickers: list[str], period: str = "1y") -> dict[str, pd.DataFrame]:
         """Returns cached OHLCV history for each ticker present in the price_history fixture."""
-        return {t: self.ohlcv_daily(t, period=period) for t in tickers if t in self._load("price_history")}
+        return {
+            t: self.ohlcv_daily(t, period=period)
+            for t in tickers
+            if t in self._load("price_history")
+        }
 
     def fundamentals(self, ticker: str) -> dict:
         """Returns the cached fundamentals payload from the fundamentals fixture."""
@@ -251,7 +255,7 @@ class RetryableTransportError(Exception):
             back-off.
     """
 
-    def __init__(self, cause: Exception, retry_after: Optional[float] = None) -> None:
+    def __init__(self, cause: Exception, retry_after: float | None = None) -> None:
         """Wraps the underlying transport exception with an optional retry hint.
 
         Args:
@@ -280,7 +284,7 @@ _TERMINAL_GROQ_ERRORS = (
 )
 
 
-def _groq_retry_delay(exc: Exception) -> Optional[float]:
+def _groq_retry_delay(exc: Exception) -> float | None:
     """Reads the provider's own retry hint off a retryable Groq error, if it gave one.
 
     Only a RateLimitError carries an explicit hint (its Retry-After header,
@@ -445,7 +449,7 @@ class FixtureLLMClient:
     def __init__(
         self,
         responses: dict[str, str],
-        key_fn: Optional[Any] = None,
+        key_fn: Any | None = None,
         capacity: int = _UNLIMITED_CAPACITY,
     ) -> None:
         """Stores the response map and the key function used to look up responses.
@@ -478,7 +482,7 @@ class FixtureLLMClient:
         return self._capacity
 
     @classmethod
-    def from_fixture_file(cls, path: Path, key_fn: Optional[Any] = None) -> FixtureLLMClient:
+    def from_fixture_file(cls, path: Path, key_fn: Any | None = None) -> FixtureLLMClient:
         """Builds a FixtureLLMClient from a JSON file of key → response text.
 
         Args:

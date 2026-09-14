@@ -92,7 +92,8 @@ def test_embedding_identity_check_is_a_noop_when_the_model_matches():
 
 
 def test_embedding_identity_check_raises_on_a_mismatched_model():
-    """A collection recorded under a different embedding model raises rather than degrading silently."""
+    """A collection recorded under a different embedding model raises rather than
+    degrading silently."""
     metadata = {"hnsw:space": "cosine", "embedding_model": "all-mpnet-base-v2"}
     with pytest.raises(EmbeddingModelMismatchError):
         _check_embedding_model_identity(metadata, "all-MiniLM-L6-v2")
@@ -127,10 +128,9 @@ def test_small_sample_shrinks_toward_prior_instead_of_reporting_the_raw_rate():
 
 def test_large_sample_converges_to_the_raw_win_rate():
     """As the sample grows, accuracy converges to the raw win rate."""
-    metadatas = (
-        [{"outcome": "SUCCESSFUL", "primary_driver": "technical"}] * 900
-        + [{"outcome": "FAILED", "primary_driver": "technical"}] * 100
-    )
+    metadatas = [{"outcome": "SUCCESSFUL", "primary_driver": "technical"}] * 900 + [
+        {"outcome": "FAILED", "primary_driver": "technical"}
+    ] * 100
     manager = _manager_with_metadatas(metadatas)
 
     accuracy, n = manager.get_agent_accuracy("technical")

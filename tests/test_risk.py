@@ -17,7 +17,6 @@ from argus.params import RISK
 from argus.schemas.signals import RiskVerdict
 from argus.seams import LiveMarketDataProvider
 
-
 _TRADING_YEAR = pd.date_range(start="2023-01-01", periods=253, freq="B")
 
 
@@ -367,7 +366,10 @@ def test_get_sector_does_not_cache_across_non_live_providers(monkeypatch) -> Non
     """
     monkeypatch.setattr(
         "argus.agents.risk._SECTOR_CACHE",
-        TTLCache(ttl=timedelta(seconds=RISK.sector_cache_ttl_seconds), max_entries=RISK.sector_cache_max_entries),
+        TTLCache(
+            ttl=timedelta(seconds=RISK.sector_cache_ttl_seconds),
+            max_entries=RISK.sector_cache_max_entries,
+        ),
     )
 
     session_one = _StubTickerInfoMarketData("Technology")

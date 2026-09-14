@@ -1,6 +1,7 @@
 import asyncio
 import dataclasses
 import importlib
+import itertools
 import math
 import sys
 import time
@@ -260,13 +261,13 @@ def test_parse_interval_minutes():
 
 
 def test_parse_interval_minutes_rejects_unsupported_shape():
-    """An interval string outside the '<n>m' / '<n>h' shape raises rather than silently misparsing."""
-    with pytest.raises(ValueError):
+    """An interval string outside the shape raises rather than silently misparsing."""
+    with pytest.raises(ValueError, match="unsupported interval string"):
         _parse_interval_minutes("daily")
 
 
 def test_derive_buffer_size_matches_fetch_period():
-    """Buffer size holds a full fetch period's candles at the given interval, plus a day and a bar of slack."""
+    """Buffer size holds a full fetch period's candles at the interval, plus a day and bar."""
     assert _bars_per_day(1) == 390
     assert _bars_per_day(5) == 78
     assert _derive_buffer_size(1) == 1173
@@ -274,7 +275,7 @@ def test_derive_buffer_size_matches_fetch_period():
 
 
 def test_pipeline_derives_buffer_size_from_interval():
-    """MFTDataPipeline sizes its buffer from the candle interval when CANDLE_BUFFER_SIZE isn't overridden."""
+    """MFTDataPipeline sizes its buffer from the interval when not overridden."""
     pipeline_1m = MFTDataPipeline([], interval="1m")
     assert pipeline_1m.buffer._buffer_size == 1173
 
@@ -356,7 +357,7 @@ def test_required_indicator_bars_is_pinned_to_macd_warmup():
 
 
 def test_required_raw_bars_matches_the_issue_table():
-    """Raw-bar pre-filter: the larger of the indicator-resample floor and one day's momentum lookback."""
+    """Raw-bar pre-filter is larger of indicator-resample floor or daily momentum lookback."""
     assert _required_raw_bars(1) == 391
     assert _required_raw_bars(5) == 79
     assert _required_raw_bars(15) == 34
@@ -390,7 +391,7 @@ def test_return_since_momentum_1d_none_without_a_prior_session():
 
 
 def test_return_since_momentum_30m_does_not_reach_into_the_prior_session():
-    """At 09:34 with only 5 bars printed today, the 30-minute lookup doesn't fall back to yesterday's close."""
+    """30-minute lookup at 09:34 with 5 bars doesn't fall back to prior session."""
     day1 = et_intraday_candles(390, start="2024-01-02 09:30")
     day2 = et_intraday_candles(5, start="2024-01-03 09:30")
     combined_close = pd.concat([day1["close"], day2["close"]])
@@ -417,7 +418,7 @@ def test_momentum_1d_is_stable_under_dropping_up_to_10_oldest_bars(drop: int):
 
 @pytest.mark.asyncio
 async def test_sweep_uses_a_constant_inter_request_gap_independent_of_universe_size(monkeypatch):
-    """The pause between per-ticker fetches is SYSTEM.min_inter_request_seconds regardless of universe size."""
+    """Per-ticker fetch pause is constant regardless of how many tickers."""
 
     async def fake_fetch_one(_ticker):
         return None
@@ -468,7 +469,7 @@ async def test_fetch_loop_sleeps_the_remainder_of_the_interval_not_a_full_one(mo
 
 @pytest.mark.asyncio
 async def test_fetch_loop_cadence_holds_across_a_slow_sweep(monkeypatch):
-    """The measured gap between sweep starts tracks _FETCH_INTERVAL, not sweep_duration + _FETCH_INTERVAL."""
+    """Sweep start gap tracks _FETCH_INTERVAL, not sweep duration plus interval."""
     monkeypatch.setattr(pipeline_module, "_FETCH_INTERVAL", 0.2)
     pipeline = MFTDataPipeline([], interval="1m")
     monkeypatch.setattr(pipeline, "_is_market_hours", lambda: True)
@@ -489,7 +490,7 @@ async def test_fetch_loop_cadence_holds_across_a_slow_sweep(monkeypatch):
     await asyncio.wait_for(task, timeout=1.0)
 
     assert len(starts) >= 2
-    gaps = [b - a for a, b in zip(starts, starts[1:])]
+    gaps = [b - a for a, b in itertools.pairwise(starts)]
     assert all(gap == pytest.approx(0.2, abs=0.05) for gap in gaps)
 
 
@@ -590,7 +591,7 @@ def test_compress_all_prunes_untracked_buffer_rows():
 
 
 def test_compress_all_skips_a_ticker_below_the_readiness_floor():
-    """compress_all omits a ticker whose buffered bars don't clear the resampled MACD warmup floor."""
+    """compress_all omits a ticker whose bars don't clear MACD warmup floor."""
     pipeline = MFTDataPipeline(["COLD"], interval="1m")
     # 20 raw bars clear OHLCVBuffer's own 14-row floor but fall far short of
     # _required_raw_bars(1) == 391
@@ -654,7 +655,7 @@ async def test_close_buffer_waits_out_an_in_flight_buffer_worker():
 
 
 def test_fetch_and_insert_bulk_inserts_in_one_call(monkeypatch):
-    """`_fetch_and_insert` hands the whole fetched frame to insert_candles in one call, not per-row."""
+    """`_fetch_and_insert` passes the frame to insert_candles in one call."""
     pipeline = MFTDataPipeline([], interval="1m")
     df = et_intraday_candles(5)
     df[["open", "high", "low", "close"]] += 100

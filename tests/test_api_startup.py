@@ -117,16 +117,15 @@ def test_acquire_process_lock_rejects_a_second_holder(monkeypatch, tmp_path):
 
     lock_path = tmp_path / "argus.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    other_fd = open(lock_path, "w")
-    fcntl.flock(other_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    with open(lock_path, "w") as other_fd:
+        fcntl.flock(other_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
-    try:
-        with pytest.raises(RuntimeError):
-            api_main._acquire_process_lock()
-    finally:
-        fcntl.flock(other_fd, fcntl.LOCK_UN)
-        other_fd.close()
-        api_main._process_lock_file = None
+        try:
+            with pytest.raises(RuntimeError):
+                api_main._acquire_process_lock()
+        finally:
+            fcntl.flock(other_fd, fcntl.LOCK_UN)
+            api_main._process_lock_file = None
 
 
 @pytest.fixture(autouse=True)

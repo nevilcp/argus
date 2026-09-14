@@ -49,7 +49,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 from langgraph.checkpoint.base import Checkpoint
@@ -68,7 +67,7 @@ _ABLATABLE_AGENTS = ("technical", "fundamental", "sentiment")
 
 
 def credit_primary_driver(
-    decision: ARGUSDecision, aggregator: Optional[HybridSignalAggregator] = None
+    decision: ARGUSDecision, aggregator: HybridSignalAggregator | None = None
 ) -> str:
     """Credits whichever specialist agent's signal moved the aggregated result the most.
 
@@ -161,7 +160,7 @@ def _needs_reconciliation(decision: ARGUSDecision) -> bool:
 
 def _realized_return_from_prices(
     decision: ARGUSDecision, prices: pd.Series, horizon_days: int
-) -> Optional[tuple[float, int, str]]:
+) -> tuple[float, int, str] | None:
     """Pairs a decision's entry price with a later close drawn from an already-fetched series.
 
     Args:
@@ -203,8 +202,8 @@ def compute_realized_return(
     market_data: MarketDataProvider,
     horizon_days: int,
     *,
-    prices: Optional[pd.Series] = None,
-) -> Optional[tuple[float, int, str]]:
+    prices: pd.Series | None = None,
+) -> tuple[float, int, str] | None:
     """Computes realized return by pairing the decision's entry price with a later close.
 
     Entry price is decision.technical.current_price — the close the
@@ -242,7 +241,7 @@ def reconcile_decision(
     cultural: CulturalMemoryManager,
     horizon_days: int = RECONCILIATION.horizon_days,
     *,
-    prices: Optional[pd.Series] = None,
+    prices: pd.Series | None = None,
 ) -> bool:
     """Reconciles a single decision: computes its outcome and stores it if the horizon has passed.
 
@@ -319,12 +318,14 @@ def reconcile_decisions(
         d for d in decisions if d.decision_id not in already_done and _needs_reconciliation(d)
     ]
 
-    prices_by_ticker: dict[str, Optional[pd.Series]] = {}
+    prices_by_ticker: dict[str, pd.Series | None] = {}
     stored = 0
     for decision in candidates:
         if decision.ticker not in prices_by_ticker:
             try:
-                prices_by_ticker[decision.ticker] = market_data.ohlcv_daily(decision.ticker)["close"]
+                prices_by_ticker[decision.ticker] = market_data.ohlcv_daily(decision.ticker)[
+                    "close"
+                ]
             except Exception as exc:
                 logger.warning(
                     "[Reconcile] failed to fetch price history for %s (%s): %s",
@@ -638,9 +639,9 @@ class ReconciliationReport:
     drawdown: float = 0.0
     runs_applied_pruned: int = 0
     pending_snapshots_expired: int = 0
-    decisions_compacted: Optional[int] = None
-    decisions_retired_unresolved: Optional[int] = None
-    checkpoints_pruned: Optional[int] = None
+    decisions_compacted: int | None = None
+    decisions_retired_unresolved: int | None = None
+    checkpoints_pruned: int | None = None
     errors: list[str] = field(default_factory=list)
 
 
@@ -667,8 +668,8 @@ def run_reconciliation_pass(
     cultural: CulturalMemoryManager,
     paper_book_path: str,
     *,
-    decisions_log_path: Optional[str] = None,
-    checkpoint_db_path: Optional[str] = None,
+    decisions_log_path: str | None = None,
+    checkpoint_db_path: str | None = None,
     horizon_days: int = RECONCILIATION.horizon_days,
 ) -> ReconciliationReport:
     """Runs the one reconciliation sequence shared by api/main.py and scripts/reconcile_outcomes.py.

@@ -52,7 +52,8 @@ def test_session_state_ttl_seconds_tolerates_one_missed_sweep():
 
 
 def test_max_bar_age_seconds_scales_with_interval():
-    """The bar-age budget grows with the candle interval, matching the expected 480s-at-1m figure."""
+    """The bar-age budget grows with the candle interval, matching the expected
+    480s-at-1m figure."""
     assert max_bar_age_seconds(1) == _FETCH_INTERVAL + 2 * 1 * 60 + SYSTEM.freshness_margin_seconds
     assert max_bar_age_seconds(1) == 480
     assert max_bar_age_seconds(5) > max_bar_age_seconds(1)
@@ -143,7 +144,8 @@ def test_publish_evicts_tickers_no_longer_in_the_tracked_universe():
 
 
 def test_ages_reports_publication_and_bar_age_for_everything_held():
-    """ages() reports numeric ages for every cached ticker, independent of whether it would pass admission."""
+    """ages() reports numeric ages for every cached ticker, independent of whether it
+    would pass admission."""
     cache = LiveSessionCache(interval_minutes=1)
     now = datetime.now(_ET)
     _publish(cache, "AAPL", now=now, bar_age_seconds=30, write_age_seconds=10)
@@ -155,7 +157,8 @@ def test_ages_reports_publication_and_bar_age_for_everything_held():
 
 
 def test_publish_defaults_to_the_same_clock_admit_measures_against():
-    """A just-published entry with a fresh bar clears admit() using only each side's default clock."""
+    """A just-published entry with a fresh bar clears admit() using only each
+    side's default clock."""
     cache = LiveSessionCache(interval_minutes=1)
     now = datetime.now(_ET)
     cache.publish({"AAPL": {"timestamp": now.isoformat()}}, ["AAPL"])

@@ -1,3 +1,4 @@
+import contextlib
 import threading
 import time
 from unittest.mock import patch
@@ -5,13 +6,13 @@ from unittest.mock import patch
 import pytest
 
 from argus.orchestration.governor import (
+    _CHAT_TEMPLATE_OVERHEAD_TOKENS,
+    _WORD_TO_TOKEN_RATIO,
     BOOTSTRAP_LIMITS,
     REGISTERED_MODELS,
     RateLimitExceeded,
     RateLimitGovernor,
     UnregisteredModel,
-    _CHAT_TEMPLATE_OVERHEAD_TOKENS,
-    _WORD_TO_TOKEN_RATIO,
     _parse_reset_duration,
     estimate_tokens,
 )
@@ -138,11 +139,11 @@ def test_governor_does_not_block_other_models_while_sleeping(governor):
         real_sleep(0.3)
 
     def _run_throttled():
-        with patch("argus.orchestration.governor.time.sleep", side_effect=_blocking_sleep):
-            try:
-                governor.wait_if_needed(throttled_model, 10)
-            except RateLimitExceeded:
-                pass
+        with (
+            patch("argus.orchestration.governor.time.sleep", side_effect=_blocking_sleep),
+            contextlib.suppress(RateLimitExceeded),
+        ):
+            governor.wait_if_needed(throttled_model, 10)
 
     t = threading.Thread(target=_run_throttled)
     t.start()
@@ -191,7 +192,7 @@ def test_governor_report(governor):
 
 
 @pytest.mark.parametrize(
-    "value,expected_seconds",
+    ("value", "expected_seconds"),
     [
         ("2m59.56s", 2 * 60 + 59.56),
         ("7.66s", 7.66),
@@ -208,7 +209,7 @@ def test_parse_reset_duration(value, expected_seconds):
 
 def test_parse_reset_duration_rejects_unparseable_input():
     """A string with no recognizable duration component raises rather than silently returning 0."""
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="unparseable Groq reset duration"):
         _parse_reset_duration("not-a-duration")
 
 
@@ -255,9 +256,7 @@ def test_observe_headers_skips_incomplete_headers(governor):
 @patch("argus.orchestration.governor.time.sleep")
 def test_observed_tpm_governs_wait_if_needed(mock_sleep, governor):
     """Once headers are observed, tokens-per-minute admission uses the header-reported remaining."""
-    governor.observe_headers(
-        MODEL, _rate_limit_headers(limit_tokens=1_000, remaining_tokens=1_000)
-    )
+    governor.observe_headers(MODEL, _rate_limit_headers(limit_tokens=1_000, remaining_tokens=1_000))
 
     # Bootstrap TPM would happily admit this, but the header-observed remaining won't.
     with pytest.raises(RateLimitExceeded):
@@ -271,9 +270,11 @@ def test_observed_daily_exhaustion_raises_immediately(governor):
         MODEL, _rate_limit_headers(remaining_requests=0, reset_requests="23h59m0s")
     )
 
-    with patch("argus.orchestration.governor.time.sleep") as mock_sleep:
-        with pytest.raises(RateLimitExceeded):
-            governor.wait_if_needed(MODEL, 10)
+    with (
+        patch("argus.orchestration.governor.time.sleep") as mock_sleep,
+        pytest.raises(RateLimitExceeded),
+    ):
+        governor.wait_if_needed(MODEL, 10)
     assert mock_sleep.call_count == 0, "a day-long reset must not be slept out"
 
 
@@ -353,9 +354,7 @@ def test_release_reservation_restores_bootstrap_budget(governor):
 
 def test_release_reservation_restores_header_observed_remaining(governor):
     """Releasing restores the header-derived remaining too, capped at the observed limit."""
-    governor.observe_headers(
-        MODEL, _rate_limit_headers(limit_tokens=1_000, remaining_tokens=1_000)
-    )
+    governor.observe_headers(MODEL, _rate_limit_headers(limit_tokens=1_000, remaining_tokens=1_000))
 
     governor.wait_if_needed(MODEL, 400)
     usage = governor._get_usage(MODEL)

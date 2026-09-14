@@ -21,7 +21,7 @@ Not responsible for:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated, Literal, Optional
+from typing import Annotated, Literal
 
 from dotenv import load_dotenv
 from pydantic import Field, field_validator
@@ -68,10 +68,26 @@ class Settings(BaseSettings):
     # Broadened to 20 tickers across 7 GICS sectors to reduce sector concentration risk.
     ARGUS_UNIVERSE: Annotated[list[str], NoDecode] = Field(
         default=[
-            "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN",
-            "META", "TSLA", "JPM", "V", "UNH",
-            "XOM", "JNJ", "PG", "MA", "HD",
-            "MRK", "ABBV", "LLY", "AVGO", "CVX",
+            "AAPL",
+            "MSFT",
+            "NVDA",
+            "GOOGL",
+            "AMZN",
+            "META",
+            "TSLA",
+            "JPM",
+            "V",
+            "UNH",
+            "XOM",
+            "JNJ",
+            "PG",
+            "MA",
+            "HD",
+            "MRK",
+            "ABBV",
+            "LLY",
+            "AVGO",
+            "CVX",
         ],
         description="Ticker universe the unattended collector tracks and analyzes",
     )
@@ -86,7 +102,7 @@ class Settings(BaseSettings):
     MFT_CANDLE_INTERVAL: str = "1m"
     # None means "derive from MFT_CANDLE_INTERVAL" (see data/pipeline.py's
     # _derive_buffer_size); set explicitly only to override that derivation.
-    CANDLE_BUFFER_SIZE: Optional[int] = None
+    CANDLE_BUFFER_SIZE: int | None = None
 
     # ─── Unattended operation ────────────────────────────────────────────────
     ARGUS_DATA_DIR: str = Field(
@@ -96,10 +112,10 @@ class Settings(BaseSettings):
     # (see memory/cultural.py's get_cultural_memory and risk/kill_switch.py) —
     # set explicitly only to point at a directory outside ARGUS_DATA_DIR, e.g.
     # a dedicated named volume as docker-compose.yml does.
-    ARGUS_CHROMA_DIR: Optional[str] = Field(
+    ARGUS_CHROMA_DIR: str | None = Field(
         default=None, description="Directory backing the ChromaDB cultural-memory store"
     )
-    ARGUS_RUNS_DIR: Optional[str] = Field(
+    ARGUS_RUNS_DIR: str | None = Field(
         default=None, description="Directory for kill-switch halt-event dumps"
     )
     ARGUS_COLLECTOR_ENABLED: bool = Field(
@@ -118,7 +134,10 @@ class Settings(BaseSettings):
         default=100_000.0, gt=1000, description="Total wealth used by unattended collection cycles"
     )
     ARGUS_INVEST_PCT: float = Field(
-        default=0.6, gt=0.05, le=0.95, description="Invest fraction used by unattended collection cycles"
+        default=0.6,
+        gt=0.05,
+        le=0.95,
+        description="Invest fraction used by unattended collection cycles",
     )
     ARGUS_RISK_TOLERANCE: Literal["CONSERVATIVE", "MODERATE", "AGGRESSIVE"] = Field(
         default="MODERATE", description="Risk tolerance used by unattended collection cycles"
@@ -149,10 +168,14 @@ class Settings(BaseSettings):
     # model until Groq's own response headers correct it per-model for the
     # account's actual tier.
     ARGUS_GROQ_RPM: int = Field(
-        default=30, gt=0, description="Bootstrap requests-per-minute floor before headers are observed"
+        default=30,
+        gt=0,
+        description="Bootstrap requests-per-minute floor before headers are observed",
     )
     ARGUS_GROQ_TPM: int = Field(
-        default=6_000, gt=0, description="Bootstrap tokens-per-minute floor before headers are observed"
+        default=6_000,
+        gt=0,
+        description="Bootstrap tokens-per-minute floor before headers are observed",
     )
     ARGUS_ANALYZE_DEADLINE_SECONDS: int = Field(
         default=360,
@@ -175,7 +198,9 @@ class Settings(BaseSettings):
 
     ARGUS_HMM_MODEL_PATH: str = Field(
         default=str(BASE_DIR / "argus" / "models" / "macro_hmm.joblib"),
-        description="Path to the persisted RegimeClassifier artifact (scripts/train_macro_hmm.py output)",
+        description=(
+            "Path to the persisted RegimeClassifier artifact (scripts/train_macro_hmm.py output)"
+        ),
     )
 
     @field_validator("ARGUS_UNIVERSE", "ARGUS_CORS_ORIGINS", mode="before")

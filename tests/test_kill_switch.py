@@ -27,7 +27,6 @@ from argus.risk.paper_book import PaperBook, compute_run_returns
 from argus.schemas.signals import ARGUSDecision, PositionAllocation, Signal, TechnicalSignal
 from argus.seams import FixtureMarketDataProvider
 
-
 _FETCH_VIX = "argus.data.fetchers.fetch_vix"
 
 
@@ -86,7 +85,7 @@ def _seed_persisted_halt() -> KillSwitch:
 
 
 @pytest.mark.parametrize(
-    "tolerance,threshold",
+    ("tolerance", "threshold"),
     [("CONSERVATIVE", 0.08), ("MODERATE", 0.12), ("AGGRESSIVE", 0.18)],
 )
 @mock.patch(_FETCH_VIX, return_value=15.0)
@@ -670,7 +669,7 @@ def test_paperbook_load_truncated_existing_file_raises(tmp_path):
     original = path.read_bytes()
     path.write_bytes(original[: len(original) // 2])  # simulate a crash mid-write
 
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match=r"line \d+ column \d+"):
         paper_book.load(str(path))
 
 

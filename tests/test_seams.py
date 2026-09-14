@@ -130,7 +130,8 @@ def test_groq_retry_delay_honors_retry_after():
 
 
 def test_groq_retry_delay_returns_none_without_header():
-    """Without a Retry-After header, the adapter gives no hint — the caller decides its own back-off."""
+    """Without a Retry-After header, the adapter gives no hint — the caller
+    decides its own back-off."""
     exc = _synthetic_rate_limit_error(retry_after=None)
     assert _groq_retry_delay(exc) is None
 
@@ -215,7 +216,8 @@ def test_groq_llm_client_retryable_error_carries_retry_after_hint():
 
 
 def test_groq_llm_client_terminal_error_raises_without_retry():
-    """AuthenticationError propagates on the first attempt — retrying a bad key wastes nothing but time."""
+    """AuthenticationError propagates on the first attempt — retrying a bad key
+    wastes nothing but time."""
     client = _client_with_mocked_llm()
     client._llm.invoke.side_effect = _synthetic_auth_error()
 
@@ -230,9 +232,11 @@ def test_groq_llm_client_releases_reservation_on_terminal_error():
     client = _client_with_mocked_llm()
     client._llm.invoke.side_effect = _synthetic_auth_error()
 
-    with mock.patch("argus.seams.governor.release_reservation") as mock_release:
-        with pytest.raises(groq.AuthenticationError):
-            client.complete("system", "user")
+    with (
+        mock.patch("argus.seams.governor.release_reservation") as mock_release,
+        pytest.raises(groq.AuthenticationError),
+    ):
+        client.complete("system", "user")
 
     mock_release.assert_called_once()
     assert mock_release.call_args.args[0] == client._model
@@ -243,9 +247,11 @@ def test_groq_llm_client_releases_reservation_on_retryable_error():
     client = _client_with_mocked_llm()
     client._llm.invoke.side_effect = _synthetic_connection_error()
 
-    with mock.patch("argus.seams.governor.release_reservation") as mock_release:
-        with pytest.raises(RetryableTransportError):
-            client.complete("system", "user")
+    with (
+        mock.patch("argus.seams.governor.release_reservation") as mock_release,
+        pytest.raises(RetryableTransportError),
+    ):
+        client.complete("system", "user")
 
     mock_release.assert_called_once()
     assert mock_release.call_args.args[0] == client._model
@@ -256,9 +262,10 @@ def test_groq_llm_client_success_does_not_release_reservation():
     client = _client_with_mocked_llm()
     client._llm.invoke.return_value = _fake_success_response()
 
-    with mock.patch("argus.seams.governor.release_reservation") as mock_release, mock.patch(
-        "argus.seams.governor.record_usage"
-    ) as mock_record:
+    with (
+        mock.patch("argus.seams.governor.release_reservation") as mock_release,
+        mock.patch("argus.seams.governor.record_usage") as mock_record,
+    ):
         client.complete("system", "user")
 
     mock_release.assert_not_called()

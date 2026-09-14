@@ -10,9 +10,9 @@ docstrings already claim, and a property test checks the claim across the
 whole domain rather than at a handful of hand-picked points.
 """
 
+import pytest
 from hypothesis import given
 from hypothesis import strategies as st
-from pytest import approx
 
 from argus.agents.technical import _score_bollinger, _score_rsi
 
@@ -51,4 +51,4 @@ def test_score_bollinger_antisymmetric_about_half(bb: float) -> None:
     mirrored = 1.0 - bb
     score = _score_bollinger({"bb_percent_b": bb})
     mirrored_score = _score_bollinger({"bb_percent_b": mirrored})
-    assert score == approx(-mirrored_score, abs=1e-9)
+    assert score == pytest.approx(-mirrored_score, abs=1e-9)

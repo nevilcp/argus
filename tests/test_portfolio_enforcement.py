@@ -12,6 +12,7 @@ import json
 from datetime import datetime
 
 import pytest
+from pydantic import ValidationError
 
 from argus.agents.portfolio import PortfolioManagerAgent
 from argus.orchestration.governor import RateLimitExceeded
@@ -172,8 +173,7 @@ def test_allocate_enforces_caps_vetoes_and_fabrications_in_code():
     assert any("zeroed VETOED allocation (risk verdict VETO)" in a for a in adjustments)
     assert any("dropped FABRICATED" in a for a in adjustments)
     assert any(
-        "cash_reserve_pct forced to residual 0.9000 (LLM proposed 0.5000)" in a
-        for a in adjustments
+        "cash_reserve_pct forced to residual 0.9000 (LLM proposed 0.5000)" in a for a in adjustments
     )
     assert len(adjustments) == 4
 
@@ -249,10 +249,10 @@ def test_proposed_position_allocation_pct_bounded_at_proposal():
         "time_horizon": "3-6 months",
     }
 
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError, match=r".*"):
         ProposedPosition(**base, allocation_pct=-0.01)
 
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError, match=r".*"):
         ProposedPosition(**base, allocation_pct=SYSTEM.max_single_position_pct + 0.01)
 
     # Within bounds still validates.

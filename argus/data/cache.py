@@ -29,9 +29,9 @@ import logging
 import sqlite3
 import threading
 from collections.abc import Callable, Hashable
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Generic, Optional, TypeVar
+from typing import Generic, TypeVar
 
 import pandas as pd
 
@@ -61,7 +61,7 @@ class TTLCache(Generic[_K, _V]):
         self,
         ttl: timedelta,
         clock: Callable[[], datetime] = datetime.now,
-        max_entries: Optional[int] = None,
+        max_entries: int | None = None,
     ) -> None:
         """Initializes an empty cache.
 
@@ -81,7 +81,7 @@ class TTLCache(Generic[_K, _V]):
         self._entries: dict[_K, tuple[_V, datetime]] = {}
         self._lock = threading.Lock()
 
-    def get(self, key: _K) -> Optional[_V]:
+    def get(self, key: _K) -> _V | None:
         """Returns the cached value for key, or None if absent or expired.
 
         Args:
@@ -113,7 +113,9 @@ class TTLCache(Generic[_K, _V]):
         """
         with self._lock:
             now = self._clock()
-            expired = [k for k, (_, cached_at) in self._entries.items() if now - cached_at >= self._ttl]
+            expired = [
+                k for k, (_, cached_at) in self._entries.items() if now - cached_at >= self._ttl
+            ]
             for k in expired:
                 del self._entries[k]
 
@@ -194,7 +196,7 @@ def _canonical_timestamp(ts: object) -> str:
     stamp = pd.Timestamp(ts)
     if stamp.tzinfo is None:
         stamp = stamp.tz_localize(_ET)
-    return stamp.tz_convert(timezone.utc).isoformat()
+    return stamp.tz_convert(UTC).isoformat()
 
 
 class OHLCVBuffer:
@@ -291,7 +293,7 @@ class OHLCVBuffer:
         # independently can land on the same stored value under a coarse clock and
         # collide under the upsert below, silently losing all but the last. Offsetting
         # each by a growing microsecond delta keeps them unique within the batch.
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         missing_count = 0
         rows = []
         for candle in candles:
@@ -299,16 +301,18 @@ class OHLCVBuffer:
             if ts is None:
                 ts = now + timedelta(microseconds=missing_count)
                 missing_count += 1
-            rows.append((
-                ticker,
-                self._interval,
-                _canonical_timestamp(ts),
-                candle.get("open"),
-                candle.get("high"),
-                candle.get("low"),
-                candle.get("close"),
-                candle.get("volume"),
-            ))
+            rows.append(
+                (
+                    ticker,
+                    self._interval,
+                    _canonical_timestamp(ts),
+                    candle.get("open"),
+                    candle.get("high"),
+                    candle.get("low"),
+                    candle.get("close"),
+                    candle.get("volume"),
+                )
+            )
 
         with self._lock:
             self._conn.executemany(_INSERT_OHLCV, rows)
@@ -317,7 +321,7 @@ class OHLCVBuffer:
 
         logger.debug("OHLCVBuffer.insert_candles: %s ← %d candle(s)", ticker, len(rows))
 
-    def get_candles(self, ticker: str) -> Optional[pd.DataFrame]:
+    def get_candles(self, ticker: str) -> pd.DataFrame | None:
         """Retrieves buffered candles as a pandas DataFrame, tz-converted to ET.
 
         Returns None when fewer than `_MIN_CANDLE_ROWS` rows exist.
@@ -480,7 +484,7 @@ class DailyBarCache:
         self._conn.commit()
         logger.info("DailyBarCache initialised (db=%s)", db_path)
 
-    def get(self, ticker: str) -> Optional[pd.DataFrame]:
+    def get(self, ticker: str) -> pd.DataFrame | None:
         """Returns a ticker's cached daily bars if refreshed today (UTC), else None.
 
         Args:
@@ -490,7 +494,7 @@ class DailyBarCache:
             Sorted DataFrame with lowercase OHLCV columns and a datetime index,
             or None if the ticker hasn't been refreshed since UTC midnight.
         """
-        today = datetime.now(timezone.utc).date().isoformat()
+        today = datetime.now(UTC).date().isoformat()
         with self._lock:
             refreshed = self._conn.execute(_SELECT_DAILY_REFRESH, (ticker,)).fetchone()
             if refreshed is None or refreshed[0] != today:
@@ -500,9 +504,7 @@ class DailyBarCache:
         if not rows:
             return None
 
-        df = pd.DataFrame(
-            rows, columns=["trading_date", "open", "high", "low", "close", "volume"]
-        )
+        df = pd.DataFrame(rows, columns=["trading_date", "open", "high", "low", "close", "volume"])
         df["trading_date"] = pd.to_datetime(df["trading_date"])
         df.set_index("trading_date", inplace=True)
         df.index.name = None
@@ -523,7 +525,7 @@ class DailyBarCache:
             df: DataFrame with lowercase OHLCV columns and a datetime index,
                 as returned by fetchers.fetch_ohlcv_daily.
         """
-        today = datetime.now(timezone.utc).date().isoformat()
+        today = datetime.now(UTC).date().isoformat()
         rows = [
             (
                 ticker,

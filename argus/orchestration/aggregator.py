@@ -20,7 +20,7 @@ Dependencies:
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import ClassVar
 
 from argus.params import AGGREGATOR
 from argus.schemas.signals import (
@@ -48,7 +48,7 @@ class HybridSignalAggregator:
             are applied.
     """
 
-    DEFAULT_WEIGHTS = {
+    DEFAULT_WEIGHTS: ClassVar[dict[str, float]] = {
         "fundamental": AGGREGATOR.weight_fundamental,
         "technical": AGGREGATOR.weight_technical,
         "sentiment": AGGREGATOR.weight_sentiment,
@@ -56,12 +56,12 @@ class HybridSignalAggregator:
 
     def aggregate(
         self,
-        technical: Optional[TechnicalSignal],
-        macro: Optional[MacroContext],
-        fundamental: Optional[FundamentalSignal],
-        sentiment: Optional[SentimentSignal],
-        reliability: Optional[dict[str, float]] = None,
-        reliability_n: Optional[dict[str, int]] = None,
+        technical: TechnicalSignal | None,
+        macro: MacroContext | None,
+        fundamental: FundamentalSignal | None,
+        sentiment: SentimentSignal | None,
+        reliability: dict[str, float] | None = None,
+        reliability_n: dict[str, int] | None = None,
     ) -> AggregatedSignal:
         """Aggregates specialist signals via conviction-weighted voting with macro multipliers.
 
@@ -164,15 +164,19 @@ class HybridSignalAggregator:
             conviction = neutral_pct
 
         # CONTRACTION suppresses low-conviction BULLISH to avoid overallocating in stressed regimes
-        if macro and macro.macro_regime == Regime.CONTRACTION:
-            if consensus == Signal.BULLISH and conviction < AGGREGATOR.contraction_conviction_threshold:
-                logger.info(
-                    "[Aggregator] %s: Contraction regime override — suppressing BULLISH (conv=%.2f)",
-                    ticker,
-                    conviction,
-                )
-                consensus = Signal.NEUTRAL
-                conviction = neutral_pct * AGGREGATOR.contraction_conviction_reduction
+        if (
+            macro
+            and macro.macro_regime == Regime.CONTRACTION
+            and consensus == Signal.BULLISH
+            and conviction < AGGREGATOR.contraction_conviction_threshold
+        ):
+            logger.info(
+                "[Aggregator] %s: Contraction regime override — suppressing BULLISH (conv=%.2f)",
+                ticker,
+                conviction,
+            )
+            consensus = Signal.NEUTRAL
+            conviction = neutral_pct * AGGREGATOR.contraction_conviction_reduction
 
         conviction = min(conviction, AGGREGATOR.max_conviction)
 

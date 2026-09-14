@@ -357,8 +357,9 @@ class TestEndToEnd:
         assert macro.macro_regime == macro2.macro_regime
 
     def test_governor_prevents_over_limit(self):
-        """The shared governor sleeps once a model's rolling-window request count reaches its limit."""
-        model = list(REGISTERED_MODELS)[0]
+        """The shared governor sleeps once a model's rolling-window request count reaches
+        its limit."""
+        model = next(iter(REGISTERED_MODELS))
         limit = BOOTSTRAP_LIMITS[model]["requests_per_minute"]
 
         usage = governor._get_usage(model)

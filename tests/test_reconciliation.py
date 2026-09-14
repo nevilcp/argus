@@ -54,7 +54,9 @@ from argus.seams import FixtureLLMClient, FixtureMarketDataProvider
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 
-def _technical(signal: Signal, conviction: float, ticker: str = "TEST", price: float = 100.0) -> TechnicalSignal:
+def _technical(
+    signal: Signal, conviction: float, ticker: str = "TEST", price: float = 100.0
+) -> TechnicalSignal:
     """Builds a TechnicalSignal with fixed indicators, varying only the given fields."""
     return TechnicalSignal(
         ticker=ticker,
@@ -155,7 +157,9 @@ class _FakeMarketData:
         return pd.DataFrame({"close": self._closes[ticker]})
 
 
-def _ten_day_series(start: datetime, start_price: float = 100.0, ticker: str = "TEST") -> _FakeMarketData:
+def _ten_day_series(
+    start: datetime, start_price: float = 100.0, ticker: str = "TEST"
+) -> _FakeMarketData:
     """Builds a 10-day daily close series rising by 1.0 per day from start_price."""
     dates = pd.date_range(start=start, periods=10, freq="D")
     closes = pd.Series([start_price + i for i in range(10)], index=dates)
@@ -344,7 +348,9 @@ def test_compute_realized_return_none_when_horizon_not_yet_reached():
         technical=_technical(Signal.BULLISH, 0.8),
         allocation=_allocation(),
     )
-    market_data = _ten_day_series(start)  # only 10 days, short of the 30-day horizon requested below
+    market_data = _ten_day_series(
+        start
+    )  # only 10 days, short of the 30-day horizon requested below
     assert compute_realized_return(decision, market_data, horizon_days=30) is None
 
 
@@ -551,7 +557,8 @@ def _compact(
     unresolved_cutoff: datetime = datetime(1900, 1, 1),
     resolved_ids: frozenset[str] = frozenset(),
 ) -> CompactionResult:
-    """compact_decisions_jsonl with a default unresolved_cutoff far enough in the past to be a no-op.
+    """compact_decisions_jsonl with a default unresolved_cutoff far enough in the past
+    to be a no-op.
 
     Lets tests that don't exercise unresolved-retention behavior omit it.
     """
@@ -626,8 +633,11 @@ def test_compact_decisions_jsonl_never_drops_an_unresolved_position_decision_at_
     assert {d.ticker for d in load_decisions_from_jsonl(str(path))} == {"UNRESOLVED"}
 
 
-def test_compact_decisions_jsonl_retires_an_unresolved_decision_past_the_wider_cutoff(tmp_path):
-    """An unresolved decision is dropped, and counted separately, once it ages past unresolved_cutoff."""
+def test_compact_decisions_jsonl_retires_an_unresolved_decision_past_the_wider_cutoff(
+    tmp_path,
+):
+    """An unresolved decision is dropped, and counted separately, once it ages past
+    unresolved_cutoff."""
     old = ARGUSDecision(
         ticker="STALE",
         session_timestamp=datetime(2020, 1, 1),
@@ -913,7 +923,7 @@ def test_run_reconciliation_pass_survives_across_runs_when_resolution_is_unavail
     resolve.
     """
     horizon_days = RECONCILIATION.horizon_days
-    old_start = datetime.now() - timedelta(  # noqa: DTZ005
+    old_start = datetime.now() - timedelta(
         days=horizon_days + RECONCILIATION.retention_margin_days + 5
     )
     decision = ARGUSDecision(
@@ -961,7 +971,7 @@ def test_run_reconciliation_pass_never_double_applies_a_run_whose_other_ticker_r
     session_timestamp is already older than the routine retention cutoff.
     """
     horizon_days = RECONCILIATION.horizon_days
-    old_start = datetime.now() - timedelta(  # noqa: DTZ005
+    old_start = datetime.now() - timedelta(
         days=horizon_days + RECONCILIATION.retention_margin_days + 1
     )
     fast = ARGUSDecision(
@@ -985,7 +995,9 @@ def test_run_reconciliation_pass_never_double_applies_a_run_whose_other_ticker_r
         [100.0 + i for i in range(20)],
         index=pd.date_range(start=old_start, periods=20, freq="D"),
     )
-    market_data = _FakeMarketData({"FAST": fast_prices, "SLOW": pd.Series([100.0], index=[old_start])})
+    market_data = _FakeMarketData(
+        {"FAST": fast_prices, "SLOW": pd.Series([100.0], index=[old_start])}
+    )
     cultural = _FakeCultural()
 
     first = run_reconciliation_pass(

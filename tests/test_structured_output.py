@@ -83,10 +83,10 @@ def test_strip_markdown_fence_preserves_embedded_backticks_in_string_values():
     first embedded fence rather than only stripping the outer one.
     """
     raw = (
-        '```json\n'
+        "```json\n"
         '{"signal": "BULLISH", "conviction": 0.8, '
         '"reasoning": "See ```python\\nprint(1)\\n``` for reference"}\n'
-        '```'
+        "```"
     )
     stripped = _strip_markdown_fence(raw)
     assert stripped == (
@@ -148,7 +148,7 @@ def test_decode_retries_schema_violation_then_succeeds():
 
 
 def test_decode_retries_retryable_transport_error_then_succeeds():
-    """A RetryableTransportError from the transport is retried and the eventual success is returned."""
+    """A transport error is retried and eventual success is returned."""
     llm = _mock_llm(_transport_error(), VALID_JSON)
 
     with mock.patch("argus.structured_output.time.sleep"):
@@ -159,12 +159,14 @@ def test_decode_retries_retryable_transport_error_then_succeeds():
 
 
 def test_decode_exhausts_attempts_on_retryable_transport_error_raises_transport_stage():
-    """A persistent transport failure costs the declared attempt cap, then raises stage=transport."""
+    """Transport failure costs attempt cap, then raises stage=transport."""
     llm = _mock_llm(*(_transport_error() for _ in range(STRUCTURED_OUTPUT.max_attempts)))
 
-    with mock.patch("argus.structured_output.time.sleep"):
-        with pytest.raises(StructuredOutputError) as exc_info:
-            decode(llm, "system", "user", _Verdict, repair=False)
+    with (
+        mock.patch("argus.structured_output.time.sleep"),
+        pytest.raises(StructuredOutputError) as exc_info,
+    ):
+        decode(llm, "system", "user", _Verdict, repair=False)
 
     assert exc_info.value.stage == "transport"
     assert exc_info.value.attempts == STRUCTURED_OUTPUT.max_attempts
@@ -205,9 +207,8 @@ def test_decode_transport_retry_preserves_repair_context_from_earlier_content_fa
         SCHEMA_INVALID_JSON,  # still invalid -> exhausts attempts
     )
 
-    with mock.patch("argus.structured_output.time.sleep"):
-        with pytest.raises(StructuredOutputError):
-            decode(llm, "system", "original user prompt", _Verdict, repair=True)
+    with mock.patch("argus.structured_output.time.sleep"), pytest.raises(StructuredOutputError):
+        decode(llm, "system", "original user prompt", _Verdict, repair=True)
 
     assert llm.complete.call_count == 3
     third_call_user_prompt = llm.complete.call_args_list[2].args[1]
@@ -216,7 +217,7 @@ def test_decode_transport_retry_preserves_repair_context_from_earlier_content_fa
 
 
 def test_decode_transport_retry_does_not_append_repair_text():
-    """A transport retry resends the original prompt — repair only makes sense for content failures."""
+    """Transport retry resends original prompt, repair is for content failures."""
     llm = _mock_llm(_transport_error(), VALID_JSON)
 
     with mock.patch("argus.structured_output.time.sleep"):
@@ -235,9 +236,11 @@ def test_decode_exhausts_attempts_on_invalid_json_raises_json_parse_stage():
     """Persistently invalid JSON is retried up to the attempt cap, then raises stage=json_parse."""
     llm = _mock_llm(*(["not json"] * STRUCTURED_OUTPUT.max_attempts))
 
-    with mock.patch("argus.structured_output.time.sleep"):
-        with pytest.raises(StructuredOutputError) as exc_info:
-            decode(llm, "system", "user", _Verdict, repair=False)
+    with (
+        mock.patch("argus.structured_output.time.sleep"),
+        pytest.raises(StructuredOutputError) as exc_info,
+    ):
+        decode(llm, "system", "user", _Verdict, repair=False)
 
     assert exc_info.value.stage == "json_parse"
     assert exc_info.value.attempts == STRUCTURED_OUTPUT.max_attempts
@@ -245,12 +248,14 @@ def test_decode_exhausts_attempts_on_invalid_json_raises_json_parse_stage():
 
 
 def test_decode_exhausts_attempts_on_schema_violation_raises_schema_validation_stage():
-    """Persistently schema-invalid JSON is retried up to the cap, then raises stage=schema_validation."""
+    """Schema-invalid JSON is retried up to cap, then raises stage=schema_validation."""
     llm = _mock_llm(*([SCHEMA_INVALID_JSON] * STRUCTURED_OUTPUT.max_attempts))
 
-    with mock.patch("argus.structured_output.time.sleep"):
-        with pytest.raises(StructuredOutputError) as exc_info:
-            decode(llm, "system", "user", _Verdict, repair=False)
+    with (
+        mock.patch("argus.structured_output.time.sleep"),
+        pytest.raises(StructuredOutputError) as exc_info,
+    ):
+        decode(llm, "system", "user", _Verdict, repair=False)
 
     assert exc_info.value.stage == "schema_validation"
     assert exc_info.value.attempts == STRUCTURED_OUTPUT.max_attempts

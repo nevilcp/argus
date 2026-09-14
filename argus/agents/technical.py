@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import ClassVar
 
 import numpy as np
 
@@ -69,18 +69,24 @@ def _score_rsi(s: dict) -> float:
     if rsi < oversold:
         return 1.0
     if rsi < bullish_transition:
-        return 1.0 - (rsi - oversold) / (bullish_transition - oversold) * (1.0 - bullish_transition_score)
+        return 1.0 - (rsi - oversold) / (bullish_transition - oversold) * (
+            1.0 - bullish_transition_score
+        )
 
     if rsi > overbought:
         return -1.0
     if rsi > bearish_transition:
-        return -bullish_transition_score - (rsi - bearish_transition) / (overbought - bearish_transition) * (1.0 - bullish_transition_score)
+        return -bullish_transition_score - (rsi - bearish_transition) / (
+            overbought - bearish_transition
+        ) * (1.0 - bullish_transition_score)
 
     if neutral_low <= rsi <= neutral_high:
         return 0.0
 
     if bullish_transition <= rsi < neutral_low:
-        return bullish_transition_score * (1.0 - (rsi - bullish_transition) / (neutral_low - bullish_transition))
+        return bullish_transition_score * (
+            1.0 - (rsi - bullish_transition) / (neutral_low - bullish_transition)
+        )
 
     # Bearish transition band: RSI in (neutral_high, bearish_transition] (implicit else-branch).
     return -bullish_transition_score * (rsi - neutral_high) / (bearish_transition - neutral_high)
@@ -100,7 +106,8 @@ def _score_macd(s: dict) -> float:
 
 
 def _score_bollinger(s: dict) -> float:
-    """Scores Bollinger %B, treating extreme band breaches as high-conviction mean-reversion signals.
+    """Scores Bollinger %B, treating extreme band breaches as high-conviction
+    mean-reversion signals.
 
     Breaches below 0.0 (below lower band) are scored bullish; breaches above
     1.0 (above upper band) are scored bearish, with a 0.5 floor/ceiling boost
@@ -115,10 +122,15 @@ def _score_bollinger(s: dict) -> float:
     bb = float(s.get("bb_percent_b", 0.5))
 
     if bb < 0.0:
-        return min(1.0, abs(bb) * TECHNICAL.bollinger_breach_multiplier + TECHNICAL.bollinger_breach_boost)
+        return min(
+            1.0, abs(bb) * TECHNICAL.bollinger_breach_multiplier + TECHNICAL.bollinger_breach_boost
+        )
 
     if bb > 1.0:
-        return max(-1.0, -(bb - 1.0) * TECHNICAL.bollinger_breach_multiplier - TECHNICAL.bollinger_breach_boost)
+        return max(
+            -1.0,
+            -(bb - 1.0) * TECHNICAL.bollinger_breach_multiplier - TECHNICAL.bollinger_breach_boost,
+        )
 
     return 0.5 - bb
 
@@ -148,7 +160,9 @@ def _score_adx_amplified(s: dict, base_direction: float) -> float:
     elif adx > amplify_threshold:
         multiplier = amplify_multiplier
     else:
-        multiplier = dampen_multiplier + (adx - dampen_threshold) / (amplify_threshold - dampen_threshold) * (amplify_multiplier - dampen_multiplier)
+        multiplier = dampen_multiplier + (adx - dampen_threshold) / (
+            amplify_threshold - dampen_threshold
+        ) * (amplify_multiplier - dampen_multiplier)
 
     return float(np.clip(base_direction * multiplier, -1.0, 1.0))
 
@@ -201,9 +215,9 @@ class TechnicalStatisticalAgent:
           sourced from settings.TECHNICAL_INDICATOR_WEIGHTS.
     """
 
-    WEIGHTS: dict[str, float] = dict(settings.TECHNICAL_INDICATOR_WEIGHTS)
+    WEIGHTS: ClassVar[dict[str, float]] = dict(settings.TECHNICAL_INDICATOR_WEIGHTS)
 
-    def analyze(self, ticker: str, session_state: dict) -> Optional[TechnicalSignal]:
+    def analyze(self, ticker: str, session_state: dict) -> TechnicalSignal | None:
         """Analyzes a single ticker's session state parameters to generate a TechnicalSignal.
 
         Returns None if any required indicator key is absent, None, or non-finite in
@@ -357,7 +371,9 @@ class TechnicalStatisticalAgent:
                 if signal is not None:
                     results[ticker] = signal
                 else:
-                    errors.append(f"technical_analysis[{ticker}]: missing required indicator fields")
+                    errors.append(
+                        f"technical_analysis[{ticker}]: missing required indicator fields"
+                    )
             except Exception as exc:
                 logger.warning(
                     "batch_analyze: %s failed — %s: %s",

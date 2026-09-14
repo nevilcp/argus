@@ -39,12 +39,15 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
 from argus.config import settings
 from argus.data.pipeline import MFTDataPipeline
-from argus.orchestration.reconciliation import default_checkpoint_retention_cutoff, prune_checkpoints
+from argus.orchestration.reconciliation import (
+    default_checkpoint_retention_cutoff,
+    prune_checkpoints,
+)
 from argus.orchestration.state import ARGUSState
 from argus.params import COLLECTOR
 from argus.risk.kill_switch import get_kill_switch
@@ -58,7 +61,7 @@ logger = logging.getLogger("argus.collector")
 _DECISION_SIGNAL_FIELDS = ("technical", "macro", "fundamental", "sentiment", "risk", "allocation")
 
 
-class CycleOutcome(str, Enum):
+class CycleOutcome(StrEnum):
     """What a completed run_collection_cycle() call actually achieved.
 
     The three outcomes issue #91 asks the collector to tell apart — market
@@ -152,7 +155,8 @@ def _summarize_degraded_inputs(decisions: list[ARGUSDecision]) -> dict[str, int]
         {signal_name: count}, omitting any signal that degraded zero times.
     """
     counts = {
-        name: sum(1 for d in decisions if getattr(d, name) is None) for name in _DECISION_SIGNAL_FIELDS
+        name: sum(1 for d in decisions if getattr(d, name) is None)
+        for name in _DECISION_SIGNAL_FIELDS
     }
     return {name: count for name, count in counts.items() if count > 0}
 

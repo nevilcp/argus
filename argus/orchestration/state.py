@@ -18,11 +18,11 @@ from __future__ import annotations
 import operator
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Annotated, Optional, TypedDict
+from typing import Annotated, TypedDict
 
 from argus.schemas.signals import (
-    ARGUSDecision,
     AggregatedSignal,
+    ARGUSDecision,
     FundamentalSignal,
     MacroContext,
     PortfolioAllocation,
@@ -59,10 +59,10 @@ class ARGUSState(TypedDict):
     backtest_mode: bool
     """When True, enables ticker anonymization in fundamental analysis prompts."""
 
-    session_seed: Optional[int]
+    session_seed: int | None
     """Integer date stamp used to deterministically seed anonymization in backtests."""
 
-    as_of: Optional[datetime]
+    as_of: datetime | None
     """Point-in-time cutoff for cultural-memory reads: excludes trade outcomes and
     decision documents stored after this timestamp (see memory.cultural's `as_of`
     parameters). None (default) applies no filtering — the live production path.
@@ -79,7 +79,7 @@ class ARGUSState(TypedDict):
     """Mapping of ticker → compressed technical feature dict (rsi, macd, etc.)."""
 
     # ── Node 2: macro_analysis ────────────────────────────────────────────────
-    macro_context: Optional[MacroContext]
+    macro_context: MacroContext | None
     """Live MacroContext from MacroStatisticalAgent. Runs in parallel with, not ahead
     of, the three specialist agents below — none of them consumes it. Its
     agent_multipliers are read once, by orchestration/aggregator.py, as a per-agent
@@ -107,7 +107,7 @@ class ARGUSState(TypedDict):
     """Mapping of ticker → AggregatedSignal from HybridSignalAggregator."""
 
     # ── Node 6: portfolio_allocation ──────────────────────────────────────────
-    portfolio_allocation: Optional[PortfolioAllocation]
+    portfolio_allocation: PortfolioAllocation | None
     """Final PortfolioAllocation from PortfolioManagerAgent."""
 
     # ── Node 7: log_decisions ────────────────────────────────────────────────
@@ -144,11 +144,11 @@ class TickerSnapshot:
         aggregated: This ticker's AggregatedSignal, or None if absent.
     """
 
-    technical: Optional[TechnicalSignal] = None
-    fundamental: Optional[FundamentalSignal] = None
-    sentiment: Optional[SentimentSignal] = None
-    risk: Optional[RiskAssessment] = None
-    aggregated: Optional[AggregatedSignal] = None
+    technical: TechnicalSignal | None = None
+    fundamental: FundamentalSignal | None = None
+    sentiment: SentimentSignal | None = None
+    risk: RiskAssessment | None = None
+    aggregated: AggregatedSignal | None = None
 
     @property
     def risk_approved(self) -> bool:
