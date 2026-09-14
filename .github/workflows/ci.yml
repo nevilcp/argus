@@ -42,6 +42,10 @@ jobs:
         if: matrix.python-version == '3.11'
         run: ruff check .
 
+      - name: Format check (ruff)
+        if: matrix.python-version == '3.11'
+        run: ruff format --check .
+
       - name: Type-check (mypy)
         if: matrix.python-version == '3.11'
         run: mypy argus/
