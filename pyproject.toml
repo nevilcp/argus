@@ -107,9 +107,16 @@ target-version = "py311"
 # version defaults to. This is the set that was actually enforced across the
 # rebuild (ruff 0.15's defaults): pyflakes plus the pycodestyle error subset,
 # plus DTZ (naive datetime construction) — real in a system whose outcome
-# resolution is date-keyed (DEP-10). UP (PEP 604/585 annotations) is still
-# deferred; it's a style change, not a correctness one.
-select = ["E4", "E7", "E9", "F", "DTZ"]
+# resolution is date-keyed (DEP-10). Widened from the original E4/E7/E9/F/DTZ
+# to the full pycodestyle set, plus a handful of low-noise, high-signal groups
+# now that the tree is clean under them: I (import sorting), UP (PEP 604/585
+# annotations — no longer deferred, this is a >=3.11-only codebase), B
+# (bugbear correctness patterns like exception chaining), SIM (simplify),
+# C4 (comprehensions), RUF (ruff-specific), PT (pytest style), PERF (perflint).
+# Deliberately left out: D (pydocstyle) fights this repo's prose-heavy
+# explanatory docstrings; ANN and PL duplicate what mypy and Pydantic already
+# enforce; S (bandit) is mostly noise on test asserts.
+select = ["E", "W", "F", "I", "UP", "B", "SIM", "C4", "RUF", "PT", "DTZ", "PERF"]
 
 [tool.ruff.lint.per-file-ignores]
 # Test fixtures deliberately construct the same naive local timestamps production
@@ -118,6 +125,14 @@ select = ["E4", "E7", "E9", "F", "DTZ"]
 # would be noise, not signal, unlike the reviewed per-call-site DTZ suppressions
 # production code carries
 "tests/*" = ["DTZ"]
+# These three agents build their LLM prompts as long, carefully worded string
+# literals (the actual text sent to the model). Reflowing them to fit 100
+# columns means splitting sentences and bullet lines at arbitrary points,
+# which is a real risk to prompt clarity for zero benefit — the prose itself,
+# not the surrounding code, is the thing worth keeping stable here.
+"argus/agents/fundamental.py" = ["E501"]
+"argus/agents/sentiment.py" = ["E501"]
+"argus/agents/portfolio.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.11"
