@@ -4,7 +4,7 @@ Multi-agent financial intelligence system orchestrating specialist LLMs and stat
 
 ![CI](https://github.com/nevilcp/argus/actions/workflows/ci.yml/badge.svg)
 ![Python Version](https://img.shields.io/badge/python-%E2%89%A53.11-blue)
-![Tests](https://img.shields.io/badge/tests-432_passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-551_passing-brightgreen)
 ![License](https://img.shields.io/badge/license-Proprietary-red)
 
 > **RESEARCH PROJECT ONLY — NOT FINANCIAL ADVICE.** ARGUS is not registered with the SEC or any regulatory body. All outputs are for educational and research purposes only. Do not make investment decisions based on this system's output.

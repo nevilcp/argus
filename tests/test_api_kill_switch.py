@@ -21,14 +21,6 @@ from argus.risk import paper_book
 from argus.risk.kill_switch import KillSwitch
 
 
-@pytest.fixture(autouse=True)
-def _reset_kill_switch_singleton():
-    """Clears the module-level KillSwitch singleton before and after each test."""
-    kill_switch_module._kill_switch = None
-    yield
-    kill_switch_module._kill_switch = None
-
-
 @pytest.fixture
 def client():
     """A TestClient over api.main.app without running its lifespan startup."""

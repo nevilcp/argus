@@ -31,14 +31,6 @@ from argus.seams import FixtureMarketDataProvider
 _FETCH_VIX = "argus.data.fetchers.fetch_vix"
 
 
-@pytest.fixture(autouse=True)
-def _reset_kill_switch_singleton() -> None:
-    """Clears the module-level KillSwitch singleton before and after each test."""
-    kill_switch_module._kill_switch = None
-    yield
-    kill_switch_module._kill_switch = None
-
-
 def _make_ks(risk_tolerance: str = "MODERATE", inception: float = 100_000.0) -> KillSwitch:
     """Builds a KillSwitch with inception state set directly, bypassing start()'s thread.
 

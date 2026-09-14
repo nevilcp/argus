@@ -25,20 +25,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 import api.main as api_main
-import argus.risk.kill_switch as kill_switch_module
-from argus.data.live_session_cache import AdmissionResult, LiveSessionCache
+from argus.data.live_session_cache import AdmissionResult
 
 _PAYLOAD = {"tickers": ["AAPL"], "total_wealth": 100_000, "invest_pct": 0.5}
 
 
 @pytest.fixture(autouse=True)
-def _reset_singletons(monkeypatch):
-    """Clears the kill-switch singleton and installs a fresh live session cache around each test."""
-    kill_switch_module._kill_switch = None
-    monkeypatch.setattr(api_main, "_live_cache", LiveSessionCache(interval_minutes=1))
-    monkeypatch.setattr(api_main.settings, "ARGUS_API_KEY", "")
-    yield
-    kill_switch_module._kill_switch = None
+def _reset_singletons(_fresh_live_cache, _no_api_key):
+    """Kill switch, live cache, and API key are all reset around each test via conftest fixtures."""
 
 
 @pytest.fixture
