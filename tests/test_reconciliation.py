@@ -6,7 +6,7 @@ computation, and reading decisions back out of the LangGraph checkpoint.
 
 import json
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -20,6 +20,7 @@ from argus.memory.cultural import CulturalMemoryManager
 from argus.orchestration.aggregator import HybridSignalAggregator
 from argus.orchestration.graph import build_checkpoint_serde, build_graph
 from argus.orchestration.reconciliation import (
+    CompactionResult,
     ReconciliationReport,
     compact_decisions_jsonl,
     compute_realized_return,
@@ -32,6 +33,7 @@ from argus.orchestration.reconciliation import (
     run_reconciliation_pass,
 )
 from argus.orchestration.state import ARGUSState
+from argus.params import RECONCILIATION
 from argus.risk import paper_book
 from argus.risk.paper_book import PaperBook
 from argus.schemas.signals import (
@@ -52,7 +54,9 @@ from argus.seams import FixtureLLMClient, FixtureMarketDataProvider
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 
-def _technical(signal: Signal, conviction: float, ticker: str = "TEST", price: float = 100.0) -> TechnicalSignal:
+def _technical(
+    signal: Signal, conviction: float, ticker: str = "TEST", price: float = 100.0
+) -> TechnicalSignal:
     """Builds a TechnicalSignal with fixed indicators, varying only the given fields."""
     return TechnicalSignal(
         ticker=ticker,
@@ -153,7 +157,9 @@ class _FakeMarketData:
         return pd.DataFrame({"close": self._closes[ticker]})
 
 
-def _ten_day_series(start: datetime, start_price: float = 100.0, ticker: str = "TEST") -> _FakeMarketData:
+def _ten_day_series(
+    start: datetime, start_price: float = 100.0, ticker: str = "TEST"
+) -> _FakeMarketData:
     """Builds a 10-day daily close series rising by 1.0 per day from start_price."""
     dates = pd.date_range(start=start, periods=10, freq="D")
     closes = pd.Series([start_price + i for i in range(10)], index=dates)
@@ -342,7 +348,9 @@ def test_compute_realized_return_none_when_horizon_not_yet_reached():
         technical=_technical(Signal.BULLISH, 0.8),
         allocation=_allocation(),
     )
-    market_data = _ten_day_series(start)  # only 10 days, short of the 30-day horizon requested below
+    market_data = _ten_day_series(
+        start
+    )  # only 10 days, short of the 30-day horizon requested below
     assert compute_realized_return(decision, market_data, horizon_days=30) is None
 
 
@@ -543,6 +551,20 @@ def test_load_decisions_from_checkpoints_round_trips_a_real_graph_run(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def _compact(
+    path: Path | str,
+    cutoff: datetime,
+    unresolved_cutoff: datetime = datetime(1900, 1, 1),
+    resolved_ids: frozenset[str] = frozenset(),
+) -> CompactionResult:
+    """compact_decisions_jsonl with a default unresolved_cutoff far enough in the past
+    to be a no-op.
+
+    Lets tests that don't exercise unresolved-retention behavior omit it.
+    """
+    return compact_decisions_jsonl(str(path), cutoff, unresolved_cutoff, resolved_ids)
+
+
 def test_compact_decisions_jsonl_drops_sessions_before_cutoff(tmp_path):
     """Decisions older than cutoff are dropped; everything at or after it is kept."""
     path = _write_decisions_log(
@@ -552,16 +574,19 @@ def test_compact_decisions_jsonl_drops_sessions_before_cutoff(tmp_path):
         ARGUSDecision(ticker="NEW", session_timestamp=datetime(2026, 1, 20)),
     )
 
-    retained = compact_decisions_jsonl(str(path), cutoff=datetime(2026, 1, 10))
+    result = _compact(path, cutoff=datetime(2026, 1, 10))
 
-    assert retained == 2
+    assert result.retained == 2
+    assert result.retired_unresolved == 0
     tickers = {d.ticker for d in load_decisions_from_jsonl(str(path))}
     assert tickers == {"EXACT", "NEW"}
 
 
 def test_compact_decisions_jsonl_missing_file_is_a_noop():
     """A path that doesn't exist yet returns 0 and writes nothing."""
-    assert compact_decisions_jsonl("/nonexistent/decisions.jsonl", cutoff=datetime(2026, 1, 1)) == 0
+    result = _compact("/nonexistent/decisions.jsonl", cutoff=datetime(2026, 1, 1))
+    assert result.retained == 0
+    assert result.retired_unresolved == 0
 
 
 def test_compact_decisions_jsonl_nothing_to_drop_leaves_the_file_untouched(tmp_path):
@@ -572,10 +597,112 @@ def test_compact_decisions_jsonl_nothing_to_drop_leaves_the_file_untouched(tmp_p
     )
     original_mtime = path.stat().st_mtime_ns
 
-    retained = compact_decisions_jsonl(str(path), cutoff=datetime(2026, 1, 1))
+    result = _compact(path, cutoff=datetime(2026, 1, 1))
 
-    assert retained == 1
+    assert result.retained == 1
     assert path.stat().st_mtime_ns == original_mtime
+
+
+def test_compact_decisions_jsonl_never_drops_an_unresolved_position_decision_at_routine_cutoff(
+    tmp_path,
+):
+    """A decision that took a position but has no stored outcome survives routine compaction.
+
+    Reproduces the observed bug: a reconcile pass that finds nothing to
+    reconcile (e.g. a missed schedule tick, or a price fetch failure) must
+    not cost the decision its one chance at being scored, however old it is
+    relative to the ordinary retention cutoff.
+    """
+    old = ARGUSDecision(
+        ticker="UNRESOLVED",
+        session_timestamp=datetime(2020, 1, 1),
+        technical=_technical(Signal.BULLISH, 0.8),
+        allocation=_allocation(ticker="UNRESOLVED"),
+    )
+    path = _write_decisions_log(tmp_path / "decisions.jsonl", old)
+
+    result = _compact(
+        path,
+        cutoff=datetime(2026, 1, 1),
+        unresolved_cutoff=datetime(2019, 1, 1),
+        resolved_ids=frozenset(),
+    )
+
+    assert result.retained == 1
+    assert result.retired_unresolved == 0
+    assert {d.ticker for d in load_decisions_from_jsonl(str(path))} == {"UNRESOLVED"}
+
+
+def test_compact_decisions_jsonl_retires_an_unresolved_decision_past_the_wider_cutoff(
+    tmp_path,
+):
+    """An unresolved decision is dropped, and counted separately, once it ages past
+    unresolved_cutoff."""
+    old = ARGUSDecision(
+        ticker="STALE",
+        session_timestamp=datetime(2020, 1, 1),
+        technical=_technical(Signal.BULLISH, 0.8),
+        allocation=_allocation(ticker="STALE"),
+    )
+    path = _write_decisions_log(tmp_path / "decisions.jsonl", old)
+
+    result = _compact(
+        path,
+        cutoff=datetime(2026, 1, 1),
+        unresolved_cutoff=datetime(2025, 1, 1),
+        resolved_ids=frozenset(),
+    )
+
+    assert result.retained == 0
+    assert result.retired_unresolved == 1
+    assert load_decisions_from_jsonl(str(path)) == []
+
+
+def test_compact_decisions_jsonl_drops_a_resolved_decision_at_the_routine_cutoff(tmp_path):
+    """A decision with a stored outcome is pruned at the ordinary cutoff, not held past it."""
+    old = ARGUSDecision(
+        ticker="RESOLVED",
+        session_timestamp=datetime(2020, 1, 1),
+        technical=_technical(Signal.BULLISH, 0.8),
+        allocation=_allocation(ticker="RESOLVED"),
+    )
+    path = _write_decisions_log(tmp_path / "decisions.jsonl", old)
+
+    result = _compact(
+        path,
+        cutoff=datetime(2026, 1, 1),
+        unresolved_cutoff=datetime(2019, 1, 1),
+        resolved_ids=frozenset({old.decision_id}),
+    )
+
+    assert result.retained == 0
+    assert result.retired_unresolved == 0
+    assert load_decisions_from_jsonl(str(path)) == []
+
+
+def test_compact_decisions_jsonl_a_no_position_decision_is_resolved_by_definition(tmp_path):
+    """A decision with no position is dropped at the routine cutoff even with no stored outcome.
+
+    It never needed reconciliation, so it can never appear in resolved_ids —
+    the routine cutoff must still apply to it, or a HOLD-only history would
+    never shrink.
+    """
+    old = ARGUSDecision(
+        ticker="HOLD",
+        session_timestamp=datetime(2020, 1, 1),
+        technical=_technical(Signal.NEUTRAL, 0.0),
+    )
+    path = _write_decisions_log(tmp_path / "decisions.jsonl", old)
+
+    result = _compact(
+        path,
+        cutoff=datetime(2026, 1, 1),
+        unresolved_cutoff=datetime(2019, 1, 1),
+        resolved_ids=frozenset(),
+    )
+
+    assert result.retained == 0
+    assert result.retired_unresolved == 0
 
 
 # ---------------------------------------------------------------------------
@@ -644,6 +771,58 @@ def test_prune_checkpoints_nothing_stale_deletes_nothing(tmp_path):
     assert deleted == 0
 
 
+def test_prune_checkpoints_normalizes_a_non_utc_offset_before_comparing(tmp_path):
+    """A checkpoint timestamped with a non-UTC offset is compared against cutoff in UTC.
+
+    Regression: discarding the offset instead of converting to UTC first shifts the
+    value by the offset's magnitude. This thread's ts is 2026-01-01T20:00:00-05:00
+    (2026-01-02T01:00:00 UTC), one hour *after* the UTC cutoff — it must survive.
+    Naively stripping the offset instead would compare 2026-01-01T20:00:00 (naive)
+    against the same cutoff and wrongly prune it as four hours stale.
+    """
+    db_path = str(tmp_path / "argus_graph.db")
+    non_utc_ts = datetime(2026, 1, 1, 20, 0, 0, tzinfo=timezone(timedelta(hours=-5)))
+    _put_checkpoint(db_path, "offset-thread", non_utc_ts)
+
+    deleted = prune_checkpoints(db_path, cutoff=datetime(2026, 1, 2))
+
+    assert deleted == 0
+
+
+def test_checkpoint_pruning_stabilizes_the_published_file_size_across_successive_cycles(
+    tmp_path,
+):
+    """Repeated collector cycles, each adding one thread and pruning to the retention
+    window, leave the file published to argus-data at a constant size once the window
+    fills — not one that keeps growing with the number of cycles run (issue #99).
+
+    Each thread carries a real decisions payload (rather than an empty checkpoint) so a
+    growing thread count actually moves the file size, the way a real collector cycle's
+    checkpoint does.
+    """
+    db_path = str(tmp_path / "argus_graph.db")
+    retention_days = RECONCILIATION.horizon_days + RECONCILIATION.retention_margin_days
+    sim_now = datetime(2026, 1, 1)
+    payload = [_matured_decision(f"TICK{i}", sim_now) for i in range(20)]
+
+    sizes = []
+    total_cycles = 3 * retention_days
+    for cycle in range(total_cycles):
+        _put_checkpoint(db_path, f"collector-{cycle:04d}", sim_now, decisions=payload)
+        prune_checkpoints(db_path, cutoff=sim_now - timedelta(days=retention_days))
+        sizes.append(Path(db_path).stat().st_size)
+        sim_now += timedelta(days=1)
+
+    # While the retention window is still filling, every cycle's new thread grows the file.
+    assert sizes[retention_days] > sizes[0]
+
+    # Once the window is full, each cycle's new thread displaces exactly one aged-out
+    # thread, so the file stops growing instead of continuing to track cycle count.
+    plateau = sizes[retention_days + 2 :]
+    assert plateau, "test needs more cycles than the retention window to reach a plateau"
+    assert all(size == plateau[0] for size in plateau)
+
+
 # ---------------------------------------------------------------------------
 # run_reconciliation_pass: the end-to-end pass that reads decisions, reconciles
 # them, and bounds every store it touches.
@@ -666,6 +845,31 @@ def _autospec_cultural(expired: int = 0) -> mock.MagicMock:
     cultural.already_reconciled.return_value = set()
     cultural.expire_pending_snapshots.return_value = expired
     return cultural
+
+
+class _FakeCultural:
+    """A stateful CulturalMemoryManager double that actually tracks stored outcomes.
+
+    Unlike _autospec_cultural's fixed return_value, already_reconciled here
+    reflects real state across calls within one test — needed to exercise
+    resolved_ids across two run_reconciliation_pass calls.
+    """
+
+    def __init__(self) -> None:
+        """Starts with no stored outcomes."""
+        self._stored_ids: set[str] = set()
+
+    def already_reconciled(self, decision_ids: list[str]) -> set[str]:
+        """Returns the subset of decision_ids this fake has a stored outcome for."""
+        return {d for d in decision_ids if d in self._stored_ids}
+
+    def store_trade_outcome(self, decision: ARGUSDecision, **_kwargs: object) -> None:
+        """Records decision.decision_id as resolved."""
+        self._stored_ids.add(decision.decision_id)
+
+    def expire_pending_snapshots(self, _cutoff: datetime) -> int:
+        """No PENDING snapshots to expire in this fake."""
+        return 0
 
 
 def test_run_reconciliation_pass_over_matured_decisions_produces_outcome_and_equity(tmp_path):
@@ -706,6 +910,127 @@ def test_run_reconciliation_pass_over_matured_decisions_produces_outcome_and_equ
 
     reloaded = paper_book.load(str(book_path))
     assert reloaded.equity == pytest.approx(105_000.0)
+
+
+def test_run_reconciliation_pass_survives_across_runs_when_resolution_is_unavailable(tmp_path):
+    """A decision whose horizon has passed but whose outcome couldn't be computed is not pruned.
+
+    Reproduces the observed "Reconciled 0/N" failure mode: the decision's
+    session_timestamp is already well past the ordinary retention cutoff, but
+    its price series never reaches the target exit date (as if the reconcile
+    pass keeps finding nothing to work with, run after run). It must survive
+    compaction rather than being destroyed before it ever gets a chance to
+    resolve.
+    """
+    horizon_days = RECONCILIATION.horizon_days
+    old_start = datetime.now() - timedelta(
+        days=horizon_days + RECONCILIATION.retention_margin_days + 5
+    )
+    decision = ARGUSDecision(
+        ticker="UNRESOLVED",
+        session_timestamp=old_start,
+        technical=_technical(Signal.BULLISH, 0.8, ticker="UNRESOLVED"),
+        allocation=_allocation(ticker="UNRESOLVED"),
+    )
+    decisions_log = _write_decisions_log(tmp_path / "decisions.jsonl", decision)
+
+    book_path = tmp_path / "paper_equity.json"
+    paper_book.save(PaperBook(equity=100_000.0, high_water_mark=100_000.0), str(book_path))
+
+    # Only one day of price history: the horizon's target exit date is never reached.
+    market_data = _FakeMarketData({"UNRESOLVED": pd.Series([100.0], index=[old_start])})
+    cultural = _autospec_cultural()
+
+    report = run_reconciliation_pass(
+        market_data,
+        cultural,
+        str(book_path),
+        decisions_log_path=str(decisions_log),
+        horizon_days=horizon_days,
+    )
+
+    assert report.outcomes_stored == 0
+    cultural.store_trade_outcome.assert_not_called()
+    assert report.decisions_compacted == 1
+    assert report.decisions_retired_unresolved == 0
+    survivors = {d.ticker for d in load_decisions_from_jsonl(str(decisions_log))}
+    assert survivors == {"UNRESOLVED"}
+
+
+def test_run_reconciliation_pass_never_double_applies_a_run_whose_other_ticker_resolved_first(
+    tmp_path,
+):
+    """Protecting an unresolved decision past cutoff must not let its run be applied twice.
+
+    One run has two decisions: FAST matures and gets reconciled and compacted
+    out of decisions.jsonl on the first pass, while SLOW stays unresolved and
+    is protected past the same cutoff. The run is partially applied (FAST
+    only) on the first pass. When SLOW finally matures on a second pass, its
+    now-solo recomputation of the same run_timestamp must not compound onto
+    equity again — runs_applied must still remember this run, even though its
+    session_timestamp is already older than the routine retention cutoff.
+    """
+    horizon_days = RECONCILIATION.horizon_days
+    old_start = datetime.now() - timedelta(
+        days=horizon_days + RECONCILIATION.retention_margin_days + 1
+    )
+    fast = ARGUSDecision(
+        ticker="FAST",
+        session_timestamp=old_start,
+        technical=_technical(Signal.BULLISH, 0.8, ticker="FAST", price=100.0),
+        allocation=_allocation(ticker="FAST"),
+    )
+    slow = ARGUSDecision(
+        ticker="SLOW",
+        session_timestamp=old_start,
+        technical=_technical(Signal.BULLISH, 0.8, ticker="SLOW", price=100.0),
+        allocation=_allocation(ticker="SLOW"),
+    )
+    decisions_log = _write_decisions_log(tmp_path / "decisions.jsonl", fast, slow)
+
+    book_path = tmp_path / "paper_equity.json"
+    paper_book.save(PaperBook(equity=100_000.0, high_water_mark=100_000.0), str(book_path))
+
+    fast_prices = pd.Series(
+        [100.0 + i for i in range(20)],
+        index=pd.date_range(start=old_start, periods=20, freq="D"),
+    )
+    market_data = _FakeMarketData(
+        {"FAST": fast_prices, "SLOW": pd.Series([100.0], index=[old_start])}
+    )
+    cultural = _FakeCultural()
+
+    first = run_reconciliation_pass(
+        market_data,
+        cultural,
+        str(book_path),
+        decisions_log_path=str(decisions_log),
+        horizon_days=horizon_days,
+    )
+
+    assert first.outcomes_stored == 1
+    equity_after_first_pass = first.equity
+    assert equity_after_first_pass != pytest.approx(100_000.0)
+    assert {d.ticker for d in load_decisions_from_jsonl(str(decisions_log))} == {"SLOW"}
+
+    # SLOW's price history finally extends far enough to mature.
+    market_data._closes["SLOW"] = pd.Series(
+        [100.0 + i for i in range(20)],
+        index=pd.date_range(start=old_start, periods=20, freq="D"),
+    )
+
+    second = run_reconciliation_pass(
+        market_data,
+        cultural,
+        str(book_path),
+        decisions_log_path=str(decisions_log),
+        horizon_days=horizon_days,
+    )
+
+    assert second.outcomes_stored == 1
+    assert second.equity == pytest.approx(equity_after_first_pass), (
+        "SLOW maturing alone must not re-compound a run already applied via FAST"
+    )
 
 
 def test_run_reconciliation_pass_reading_from_checkpoints_bounds_checkpoints(tmp_path):
@@ -796,6 +1121,43 @@ def test_run_reconciliation_pass_one_store_failing_leaves_the_others_bounded_and
     assert report.outcomes_stored == 1
     assert len(report.errors) == 1
     assert "checkpoint" in report.errors[0]
+
+
+def test_run_reconciliation_pass_truncated_paper_equity_file_neither_resets_nor_double_applies(
+    tmp_path,
+):
+    """A truncated paper_equity.json fails the paper-book step instead of silently starting
+    fresh — which would both reset equity and re-apply a run already reflected in it."""
+    start = datetime(2026, 1, 1)
+    decisions_log = _write_decisions_log(
+        tmp_path / "decisions.jsonl", _matured_decision("TEST", start)
+    )
+
+    book_path = tmp_path / "paper_equity.json"
+    good_book = PaperBook(equity=12_345.0, high_water_mark=15_000.0)
+    good_book.apply_run(start, -0.05)  # this run is already reflected in equity and runs_applied
+    paper_book.save(good_book, str(book_path))
+    full = book_path.read_bytes()
+    truncated = full[: len(full) // 2]
+    book_path.write_bytes(truncated)
+
+    market_data = _ten_day_series(start, start_price=100.0)
+    cultural = _autospec_cultural()
+
+    report = run_reconciliation_pass(
+        market_data,
+        cultural,
+        str(book_path),
+        decisions_log_path=str(decisions_log),
+        horizon_days=5,
+    )
+
+    assert report.paper_book_updated is False
+    assert report.equity == 0.0  # unset default — neither reset to fresh, nor double-applied
+    assert len(report.errors) == 1
+    assert "paper-book update failed" in report.errors[0]
+    # The persisted file is untouched: still truncated, not silently overwritten by a fresh book.
+    assert book_path.read_bytes() == truncated
 
 
 def test_run_reconciliation_pass_paper_book_not_partially_applied_when_its_step_fails(

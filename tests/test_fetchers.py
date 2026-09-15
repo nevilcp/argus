@@ -4,23 +4,35 @@ Covers retry classification, NewsAPI budget enforcement, and the "None
 means unavailable, not neutral" contract for NewsAPI.
 """
 
-from datetime import timedelta
+import json
+import multiprocessing
+from datetime import UTC, datetime, timedelta
 from unittest import mock
 
 import pandas as pd
 import pytest
 import requests
+import yfinance as yf
 import yfinance.exceptions as yf_exceptions
 from newsapi.newsapi_exception import NewsAPIException
 
 from argus.data import fetchers
-from argus.data.cache import DailyBarCache
+from argus.data.cache import DailyBarCache, TTLCache
 
 
 def _http_error(status_code: int, headers: dict | None = None) -> requests.exceptions.HTTPError:
     """Builds an HTTPError whose .response mimics a real requests response."""
     response = mock.Mock(status_code=status_code, headers=headers or {})
     return requests.exceptions.HTTPError(response=response)
+
+
+def _crumb_error() -> requests.exceptions.HTTPError:
+    """Builds a 401 HTTPError matching Yahoo's actual "Invalid Crumb" response body."""
+    response = mock.Mock(status_code=401, headers={})
+    return requests.exceptions.HTTPError(
+        '{"finance":{"result":null,"error":{"code":"Unauthorized","description":"Invalid Crumb"}}}',
+        response=response,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -52,7 +64,7 @@ def test_is_retryable_timeout_and_connection_errors():
 
 
 @pytest.mark.parametrize(
-    "status_code,expected",
+    ("status_code", "expected"),
     [(401, False), (403, False), (404, False), (429, True), (423, True), (500, True), (503, True)],
 )
 def test_is_retryable_http_status_codes(status_code, expected):
@@ -63,6 +75,53 @@ def test_is_retryable_http_status_codes(status_code, expected):
 def test_is_retryable_defaults_true_for_unclassified_exceptions():
     """An exception outside the known taxonomy defaults to retryable, matching prior behavior."""
     assert fetchers._is_retryable(ValueError("unexpected")) is True
+
+
+# ---------------------------------------------------------------------------
+# _is_crumb_handshake_failure
+# ---------------------------------------------------------------------------
+
+
+def test_is_crumb_handshake_failure_detects_yahoo_invalid_crumb():
+    """Yahoo's actual 401 body is recognized as a crumb handshake failure."""
+    assert fetchers._is_crumb_handshake_failure(_crumb_error()) is True
+
+
+def test_is_crumb_handshake_failure_false_for_credential_401():
+    """A plain 401 with no crumb mention (e.g. a bad FRED/NewsAPI key) is not a crumb failure."""
+    assert fetchers._is_crumb_handshake_failure(_http_error(401)) is False
+
+
+def test_is_crumb_handshake_failure_false_for_non_401_status():
+    """The "crumb" text alone, on a different status code, does not qualify."""
+    response = mock.Mock(status_code=500, headers={})
+    exc = requests.exceptions.HTTPError("Invalid Crumb", response=response)
+    assert fetchers._is_crumb_handshake_failure(exc) is False
+
+
+# ---------------------------------------------------------------------------
+# _reset_yfinance_session
+# ---------------------------------------------------------------------------
+
+
+def test_reset_yfinance_session_clears_in_memory_and_persisted_cookie():
+    """Reset clears both the singleton's in-memory crumb/cookie and the on-disk cookie cache.
+
+    Regression test: clearing only _cookie/_crumb isn't enough — yfinance
+    reloads a persisted cookie from disk before ever attempting a new
+    network handshake (see _reset_yfinance_session's docstring), so a stale
+    cookie there would survive an in-memory-only reset and get reused.
+    """
+    data_client = yf.data.YfData()
+    data_client._cookie = "stale-cookie"
+    data_client._crumb = "stale-crumb"
+    yf.cache.get_cookie_cache().store("curlCffi", {"stale": "cookie-jar"})
+
+    fetchers._reset_yfinance_session()
+
+    assert data_client._cookie is None
+    assert data_client._crumb is None
+    assert yf.cache.get_cookie_cache().lookup("curlCffi") is None
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +213,41 @@ def test_with_retry_succeeds_without_sleeping_on_first_attempt(monkeypatch):
     assert ok() == "value"
 
 
+def test_with_retry_resets_yfinance_session_and_retries_crumb_handshake_failures(monkeypatch):
+    """A crumb handshake failure resets yfinance's session and gets retried, unlike a plain 401."""
+    monkeypatch.setattr(fetchers.time, "sleep", lambda _s: None)
+    reset_calls = mock.Mock()
+    monkeypatch.setattr(fetchers, "_reset_yfinance_session", reset_calls)
+    calls = {"n": 0}
+
+    @fetchers._with_retry
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 2:
+            raise _crumb_error()
+        return "ok"
+
+    assert flaky() == "ok"
+    assert calls["n"] == 2
+    reset_calls.assert_called_once()
+
+
+def test_with_retry_raises_named_error_after_exhausting_crumb_handshake_retries(monkeypatch):
+    """Persistent crumb failures raise YahooCrumbHandshakeError, not a bare upstream 401."""
+    monkeypatch.setattr(fetchers.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(fetchers, "_reset_yfinance_session", mock.Mock())
+    calls = {"n": 0}
+
+    @fetchers._with_retry
+    def flaky():
+        calls["n"] += 1
+        raise _crumb_error()
+
+    with pytest.raises(fetchers.YahooCrumbHandshakeError):
+        flaky()
+    assert calls["n"] == fetchers._RETRY_ATTEMPTS
+
+
 # ---------------------------------------------------------------------------
 # NewsAPI budget + fetch_news
 # ---------------------------------------------------------------------------
@@ -167,14 +261,56 @@ def test_newsapi_budget_exhausts_after_daily_limit():
     assert budget.try_reserve() is False
 
 
-def test_newsapi_budget_resets_on_new_day():
-    """Rolling over to a new UTC date resets the counter."""
+def test_newsapi_budget_resets_on_new_day_within_one_instance(monkeypatch):
+    """A single long-lived instance rolls its counter over at UTC midnight.
+
+    The API server's _NEWSAPI_BUDGET singleton lives for the process's whole
+    lifetime and spans midnight UTC — this proves the rollover holds across
+    two calls on one instance, not just across two freshly constructed ones.
+    """
+
+    class _FixedDatetime(datetime):
+        _now = datetime(2026, 1, 1, tzinfo=UTC)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls._now
+
+    monkeypatch.setattr(fetchers, "datetime", _FixedDatetime)
     budget = fetchers._NewsApiBudget(daily_limit=1)
     assert budget.try_reserve() is True
     assert budget.try_reserve() is False
 
-    budget._date = budget._date - timedelta(days=1)
+    _FixedDatetime._now = datetime(2026, 1, 2, tzinfo=UTC)
     assert budget.try_reserve() is True
+
+
+def test_newsapi_budget_treats_wrong_typed_persisted_fields_as_absent():
+    """A syntactically valid but wrong-typed persisted count degrades to 0, not a raise.
+
+    A `requests_today` of null (int(None) raises TypeError) is a plausible
+    partial-write shape, not just outright-invalid JSON.
+    """
+    budget = fetchers._NewsApiBudget(daily_limit=1)
+    today = datetime.now(UTC).date()
+    budget._persist_path().write_text(
+        json.dumps({"date": today.isoformat(), "requests_today": None})
+    )
+
+    assert budget.try_reserve() is True
+
+
+def test_newsapi_budget_ignores_a_stale_persisted_date():
+    """A persisted count from a prior UTC day is not carried into today's."""
+    budget = fetchers._NewsApiBudget(daily_limit=2)
+    yesterday = datetime.now(UTC).date() - timedelta(days=1)
+    budget._persist_path().write_text(
+        json.dumps({"date": yesterday.isoformat(), "requests_today": 2})
+    )
+
+    assert budget.try_reserve() is True
+    assert budget.try_reserve() is True
+    assert budget.try_reserve() is False
 
 
 def test_newsapi_budget_survives_a_fresh_process():
@@ -192,17 +328,71 @@ def test_newsapi_budget_survives_a_fresh_process():
     assert second.try_reserve() is False
 
 
-def test_newsapi_budget_ignores_a_stale_persisted_date():
-    """A persisted count from a prior UTC day is not carried into a new process's day."""
-    stale = fetchers._NewsApiBudget(daily_limit=2)
-    assert stale.try_reserve() is True
-    stale._date = stale._date - timedelta(days=1)
-    stale._save_to_disk()
+def _reserve_n_times(
+    data_dir: str, daily_limit: int, attempts: int, result_queue: "multiprocessing.Queue[int]"
+) -> None:
+    """Worker for test_newsapi_budget_enforces_cap_across_processes.
 
-    fresh = fetchers._NewsApiBudget(daily_limit=2)
-    assert fresh.try_reserve() is True
-    assert fresh.try_reserve() is True
-    assert fresh.try_reserve() is False
+    Runs in its own forked process (a separate Python interpreter for the
+    purposes of file locking) and reports how many of its attempts were
+    reserved, so the test can sum successes across processes.
+    """
+    from argus.data import fetchers as _fetchers
+
+    _fetchers.settings.ARGUS_DATA_DIR = data_dir
+    budget = _fetchers._NewsApiBudget(daily_limit=daily_limit)
+    result_queue.put(sum(1 for _ in range(attempts) if budget.try_reserve()))
+
+
+def test_newsapi_budget_enforces_cap_across_processes(tmp_path):
+    """Two independent OS processes racing on the same state dir don't jointly exceed the cap.
+
+    This is the API server / collector scenario the ticket describes: both
+    read-modify-write the same on-disk counter, so serializing only within
+    one process's threads isn't enough.
+    """
+    daily_limit = 20
+    ctx = multiprocessing.get_context("fork")
+    result_queue: multiprocessing.Queue[int] = ctx.Queue()
+    procs = [
+        ctx.Process(
+            target=_reserve_n_times, args=(str(tmp_path), daily_limit, daily_limit, result_queue)
+        )
+        for _ in range(2)
+    ]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join()
+
+    total_reserved = sum(result_queue.get() for _ in procs)
+    assert total_reserved == daily_limit
+
+
+def _raise_os_error(*_args: object, **_kwargs: object) -> None:
+    raise OSError("simulated disk error")
+
+
+def test_newsapi_budget_degrades_on_disk_error(monkeypatch):
+    """A disk error during the reserve cycle (e.g. a read-only volume) returns False,
+    not a raise."""
+    monkeypatch.setattr(fetchers, "open", _raise_os_error, raising=False)
+
+    budget = fetchers._NewsApiBudget(daily_limit=5)
+    assert budget.try_reserve() is False
+
+
+def test_fetch_news_returns_none_when_reservation_hits_a_disk_error(monkeypatch):
+    """A disk error while reserving a budget slot degrades fetch_news to None instead of raising."""
+    monkeypatch.setattr(fetchers.settings, "newsapi_key", "test-key")
+    monkeypatch.setattr(fetchers, "_NEWSAPI_BUDGET", fetchers._NewsApiBudget())
+    monkeypatch.setattr(fetchers, "open", _raise_os_error, raising=False)
+
+    with mock.patch("newsapi.NewsApiClient") as mock_client_cls:
+        result = fetchers.fetch_news("AAPL", "Apple Inc")
+
+    assert result is None
+    mock_client_cls.assert_not_called()
 
 
 def test_fetch_news_returns_none_without_api_key(monkeypatch):
@@ -231,7 +421,12 @@ def test_fetch_news_returns_articles_at_max_page_size(monkeypatch):
     mock_client = mock.Mock()
     mock_client.get_everything.return_value = {
         "articles": [
-            {"title": "Real headline", "description": "d", "publishedAt": "t", "source": {"name": "s"}},
+            {
+                "title": "Real headline",
+                "description": "d",
+                "publishedAt": "t",
+                "source": {"name": "s"},
+            },
             {"title": "", "description": "no title, dropped"},
         ]
     }
@@ -239,7 +434,9 @@ def test_fetch_news_returns_articles_at_max_page_size(monkeypatch):
     with mock.patch("newsapi.NewsApiClient", return_value=mock_client):
         result = fetchers.fetch_news("AAPL", "Apple Inc")
 
-    assert result == [{"title": "Real headline", "description": "d", "published_at": "t", "source": "s"}]
+    assert result == [
+        {"title": "Real headline", "description": "d", "published_at": "t", "source": "s"}
+    ]
     assert mock_client.get_everything.call_args.kwargs["page_size"] == 100
 
 
@@ -313,3 +510,39 @@ def test_daily_bar_cache_is_constructed_once_and_reused(monkeypatch):
     second = fetchers._daily_bar_cache()
 
     assert first is second
+
+
+class _FakeFred:
+    """Stub fredapi.Fred that counts calls instead of hitting the network."""
+
+    calls = 0
+
+    def __init__(self, api_key):
+        pass
+
+    def get_series(self, series_id, observation_start):
+        _FakeFred.calls += 1
+        return pd.Series([1.0, 2.0], index=pd.to_datetime(["2024-01-01", "2024-01-02"]))
+
+
+def test_fetch_fred_series_cache_evicts_the_oldest_entry_at_capacity(monkeypatch):
+    """The FRED series cache is bounded: a new series id at capacity evicts the oldest one.
+
+    Without an explicit cap, growth was bounded only incidentally by the small,
+    fixed set of series ids this system actually requests.
+    """
+    monkeypatch.setattr(fetchers.settings, "fred_api_key", "test-key")
+    monkeypatch.setattr(fetchers, "_FRED_CACHE", TTLCache(ttl=timedelta(hours=6), max_entries=2))
+    monkeypatch.setattr("fredapi.Fred", _FakeFred)
+    _FakeFred.calls = 0
+
+    fetchers.fetch_fred_series("A")
+    fetchers.fetch_fred_series("B")
+    fetchers.fetch_fred_series("C")
+    assert _FakeFred.calls == 3
+
+    fetchers.fetch_fred_series("A")
+    assert _FakeFred.calls == 4, "A was evicted to keep the cache at its cap, so this must refetch"
+
+    fetchers.fetch_fred_series("C")
+    assert _FakeFred.calls == 4, "C is still cached"

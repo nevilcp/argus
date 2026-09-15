@@ -42,8 +42,7 @@ import time
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 from argus.config import settings
 
@@ -144,8 +143,8 @@ def _parse_reset_duration(value: str) -> float:
         return total
     try:
         return float(value)
-    except (TypeError, ValueError):
-        raise ValueError(f"unparseable Groq reset duration: {value!r}")
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"unparseable Groq reset duration: {value!r}") from e
 
 
 def _observe_axis(
@@ -154,7 +153,7 @@ def _observe_axis(
     axis: str,
     axis_headers: tuple[str, str, str],
     now: float,
-) -> Optional[tuple[int, int, Optional[float]]]:
+) -> tuple[int, int, float | None] | None:
     """Reads one rate-limit axis's (limit, remaining, reset) triple out of a Groq response.
 
     Args:
@@ -180,7 +179,7 @@ def _observe_axis(
         logger.warning("[Governor] Malformed %s headers for %s: %s", axis, model, e)
         return None
 
-    reset_at: Optional[float] = None
+    reset_at: float | None = None
     try:
         reset_at = now + _parse_reset_duration(headers[reset_header])
     except ValueError as e:
@@ -267,17 +266,17 @@ class ModelUsage:
 
     requests_today: int = 0
     tokens_today: int = 0
-    current_date: str = field(default_factory=lambda: datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+    current_date: str = field(default_factory=lambda: datetime.now(UTC).strftime("%Y-%m-%d"))
 
     requests_window: deque[float] = field(default_factory=deque)
     tokens_window: deque[tuple[float, int]] = field(default_factory=deque)
 
-    limit_requests: Optional[int] = None
-    limit_tokens: Optional[int] = None
-    remaining_requests: Optional[int] = None
-    remaining_tokens: Optional[int] = None
-    reset_requests_at: Optional[float] = None
-    reset_tokens_at: Optional[float] = None
+    limit_requests: int | None = None
+    limit_tokens: int | None = None
+    remaining_requests: int | None = None
+    remaining_tokens: int | None = None
+    reset_requests_at: float | None = None
+    reset_tokens_at: float | None = None
     limits_observed: bool = False
 
 
@@ -316,7 +315,7 @@ class RateLimitGovernor:
         Args:
             usage: Mutable ModelUsage instance to check and reset.
         """
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         if usage.current_date != today:
             usage.requests_today = 0
             usage.tokens_today = 0
@@ -403,6 +402,11 @@ class RateLimitGovernor:
                 if usage.limits_observed and usage.remaining_requests is not None:
                     rpd_ok = usage.remaining_requests > 0
                 else:
+                    # No bootstrap figure exists for this axis (see BOOTSTRAP_LIMITS'
+                    # comment) — inventing one would fabricate a daily cap nothing
+                    # publishes. This is permissive only until the first response's
+                    # headers arrive; rpm_ok/tpm_ok above still gate every call in that
+                    # window, bounding it to roughly the process's first request.
                     rpd_ok = True
 
                 if rpm_ok and tpm_ok and rpd_ok:
@@ -482,7 +486,9 @@ class RateLimitGovernor:
             if token_values is not None:
                 usage.limit_tokens, usage.remaining_tokens, usage.reset_tokens_at = token_values
             if request_values is not None:
-                usage.limit_requests, usage.remaining_requests, usage.reset_requests_at = request_values
+                usage.limit_requests, usage.remaining_requests, usage.reset_requests_at = (
+                    request_values
+                )
             usage.limits_observed = True
             logger.debug(
                 "[Governor] %s — observed limits: req=%s/%s tok=%s/%s",
@@ -563,7 +569,9 @@ class RateLimitGovernor:
                         usage.limit_tokens, usage.remaining_tokens + estimated_tokens
                     )
                 if usage.remaining_requests is not None and usage.limit_requests is not None:
-                    usage.remaining_requests = min(usage.limit_requests, usage.remaining_requests + 1)
+                    usage.remaining_requests = min(
+                        usage.limit_requests, usage.remaining_requests + 1
+                    )
 
     def _apply_window_delta(self, usage: ModelUsage, delta: int) -> None:
         """Appends a clamped correction entry to the token window, flooring the sum at 0.
@@ -594,7 +602,9 @@ class RateLimitGovernor:
         with self._lock:
             usage = self._get_usage(model)
             self._prune_window(usage)
-            return max(0, BOOTSTRAP_LIMITS[model]["requests_per_minute"] - len(usage.requests_window))
+            return max(
+                0, BOOTSTRAP_LIMITS[model]["requests_per_minute"] - len(usage.requests_window)
+            )
 
     def get_usage_report(self) -> dict:
         """Compiles a per-model usage snapshot for health check endpoints.
@@ -618,7 +628,9 @@ class RateLimitGovernor:
                     "tokens_today": usage.tokens_today,
                     "requests_per_minute_limit": bootstrap["requests_per_minute"],
                     "tokens_per_minute_limit": (
-                        usage.limit_tokens if usage.limits_observed else bootstrap["tokens_per_minute"]
+                        usage.limit_tokens
+                        if usage.limits_observed
+                        else bootstrap["tokens_per_minute"]
                     ),
                     "limits_observed": usage.limits_observed,
                     "remaining_requests_today": usage.remaining_requests,

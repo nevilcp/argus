@@ -1,16 +1,21 @@
+from datetime import timedelta
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from argus.agents.risk import (
     RiskStatisticalEngine,
+    avg_pairwise_correlation,
     compute_asset_returns,
     compute_portfolio_returns,
+    get_sector,
     ols_portfolio_beta,
 )
+from argus.data.cache import TTLCache
 from argus.params import RISK
 from argus.schemas.signals import RiskVerdict
-
+from argus.seams import LiveMarketDataProvider
 
 _TRADING_YEAR = pd.date_range(start="2023-01-01", periods=253, freq="B")
 
@@ -246,7 +251,7 @@ def test_evaluate_excludes_short_history_ticker_from_covariance(monkeypatch) -> 
     Picked up by graph.py's error-surfacing filter, rather than silently
     degrading every other ticker's covariance.
     """
-    monkeypatch.setattr("argus.agents.risk.get_sector", lambda ticker: "Diversified")
+    monkeypatch.setattr("argus.agents.risk.get_sector", lambda ticker, market_data: "Diversified")
     engine = RiskStatisticalEngine()
 
     np.random.seed(5)
@@ -262,13 +267,64 @@ def test_evaluate_excludes_short_history_ticker_from_covariance(monkeypatch) -> 
     assert "NEWCO" not in result.optimal_weights
 
 
+def test_avg_pairwise_correlation_returns_none_without_overlap() -> None:
+    """No overlapping dates leaves correlation undefined, not a fabricated NaN.
+
+    Regression: pandas' .corr() on a zero-row frame yields NaN, which
+    satisfies neither bound of avg_correlation's [-1, 1] field.
+    """
+    disjoint_dates = pd.date_range(start="2010-01-01", periods=len(_TRADING_YEAR), freq="B")
+    np.random.seed(1)
+    returns_matrix = pd.DataFrame(
+        {
+            "AAPL": pd.Series(
+                np.random.normal(0.001, 0.01, len(_TRADING_YEAR)), index=_TRADING_YEAR
+            ),
+            "NEWCO": pd.Series(
+                np.random.normal(0.001, 0.01, len(disjoint_dates)), index=disjoint_dates
+            ),
+        }
+    )
+    assert avg_pairwise_correlation(returns_matrix) is None
+
+
+def test_evaluate_completes_when_a_ticker_has_no_price_history_overlap(monkeypatch) -> None:
+    """Regression: a newly-listed ticker with zero date overlap must degrade, not raise.
+
+    Before the fix, avg_pairwise_correlation's NaN result violated
+    RiskAssessment.avg_correlation's [-1, 1] bound, so evaluate() raised
+    instead of completing with a degraded (None) assessment. VaR/CVaR must
+    likewise report None rather than a fabricated 0.0, since the same
+    zero-row intersection empties the portfolio return series too.
+    """
+    monkeypatch.setattr("argus.agents.risk.get_sector", lambda ticker, market_data: "Diversified")
+    engine = RiskStatisticalEngine()
+
+    np.random.seed(9)
+    disjoint_dates = pd.date_range(start="2010-01-01", periods=len(_TRADING_YEAR), freq="B")
+    hist = {
+        "AAPL": _random_prices(_TRADING_YEAR, 0.0005, 0.01),
+        "SPY": _random_prices(_TRADING_YEAR, 0.0005, 0.01),
+        "NEWCO": _random_prices(disjoint_dates, 0.0005, 0.01),
+    }
+    positions = [{"ticker": "AAPL", "weight": 0.1}, {"ticker": "NEWCO", "weight": 0.1}]
+
+    result = engine.evaluate(positions, hist, current_vix=20.0)
+
+    assert result.verdict in (RiskVerdict.APPROVE, RiskVerdict.REDUCE)
+    assert result.avg_correlation is None
+    assert result.var_99 is None
+    assert result.cvar is None
+    assert any("not measurable" in r for r in result.veto_reasons)
+
+
 def test_evaluate_skips_optimizer_on_non_finite_covariance(monkeypatch) -> None:
     """Regression: a non-finite covariance must not reach SLSQP silently.
 
     E.g. a zero-price data glitch producing an infinite return that survives
     dropna().
     """
-    monkeypatch.setattr("argus.agents.risk.get_sector", lambda ticker: "Diversified")
+    monkeypatch.setattr("argus.agents.risk.get_sector", lambda ticker, market_data: "Diversified")
     engine = RiskStatisticalEngine()
 
     np.random.seed(11)
@@ -286,3 +342,72 @@ def test_evaluate_skips_optimizer_on_non_finite_covariance(monkeypatch) -> None:
     assert result.optimal_weights == {}
     assert result.optimizer_converged is None
     assert any(r.startswith("Covariance: non-finite") for r in result.veto_reasons)
+
+
+class _StubTickerInfoMarketData:
+    """Minimal MarketDataProvider stub returning a fixed sector for ticker_info."""
+
+    def __init__(self, sector: str) -> None:
+        self._sector = sector
+        self.calls = 0
+
+    def ticker_info(self, ticker: str) -> dict:
+        self.calls += 1
+        return {"sector": self._sector}
+
+
+def test_get_sector_does_not_cache_across_non_live_providers(monkeypatch) -> None:
+    """A non-live provider's sector must never leak into a later, different provider's lookup.
+
+    Regression: argus/backtesting/replay.py constructs a fresh
+    FixtureMarketDataProvider per session in the same process — a
+    provider-agnostic cache would let session 1's sector for a ticker
+    silently answer session 2's lookup for the same ticker.
+    """
+    monkeypatch.setattr(
+        "argus.agents.risk._SECTOR_CACHE",
+        TTLCache(
+            ttl=timedelta(seconds=RISK.sector_cache_ttl_seconds),
+            max_entries=RISK.sector_cache_max_entries,
+        ),
+    )
+
+    session_one = _StubTickerInfoMarketData("Technology")
+    session_two = _StubTickerInfoMarketData("Energy")
+
+    assert get_sector("AAPL", session_one) == "Technology"
+    assert get_sector("AAPL", session_two) == "Energy"
+    assert session_one.calls == 1
+    assert session_two.calls == 1
+
+
+class _StubLiveMarketData(LiveMarketDataProvider):
+    """A LiveMarketDataProvider whose ticker_info is a counted stub, not a real yfinance call."""
+
+    def __init__(self, sector: str) -> None:
+        self._sector = sector
+        self.calls = 0
+
+    def ticker_info(self, ticker: str) -> dict:
+        self.calls += 1
+        return {"sector": self._sector}
+
+
+def test_get_sector_cache_evicts_the_oldest_entry_at_capacity(monkeypatch) -> None:
+    """The live sector cache is bounded: a new ticker at capacity evicts the oldest one."""
+    monkeypatch.setattr(
+        "argus.agents.risk._SECTOR_CACHE",
+        TTLCache(ttl=timedelta(seconds=RISK.sector_cache_ttl_seconds), max_entries=2),
+    )
+    market_data = _StubLiveMarketData("Technology")
+
+    get_sector("AAPL", market_data)
+    get_sector("MSFT", market_data)
+    get_sector("GOOG", market_data)
+    assert market_data.calls == 3
+
+    get_sector("AAPL", market_data)
+    assert market_data.calls == 4, "AAPL was evicted to keep the cache at its cap"
+
+    get_sector("GOOG", market_data)
+    assert market_data.calls == 4, "GOOG is still cached"

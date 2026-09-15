@@ -18,8 +18,10 @@ Backs up the sqlite file to <path>.bak-<timestamp> before writing.
 import argparse
 import logging
 import shutil
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+
+from argus.config import settings
 
 logger = logging.getLogger("argus.remediate_macro_regime_tags")
 
@@ -29,7 +31,7 @@ REPLACEMENT_REGIME = "unknown"
 
 def main() -> None:
     """Backs up the ChromaDB sqlite file and rewrites stale regime tags to "unknown"."""
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=settings.ARGUS_LOG_LEVEL)
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--persist-dir", default="./chroma_db")
@@ -41,7 +43,7 @@ def main() -> None:
         return
 
     backup_path = sqlite_path.with_name(
-        f"{sqlite_path.name}.bak-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+        f"{sqlite_path.name}.bak-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
     )
     shutil.copy2(sqlite_path, backup_path)
     print(f"Backed up {sqlite_path} to {backup_path}")
@@ -69,7 +71,9 @@ def main() -> None:
     ]
 
     collection.update(ids=ids, metadatas=metadatas, documents=documents)
-    print(f"Rewrote {len(ids)} row(s) from regime={STALE_REGIME!r} to regime={REPLACEMENT_REGIME!r}.")
+    print(
+        f"Rewrote {len(ids)} row(s) from regime={STALE_REGIME!r} to regime={REPLACEMENT_REGIME!r}."
+    )
 
 
 if __name__ == "__main__":

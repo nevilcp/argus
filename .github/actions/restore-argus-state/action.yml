@@ -1,0 +1,35 @@
+name: Restore ARGUS state
+description: >
+  Restores the persistent ARGUS_DATA_DIR tree from the argus-data branch as a
+  single unit, so the set of files that comes back is whatever the
+  application wrote last time, not a hardcoded list.
+
+runs:
+  using: composite
+  steps:
+    - name: Check out prior state
+      uses: actions/checkout@v7
+      continue-on-error: true # first-ever run: the argus-data branch doesn't exist yet
+      with:
+        ref: argus-data
+        path: state
+
+    - name: Seed the data directory from prior state
+      shell: bash
+      run: |
+        mkdir -p data
+        if [ -d state/data ]; then
+          cp -r state/data/. ./data/
+        elif [ -d state ] && [ -n "$(ls -A state 2>/dev/null)" ]; then
+          # One-time migration: the argus-data branch predates this nested
+          # data/ layout and has decisions.jsonl etc. flat at its root.
+          # status.json isn't application state — publish-argus-state reads
+          # it straight from state/status.json — so it's excluded here.
+          find state -mindepth 1 -maxdepth 1 ! -name .git ! -name status.json \
+            -exec cp -r {} ./data/ \;
+        else
+          echo "no prior state"
+        fi
+        # World-writable so the image's non-root `argus` user (uid 1000) can
+        # write here regardless of the runner's own uid
+        chmod -R a+rwX data

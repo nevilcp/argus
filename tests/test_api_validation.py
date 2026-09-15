@@ -17,8 +17,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 import api.main as api_main
-import argus.risk.kill_switch as kill_switch_module
-from argus.data.live_session_cache import LiveSessionCache
 
 
 def _payload(*tickers: str) -> dict:
@@ -27,13 +25,8 @@ def _payload(*tickers: str) -> dict:
 
 
 @pytest.fixture(autouse=True)
-def _reset_singletons(monkeypatch):
-    """Clears the kill-switch singleton and installs a fresh live session cache around each test."""
-    kill_switch_module._kill_switch = None
-    monkeypatch.setattr(api_main, "_live_cache", LiveSessionCache(interval_minutes=1))
-    monkeypatch.setattr(api_main.settings, "ARGUS_API_KEY", "")
-    yield
-    kill_switch_module._kill_switch = None
+def _reset_singletons(_fresh_live_cache, _no_api_key):
+    """Kill switch, live cache, and API key are all reset around each test via conftest fixtures."""
 
 
 @pytest.fixture
@@ -100,6 +93,20 @@ def test_analyze_upcases_and_dedupes_tickers(client, monkeypatch):
     response = client.post("/analyze", json=_payload(" aapl ", "AAPL", "msft"))
     assert response.status_code == 503
     fake_pipeline.register_tickers.assert_called_once_with(["AAPL", "MSFT"])
+
+
+def test_analyze_reports_a_missing_allocation_as_503_not_500(client, monkeypatch):
+    """A degraded (no-allocation) graph run is an upstream LLM outage, not a server bug."""
+    _pipeline(monkeypatch, market_hours=True)
+    _seed_cache("AAPL", bar_age_seconds=5, write_age_seconds=5)
+    fake_graph = mock.Mock()
+    fake_graph.invoke.return_value = {"decisions": [], "portfolio_allocation": None}
+    monkeypatch.setattr(api_main, "_graph", fake_graph)
+
+    response = client.post("/analyze", json=_payload("AAPL"))
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Portfolio allocation failed."
 
 
 def test_analyze_redacts_internal_exception_details(client, monkeypatch):

@@ -10,7 +10,8 @@ Not responsible for:
   - Portfolio allocation decisions (see agents/portfolio.py).
 
 Depends on transformers>=4.0 (ProsusAI/finbert), langchain_groq, and yfinance
-(for catalyst event detection); GROQ_API_KEY must be set (see .env.example).
+(for catalyst event detection, via the MarketDataProvider seam); GROQ_API_KEY
+must be set (see .env.example).
 """
 
 from __future__ import annotations
@@ -18,14 +19,14 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime, timedelta
-from typing import Optional
 
 import numpy as np
+import pandas as pd
 
 from argus.config import settings
-from argus.data import fetchers
 from argus.data.cache import TTLCache
 from argus.orchestration.governor import RateLimitExceeded, UnregisteredModel
+from argus.params import STRUCTURED_OUTPUT
 from argus.schemas.prompting import schema_block
 from argus.schemas.signals import SentimentSignal, SentimentVerdict
 from argus.seams import GroqLLMClient, LiveMarketDataProvider, LLMClient, MarketDataProvider
@@ -176,24 +177,24 @@ def aggregate_finbert_scores(scored: list[dict], decay_rate: float = 0.95) -> di
     }
 
 
-def _check_earnings_calendar(ticker: str) -> bool:
+def _check_earnings_calendar(ticker: str, market_data: MarketDataProvider) -> bool:
     """Returns True if an earnings date falls within the next 14 days.
 
-    Uses yfinance's calendar API via fetchers.fetch_ticker_calendar (retried,
+    Uses yfinance's calendar API via the MarketDataProvider seam (retried,
     rate-limit-classified) rather than calling yfinance directly. The response
     shape (DataFrame or dict) varies across yfinance versions; both are parsed
     for cross-version compatibility.
 
     Args:
         ticker: Equity ticker symbol.
+        market_data: Provider for the ticker-calendar lookup.
 
     Returns:
         True if an upcoming earnings event is within 14 days, False otherwise
         (including when the calendar can't be fetched at all).
     """
     try:
-        cal = fetchers.fetch_ticker_calendar(ticker)
-        import pandas as pd
+        cal = market_data.ticker_calendar(ticker)
 
         if isinstance(cal, pd.DataFrame) and not cal.empty and "Earnings Date" in cal.index:
             earnings_dates = cal.loc["Earnings Date"]
@@ -253,7 +254,7 @@ def _build_synthesis_prompt(ticker: str, metrics: dict) -> str:
     metrics_str = "\n".join(lines)
 
     prompt = (
-        f"<sentiment_data ticker=\"{ticker}\" as_of=\"intraday\">\n"
+        f'<sentiment_data ticker="{ticker}" as_of="intraday">\n'
         f"{metrics_str}\n"
         "</sentiment_data>\n"
         "\n"
@@ -322,8 +323,8 @@ class SentimentAgent:
 
     def __init__(
         self,
-        llm_client: Optional[LLMClient] = None,
-        market_data: Optional[MarketDataProvider] = None,
+        llm_client: LLMClient | None = None,
+        market_data: MarketDataProvider | None = None,
     ) -> None:
         """Constructs Groq/live defaults for any provider not injected.
 
@@ -339,7 +340,7 @@ class SentimentAgent:
                 )
             llm_client = GroqLLMClient(
                 model=settings.ARGUS_SENTIMENT_MODEL,
-                temperature=0.1,
+                temperature=STRUCTURED_OUTPUT.llm_temperature,
                 # gpt-oss-20b peaked at 417 completion tokens on fixture prompts; 550 leaves ~30% headroom.
                 max_tokens=550,
                 api_key=api_key,
@@ -351,9 +352,9 @@ class SentimentAgent:
     def analyze(
         self,
         ticker: str,
-        company_name: Optional[str] = None,
-        errors: Optional[list[str]] = None,
-    ) -> Optional[SentimentSignal]:
+        company_name: str | None = None,
+        errors: list[str] | None = None,
+    ) -> SentimentSignal | None:
         """Generates a ticker's SentimentSignal via FinBERT and LLM synthesis.
 
         Decodes a SentimentVerdict from the LLM via argus.structured_output.decode
@@ -421,7 +422,7 @@ class SentimentAgent:
         self.cache.set(ticker, signal)
         return signal
 
-    def _news_metrics(self, ticker: str, company_name: Optional[str]) -> dict:
+    def _news_metrics(self, ticker: str, company_name: str | None) -> dict:
         """Fetches this ticker's news and reduces it to LLM-facing metrics.
 
         A failed fetch is reported as ``news_data_available: False`` with placeholder
@@ -456,7 +457,7 @@ class SentimentAgent:
             "news_volume_7d": len(news_list),
             "news_scored_count": len(scored),
             "news_data_available": news is not None,
-            "upcoming_catalyst": _check_earnings_calendar(ticker),
+            "upcoming_catalyst": _check_earnings_calendar(ticker, self.market_data),
         }
 
     def batch_analyze(self, tickers: list[str]) -> tuple[dict[str, SentimentSignal], list[str]]:
@@ -492,9 +493,7 @@ class SentimentAgent:
             try:
                 res = self.analyze(ticker, company_name=company_name, errors=errors)
             except Exception as exc:
-                logger.warning(
-                    "batch_analyze: %s failed — %s: %s", ticker, type(exc).__name__, exc
-                )
+                logger.warning("batch_analyze: %s failed — %s: %s", ticker, type(exc).__name__, exc)
                 errors.append(f"sentiment_analysis[{ticker}]: {type(exc).__name__}: {exc}")
                 continue
             if res is not None:

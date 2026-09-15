@@ -88,7 +88,7 @@ def _pairs(convictions: list[float], returns: list[float]) -> list[PairedOutcome
     """Zips convictions with forward returns into PairedOutcomes on synthetic tickers."""
     return [
         PairedOutcome(ticker=f"T{i}", signed_conviction=c, forward_return=r, holding_days=5)
-        for i, (c, r) in enumerate(zip(convictions, returns))
+        for i, (c, r) in enumerate(zip(convictions, returns, strict=True))
     ]
 
 
@@ -188,7 +188,8 @@ def test_bootstrap_ci_reproducible_with_fixed_seed():
 
     assert first == second
     lower, upper = first
-    assert lower is not None and upper is not None
+    assert lower is not None
+    assert upper is not None
     assert lower <= upper
 
 

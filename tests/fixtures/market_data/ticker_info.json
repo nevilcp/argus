@@ -1,0 +1,8 @@
+{
+  "AAPL": {"sector": "Technology", "industry": "Consumer Electronics"},
+  "MSFT": {"sector": "Technology", "industry": "Software - Infrastructure"},
+  "NVDA": {"sector": "Technology", "industry": "Semiconductors"},
+  "JPM": {"sector": "Financial Services", "industry": "Banks - Diversified"},
+  "XOM": {"sector": "Energy", "industry": "Oil & Gas Integrated"},
+  "GOOGL": {"sector": "Communication Services", "industry": "Internet Content & Information"}
+}

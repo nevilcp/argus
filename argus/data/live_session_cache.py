@@ -44,7 +44,6 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
 from zoneinfo import ZoneInfo
 
 from argus.data.pipeline import _FETCH_INTERVAL
@@ -80,7 +79,7 @@ def max_bar_age_seconds(interval_minutes: int) -> int:
     return _FETCH_INTERVAL + 2 * interval_minutes * 60 + SYSTEM.freshness_margin_seconds
 
 
-def _bar_age_seconds(state: dict, now_et: datetime) -> Optional[float]:
+def _bar_age_seconds(state: dict, now_et: datetime) -> float | None:
     """Computes a session state's bar age in seconds, failing closed on a bad timestamp.
 
     A missing, malformed, or naive ``timestamp`` must not raise out of
@@ -142,7 +141,7 @@ class LiveSessionCache:
         self,
         session_states: dict[str, dict],
         tracked_universe: Iterable[str],
-        now: Optional[datetime] = None,
+        now: datetime | None = None,
     ) -> None:
         """Stores one sweep's compressed session states and evicts untracked tickers.
 
@@ -205,7 +204,7 @@ class LiveSessionCache:
 
         return result
 
-    def ages(self, now: datetime) -> tuple[dict[str, float], dict[str, Optional[float]]]:
+    def ages(self, now: datetime) -> tuple[dict[str, float], dict[str, float | None]]:
         """Reports per-ticker publication age and bar age for everything held.
 
         A different question from admit(): this answers "how old is X" for

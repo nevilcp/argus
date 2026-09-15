@@ -31,9 +31,9 @@ import re
 import threading
 import time
 from collections.abc import Callable
-from datetime import datetime, time as dtime, timedelta
+from datetime import datetime, timedelta
+from datetime import time as dtime
 from pathlib import Path
-from typing import Optional
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -150,7 +150,7 @@ def _required_raw_bars(interval_minutes: int) -> int:
     return max(indicator_floor, momentum_floor)
 
 
-def _finite_or_none(value: Optional[float]) -> Optional[float]:
+def _finite_or_none(value: float | None) -> float | None:
     """Returns `value` unless it's None, NaN, or infinite.
 
     Args:
@@ -164,7 +164,7 @@ def _finite_or_none(value: Optional[float]) -> Optional[float]:
     return value
 
 
-def _rounded(value: Optional[float], digits: int) -> Optional[float]:
+def _rounded(value: float | None, digits: int) -> float | None:
     """Rounds a computed indicator value, passing None through untouched.
 
     Args:
@@ -177,7 +177,7 @@ def _rounded(value: Optional[float], digits: int) -> Optional[float]:
     return None if value is None else round(value, digits)
 
 
-def _last_series_value(series: Optional[pd.Series]) -> Optional[float]:
+def _last_series_value(series: pd.Series | None) -> float | None:
     """Reads the final value of a pandas_ta result series.
 
     Args:
@@ -193,8 +193,8 @@ def _last_series_value(series: Optional[pd.Series]) -> Optional[float]:
 
 
 def _last_column_value(
-    df: Optional[pd.DataFrame], prefix: str, missing_label: Optional[str] = None
-) -> Optional[float]:
+    df: pd.DataFrame | None, prefix: str, missing_label: str | None = None
+) -> float | None:
     """Reads the final value of the first `df` column whose name starts with `prefix`.
 
     pandas_ta names its output columns after the parameters they were computed
@@ -222,7 +222,7 @@ def _last_column_value(
     return float(df[matches[0]].iloc[-1])
 
 
-def _atr_pct(ind_df: pd.DataFrame, close_last: float) -> Optional[float]:
+def _atr_pct(ind_df: pd.DataFrame, close_last: float) -> float | None:
     """Computes ATR-14 as a fraction of the latest close.
 
     Args:
@@ -238,7 +238,7 @@ def _atr_pct(ind_df: pd.DataFrame, close_last: float) -> Optional[float]:
     return _finite_or_none(atr / close_last)
 
 
-def _vwap_distance(ind_df: pd.DataFrame, close_last: float) -> Optional[float]:
+def _vwap_distance(ind_df: pd.DataFrame, close_last: float) -> float | None:
     """Computes the latest close's signed distance from session VWAP, as a fraction.
 
     Args:
@@ -259,7 +259,7 @@ def _vwap_distance(ind_df: pd.DataFrame, close_last: float) -> Optional[float]:
     return _finite_or_none((close_last - vwap) / vwap)
 
 
-def _volume_ratio(volume_s: pd.Series) -> Optional[float]:
+def _volume_ratio(volume_s: pd.Series) -> float | None:
     """Compares the latest bar's volume against its recent mean.
 
     Args:
@@ -274,14 +274,14 @@ def _volume_ratio(volume_s: pd.Series) -> Optional[float]:
         if len(volume_s) >= 20
         else float(volume_s.mean())
     )
-    if not mean:
+    # A falsy check here only catches an exact 0.0 — a near-zero mean is still
+    # truthy and would divide through to an extreme outlier, not a missing value.
+    if not math.isfinite(mean) or abs(mean) < SYSTEM.min_volume_mean_for_ratio:
         return None
     return _finite_or_none(float(volume_s.iloc[-1]) / mean)
 
 
-def _return_since(
-    close_s: pd.Series, delta: pd.Timedelta, *, same_session: bool
-) -> Optional[float]:
+def _return_since(close_s: pd.Series, delta: pd.Timedelta, *, same_session: bool) -> float | None:
     """Looks up a return from the closest bar at least `delta` before the last one.
 
     Locating by elapsed time rather than a fixed bar count keeps the lookup
@@ -683,8 +683,8 @@ class MFTDataPipeline:
             Tuple of (candles inserted, latest close). (0, 0.0) on an empty fetch.
         """
         with self._buffer_op_lock:
-            is_cold = (
-                self.buffer.row_counts().get(ticker, 0) < _required_raw_bars(self.interval_minutes)
+            is_cold = self.buffer.row_counts().get(ticker, 0) < _required_raw_bars(
+                self.interval_minutes
             )
             period = _FETCH_PERIOD if is_cold else _STEADY_STATE_FETCH_PERIOD
             df: pd.DataFrame = fetch_ohlcv_intraday(ticker, self.interval, period)
@@ -749,7 +749,7 @@ class MFTDataPipeline:
         logger.info("compress_all: %d tickers compressed", len(states))
         return states
 
-    def _compress_candles(self, df: pd.DataFrame) -> Optional[dict]:
+    def _compress_candles(self, df: pd.DataFrame) -> dict | None:
         """Calculates technical indicators on a DataFrame using pandas-ta.
 
         Args:

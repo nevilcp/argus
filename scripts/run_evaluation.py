@@ -29,6 +29,7 @@ from argus.backtesting.evaluation import (
     trade_level_win_loss_stats,
 )
 from argus.backtesting.replay import replay_session
+from argus.config import settings
 from argus.params import RECONCILIATION
 from argus.seams import LiveMarketDataProvider
 
@@ -65,27 +66,35 @@ def _print_evaluation(label: str, result: EvaluationResult) -> None:
     if result.n < 2:
         print("  Too few decisions to compute rank IC or hit-rate.")
         return
-    print(f"  rank IC:        {result.rank_ic:+.4f} (p={result.rank_ic_p_value:.4f}), "
-          f"95% CI {_format_ci(result.rank_ic_ci, '+.4f')}")
+    print(
+        f"  rank IC:        {result.rank_ic:+.4f} (p={result.rank_ic_p_value:.4f}), "
+        f"95% CI {_format_ci(result.rank_ic_ci, '+.4f')}"
+    )
     if result.hit_rate is not None:
-        print(f"  hit-rate:       {result.hit_rate:.4f} (n={result.hit_rate_n}), "
-              f"95% CI {_format_ci(result.hit_rate_ci, '.4f')}")
+        print(
+            f"  hit-rate:       {result.hit_rate:.4f} (n={result.hit_rate_n}), "
+            f"95% CI {_format_ci(result.hit_rate_ci, '.4f')}"
+        )
     else:
         print("  hit-rate:       undefined (every decision fell inside the dead band)")
 
     trade_stats = trade_level_win_loss_stats(result.pairs)
     if trade_stats:
-        print(f"  win rate:       {trade_stats['win_rate']:.4f} "
-              f"({trade_stats['total_trades']} decisions)")
+        print(
+            f"  win rate:       {trade_stats['win_rate']:.4f} "
+            f"({trade_stats['total_trades']} decisions)"
+        )
         print(f"  profit factor:  {trade_stats['profit_factor']}")
-        print(f"  avg win/loss:   {trade_stats['avg_win_pct']:+.4f} / "
-              f"{trade_stats['avg_loss_pct']:+.4f} pct, "
-              f"avg holding {trade_stats['avg_holding_days']:.1f}d")
+        print(
+            f"  avg win/loss:   {trade_stats['avg_win_pct']:+.4f} / "
+            f"{trade_stats['avg_loss_pct']:+.4f} pct, "
+            f"avg holding {trade_stats['avg_holding_days']:.1f}d"
+        )
 
 
 def main() -> None:
     """Replays open-loop and closed-loop sessions and prints the evaluation report."""
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=settings.ARGUS_LOG_LEVEL)
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixtures-dir", type=Path, default=FIXTURES_DIR)
@@ -104,7 +113,9 @@ def main() -> None:
     closed_decisions = closed_loop.final_state.get("decisions") or []
 
     open_result = evaluate_decisions(open_decisions, market_data, args.horizon_days, args.deadband)
-    closed_result = evaluate_decisions(closed_decisions, market_data, args.horizon_days, args.deadband)
+    closed_result = evaluate_decisions(
+        closed_decisions, market_data, args.horizon_days, args.deadband
+    )
 
     print(f"\n=== Pre-registered evaluation (H={args.horizon_days}d, deadband={args.deadband}) ===")
     _print_evaluation("Open-loop", open_result)
@@ -120,11 +131,7 @@ def main() -> None:
         ci_lo, _ci_hi = closed_result.rank_ic_ci
         # Pre-registered bar: closed-loop must beat open-loop's rank IC, and the
         # improvement's confidence interval must exclude zero.
-        helped = (
-            ci_lo is not None
-            and ci_lo > 0
-            and closed_result.rank_ic > open_result.rank_ic
-        )
+        helped = ci_lo is not None and ci_lo > 0 and closed_result.rank_ic > open_result.rank_ic
         if helped:
             print("\nVerdict: closed-loop cleared the pre-registered bar")
         else:
@@ -132,14 +139,20 @@ def main() -> None:
 
     print("\n=== System-behavior metrics (open-loop session; reported separately) ===")
     sys_report = system_behavior_report(open_loop)
-    print(f"  schema validity:       {sys_report.decisions_built}/{sys_report.tickers_total} "
-          f"({sys_report.schema_validity:.0%})")
+    print(
+        f"  schema validity:       {sys_report.decisions_built}/{sys_report.tickers_total} "
+        f"({sys_report.schema_validity:.0%})"
+    )
     print(f"  errors recorded:       {len(sys_report.errors)}")
-    print(f"  constraint violations: {sys_report.constraint_violations} "
-          f"(enforced structurally by RiskAssessment's Pydantic validator; "
-          f"{sys_report.reduce_verdicts} REDUCE verdicts exercised it)")
-    print(f"  API calls/decision:    {sys_report.api_calls_per_decision:.2f} "
-          f"(total {sys_report.total_api_calls})")
+    print(
+        f"  constraint violations: {sys_report.constraint_violations} "
+        f"(enforced structurally by RiskAssessment's Pydantic validator; "
+        f"{sys_report.reduce_verdicts} REDUCE verdicts exercised it)"
+    )
+    print(
+        f"  API calls/decision:    {sys_report.api_calls_per_decision:.2f} "
+        f"(total {sys_report.total_api_calls})"
+    )
     print("  retries/decision:      not instrumented (disclosed gap)")
     print("  tokens/decision:       not instrumented (disclosed gap)")
 

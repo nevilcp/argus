@@ -32,13 +32,13 @@ backtest run's metadata; bump it whenever any value below changes.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
-PARAMS_VERSION = 16
+PARAMS_VERSION = 19
 
 
-class Provenance(str, Enum):
+class Provenance(StrEnum):
     """Where a parameter's value came from.
 
     See the module docstring for the category definitions.
@@ -92,9 +92,7 @@ class SystemParams:
     vix_blackout_threshold: float = p(
         35.0, Provenance.CONVENTION, "VIX > 35 is commonly treated as a high-fear regime"
     )
-    lookback_days: int = p(
-        252, Provenance.LITERATURE, "252 = standard US trading days per year"
-    )
+    lookback_days: int = p(252, Provenance.LITERATURE, "252 = standard US trading days per year")
     freshness_margin_seconds: int = p(
         60,
         Provenance.ARBITRARY,
@@ -130,6 +128,20 @@ class SystemParams:
         "Retry-After header value on /analyze's 429 when a run is already in "
         "progress; a guess at a graph run's typical duration, not measured",
     )
+    fred_cache_max_entries: int = p(
+        32,
+        Provenance.ARBITRARY,
+        "cap on data/fetchers.py's in-process FRED series cache; the system only "
+        "ever requests a handful of fixed series ids, so this is headroom rather "
+        "than a measured ceiling — not evaluated against alternatives",
+    )
+    min_volume_mean_for_ratio: float = p(
+        1e-6,
+        Provenance.ARBITRARY,
+        "floor below which data/pipeline.py's rolling volume mean is treated as "
+        "unreliable rather than divided by; guards against a near-zero (but not "
+        "exactly zero) mean producing an extreme ratio outlier",
+    )
 
 
 @dataclass(frozen=True)
@@ -162,11 +174,17 @@ class TechnicalIndicatorWeights:
     """Per-indicator weights in the technical consensus score (config.py)."""
 
     rsi: float = p(2.0, Provenance.ARBITRARY, "no basis for relative weighting vs other indicators")
-    macd: float = p(2.0, Provenance.ARBITRARY, "no basis for relative weighting vs other indicators")
+    macd: float = p(
+        2.0, Provenance.ARBITRARY, "no basis for relative weighting vs other indicators"
+    )
     bb: float = p(1.5, Provenance.ARBITRARY, "no basis for relative weighting vs other indicators")
     adx: float = p(1.0, Provenance.ARBITRARY, "no basis for relative weighting vs other indicators")
-    vwap: float = p(1.0, Provenance.ARBITRARY, "no basis for relative weighting vs other indicators")
-    momentum: float = p(1.5, Provenance.ARBITRARY, "no basis for relative weighting vs other indicators")
+    vwap: float = p(
+        1.0, Provenance.ARBITRARY, "no basis for relative weighting vs other indicators"
+    )
+    momentum: float = p(
+        1.5, Provenance.ARBITRARY, "no basis for relative weighting vs other indicators"
+    )
 
 
 @dataclass(frozen=True)
@@ -176,46 +194,92 @@ class TechnicalParams:
     See agents/technical.py.
     """
 
-    rsi_oversold: float = p(25, Provenance.CONVENTION, "RSI < 30 is the standard oversold convention; 25 used as the max-bullish anchor")
+    rsi_oversold: float = p(
+        25,
+        Provenance.CONVENTION,
+        "RSI < 30 is the standard oversold convention; 25 used as the max-bullish anchor",
+    )
     rsi_bullish_transition: float = p(30, Provenance.CONVENTION, "standard RSI oversold boundary")
-    rsi_bullish_transition_score: float = p(0.85, Provenance.ARBITRARY, "no basis for this specific score level")
-    rsi_overbought: float = p(75, Provenance.CONVENTION, "RSI > 70 is the standard overbought convention; 75 used as the max-bearish anchor")
+    rsi_bullish_transition_score: float = p(
+        0.85, Provenance.ARBITRARY, "no basis for this specific score level"
+    )
+    rsi_overbought: float = p(
+        75,
+        Provenance.CONVENTION,
+        "RSI > 70 is the standard overbought convention; 75 used as the max-bearish anchor",
+    )
     rsi_bearish_transition: float = p(70, Provenance.CONVENTION, "standard RSI overbought boundary")
-    rsi_neutral_low: float = p(45.0, Provenance.ARBITRARY, "dead-zone boundary; no basis beyond symmetry around 50")
-    rsi_neutral_high: float = p(55.0, Provenance.ARBITRARY, "dead-zone boundary; no basis beyond symmetry around 50")
+    rsi_neutral_low: float = p(
+        45.0, Provenance.ARBITRARY, "dead-zone boundary; no basis beyond symmetry around 50"
+    )
+    rsi_neutral_high: float = p(
+        55.0, Provenance.ARBITRARY, "dead-zone boundary; no basis beyond symmetry around 50"
+    )
 
-    macd_normalization_scale: float = p(0.5, Provenance.ARBITRARY, "no basis for this specific scale")
+    macd_normalization_scale: float = p(
+        0.5, Provenance.ARBITRARY, "no basis for this specific scale"
+    )
 
-    bollinger_breach_multiplier: float = p(2.0, Provenance.ARBITRARY, "no basis for this specific multiplier")
+    bollinger_breach_multiplier: float = p(
+        2.0, Provenance.ARBITRARY, "no basis for this specific multiplier"
+    )
     bollinger_breach_boost: float = p(0.5, Provenance.ARBITRARY, "no basis for this specific boost")
 
-    adx_dampen_threshold: float = p(20.0, Provenance.CONVENTION, "ADX < 20 commonly read as 'no trend'")
-    adx_dampen_multiplier: float = p(0.6, Provenance.ARBITRARY, "no basis for this specific multiplier")
-    adx_amplify_threshold: float = p(40.0, Provenance.CONVENTION, "ADX > 40 commonly read as 'strong trend'")
-    adx_amplify_multiplier: float = p(1.2, Provenance.ARBITRARY, "no basis for this specific multiplier")
+    adx_dampen_threshold: float = p(
+        20.0, Provenance.CONVENTION, "ADX < 20 commonly read as 'no trend'"
+    )
+    adx_dampen_multiplier: float = p(
+        0.6, Provenance.ARBITRARY, "no basis for this specific multiplier"
+    )
+    adx_amplify_threshold: float = p(
+        40.0, Provenance.CONVENTION, "ADX > 40 commonly read as 'strong trend'"
+    )
+    adx_amplify_multiplier: float = p(
+        1.2, Provenance.ARBITRARY, "no basis for this specific multiplier"
+    )
 
-    vwap_spread_normalization: float = p(0.015, Provenance.ARBITRARY, "no basis for +/-1.5% as the normalizing spread")
+    vwap_spread_normalization: float = p(
+        0.015, Provenance.ARBITRARY, "no basis for +/-1.5% as the normalizing spread"
+    )
 
-    momentum_30m_weight: float = p(0.4, Provenance.ARBITRARY, "no basis for 40/60 split vs 1d momentum")
-    momentum_1d_weight: float = p(0.6, Provenance.ARBITRARY, "no basis for 40/60 split vs 30m momentum")
-    momentum_saturation_bound: float = p(0.02, Provenance.ARBITRARY, "no basis for +/-2% as the clipping bound")
+    momentum_30m_weight: float = p(
+        0.4, Provenance.ARBITRARY, "no basis for 40/60 split vs 1d momentum"
+    )
+    momentum_1d_weight: float = p(
+        0.6, Provenance.ARBITRARY, "no basis for 40/60 split vs 30m momentum"
+    )
+    momentum_saturation_bound: float = p(
+        0.02, Provenance.ARBITRARY, "no basis for +/-2% as the clipping bound"
+    )
 
     volume_ratio_divisor: float = p(1.5, Provenance.ARBITRARY, "no basis for this specific divisor")
     volume_modifier_floor: float = p(0.7, Provenance.ARBITRARY, "no basis for this specific floor")
-    volume_modifier_ceiling: float = p(1.3, Provenance.ARBITRARY, "no basis for this specific ceiling")
+    volume_modifier_ceiling: float = p(
+        1.3, Provenance.ARBITRARY, "no basis for this specific ceiling"
+    )
 
-    net_score_neutral_threshold: float = p(0.12, Provenance.ARBITRARY, "no basis for this specific cutoff")
-    neutral_conviction_floor: float = p(0.30, Provenance.ARBITRARY, "no basis for this specific floor")
+    net_score_neutral_threshold: float = p(
+        0.12, Provenance.ARBITRARY, "no basis for this specific cutoff"
+    )
+    neutral_conviction_floor: float = p(
+        0.30, Provenance.ARBITRARY, "no basis for this specific floor"
+    )
     conviction_base: float = p(0.40, Provenance.ARBITRARY, "no basis for this specific base")
-    conviction_score_multiplier: float = p(0.55, Provenance.ARBITRARY, "no basis for this specific multiplier")
-    conviction_ceiling: float = p(0.92, Provenance.ARBITRARY, "kept below 1.0 so no signal claims certainty")
+    conviction_score_multiplier: float = p(
+        0.55, Provenance.ARBITRARY, "no basis for this specific multiplier"
+    )
+    conviction_ceiling: float = p(
+        0.92, Provenance.ARBITRARY, "kept below 1.0 so no signal claims certainty"
+    )
 
 
 @dataclass(frozen=True)
 class AggregatorParams:
     """Multi-agent voting parameters (orchestration/aggregator.py)."""
 
-    weight_fundamental: float = p(0.35, Provenance.ARBITRARY, "no basis for relative agent weighting")
+    weight_fundamental: float = p(
+        0.35, Provenance.ARBITRARY, "no basis for relative agent weighting"
+    )
     weight_technical: float = p(0.35, Provenance.ARBITRARY, "no basis for relative agent weighting")
     weight_sentiment: float = p(0.30, Provenance.ARBITRARY, "no basis for relative agent weighting")
     contraction_conviction_threshold: float = p(
@@ -224,24 +288,56 @@ class AggregatorParams:
         "restated post-issue-24-Decision-A against achievable conviction (~0.665 for a "
         "two-agent unanimous call), not the pre-A 1.0 scale; no basis for this specific value",
     )
-    contraction_conviction_reduction: float = p(0.6, Provenance.ARBITRARY, "no basis for this specific multiplier")
-    max_conviction: float = p(0.95, Provenance.ARBITRARY, "kept below 1.0 so no aggregate claims certainty")
+    contraction_conviction_reduction: float = p(
+        0.6, Provenance.ARBITRARY, "no basis for this specific multiplier"
+    )
+    max_conviction: float = p(
+        0.95, Provenance.ARBITRARY, "kept below 1.0 so no aggregate claims certainty"
+    )
 
 
 @dataclass(frozen=True)
 class PortfolioParams:
     """Position sizing and LLM-call controls (agents/portfolio.py)."""
 
-    kelly_avg_win_pct: float = p(0.08, Provenance.ARBITRARY, "assumed average winning-trade return; not fit to ARGUS's own trades")
-    kelly_avg_loss_pct: float = p(0.04, Provenance.ARBITRARY, "assumed average losing-trade return; not fit to ARGUS's own trades")
-    kelly_max_position: float = p(0.15, Provenance.CONVENTION, "matches SystemParams.max_single_position_pct")
-    kelly_divisor: float = p(2.0, Provenance.CONVENTION, "half-Kelly is a standard variance-reduction convention")
-    llm_temperature: float = p(0.05, Provenance.CONVENTION, "near-zero temperature for reproducible structured output")
-    llm_max_tokens: int = p(1000, Provenance.ARBITRARY, "gpt-oss-120b at reasoning_effort='low' on a reconstructed dense-portfolio prompt peaked at 785 completion tokens (up to 458 reasoning) across 4 runs; 1000 leaves ~25% headroom")
-    equity_floor_adjustment: float = p(0.05, Provenance.ARBITRARY, "no basis for this specific adjustment")
-    cash_reserve_floor_pct: float = p(0.05, Provenance.ARBITRARY, "matches PortfolioAllocation.cash_reserve_pct's schema floor")
-    thesis_char_limit: int = p(120, Provenance.ARBITRARY, "no basis beyond keeping per-position text short")
-    advisor_note_char_limit: int = p(600, Provenance.ARBITRARY, "no basis beyond keeping the rationale readable")
+    kelly_avg_win_pct: float = p(
+        0.08,
+        Provenance.ARBITRARY,
+        "assumed average winning-trade return; not fit to ARGUS's own trades",
+    )
+    kelly_avg_loss_pct: float = p(
+        0.04,
+        Provenance.ARBITRARY,
+        "assumed average losing-trade return; not fit to ARGUS's own trades",
+    )
+    kelly_max_position: float = p(
+        0.15, Provenance.CONVENTION, "matches SystemParams.max_single_position_pct"
+    )
+    kelly_divisor: float = p(
+        2.0, Provenance.CONVENTION, "half-Kelly is a standard variance-reduction convention"
+    )
+    llm_temperature: float = p(
+        0.05, Provenance.CONVENTION, "near-zero temperature for reproducible structured output"
+    )
+    llm_max_tokens: int = p(
+        1000,
+        Provenance.ARBITRARY,
+        "gpt-oss-120b at reasoning_effort='low' on a reconstructed dense-portfolio "
+        "prompt peaked at 785 completion tokens (up to 458 reasoning) across 4 runs; "
+        "1000 leaves ~25% headroom",
+    )
+    equity_floor_adjustment: float = p(
+        0.05, Provenance.ARBITRARY, "no basis for this specific adjustment"
+    )
+    cash_reserve_floor_pct: float = p(
+        0.05, Provenance.ARBITRARY, "matches PortfolioAllocation.cash_reserve_pct's schema floor"
+    )
+    thesis_char_limit: int = p(
+        120, Provenance.ARBITRARY, "no basis beyond keeping per-position text short"
+    )
+    advisor_note_char_limit: int = p(
+        600, Provenance.ARBITRARY, "no basis beyond keeping the rationale readable"
+    )
 
 
 @dataclass(frozen=True)
@@ -251,24 +347,58 @@ class RiskParams:
     See agents/risk.py.
     """
 
-    sector_cache_ttl_seconds: int = p(86400, Provenance.ARBITRARY, "24h cache lifetime; GICS classifications rarely change")
-    returns_lookback_days: int = p(252, Provenance.LITERATURE, "252 = standard US trading days per year")
-    var_confidence: float = p(0.99, Provenance.CONVENTION, "99% is a standard VaR/CVaR confidence level")
-    cvar_confidence: float = p(0.99, Provenance.CONVENTION, "99% is a standard VaR/CVaR confidence level")
+    sector_cache_ttl_seconds: int = p(
+        86400, Provenance.ARBITRARY, "24h cache lifetime; GICS classifications rarely change"
+    )
+    sector_cache_max_entries: int = p(
+        500,
+        Provenance.ARBITRARY,
+        "headroom above SystemParams.max_tracked_tickers (100) for tickers whose "
+        "sector is still momentarily cached after falling out of the tracked "
+        "universe — not evaluated against alternatives",
+    )
+    returns_lookback_days: int = p(
+        252, Provenance.LITERATURE, "252 = standard US trading days per year"
+    )
+    var_confidence: float = p(
+        0.99, Provenance.CONVENTION, "99% is a standard VaR/CVaR confidence level"
+    )
+    cvar_confidence: float = p(
+        0.99, Provenance.CONVENTION, "99% is a standard VaR/CVaR confidence level"
+    )
     min_beta_overlap_points: int = p(10, Provenance.ARBITRARY, "no basis for this specific minimum")
-    atr_multiplier: float = p(2.5, Provenance.CONVENTION, "2-3x ATR is a common stop-loss distance convention")
-    atr_period: int = p(14, Provenance.LITERATURE, "14 is the standard Wilder ATR period")
-    min_positions_diversification: int = p(5, Provenance.ARBITRARY, "no basis for this specific minimum")
+    # These back close_to_close_stop_losses (agents/risk.py), which computes
+    # mean absolute close-to-close change, not true ATR — the period and
+    # multiplier are still borrowed from the standard ATR-14, 2-3x convention.
+    stop_multiplier: float = p(
+        2.5, Provenance.CONVENTION, "2-3x ATR is a common stop-loss distance convention"
+    )
+    stop_lookback_period: int = p(14, Provenance.LITERATURE, "14 is the standard Wilder ATR period")
+    min_positions_diversification: int = p(
+        5, Provenance.ARBITRARY, "no basis for this specific minimum"
+    )
     max_positions: int = p(20, Provenance.ARBITRARY, "no basis for this specific maximum")
-    slsqp_risk_aversion: float = p(1.0, Provenance.ARBITRARY, "equal weighting of conviction return vs variance; not tuned")
-    slsqp_max_total_deployment: float = p(1.0, Provenance.CONVENTION, "a long-only book cannot exceed its capital")
-    slsqp_zero_cap_epsilon: float = p(1e-3, Provenance.ARBITRARY, "cap below this is treated as no room to allocate, not a real position")
+    slsqp_risk_aversion: float = p(
+        1.0, Provenance.ARBITRARY, "equal weighting of conviction return vs variance; not tuned"
+    )
+    slsqp_max_total_deployment: float = p(
+        1.0, Provenance.CONVENTION, "a long-only book cannot exceed its capital"
+    )
+    slsqp_zero_cap_epsilon: float = p(
+        1e-3,
+        Provenance.ARBITRARY,
+        "cap below this is treated as no room to allocate, not a real position",
+    )
     slsqp_ftol: float = p(1e-9, Provenance.CONVENTION, "typical SciPy SLSQP convergence tolerance")
     slsqp_maxiter: int = p(300, Provenance.CONVENTION, "typical SciPy SLSQP iteration cap")
     var_limit: float = p(0.03, Provenance.ARBITRARY, "no basis for this specific daily VaR ceiling")
     cvar_limit: float = p(0.05, Provenance.ARBITRARY, "no basis for this specific CVaR ceiling")
-    correlation_limit: float = p(0.75, Provenance.ARBITRARY, "no basis for this specific correlation ceiling")
-    reduce_weight_multiplier: float = p(0.5, Provenance.ARBITRARY, "no basis for this specific haircut on statistical violation")
+    correlation_limit: float = p(
+        0.75, Provenance.ARBITRARY, "no basis for this specific correlation ceiling"
+    )
+    reduce_weight_multiplier: float = p(
+        0.5, Provenance.ARBITRARY, "no basis for this specific haircut on statistical violation"
+    )
 
 
 @dataclass(frozen=True)
@@ -297,9 +427,7 @@ class MacroParams:
     unemployment_publication_lag_days: int = p(
         35, Provenance.LITERATURE, "BLS Employment Situation release lag for UNRATE"
     )
-    cpi_publication_lag_days: int = p(
-        45, Provenance.LITERATURE, "BLS CPI release lag for CPIAUCSL"
-    )
+    cpi_publication_lag_days: int = p(45, Provenance.LITERATURE, "BLS CPI release lag for CPIAUCSL")
     hmm_n_init: int = p(
         20,
         Provenance.ARBITRARY,
@@ -369,6 +497,15 @@ class ReconciliationParams:
         "a delayed reconcile pass still finds it first, no basis for this "
         "specific width",
     )
+    unresolved_retirement_days: int = p(
+        30,
+        Provenance.ARBITRARY,
+        "age beyond horizon_days at which a decision that has never received "
+        "a reconciled outcome is retired anyway, so the store stays bounded "
+        "even though it was never scored — scheduled reconcile ticks can be "
+        "dropped by the platform for days at a time, so this must comfortably "
+        "outlast that, but no basis for this specific width",
+    )
 
 
 @dataclass(frozen=True)
@@ -397,6 +534,13 @@ class StructuredOutputParams:
     so the value carries forward unchanged rather than being re-guessed.
     """
 
+    llm_temperature: float = p(
+        0.1,
+        Provenance.CONVENTION,
+        "near-zero temperature for reproducible structured output; used by "
+        "fundamental.py and sentiment.py — portfolio.py sets its own, lower "
+        "value in PortfolioParams.llm_temperature",
+    )
     max_attempts: int = p(
         3,
         Provenance.ARBITRARY,
@@ -418,6 +562,27 @@ class StructuredOutputParams:
     )
 
 
+@dataclass(frozen=True)
+class CollectorParams:
+    """Thresholds the unattended collector uses to judge a completed cycle's health.
+
+    See orchestration/collector.py's CycleOutcome: a cycle that ran but produced
+    too few usable allocations is DEGRADED, not SUCCESS, even though nothing
+    raised — the LLM agents' "degrade, never fabricate" behavior means a dead
+    upstream (issue #90's missing-secret case, or any other) shows up as null
+    fields on every decision rather than an exception.
+    """
+
+    min_decisions_with_allocation: int = p(
+        1,
+        Provenance.ARBITRARY,
+        "a completed cycle needs at least one decision with a real allocation "
+        "to have produced anything worth reconciling; below this the cycle is "
+        "reported DEGRADED and the job fails. 1 is a floor, not a fraction — "
+        "not tuned against real degraded-run data",
+    )
+
+
 SYSTEM = SystemParams()
 KILL_SWITCH = KillSwitchParams()
 TECHNICAL_INDICATOR_WEIGHTS = TechnicalIndicatorWeights()
@@ -429,6 +594,7 @@ MACRO = MacroParams()
 RECONCILIATION = ReconciliationParams()
 MEMORY = MemoryParams()
 STRUCTURED_OUTPUT = StructuredOutputParams()
+COLLECTOR = CollectorParams()
 
 _ALL_GROUPS: dict[str, Any] = {
     "SYSTEM": SYSTEM,
@@ -442,6 +608,7 @@ _ALL_GROUPS: dict[str, Any] = {
     "RECONCILIATION": RECONCILIATION,
     "MEMORY": MEMORY,
     "STRUCTURED_OUTPUT": STRUCTURED_OUTPUT,
+    "COLLECTOR": COLLECTOR,
 }
 
 

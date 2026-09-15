@@ -4,8 +4,8 @@ import pytest
 
 from argus.agents.sentiment import (
     SentimentAgent,
-    aggregate_finbert_scores,
     _check_earnings_calendar,
+    aggregate_finbert_scores,
 )
 from argus.orchestration.governor import RateLimitExceeded
 
@@ -16,7 +16,9 @@ _NEUTRAL_RESPONSE = (
 
 def _no_upcoming_earnings(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stubs the calendar lookup, which would otherwise reach yfinance on every analyze()."""
-    monkeypatch.setattr("argus.agents.sentiment._check_earnings_calendar", lambda ticker: False)
+    monkeypatch.setattr(
+        "argus.agents.sentiment._check_earnings_calendar", lambda ticker, market_data: False
+    )
 
 
 def test_aggregate_finbert_scores_empty():
@@ -76,6 +78,12 @@ class _StubMarketData:
         raise NotImplementedError
 
     def vix(self):
+        raise NotImplementedError
+
+    def ticker_info(self, ticker):
+        raise NotImplementedError
+
+    def ticker_calendar(self, ticker):
         raise NotImplementedError
 
 
@@ -314,21 +322,26 @@ def test_batch_analyze_passes_company_name_for_known_tickers(monkeypatch):
     assert received["ZZZZ"] == "ZZZZ"  # unmapped ticker falls back to itself
 
 
-def test_check_earnings_calendar_past_date_is_not_upcoming(monkeypatch):
+class _CalendarMarketData(_StubMarketData):
+    """Stub MarketDataProvider returning a fixed calendar payload for any ticker."""
+
+    def __init__(self, calendar):
+        super().__init__(news=[])
+        self._calendar = calendar
+
+    def ticker_calendar(self, ticker):
+        return self._calendar
+
+
+def test_check_earnings_calendar_past_date_is_not_upcoming():
     """An earnings date in the past must not report an upcoming catalyst."""
     past_date = datetime.now() - timedelta(days=15)
-    monkeypatch.setattr(
-        "argus.agents.sentiment.fetchers.fetch_ticker_calendar",
-        lambda ticker: {"Earnings Date": [past_date]},
-    )
-    assert _check_earnings_calendar("AAPL") is False
+    market_data = _CalendarMarketData({"Earnings Date": [past_date]})
+    assert _check_earnings_calendar("AAPL", market_data) is False
 
 
-def test_check_earnings_calendar_future_date_within_window_is_upcoming(monkeypatch):
+def test_check_earnings_calendar_future_date_within_window_is_upcoming():
     """An earnings date within the next 14 days reports an upcoming catalyst."""
     future_date = datetime.now() + timedelta(days=5)
-    monkeypatch.setattr(
-        "argus.agents.sentiment.fetchers.fetch_ticker_calendar",
-        lambda ticker: {"Earnings Date": [future_date]},
-    )
-    assert _check_earnings_calendar("AAPL") is True
+    market_data = _CalendarMarketData({"Earnings Date": [future_date]})
+    assert _check_earnings_calendar("AAPL", market_data) is True

@@ -28,9 +28,8 @@ from __future__ import annotations
 import logging
 import warnings
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Optional
 
 import hmmlearn
 import joblib
@@ -216,14 +215,14 @@ class RegimeClassifier:
         self.is_fitted = False
         self.state_to_regime: dict[int, str] = {}
         self.n_train_observations = 0
-        # Diagnostic-only per-state means from the last fit; not persisted, refreshed by _map_states.
+        # Diagnostic-only per-state means from the last fit; not persisted, refreshed
+        # by _map_states.
         self.state_means: dict[int, dict[str, float]] = {}
-        # Populated by fit(): validation evidence, persisted by save(), checked by validation_failures().
+        # Populated by fit(): validation evidence, persisted by save(), checked by
+        # validation_failures().
         self.validation_metrics: dict = {}
 
-    def fit(
-        self, macro_history: pd.DataFrame, recession_series: Optional[pd.Series] = None
-    ) -> None:
+    def fit(self, macro_history: pd.DataFrame, recession_series: pd.Series | None = None) -> None:
         """Fits the scaling transformer and HMM classifier on historic feature timelines.
 
         Tries MACRO.hmm_n_init random restarts (seeds 0..n_init-1), rejecting any
@@ -255,7 +254,7 @@ class RegimeClassifier:
 
         self._log_bic_diagnostic(scaled_features)
 
-        best_hmm: Optional[GaussianHMM] = None
+        best_hmm: GaussianHMM | None = None
         best_score = -np.inf
         best_separation = 0.0
         best_occupancy = np.array([])
@@ -298,7 +297,8 @@ class RegimeClassifier:
             )
 
         self.hmm = best_hmm
-        # Apply now: validation_failures() calls predict() pre-save, and raw EM startprob_ would dominate.
+        # Apply now: validation_failures() calls predict() pre-save, and raw EM
+        # startprob_ would dominate.
         self.hmm.startprob_ = self._stationary_startprob(self.hmm.transmat_)
         self.scaler = scaler
         hidden_states = best_hmm.predict(scaled_features)
@@ -358,7 +358,7 @@ class RegimeClassifier:
             except Exception as exc:
                 logger.debug("RegimeClassifier.fit: BIC diagnostic failed for k=%d: %s", k, exc)
 
-    def _map_states(self, df: pd.DataFrame, recession_series: Optional[pd.Series] = None) -> None:
+    def _map_states(self, df: pd.DataFrame, recession_series: pd.Series | None = None) -> None:
         """Maps hidden states to human-readable regimes.
 
         CONTRACTION = the state with the highest NBER (USREC) recession
@@ -390,7 +390,7 @@ class RegimeClassifier:
         contraction_state = self._label_contraction_state(df, recession_series)
 
         remaining = df[df["state"] != contraction_state] if contraction_state is not None else df
-        expansion_state: Optional[int] = None
+        expansion_state: int | None = None
         if not remaining.empty:
             remaining_means = remaining.groupby("state")["d_unemp_12m"].mean()
             if not remaining_means.empty:
@@ -408,8 +408,8 @@ class RegimeClassifier:
         logger.debug("HMM State Mapping: %s", self.state_to_regime)
 
     def _label_contraction_state(
-        self, df_with_state: pd.DataFrame, recession_series: Optional[pd.Series]
-    ) -> Optional[int]:
+        self, df_with_state: pd.DataFrame, recession_series: pd.Series | None
+    ) -> int | None:
         """Picks the CONTRACTION state by NBER recession-frequency enrichment.
 
         Args:
@@ -543,7 +543,8 @@ class RegimeClassifier:
         if isinstance(current, pd.DataFrame):
             arr = current[FEATURE_COLUMNS].values
         else:
-            # macro_bundle() keys can be present-but-None; .get(col, default) won't catch that, nor would `or`.
+            # macro_bundle() keys can be present-but-None; .get(col, default) won't
+            # catch that, nor would `or`.
             def _value(col: str) -> float:
                 v = current.get(col)
                 return v if v is not None else _FEATURE_DEFAULTS[col]
@@ -586,7 +587,7 @@ class RegimeClassifier:
         else:
             return Regime.TRANSITIONAL.value, 0.5
 
-    def save(self, path: str | Path, start_date: Optional[str] = None) -> None:
+    def save(self, path: str | Path, start_date: str | None = None) -> None:
         """Persists the fitted hmm, scaler, and state_to_regime mapping to a joblib file.
 
         Args:
@@ -607,7 +608,7 @@ class RegimeClassifier:
                 "feature_columns": list(FEATURE_COLUMNS),
                 "n_train_observations": self.n_train_observations,
                 "start_date": start_date,
-                "trained_at": datetime.now(timezone.utc).isoformat(),
+                "trained_at": datetime.now(UTC).isoformat(),
                 "validation_metrics": self.validation_metrics,
             },
         }
@@ -646,7 +647,8 @@ class RegimeClassifier:
             classifier.validation_metrics = metadata.get("validation_metrics", {})
 
             if classifier.is_fitted:
-                # fit() already applies this; re-derived here so old artifacts reach CONTRACTION from cold start.
+                # fit() already applies this; re-derived here so old artifacts reach
+                # CONTRACTION from cold start.
                 classifier.hmm.startprob_ = cls._stationary_startprob(classifier.hmm.transmat_)
 
             logger.info(
@@ -674,8 +676,8 @@ class MacroStatisticalAgent:
 
     def __init__(
         self,
-        market_data: Optional[MarketDataProvider] = None,
-        model_path: Optional[str] = None,
+        market_data: MarketDataProvider | None = None,
+        model_path: str | None = None,
     ) -> None:
         """Loads the persisted classifier artifact for immediate use.
 
@@ -725,9 +727,9 @@ class MacroStatisticalAgent:
         self,
         window_final: pd.Series | None,
         field_name: str,
-        raw_value: Optional[float],
+        raw_value: float | None,
         *,
-        warn_message: Optional[str] = None,
+        warn_message: str | None = None,
     ) -> float:
         """Reads one macro field from the feature window, falling back to the FRED bundle.
 
@@ -788,7 +790,7 @@ class MacroStatisticalAgent:
             logger.warning("Failed to compute %s trend; defaulting to STABLE: %s", label, exc)
         return "STABLE"
 
-    def analyze(self) -> Optional[MacroContext]:
+    def analyze(self) -> MacroContext | None:
         """Compiles real-time economic indicators into a unified MacroContext.
 
         Returns a cached result if one exists within the 6-hour TTL. Otherwise
@@ -820,11 +822,15 @@ class MacroStatisticalAgent:
             )
             return None
 
+        vix_defaulted = vix is None
         if vix is None:
-            logger.warning("analyze: vix is None from FRED bundle; proceeding with regime classification only.")
+            logger.warning(
+                "analyze: vix is None from FRED bundle; proceeding with regime classification only."
+            )
             vix = 20.0
 
-        # window_final holds the classifier's actual scored row, avoiding a disagreeing second fetch.
+        # window_final holds the classifier's actual scored row, avoiding a
+        # disagreeing second fetch.
         window_final: pd.Series | None = None
         try:
             history_start = (
@@ -846,16 +852,25 @@ class MacroStatisticalAgent:
         regime = Regime(regime_str)
         model_healthy = self.classifier.is_fitted
 
+        # Neutral placeholder — left as-is when vix itself was defaulted, since a
+        # percentile computed against a substituted level would look measured
+        # while actually being derived from a fabricated input.
         vix_percentile = 50.0
-        try:
-            vix_hist = self.market_data.ohlcv_daily("^VIX", period="2y")
-            closes = vix_hist["close"].dropna()
-            if not closes.empty:
-                vix_percentile = float((closes < vix).mean() * 100.0)
-        except Exception as exc:
-            logger.warning("Failed to fetch VIX history for percentile: %s", exc)
+        if vix_defaulted:
+            logger.warning(
+                "analyze: vix was defaulted; skipping percentile computation, using neutral 50.0"
+            )
+        else:
+            try:
+                vix_hist = self.market_data.ohlcv_daily("^VIX", period="2y")
+                closes = vix_hist["close"].dropna()
+                if not closes.empty:
+                    vix_percentile = float((closes < vix).mean() * 100.0)
+            except Exception as exc:
+                logger.warning("Failed to fetch VIX history for percentile: %s", exc)
 
-        # Buckets on absolute VIX, not percentile — EXTREME is the governor's kill-switch zone by level.
+        # Buckets on absolute VIX, not percentile — EXTREME is the governor's
+        # kill-switch zone by level.
         if vix < 15:
             vix_regime = VixRegime.LOW
         elif vix < 25:
@@ -913,7 +928,8 @@ class MacroStatisticalAgent:
         else:
             sector_signal = SectorSignal.VALUE_FAVORED
 
-        # Scale agent multipliers by volatility regime; high VIX amplifies technical and sentiment signals.
+        # Scale agent multipliers by volatility regime; high VIX amplifies technical
+        # and sentiment signals.
         fund_mult = 1.3 if (regime == Regime.EXPANSION and vix_percentile < 40) else 0.9
         tech_mult = 1.2 if vix_percentile > 60 else 1.0
         sent_mult = 1.15 if vix_percentile > 50 else 0.9

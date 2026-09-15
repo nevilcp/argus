@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest import mock
 from zoneinfo import ZoneInfo
 
@@ -19,15 +19,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 import api.main as api_main
-from argus.data.live_session_cache import LiveSessionCache
 
 _ET = ZoneInfo("America/New_York")
 
 
 @pytest.fixture(autouse=True)
-def _reset_singletons(monkeypatch):
-    """Installs a fresh live session cache for each test."""
-    monkeypatch.setattr(api_main, "_live_cache", LiveSessionCache(interval_minutes=1))
+def _reset_singletons(_fresh_live_cache):
+    """Installs a fresh live session cache for each test (see conftest.py)."""
 
 
 @pytest.fixture
@@ -37,7 +35,8 @@ def client():
 
 
 def test_pipeline_status_reports_buffer_depth_without_materializing_frames(monkeypatch, client):
-    """/pipeline/status reads buffer depth via row_counts(), not by materializing each ticker's frame."""
+    """/pipeline/status reads buffer depth via row_counts(), not by materializing each
+    ticker's frame."""
     fake_pipeline = mock.Mock()
     fake_pipeline.tickers = ["AAPL"]
     fake_pipeline.is_market_hours.return_value = True
@@ -83,7 +82,7 @@ def test_seconds_until_next_reconcile_matches_utc_diff_on_a_normal_day():
 
     seconds = api_main._seconds_until_next_reconcile(now_et, hour=18)
 
-    expected = (target_et.astimezone(timezone.utc) - now_et.astimezone(timezone.utc)).total_seconds()
+    expected = (target_et.astimezone(UTC) - now_et.astimezone(UTC)).total_seconds()
     assert seconds == expected == 9 * 3600
 
 

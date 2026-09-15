@@ -14,7 +14,7 @@ directories are given.
 
 from __future__ import annotations
 
-import sys
+import argparse
 from pathlib import Path
 
 from argus.backtesting.replay import replay_sessions
@@ -24,7 +24,15 @@ DEFAULT_SESSION_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtur
 
 def main() -> None:
     """Replays each given session (default: fixtures dir) and prints its allocation."""
-    session_dirs = [Path(p) for p in sys.argv[1:]] or [DEFAULT_SESSION_DIR]
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "session_dirs",
+        nargs="*",
+        type=Path,
+        help="Fixture session directories to replay (default: tests/fixtures/)",
+    )
+    args = parser.parse_args()
+    session_dirs = args.session_dirs or [DEFAULT_SESSION_DIR]
 
     results = replay_sessions(session_dirs)
 

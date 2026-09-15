@@ -7,6 +7,9 @@ Responsibilities:
   - Provide an opt-in network guard a test can request to prove it never
     falls through to a real socket call
   - Isolate every test from the production candle buffer
+  - Reset the kill-switch singleton and api.main's live-session-cache /
+    API-key singletons that several api.main test modules each used to
+    reset independently
 
 Not responsible for:
   - Test data (see tests/fixtures/)
@@ -22,7 +25,30 @@ from collections.abc import Iterator
 
 import pytest
 
+import api.main as api_main
+import argus.risk.kill_switch as kill_switch_module
 from argus.config import settings
+from argus.data.live_session_cache import LiveSessionCache
+
+
+@pytest.fixture(autouse=True)
+def _reset_kill_switch_singleton() -> Iterator[None]:
+    """Clears the module-level KillSwitch singleton before and after each test."""
+    kill_switch_module._kill_switch = None
+    yield
+    kill_switch_module._kill_switch = None
+
+
+@pytest.fixture
+def _fresh_live_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Installs a fresh LiveSessionCache as api.main's module-level singleton."""
+    monkeypatch.setattr(api_main, "_live_cache", LiveSessionCache(interval_minutes=1))
+
+
+@pytest.fixture
+def _no_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disables the ARGUS_API_KEY auth gate for the duration of a test."""
+    monkeypatch.setattr(api_main.settings, "ARGUS_API_KEY", "")
 
 
 @pytest.fixture(autouse=True)
@@ -57,4 +83,4 @@ def block_network(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
     monkeypatch.setattr(socket.socket, "connect", _blocked)
     monkeypatch.setattr(socket.socket, "connect_ex", _blocked)
-    yield
+    return

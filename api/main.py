@@ -39,7 +39,7 @@ import os
 import sys
 from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
@@ -61,7 +61,12 @@ from argus.orchestration.collector import (
     append_decisions_jsonl,
     run_collection_cycle,
 )
-from argus.orchestration.governor import REGISTERED_MODELS, RateLimitExceeded, UnregisteredModel, governor
+from argus.orchestration.governor import (
+    REGISTERED_MODELS,
+    RateLimitExceeded,
+    UnregisteredModel,
+    governor,
+)
 from argus.orchestration.graph import build_graph
 from argus.orchestration.reconciliation import run_reconciliation_pass
 from argus.orchestration.state import ARGUSState
@@ -187,6 +192,7 @@ async def _collector_loop(pipeline: MFTDataPipeline, compiled_graph) -> None:
                 pipeline=pipeline,
                 compiled_graph=compiled_graph,
                 decisions_log_path=_data_path("decisions.jsonl"),
+                checkpoint_db_path=_data_path("argus_graph.db"),
                 analyze_lock=_analyze_semaphore,
             )
             logger.info("[Collector] cycle result: %s", _last_collection_result)
@@ -222,7 +228,14 @@ def _reconcile_once() -> None:
             "[Reconcile] equity=$%.2f (drawdown=%.1f%%)", report.equity, report.drawdown * 100
         )
     if report.decisions_compacted is not None:
-        logger.info("[Reconcile] decisions.jsonl compacted: %d retained", report.decisions_compacted)
+        logger.info(
+            "[Reconcile] decisions.jsonl compacted: %d retained", report.decisions_compacted
+        )
+    if report.decisions_retired_unresolved:
+        logger.info(
+            "[Reconcile] retired %d decision(s) as permanently unresolved",
+            report.decisions_retired_unresolved,
+        )
     if report.checkpoints_pruned is not None:
         logger.info("[Reconcile] checkpoint threads pruned: %d", report.checkpoints_pruned)
     logger.info("[Reconcile] PENDING snapshots expired: %d", report.pending_snapshots_expired)
@@ -254,7 +267,7 @@ def _seconds_until_next_reconcile(now_et: datetime, hour: int) -> float:
     target = now_et.replace(hour=hour, minute=0, second=0, microsecond=0)
     if target <= now_et:
         target += timedelta(days=1)
-    return (target.astimezone(timezone.utc) - now_et.astimezone(timezone.utc)).total_seconds()
+    return (target.astimezone(UTC) - now_et.astimezone(UTC)).total_seconds()
 
 
 async def _reconcile_loop() -> None:
@@ -316,9 +329,9 @@ def _assert_single_worker() -> None:
         idx = argv.index("--workers")
         if idx + 1 < len(argv):
             requested.append((f"--workers {argv[idx + 1]}", argv[idx + 1]))
-    for arg in argv:
-        if arg.startswith("--workers="):
-            requested.append((arg, arg.removeprefix("--workers=")))
+    requested.extend(
+        (arg, arg.removeprefix("--workers=")) for arg in argv if arg.startswith("--workers=")
+    )
     web_concurrency = os.environ.get("WEB_CONCURRENCY")
     if web_concurrency is not None:
         requested.append((f"WEB_CONCURRENCY={web_concurrency}", web_concurrency))
@@ -354,7 +367,7 @@ def _acquire_process_lock() -> None:
     global _process_lock_file
     lock_path = Path(_data_path("argus.lock"))
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_file = open(lock_path, "w")
+    lock_file = open(lock_path, "w")  # noqa: SIM115
     try:
         fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as exc:
@@ -376,7 +389,7 @@ def _warn_on_permissive_security_defaults() -> None:
     """
     if settings.ARGUS_CORS_ORIGINS == ["*"]:
         logger.warning(
-            "[Startup] ARGUS_CORS_ORIGINS is at its default (\"*\"): every origin is allowed. "
+            '[Startup] ARGUS_CORS_ORIGINS is at its default ("*"): every origin is allowed. '
             "Set it explicitly for a deployment reachable outside a trusted network."
         )
     if not settings.ARGUS_API_KEY:
@@ -403,13 +416,22 @@ def _assert_registered_models() -> None:
         settings.ARGUS_PORTFOLIO_MODEL,
     ):
         if model not in REGISTERED_MODELS:
-            raise UnregisteredModel(f"{model!r} is configured but has no registered rate-limit profile")
+            raise UnregisteredModel(
+                f"{model!r} is configured but has no registered rate-limit profile"
+            )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Starts background tasks on startup and stops them cleanly on shutdown."""
-    global _mft_pipeline, _pipeline_task, _collector_task, _reconcile_task, _graph, _macro_status_agent, _live_cache
+    global \
+        _mft_pipeline, \
+        _pipeline_task, \
+        _collector_task, \
+        _reconcile_task, \
+        _graph, \
+        _macro_status_agent, \
+        _live_cache
 
     _configure_logging()
     _warn_on_permissive_security_defaults()
@@ -609,6 +631,7 @@ async def health():
     try:
         can_make_calls = governor.get_remaining_capacity(settings.ARGUS_PORTFOLIO_MODEL) > 0
     except Exception:
+        logger.exception("[API] /health governor capacity check failed")
         can_make_calls = False
 
     background_tasks = {
@@ -710,10 +733,12 @@ async def analyze(req: AnalysisRequest):
             threshold, the market is currently closed, the MFT cache has not yet
             been populated for all requested tickers, the cache hasn't been
             refreshed recently (pipeline stalled), the cached bars are older
-            than expected (stale data survived a restart), or a configured
-            model has no rate-limit profile (a misconfiguration, not a
-            transient condition).
-        HTTPException 500: If the LangGraph execution fails or produces no allocation.
+            than expected (stale data survived a restart), a configured model
+            has no rate-limit profile (a misconfiguration, not a transient
+            condition), or the portfolio agent's LLM call failed and correctly
+            degraded to no allocation rather than fabricating one.
+        HTTPException 500: If the LangGraph execution fails for a reason other
+            than the LLM call above.
     """
     ks = get_kill_switch()
     if ks:
@@ -818,7 +843,7 @@ async def analyze(req: AnalysisRequest):
                 asyncio.to_thread(_graph.invoke, state, config),
                 timeout=settings.ARGUS_ANALYZE_DEADLINE_SECONDS,
             )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         # The underlying thread can't be cancelled and keeps running — async
         # job submission is a possible future improvement — but the server no
         # longer holds the connection open past a proxy's own timeout with no signal.
@@ -829,17 +854,17 @@ async def analyze(req: AnalysisRequest):
             504,
             f"Analysis did not complete within {settings.ARGUS_ANALYZE_DEADLINE_SECONDS}s. "
             "It may still be running and consuming governor quota in the background.",
-        )
+        ) from None
     except RateLimitExceeded as e:
         logger.warning("[API] Governor rate limit exhausted: %s", e)
-        raise HTTPException(429, f"Rate limit exhausted: {e}")
+        raise HTTPException(429, f"Rate limit exhausted: {e}") from e
     except UnregisteredModel as e:
         logger.error("[API] Model configuration error: %s", e)
-        raise HTTPException(503, f"Model configuration error: {e}")
+        raise HTTPException(503, f"Model configuration error: {e}") from e
     except Exception as e:
         ref = uuid4()
         logger.error("[API] Graph error (ref %s): %s", ref, e, exc_info=True)
-        raise HTTPException(500, f"Agent graph error (ref {ref})")
+        raise HTTPException(500, f"Agent graph error (ref {ref})") from e
 
     # /analyze is the other entry point into the graph besides the unattended
     # collector — without this, decisions.jsonl (the only source
@@ -858,7 +883,10 @@ async def analyze(req: AnalysisRequest):
 
     allocation = final_state.get("portfolio_allocation")
     if not allocation:
-        raise HTTPException(500, "Portfolio allocation failed.")
+        # Refusing to answer is correct here — see PortfolioManagerAgent.allocate's
+        # degrade-not-fabricate contract — so this is an upstream LLM outage, not
+        # a bug in this server; 503 says so rather than the generic 500.
+        raise HTTPException(503, "Portfolio allocation failed.")
 
     macro_context = final_state.get("macro_context")
     macro_regime = macro_context.macro_regime.value if macro_context else "unknown"
@@ -909,13 +937,26 @@ async def reset_kill_switch(new_inception_value: float = Query(gt=1000)):
     Raises:
         HTTPException 401: If ARGUS_API_KEY is set and the X-API-Key header doesn't match.
         HTTPException 404: If the kill switch has not been initialized.
+        HTTPException 500: If the persisted paper-equity file exists but is
+            corrupt. Rebasing a book paper_book.load() couldn't actually read
+            would silently drop its runs_applied, letting a run already
+            reflected in the old (unreadable) equity get double-applied by
+            the next reconcile pass — so this is refused rather than papered
+            over. Move the corrupt file aside and retry.
     """
     ks = get_kill_switch()
     if ks is None:
         raise HTTPException(404, "Kill switch not initialized")
 
     book_path = _data_path("paper_equity.json")
-    book = paper_book.load(book_path)
+    try:
+        book = paper_book.load(book_path)
+    except Exception as exc:
+        raise HTTPException(
+            500,
+            f"{book_path} exists but could not be read ({exc}); move it aside and retry "
+            "— rebasing over unreadable state risks double-applying an already-applied run.",
+        ) from exc
     book.rebase(new_inception_value)
     paper_book.save(book, book_path)
     ks.reset(new_inception_value)

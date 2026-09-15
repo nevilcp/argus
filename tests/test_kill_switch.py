@@ -25,17 +25,9 @@ from argus.risk import paper_book
 from argus.risk.kill_switch import KillSwitch, initialize_kill_switch
 from argus.risk.paper_book import PaperBook, compute_run_returns
 from argus.schemas.signals import ARGUSDecision, PositionAllocation, Signal, TechnicalSignal
-
+from argus.seams import FixtureMarketDataProvider
 
 _FETCH_VIX = "argus.data.fetchers.fetch_vix"
-
-
-@pytest.fixture(autouse=True)
-def _reset_kill_switch_singleton() -> None:
-    """Clears the module-level KillSwitch singleton before and after each test."""
-    kill_switch_module._kill_switch = None
-    yield
-    kill_switch_module._kill_switch = None
 
 
 def _make_ks(risk_tolerance: str = "MODERATE", inception: float = 100_000.0) -> KillSwitch:
@@ -93,7 +85,7 @@ def _seed_persisted_halt() -> KillSwitch:
 
 
 @pytest.mark.parametrize(
-    "tolerance,threshold",
+    ("tolerance", "threshold"),
     [("CONSERVATIVE", 0.08), ("MODERATE", 0.12), ("AGGRESSIVE", 0.18)],
 )
 @mock.patch(_FETCH_VIX, return_value=15.0)
@@ -226,6 +218,18 @@ def test_vix_fetch_success_resets_failure_counter():
     assert ks.new_positions_allowed  # only 4 consecutive failures since the reset, not 5
 
 
+def test_vix_gate_driven_entirely_from_fixture_data():
+    """The VIX gate can be exercised off FixtureMarketDataProvider, with no network fetch."""
+    ks = _make_ks("MODERATE")
+    ks.market_data = FixtureMarketDataProvider()
+
+    with mock.patch(_FETCH_VIX, side_effect=AssertionError("must not reach the live fetcher")):
+        ks._check()
+
+    assert ks.status.current_vix == pytest.approx(16.799999237060547)
+    assert ks.new_positions_allowed  # fixture VIX is well below the 35.0 blackout threshold
+
+
 # ---------------------------------------------------------------------------
 # Halt persistence and restore-on-init
 # ---------------------------------------------------------------------------
@@ -244,6 +248,39 @@ def test_halt_restores_from_a_persisted_dump(tmp_path, monkeypatch):
 
     assert restored.is_halted
     assert restored._halt_reason == seed._halt_reason
+
+
+def test_halt_restores_from_a_corrupt_dump(tmp_path, monkeypatch):
+    """A halt dump that exists but fails to parse still engages the halt.
+
+    Its mere existence is the evidence a halt occurred — treating an
+    unreadable dump as "no halt" would let a crash silently clear a real one.
+    """
+    monkeypatch.chdir(tmp_path)
+    _seed_persisted_halt()
+    halt_file = kill_switch_module._find_latest_halt_file()
+    assert halt_file is not None
+    halt_file.write_text("{not valid json")  # corrupt it after the seed wrote it cleanly
+
+    restored = KillSwitch("MODERATE")
+    restored._restore_halt_from_file(halt_file)
+
+    assert restored.is_halted
+
+
+def test_halt_restores_from_a_truncated_dump(tmp_path, monkeypatch):
+    """A halt dump truncated mid-write (e.g. by a crash) still engages the halt."""
+    monkeypatch.chdir(tmp_path)
+    _seed_persisted_halt()
+    halt_file = kill_switch_module._find_latest_halt_file()
+    assert halt_file is not None
+    original = halt_file.read_text()
+    halt_file.write_text(original[: len(original) // 2])
+
+    restored = KillSwitch("MODERATE")
+    restored._restore_halt_from_file(halt_file)
+
+    assert restored.is_halted
 
 
 def test_initialize_kill_switch_restores_halt_on_reinit(tmp_path, monkeypatch):
@@ -506,6 +543,25 @@ def test_compute_run_returns_and_paperbook_survive_the_audit_simulation():
 # ---------------------------------------------------------------------------
 
 
+def test_paperbook_apply_run_floors_equity_at_zero():
+    """A run_return that would drive equity negative floors it at 0 instead."""
+    book = PaperBook(equity=100_000.0, high_water_mark=100_000.0)
+
+    book.apply_run(datetime(2026, 1, 1), -1.5)
+
+    assert book.equity == 0.0
+
+
+def test_paperbook_rebase_floors_equity_and_hwm_at_zero():
+    """rebase() to a negative inception value floors equity/high_water_mark at 0."""
+    book = PaperBook(equity=50_000.0, high_water_mark=50_000.0)
+
+    book.rebase(-1.0)
+
+    assert book.equity == 0.0
+    assert book.high_water_mark == 0.0
+
+
 def test_paperbook_apply_run_idempotent():
     """Re-applying the same run_timestamp is a no-op the second time."""
     book = PaperBook(equity=100_000.0, high_water_mark=100_000.0)
@@ -597,6 +653,34 @@ def test_paperbook_load_missing_file_starts_fresh_at_total_wealth(tmp_path):
     assert book.equity == pytest.approx(settings.ARGUS_TOTAL_WEALTH)
     assert book.high_water_mark == pytest.approx(settings.ARGUS_TOTAL_WEALTH)
     assert book.runs_applied == set()
+
+
+def test_paperbook_load_truncated_existing_file_raises(tmp_path):
+    """An existing-but-unparseable file is a hard failure, not a silent fresh start.
+
+    Silently starting fresh here would reset equity (erasing the drawdown
+    history the kill switch's drawdown gate reads) and empty runs_applied
+    (so an already-applied run in decisions.jsonl gets compounded again).
+    """
+    path = tmp_path / "paper_equity.json"
+    good_book = PaperBook(equity=95_000.0, high_water_mark=110_000.0)
+    good_book.apply_run(datetime(2026, 1, 1), -0.05)
+    paper_book.save(good_book, str(path))
+    original = path.read_bytes()
+    path.write_bytes(original[: len(original) // 2])  # simulate a crash mid-write
+
+    with pytest.raises(ValueError, match=r"line \d+ column \d+"):
+        paper_book.load(str(path))
+
+
+def test_paperbook_save_is_crash_safe_no_leftover_tmp_file(tmp_path):
+    """save() leaves no .tmp artifact behind — readers only ever see the final file or nothing."""
+    path = tmp_path / "paper_equity.json"
+
+    paper_book.save(PaperBook(equity=100_000.0, high_water_mark=100_000.0), str(path))
+
+    assert path.exists()
+    assert not path.with_suffix(path.suffix + ".tmp").exists()
 
 
 def test_paperbook_prune_runs_applied_drops_only_entries_older_than_cutoff():

@@ -44,12 +44,11 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 from langgraph.checkpoint.base import Checkpoint
@@ -68,7 +67,7 @@ _ABLATABLE_AGENTS = ("technical", "fundamental", "sentiment")
 
 
 def credit_primary_driver(
-    decision: ARGUSDecision, aggregator: Optional[HybridSignalAggregator] = None
+    decision: ARGUSDecision, aggregator: HybridSignalAggregator | None = None
 ) -> str:
     """Credits whichever specialist agent's signal moved the aggregated result the most.
 
@@ -138,9 +137,16 @@ def credit_primary_driver(
 
 
 def _as_naive_timestamp(value: datetime | pd.Timestamp) -> pd.Timestamp:
-    """Normalizes a datetime/Timestamp to tz-naive so entry/exit comparisons never raise."""
+    """Normalizes a datetime/Timestamp to tz-naive so entry/exit comparisons never raise.
+
+    A tz-aware value is converted to UTC before its tzinfo is dropped, rather than
+    simply discarding whatever offset it carries — the latter silently shifts the
+    value by that offset (e.g. prune_checkpoints' checkpoint `ts`, which LangGraph
+    stamps tz-aware) and produces a pruning decision that's early or late by the
+    offset's magnitude.
+    """
     ts = pd.Timestamp(value)
-    return ts.tz_localize(None) if ts.tzinfo is not None else ts
+    return ts.tz_convert("UTC").tz_localize(None) if ts.tzinfo is not None else ts
 
 
 def _needs_reconciliation(decision: ARGUSDecision) -> bool:
@@ -154,7 +160,7 @@ def _needs_reconciliation(decision: ARGUSDecision) -> bool:
 
 def _realized_return_from_prices(
     decision: ARGUSDecision, prices: pd.Series, horizon_days: int
-) -> Optional[tuple[float, int, str]]:
+) -> tuple[float, int, str] | None:
     """Pairs a decision's entry price with a later close drawn from an already-fetched series.
 
     Args:
@@ -196,8 +202,8 @@ def compute_realized_return(
     market_data: MarketDataProvider,
     horizon_days: int,
     *,
-    prices: Optional[pd.Series] = None,
-) -> Optional[tuple[float, int, str]]:
+    prices: pd.Series | None = None,
+) -> tuple[float, int, str] | None:
     """Computes realized return by pairing the decision's entry price with a later close.
 
     Entry price is decision.technical.current_price — the close the
@@ -235,7 +241,7 @@ def reconcile_decision(
     cultural: CulturalMemoryManager,
     horizon_days: int = RECONCILIATION.horizon_days,
     *,
-    prices: Optional[pd.Series] = None,
+    prices: pd.Series | None = None,
 ) -> bool:
     """Reconciles a single decision: computes its outcome and stores it if the horizon has passed.
 
@@ -312,15 +318,20 @@ def reconcile_decisions(
         d for d in decisions if d.decision_id not in already_done and _needs_reconciliation(d)
     ]
 
-    prices_by_ticker: dict[str, Optional[pd.Series]] = {}
+    prices_by_ticker: dict[str, pd.Series | None] = {}
     stored = 0
     for decision in candidates:
         if decision.ticker not in prices_by_ticker:
             try:
-                prices_by_ticker[decision.ticker] = market_data.ohlcv_daily(decision.ticker)["close"]
+                prices_by_ticker[decision.ticker] = market_data.ohlcv_daily(decision.ticker)[
+                    "close"
+                ]
             except Exception as exc:
                 logger.warning(
-                    "[Reconcile] failed to fetch price history for %s: %s", decision.ticker, exc
+                    "[Reconcile] failed to fetch price history for %s (%s): %s",
+                    decision.ticker,
+                    type(exc).__name__,
+                    exc,
                 )
                 prices_by_ticker[decision.ticker] = None
 
@@ -421,33 +432,86 @@ def load_decisions_from_jsonl(path: str) -> list[ARGUSDecision]:
     return decisions
 
 
-def compact_decisions_jsonl(path: str, cutoff: datetime) -> int:
-    """Rewrites a decisions.jsonl log, dropping sessions older than cutoff.
+@dataclass
+class CompactionResult:
+    """Outcome of one compact_decisions_jsonl() call.
+
+    Attributes:
+        retained: Count of decisions written back to the log.
+        retired_unresolved: Count of decisions dropped for aging past
+            RECONCILIATION.unresolved_retirement_days without ever having
+            received an outcome — distinct from `retained`'s complement,
+            which also includes decisions dropped as routine, already-resolved
+            cleanup.
+    """
+
+    retained: int
+    retired_unresolved: int = 0
+
+
+def compact_decisions_jsonl(
+    path: str,
+    cutoff: datetime,
+    unresolved_cutoff: datetime,
+    resolved_ids: Collection[str],
+) -> CompactionResult:
+    """Rewrites a decisions.jsonl log, dropping resolved sessions older than cutoff.
+
+    A decision is resolved once it has a stored outcome (its decision_id is in
+    resolved_ids) or could never produce one (see _needs_reconciliation) —
+    anything else has no recorded outcome yet and is not eligible for this
+    routine prune, however old it is: a reconcile pass that never ran, or
+    never found a matured price, must not cost it the evidence it would
+    otherwise have produced. Such a decision is instead retired once it also
+    passes the much wider `unresolved_cutoff`, at which point it is declared
+    permanently unresolvable and dropped anyway, counted separately from a
+    routine, resolved prune.
 
     Meant to run right after a reconcile_decisions() pass over the same log
-    (see api/main.py's _reconcile_once and scripts/reconcile_outcomes.py) with
-    a cutoff at or before that pass's horizon: a decision that old has already
-    had its one chance at reconciliation, so dropping it here only stops the
-    log growing forever, it does not cost a delayed reconcile pass anything.
+    (see api/main.py's _reconcile_once and scripts/reconcile_outcomes.py),
+    with resolved_ids reflecting that same pass's outcome stores.
 
     Args:
         path: decisions.jsonl path.
-        cutoff: Decisions with session_timestamp before this are dropped. Should
-            be tz-naive, matching the naive timestamps this log stores.
+        cutoff: Resolved decisions with session_timestamp before this are
+            dropped. Should be tz-naive, matching the naive timestamps this
+            log stores.
+        unresolved_cutoff: Unresolved decisions with session_timestamp before
+            this are retired anyway. Should be tz-naive and at or before
+            cutoff (i.e. further in the past), so an unresolved decision
+            always gets at least as long as a resolved one.
+        resolved_ids: decision_id values that already have a stored outcome.
 
     Returns:
-        Count of decisions retained. 0 (and no file written) if the file
-        doesn't exist yet.
+        A CompactionResult. Both fields are 0 (and no file written) if the
+        file doesn't exist yet.
     """
     file_path = Path(path)
     if not file_path.exists():
-        return 0
+        return CompactionResult(retained=0)
 
     decisions = load_decisions_from_jsonl(path)
     cutoff_naive = _as_naive_timestamp(cutoff)
-    kept = [d for d in decisions if _as_naive_timestamp(d.session_timestamp) >= cutoff_naive]
+    unresolved_cutoff_naive = _as_naive_timestamp(unresolved_cutoff)
+
+    kept: list[ARGUSDecision] = []
+    retired_unresolved = 0
+    for decision in decisions:
+        session_ts = _as_naive_timestamp(decision.session_timestamp)
+        if session_ts >= cutoff_naive:
+            kept.append(decision)
+            continue
+
+        resolved = decision.decision_id in resolved_ids or not _needs_reconciliation(decision)
+        if resolved:
+            continue
+        if session_ts >= unresolved_cutoff_naive:
+            kept.append(decision)
+        else:
+            retired_unresolved += 1
+
     if len(kept) == len(decisions):
-        return len(kept)
+        return CompactionResult(retained=len(kept), retired_unresolved=retired_unresolved)
 
     tmp_path = file_path.with_suffix(file_path.suffix + ".tmp")
     with open(tmp_path, "w", encoding="utf-8") as f:
@@ -456,13 +520,28 @@ def compact_decisions_jsonl(path: str, cutoff: datetime) -> int:
     tmp_path.replace(file_path)
 
     logger.info(
-        "compact_decisions_jsonl: kept %d/%d decision(s) in %s (cutoff=%s)",
+        "compact_decisions_jsonl: kept %d/%d decision(s) in %s (cutoff=%s, retired %d "
+        "unresolved past %s)",
         len(kept),
         len(decisions),
         path,
         cutoff_naive.isoformat(),
+        retired_unresolved,
+        unresolved_cutoff_naive.isoformat(),
     )
-    return len(kept)
+    return CompactionResult(retained=len(kept), retired_unresolved=retired_unresolved)
+
+
+def default_checkpoint_retention_cutoff() -> datetime:
+    """The prune_checkpoints cutoff at RECONCILIATION's declared default horizon.
+
+    Shared by collector.py's per-cycle pruning and this module's own
+    run_reconciliation_pass (whenever its horizon_days is left at the default), so
+    the two prune paths can't silently drift onto different windows.
+    """
+    return datetime.now() - timedelta(  # noqa: DTZ005
+        days=RECONCILIATION.horizon_days + RECONCILIATION.retention_margin_days
+    )
 
 
 def prune_checkpoints(db_path: str, cutoff: datetime) -> int:
@@ -541,6 +620,12 @@ class ReconciliationReport:
             snapshots expired by this pass.
         decisions_compacted: Retained decisions.jsonl count, or None if
             decisions_log_path wasn't given.
+        decisions_retired_unresolved: Count of decisions.jsonl decisions
+            dropped for aging past RECONCILIATION.unresolved_retirement_days
+            without ever receiving an outcome, or None if decisions_log_path
+            wasn't given. Distinct from decisions_compacted, which counts what
+            survived — this counts a deliberate, unresolved retirement rather
+            than a routine, resolved prune.
         checkpoints_pruned: Deleted checkpoint-thread count, or None if
             checkpoint_db_path wasn't given.
         errors: One entry per independent step that failed; every other
@@ -554,8 +639,9 @@ class ReconciliationReport:
     drawdown: float = 0.0
     runs_applied_pruned: int = 0
     pending_snapshots_expired: int = 0
-    decisions_compacted: Optional[int] = None
-    checkpoints_pruned: Optional[int] = None
+    decisions_compacted: int | None = None
+    decisions_retired_unresolved: int | None = None
+    checkpoints_pruned: int | None = None
     errors: list[str] = field(default_factory=list)
 
 
@@ -582,8 +668,8 @@ def run_reconciliation_pass(
     cultural: CulturalMemoryManager,
     paper_book_path: str,
     *,
-    decisions_log_path: Optional[str] = None,
-    checkpoint_db_path: Optional[str] = None,
+    decisions_log_path: str | None = None,
+    checkpoint_db_path: str | None = None,
     horizon_days: int = RECONCILIATION.horizon_days,
 ) -> ReconciliationReport:
     """Runs the one reconciliation sequence shared by api/main.py and scripts/reconcile_outcomes.py.
@@ -655,6 +741,9 @@ def run_reconciliation_pass(
     cutoff = datetime.now() - timedelta(  # noqa: DTZ005
         days=horizon_days + RECONCILIATION.retention_margin_days
     )
+    unresolved_cutoff = datetime.now() - timedelta(  # noqa: DTZ005
+        days=horizon_days + RECONCILIATION.unresolved_retirement_days
+    )
 
     with _pass_step(report, "paper-book update"):
         book = paper_book.load(paper_book_path)
@@ -662,7 +751,12 @@ def run_reconciliation_pass(
             decisions, market_data, horizon_days
         ):
             book.apply_run(run_timestamp, run_return)
-        report.runs_applied_pruned = book.prune_runs_applied(cutoff)
+        # unresolved_cutoff, not cutoff: an unresolved decision can now outlive
+        # cutoff in decisions.jsonl (see compact_decisions_jsonl), so a run
+        # sharing its session_timestamp must stay in runs_applied at least as
+        # long — otherwise a later pass that recomputes the run from the
+        # decisions still on disk would compound it onto equity a second time.
+        report.runs_applied_pruned = book.prune_runs_applied(unresolved_cutoff)
         paper_book.save(book, paper_book_path)
         report.equity = book.equity
         report.drawdown = book.drawdown_from_peak()
@@ -670,7 +764,12 @@ def run_reconciliation_pass(
 
     if decisions_log_path:
         with _pass_step(report, "decisions.jsonl compaction"):
-            report.decisions_compacted = compact_decisions_jsonl(decisions_log_path, cutoff)
+            resolved_ids = cultural.already_reconciled([d.decision_id for d in decisions])
+            compaction = compact_decisions_jsonl(
+                decisions_log_path, cutoff, unresolved_cutoff, resolved_ids
+            )
+            report.decisions_compacted = compaction.retained
+            report.decisions_retired_unresolved = compaction.retired_unresolved
 
     if checkpoint_db_path:
         with _pass_step(report, "checkpoint pruning"):

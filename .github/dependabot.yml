@@ -1,0 +1,9 @@
+version: 2
+updates:
+  # Dockerfile.api pins python:3.11-slim by digest for build reproducibility
+  # (a floating tag builds differently on different days); this is what
+  # keeps that pin from going stale.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"

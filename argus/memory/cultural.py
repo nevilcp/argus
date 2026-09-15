@@ -30,13 +30,59 @@ import logging
 import os
 from datetime import datetime
 from threading import Lock
-from typing import Any, Optional
+from typing import Any
 
 from argus.config import settings
 from argus.params import MEMORY, RECONCILIATION
 from argus.schemas.signals import ARGUSDecision, MacroContext
 
 logger = logging.getLogger("argus.cultural_memory")
+
+# Model downloaded once to ~/.cache/sentence-transformers on first invocation.
+_EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
+
+
+class EmbeddingModelMismatchError(RuntimeError):
+    """The persisted collection was embedded with a different model than this process uses."""
+
+
+def _check_embedding_model_identity(
+    persisted_metadata: dict[str, Any] | None, expected_model: str
+) -> dict[str, Any] | None:
+    """Compares a collection's recorded embedding model against the one this process uses.
+
+    `get_or_create_collection` ignores the `metadata` argument for a collection that
+    already exists, so an existing collection's `embedding_model` — if ever
+    recorded — reflects whatever model actually produced its vectors, not this
+    process's current configuration.
+
+    Args:
+        persisted_metadata: The collection's current metadata, or None.
+        expected_model: The model name this process is configured to embed with.
+
+    Returns:
+        Metadata to backfill via `collection.modify` when the collection predates
+        this check (no `embedding_model` recorded yet), or None when nothing needs
+        writing back.
+
+    Raises:
+        EmbeddingModelMismatchError: The collection was embedded with a different
+            model. Its vectors are geometrically incomparable to anything this
+            process would add — similarity search would otherwise silently degrade
+            toward meaningless results rather than surfacing the mismatch.
+    """
+    persisted_metadata = persisted_metadata or {}
+    recorded_model = persisted_metadata.get("embedding_model")
+    if recorded_model is None:
+        return {**persisted_metadata, "embedding_model": expected_model}
+    if recorded_model != expected_model:
+        raise EmbeddingModelMismatchError(
+            f"Cultural memory collection was embedded with {recorded_model!r}, but this "
+            f"process is configured for {expected_model!r}. Vectors from different "
+            "embedding models are not comparable — point persist_dir at a fresh "
+            "directory or reindex the collection under the new model before continuing."
+        )
+    return None
 
 
 def _where(conditions: list[dict[str, Any]]) -> dict[str, Any]:
@@ -92,16 +138,25 @@ class CulturalMemoryManager:
             settings=chromadb.config.Settings(anonymized_telemetry=False),
         )
 
-        # Model downloaded once to ~/.cache/sentence-transformers on first invocation
         self.ef = embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name="all-MiniLM-L6-v2"
+            model_name=_EMBEDDING_MODEL_NAME
         )
 
         self.collection = self.client.get_or_create_collection(
             name="argus_wisdom",
             embedding_function=self.ef,  # type: ignore[arg-type]  # chromadb/sentence-transformers stub mismatch
-            metadata={"hnsw:space": "cosine"},
+            metadata={"hnsw:space": "cosine", "embedding_model": _EMBEDDING_MODEL_NAME},
         )
+        backfill_metadata = _check_embedding_model_identity(
+            self.collection.metadata, _EMBEDDING_MODEL_NAME
+        )
+        if backfill_metadata is not None:
+            self.collection.modify(metadata=backfill_metadata)
+            logger.info(
+                "[Memory] Backfilled embedding_model=%s onto a pre-existing collection "
+                "with no recorded model",
+                _EMBEDDING_MODEL_NAME,
+            )
         self.persist_dir = persist_dir
         logger.info("[Memory] Cultural Memory Manager initialized at %s", persist_dir)
 
@@ -218,7 +273,7 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
         outcome: str,
         regime: str,
         n_results: int,
-        as_of: Optional[datetime],
+        as_of: datetime | None,
         label: str,
     ) -> list[str]:
         """Runs one outcome- and regime-filtered similarity query, returning [] on failure.
@@ -259,9 +314,11 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
         current_macro: MacroContext,
         current_technical_summary: str,
         n_results: int = 5,
-        as_of: Optional[datetime] = None,
+        as_of: datetime | None = None,
     ) -> list[str]:
-        """Queries the vector collection to retrieve successful historic patterns similar to the current posture.
+        """Queries the vector collection to retrieve successful historic patterns.
+
+        Retrieves patterns similar to the current posture.
 
         Filters on the current regime, symmetrically with retrieve_warnings — both
         land in the same portfolio prompt, so successes shouldn't be drawn from every
@@ -286,7 +343,7 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
         regime = current_macro.macro_regime.value
         vix_regime = current_macro.vix_regime.value
         return self._retrieve_by_outcome(
-            query=f"Macro regime {regime}, VIX {vix_regime}, {current_technical_summary}",
+            query=(f"Macro regime {regime}, VIX {vix_regime}, {current_technical_summary}"),
             outcome="SUCCESSFUL",
             regime=regime,
             n_results=n_results,
@@ -298,7 +355,7 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
         self,
         current_macro: MacroContext,
         n_results: int = 3,
-        as_of: Optional[datetime] = None,
+        as_of: datetime | None = None,
     ) -> list[str]:
         """Retrieves failed historic patterns within the current macro regime to serve as warnings.
 
@@ -310,7 +367,8 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
                 None (default) applies no filtering.
 
         Returns:
-            List of matching document strings from the FAILED outcome filter for the current regime.
+            List of matching document strings from the FAILED outcome filter for
+            the current regime.
         """
         regime = current_macro.macro_regime.value
         return self._retrieve_by_outcome(
@@ -325,10 +383,10 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
     def get_agent_accuracy(
         self,
         agent_name: str,
-        regime: Optional[str] = None,
-        as_of: Optional[datetime] = None,
+        regime: str | None = None,
+        as_of: datetime | None = None,
     ) -> tuple[float, int]:
-        """Computes shrunk statistical win rates for trades driven primarily by a specific specialist agent.
+        """Computes shrunk statistical win rates for specialist agent-driven trades.
 
         Win rate is shrunk toward the 0.5 neutral prior by
         MEMORY.accuracy_shrinkage_k pseudo-observations (wins + k*0.5) / (n + k),
@@ -348,10 +406,11 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
                 passes it to avoid reading future outcomes.
 
         Returns:
-            (rate, n) — the shrunk win rate in [0, 1], and the raw sample count it
-            was computed from. n distinguishes "0.5 because no data exists" from
-            "0.5 because that's the measured rate"; callers that need to gate on
-            data actually existing (e.g. the Kelly anchor) should check n, not rate.
+            (rate, n) — the shrunk win rate in [0, 1], and the raw sample count
+            it was computed from. n distinguishes "0.5 because no data exists"
+            from "0.5 because that's the measured rate"; callers that need to gate
+            on data actually existing (e.g. the Kelly anchor) should check n,
+            not rate.
         """
         if self.collection.count() == 0:
             return 0.5, 0
@@ -377,7 +436,7 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
             return 0.5, 0
 
     def summary_stats(self) -> dict[str, Any]:
-        """Compiles aggregate performance statistics and regime diagnostics from the memory database.
+        """Compiles performance statistics and regime diagnostics from the memory store.
 
         avg_return_pct averages over settled rows only (SUCCESSFUL/FAILED/FLAT
         outcomes carry a real return_pct; PENDING snapshots don't). Dividing by
@@ -526,7 +585,7 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
         ids = results.get("ids") or []
         metadatas = results.get("metadatas") or []
         stale_ids = []
-        for doc_id, meta in zip(ids, metadatas):
+        for doc_id, meta in zip(ids, metadatas, strict=True):
             timestamp_raw = meta.get("timestamp")
             if not timestamp_raw:
                 continue
@@ -549,11 +608,11 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
         return len(stale_ids)
 
 
-_cultural_memory: Optional[CulturalMemoryManager] = None
+_cultural_memory: CulturalMemoryManager | None = None
 _cultural_memory_lock = Lock()
 
 
-def get_cultural_memory(persist_dir: Optional[str] = None) -> CulturalMemoryManager:
+def get_cultural_memory(persist_dir: str | None = None) -> CulturalMemoryManager:
     """Returns the process-wide CulturalMemoryManager, constructing it on first call.
 
     Lazy on purpose: construction pulls in sentence-transformers (and its

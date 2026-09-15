@@ -44,7 +44,7 @@ def _data_path(filename: str) -> str:
 
 def main() -> None:
     """Parses CLI args, runs one reconciliation pass, and prints its report."""
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=settings.ARGUS_LOG_LEVEL)
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -84,6 +84,10 @@ def main() -> None:
         print(f"Paper equity: ${report.equity:,.2f} (drawdown={report.drawdown:.1%} from peak)")
     if report.decisions_compacted is not None:
         print(f"Compacted {args.decisions_log}: {report.decisions_compacted} decision(s) retained")
+    if report.decisions_retired_unresolved:
+        print(
+            f"Retired {report.decisions_retired_unresolved} decision(s) as permanently unresolved"
+        )
     if report.checkpoints_pruned is not None:
         print(f"Pruned {report.checkpoints_pruned} stale checkpoint thread(s) from {args.db}")
     print(f"Expired {report.pending_snapshots_expired} stale PENDING snapshot(s)")

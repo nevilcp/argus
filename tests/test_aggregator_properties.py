@@ -24,9 +24,9 @@ from argus.schemas.signals import (
     FundamentalSignal,
     MacroContext,
     Regime,
-    Signal,
     SectorSignal,
     SentimentSignal,
+    Signal,
     TechnicalSignal,
     VixRegime,
     YieldCurve,
@@ -127,8 +127,16 @@ def _macro(regime: Regime, fund_mult: float, tech_mult: float, sent_mult: float)
     sent_mult=_multipliers,
 )
 def test_aggregated_conviction_never_exceeds_cap(
-    tech_signal, tech_conv, fund_signal, fund_conv, sent_signal, sent_conv,
-    regime, fund_mult, tech_mult, sent_mult,
+    tech_signal,
+    tech_conv,
+    fund_signal,
+    fund_conv,
+    sent_signal,
+    sent_conv,
+    regime,
+    fund_mult,
+    tech_mult,
+    sent_mult,
 ):
     """Aggregated conviction stays within [0, max_conviction] for any inputs."""
     aggregator = HybridSignalAggregator()

@@ -21,13 +21,14 @@ from __future__ import annotations
 import hashlib
 import logging
 from datetime import date, datetime, timedelta
-from typing import Any, Optional
+from typing import Any
 
 from pydantic import ValidationError
 
 from argus.config import settings
 from argus.data.cache import TTLCache
 from argus.orchestration.governor import RateLimitExceeded, UnregisteredModel
+from argus.params import STRUCTURED_OUTPUT
 from argus.schemas.prompting import field_list
 from argus.schemas.signals import FundamentalSignal, FundamentalVerdict
 from argus.seams import GroqLLMClient, LiveMarketDataProvider, LLMClient, MarketDataProvider
@@ -72,7 +73,7 @@ _MEASURED_FUNDAMENTAL_FIELDS = (
 )
 
 
-def _use_backtest_seed(backtest_mode: bool, session_seed: Optional[int]) -> bool:
+def _use_backtest_seed(backtest_mode: bool, session_seed: int | None) -> bool:
     """Decides whether a session should anonymize and derive as_of_date from session_seed.
 
     Args:
@@ -118,7 +119,7 @@ def anonymize_ticker(ticker: str, session_seed: int) -> str:
     return f"COMP_{h}"
 
 
-def build_compact_prompt(ticker: str, pit_data: dict, anon_id: Optional[str] = None) -> str:
+def build_compact_prompt(ticker: str, pit_data: dict, anon_id: str | None = None) -> str:
     """Constructs a structured, token-minimized evaluation prompt with metric unit classifications.
 
     Formats metric values with their units and context thresholds so the LLM can
@@ -140,17 +141,17 @@ def build_compact_prompt(ticker: str, pit_data: dict, anon_id: Optional[str] = N
     industry_median_pe = _SECTOR_PE_MEDIANS.get(sector, _DEFAULT_PE_MEDIAN)
 
     METRIC_LABELS = {
-        "pe_ttm":             ("P/E Ratio",          f"x earnings   [industry median ~{industry_median_pe:.1f}x]"),
+        "pe_ttm": ("P/E Ratio", f"x earnings   [industry median ~{industry_median_pe:.1f}x]"),
         "revenue_growth_yoy": ("Revenue Growth YoY", "decimal  (0.12 = 12%)"),
-        "operating_margin":   ("Operating Margin",   "decimal  (0.32 = 32%)"),
-        "net_margin":         ("Net Margin",         "decimal  (0.20 = 20%)"),
-        "fcf_yield":          ("FCF Yield",          "decimal  (0.03 = 3%)   [higher = cheaper valuation]"),
-        "debt_to_equity":     ("Debt/Equity Ratio",  "ratio    (0.80 = 0.80x; >2.0x = high leverage)"),
-        "current_ratio":      ("Current Ratio",      "ratio    (1.5 = 1.5x;  <1.0 = liquidity risk)"),
-        "roe":                ("Return on Equity",   "decimal  (0.35 = 35%)"),
-        "roic":               ("ROIC (proxy)",       "decimal  (0.20 = 20%;  >0.15 = strong)"),
-        "p_fcf":              ("Price/FCF Multiple", "x FCF    [lower = cheaper]"),
-        "marketCap":          ("Market Cap",         "USD"),
+        "operating_margin": ("Operating Margin", "decimal  (0.32 = 32%)"),
+        "net_margin": ("Net Margin", "decimal  (0.20 = 20%)"),
+        "fcf_yield": ("FCF Yield", "decimal  (0.03 = 3%)   [higher = cheaper valuation]"),
+        "debt_to_equity": ("Debt/Equity Ratio", "ratio    (0.80 = 0.80x; >2.0x = high leverage)"),
+        "current_ratio": ("Current Ratio", "ratio    (1.5 = 1.5x;  <1.0 = liquidity risk)"),
+        "roe": ("Return on Equity", "decimal  (0.35 = 35%)"),
+        "roic": ("ROIC (proxy)", "decimal  (0.20 = 20%;  >0.15 = strong)"),
+        "p_fcf": ("Price/FCF Multiple", "x FCF    [lower = cheaper]"),
+        "marketCap": ("Market Cap", "USD"),
     }
 
     lines = []
@@ -165,7 +166,7 @@ def build_compact_prompt(ticker: str, pit_data: dict, anon_id: Optional[str] = N
     metrics_str = "\n".join(lines)
 
     prompt = (
-        f"<fundamental_data ticker=\"{subject}\" as_of=\"{as_of}\" sector=\"{sector}\">\n"
+        f'<fundamental_data ticker="{subject}" as_of="{as_of}" sector="{sector}">\n'
         f"{metrics_str}\n"
         "</fundamental_data>\n"
         "\n"
@@ -279,8 +280,8 @@ class FundamentalAgent:
 
     def __init__(
         self,
-        llm_client: Optional[LLMClient] = None,
-        market_data: Optional[MarketDataProvider] = None,
+        llm_client: LLMClient | None = None,
+        market_data: MarketDataProvider | None = None,
     ) -> None:
         """Constructs Groq/live defaults for any provider not injected.
 
@@ -296,7 +297,7 @@ class FundamentalAgent:
                 )
             llm_client = GroqLLMClient(
                 model=settings.ARGUS_FUNDAMENTAL_MODEL,
-                temperature=0.1,
+                temperature=STRUCTURED_OUTPUT.llm_temperature,
                 # gpt-oss-120b peaked at 327 completion tokens on fixture prompts; 450 leaves ~35% headroom.
                 max_tokens=450,
                 api_key=api_key,
@@ -304,7 +305,7 @@ class FundamentalAgent:
         self.llm_client = llm_client
         self.market_data = market_data or LiveMarketDataProvider()
         # Keyed on (ticker, session_seed) so backtest sessions and live calls never share a cached signal.
-        self.cache: TTLCache[tuple[str, Optional[int]], FundamentalSignal] = TTLCache(
+        self.cache: TTLCache[tuple[str, int | None], FundamentalSignal] = TTLCache(
             ttl=timedelta(days=7)
         )
 
@@ -312,9 +313,9 @@ class FundamentalAgent:
         self,
         ticker: str,
         backtest_mode: bool = False,
-        session_seed: Optional[int] = None,
-        errors: Optional[list[str]] = None,
-    ) -> Optional[FundamentalSignal]:
+        session_seed: int | None = None,
+        errors: list[str] | None = None,
+    ) -> FundamentalSignal | None:
         """Audits fundamentals for a single ticker and returns a validated Pydantic signal.
 
         Checks the local cache first, enforces the injected LLM client's
@@ -341,7 +342,9 @@ class FundamentalAgent:
 
         if not self._has_spare_capacity():
             logger.warning(
-                "[Fundamental] Low capacity for %s, skipping %s", settings.ARGUS_FUNDAMENTAL_MODEL, ticker
+                "[Fundamental] Low capacity for %s, skipping %s",
+                settings.ARGUS_FUNDAMENTAL_MODEL,
+                ticker,
             )
             if errors is not None:
                 errors.append(f"fundamental_analysis[{ticker}]: LLM capacity too low, skipped")
@@ -369,7 +372,9 @@ class FundamentalAgent:
         prompt = build_compact_prompt(ticker, pit_data, anon_id)
 
         try:
-            verdict = decode(self.llm_client, SYSTEM_PROMPT, prompt, FundamentalVerdict, repair=True)
+            verdict = decode(
+                self.llm_client, SYSTEM_PROMPT, prompt, FundamentalVerdict, repair=True
+            )
         except StructuredOutputError as e:
             logger.warning("[Fundamental] Decode failed for %s: %s", ticker, e)
             if errors is not None:
@@ -393,15 +398,17 @@ class FundamentalAgent:
             signal = FundamentalSignal.model_validate(data)
         except ValidationError as e:
             # Merged measured data (e.g. negative debt_to_equity) can fail schema even after a clean decode.
-            logger.warning("[Fundamental] Measured data failed signal validation for %s: %s", ticker, e)
+            logger.warning(
+                "[Fundamental] Measured data failed signal validation for %s: %s", ticker, e
+            )
             if errors is not None:
-                errors.append(f"fundamental_analysis[{ticker}]: measured data failed validation: {e}")
+                errors.append(
+                    f"fundamental_analysis[{ticker}]: measured data failed validation: {e}"
+                )
             return None
 
         self.cache.set((ticker, session_seed), signal)
-        logger.debug(
-            "[Fundamental] Analysis complete for %s -> %s", ticker, signal.signal.value
-        )
+        logger.debug("[Fundamental] Analysis complete for %s -> %s", ticker, signal.signal.value)
         return signal
 
     def _has_spare_capacity(self) -> bool:
@@ -415,7 +422,7 @@ class FundamentalAgent:
         return self.llm_client.remaining_capacity() >= capacity_reserve
 
     def batch_analyze(
-        self, tickers: list[str], backtest_mode: bool = False, session_seed: Optional[int] = None
+        self, tickers: list[str], backtest_mode: bool = False, session_seed: int | None = None
     ) -> tuple[dict[str, FundamentalSignal], list[str]]:
         """Performs fundamental evaluations sequentially across a set of tickers.
 

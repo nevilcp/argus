@@ -26,6 +26,7 @@ Dependencies:
 
 from __future__ import annotations
 
+import fcntl
 import functools
 import json
 import logging
@@ -33,16 +34,16 @@ import random
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from threading import Lock
-from typing import Any, Optional, TypeVar
+from typing import Any, TypeVar
 
 import pandas as pd
 import yfinance as yf
 
 from argus.config import settings
-from argus.data.cache import DailyBarCache
+from argus.data.cache import DailyBarCache, TTLCache
+from argus.params import SYSTEM
 
 logger = logging.getLogger("argus.fetchers")
 
@@ -55,6 +56,17 @@ class DataFetchError(Exception):
     """Raised when a data fetch fails after all retry attempts."""
 
 
+class YahooCrumbHandshakeError(DataFetchError):
+    """Yahoo Finance rejected every attempt with an invalid/expired crumb.
+
+    yfinance mints an anonymous session cookie + crumb per process and caches
+    it for reuse; this is not a credential problem (there is no API key to be
+    wrong), it is Yahoo's anti-bot layer invalidating that handshake — which
+    then poisons every subsequent call in the process until a fresh crumb is
+    minted. See GH issue #93.
+    """
+
+
 F = TypeVar("F", bound=Callable[..., Any])
 
 _RETRY_ATTEMPTS = 3
@@ -62,7 +74,7 @@ _RETRY_ATTEMPTS = 3
 _RETRY_BASE_DELAY = 1.5
 
 
-def _status_code_of(exc: Exception) -> Optional[int]:
+def _status_code_of(exc: Exception) -> int | None:
     """Extracts an HTTP status code from an exception's attached response, if any.
 
     Args:
@@ -117,7 +129,43 @@ def _is_retryable(exc: Exception) -> bool:
     return status_code in (429, 423) or status_code >= 500
 
 
-def _retry_after_seconds(exc: Exception) -> Optional[float]:
+def _is_crumb_handshake_failure(exc: Exception) -> bool:
+    """Distinguishes Yahoo's "Invalid Crumb" 401 from a genuine credential 401.
+
+    FRED and NewsAPI 401s mean a bad/missing API key and retrying is pointless
+    (see _is_retryable). A yfinance 401 is different: yfinance has no key at
+    all, so a 401 there means Yahoo rejected the anonymous crumb it minted —
+    a session handshake a fresh mint can often fix, not a permanent failure.
+
+    Args:
+        exc: The exception a fetch attempt raised.
+
+    Returns:
+        True if this looks like Yahoo's crumb rejection specifically.
+    """
+    return _status_code_of(exc) == 401 and "crumb" in str(exc).lower()
+
+
+def _reset_yfinance_session() -> None:
+    """Forces yfinance's singleton client to mint a fresh cookie and crumb next call.
+
+    yfinance caches the crumb it mints for the life of the process; once Yahoo
+    invalidates it, every subsequent call reuses the same broken crumb and
+    fails identically. Clearing only the in-memory _cookie/_crumb isn't
+    enough: yfinance also persists the cookie to an on-disk cache keyed
+    'curlCffi' (see its data.py's _load_cookie_curlCffi), and reloads it
+    before ever attempting a new network handshake — so a stale, Yahoo-
+    rejected cookie would otherwise survive the reset and get reused
+    immediately. Clearing both is what lets a retry attempt an actual new
+    handshake instead of repeating the failed one.
+    """
+    data_client = yf.data.YfData()
+    data_client._cookie = None
+    data_client._crumb = None
+    yf.cache.get_cookie_cache().store("curlCffi", None)
+
+
+def _retry_after_seconds(exc: Exception) -> float | None:
     """Reads a Retry-After response header off an exception, if one is attached.
 
     Args:
@@ -147,7 +195,10 @@ def _with_retry(fn: F) -> F:
     Re-raises DataFetchError immediately without re-wrapping to avoid stacking.
     A terminal (non-retryable) failure raises DataFetchError on the first
     attempt rather than burning the full retry budget on a call that would
-    fail identically every time.
+    fail identically every time. A Yahoo crumb/cookie handshake failure (see
+    _is_crumb_handshake_failure) is retried with the yfinance session reset
+    first, since retrying without a reset would just repeat the same failure;
+    exhausting the budget there raises YahooCrumbHandshakeError instead.
 
     Args:
         fn: The function to wrap.
@@ -167,6 +218,24 @@ def _with_retry(fn: F) -> F:
                 raise
             except Exception as exc:
                 last_exc = exc
+                if _is_crumb_handshake_failure(exc):
+                    if attempt >= _RETRY_ATTEMPTS:
+                        raise YahooCrumbHandshakeError(
+                            f"{fn.__name__}: Yahoo Finance rejected every crumb/cookie "
+                            f"handshake attempt ({_RETRY_ATTEMPTS}); price data "
+                            f"unavailable. Last error: {exc}"
+                        ) from exc
+                    _reset_yfinance_session()
+                    logger.warning(
+                        "%s attempt %d/%d failed with a crumb/cookie handshake error; "
+                        "resetting the yfinance session and retrying: %s",
+                        fn.__name__,
+                        attempt,
+                        _RETRY_ATTEMPTS,
+                        exc,
+                    )
+                    time.sleep(random.uniform(0.0, _RETRY_BASE_DELAY * (2 ** (attempt - 1))))
+                    continue
                 if not _is_retryable(exc):
                     logger.warning(
                         "%s failed with a non-retryable error (%s: %s); not retrying",
@@ -317,7 +386,7 @@ _MULTI_DAILY_MAX_WORKERS = 5
 # import time — docker-compose mounts only data/ and chroma_db/, so the old
 # cwd-relative default silently landed on the ephemeral container layer and
 # was destroyed on every restart.
-_DAILY_BAR_CACHE: Optional[DailyBarCache] = None
+_DAILY_BAR_CACHE: DailyBarCache | None = None
 
 
 def _daily_bar_cache() -> DailyBarCache:
@@ -477,9 +546,9 @@ def fetch_ticker_calendar(ticker: str) -> Any:
     return yf.Ticker(ticker).calendar
 
 
-_FRED_CACHE: dict[str, tuple[datetime, pd.Series]] = {}
-_FRED_CACHE_LOCK = Lock()
-_FRED_CACHE_TTL = timedelta(hours=6)
+_FRED_CACHE: TTLCache[str, pd.Series] = TTLCache(
+    ttl=timedelta(hours=6), max_entries=SYSTEM.fred_cache_max_entries
+)
 
 
 @_with_retry
@@ -503,12 +572,10 @@ def fetch_fred_series(series_id: str, start: str = "2018-01-01") -> pd.Series:
         raise DataFetchError("FRED_API_KEY is not set — configure it in .env to use macro data.")
 
     cache_key = f"{series_id}::{start}"
-    with _FRED_CACHE_LOCK:
-        if cache_key in _FRED_CACHE:
-            cached_at, series = _FRED_CACHE[cache_key]
-            if datetime.now(timezone.utc).replace(tzinfo=None) - cached_at < _FRED_CACHE_TTL:
-                logger.debug("fetch_fred_series: cache hit for %s", series_id)
-                return series
+    cached = _FRED_CACHE.get(cache_key)
+    if cached is not None:
+        logger.debug("fetch_fred_series: cache hit for %s", series_id)
+        return cached
 
     logger.debug("fetch_fred_series: fetching %s from FRED", series_id)
     from fredapi import Fred  # Lazy import; only loaded when FRED is actually used
@@ -521,8 +588,7 @@ def fetch_fred_series(series_id: str, start: str = "2018-01-01") -> pd.Series:
     raw.index = pd.to_datetime(raw.index)
     raw = raw.sort_index().dropna()
 
-    with _FRED_CACHE_LOCK:
-        _FRED_CACHE[cache_key] = (datetime.now(timezone.utc).replace(tzinfo=None), raw)
+    _FRED_CACHE.set(cache_key, raw)
 
     logger.info("fetch_fred_series: %s → %d observations", series_id, len(raw))
     return raw
@@ -540,8 +606,8 @@ _MACRO_BUNDLE_SERIES = {
 def _latest_fred_value(
     key: str,
     series_id: str,
-    transform: Optional[Callable[[pd.Series], pd.Series]] = None,
-) -> Optional[float]:
+    transform: Callable[[pd.Series], pd.Series] | None = None,
+) -> float | None:
     """Reads the most recent observation of a FRED series, degrading to None on failure.
 
     Args:
@@ -571,8 +637,7 @@ def fetch_macro_bundle() -> dict:
         cpi_yoy, vix. Any key that fails to fetch is set to None.
     """
     bundle: dict[str, float | None] = {
-        key: _latest_fred_value(key, series_id)
-        for key, series_id in _MACRO_BUNDLE_SERIES.items()
+        key: _latest_fred_value(key, series_id) for key, series_id in _MACRO_BUNDLE_SERIES.items()
     }
     bundle["cpi_yoy"] = _latest_fred_value("cpi_yoy", "CPIAUCSL", lambda s: s.pct_change(12) * 100)
 
@@ -603,66 +668,86 @@ class _NewsApiBudget:
     anything Groq imposes — so this is checked before every request rather
     than discovered from a 426/429 response.
 
-    Persisted under ARGUS_DATA_DIR: the Actions collector starts a
-    fresh container on every tick, so an in-memory-only counter always read
-    zero used and never actually enforced the daily ceiling in that
-    deployment.
+    Persisted under ARGUS_DATA_DIR and read fresh on every reservation rather
+    than cached in memory: the long-lived API server and the Actions
+    collector's once-per-tick container both read-modify-write the same
+    file, so a process-local cache of "today's count" would go stale the
+    moment the other process wrote. An flock on a sidecar lock file
+    serializes that read-modify-write cycle across processes (tmp-then-replace
+    alone only makes each individual write atomic, not the cycle around it).
+    Any disk error during that cycle is treated as a failed reservation
+    rather than raised, so a full or read-only volume degrades the caller
+    instead of crashing it.
     """
 
     def __init__(self, daily_limit: int = _NEWSAPI_DAILY_LIMIT) -> None:
-        """Initializes an empty budget tracker.
+        """Initializes a budget tracker backed by ARGUS_DATA_DIR.
 
         Args:
             daily_limit: Maximum requests permitted per UTC day.
         """
         self._daily_limit = daily_limit
-        self._lock = Lock()
-        self._requests_today = 0
-        self._date = datetime.now(timezone.utc).date()
-        self._loaded_from_disk = False
 
     def _persist_path(self) -> Path:
         """Returns the counter's path, read lazily so it honors the current ARGUS_DATA_DIR."""
         return Path(settings.ARGUS_DATA_DIR) / "newsapi_budget.json"
 
-    def _load_from_disk(self) -> None:
-        """Restores today's persisted request count, if any, once per process."""
+    @staticmethod
+    def _read_count(path: Path, today: date) -> int:
+        """Returns today's persisted request count, or 0 if absent, stale, or corrupt."""
         try:
-            raw = json.loads(self._persist_path().read_text())
-            if date.fromisoformat(raw["date"]) == self._date:
-                self._requests_today = raw["requests_today"]
-        except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError):
+            raw = json.loads(path.read_text())
+            if date.fromisoformat(raw["date"]) == today:
+                return int(raw["requests_today"])
+        except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
             pass
+        return 0
 
-    def _save_to_disk(self) -> None:
-        """Writes the current count to disk, tmp-file-then-replace for atomicity."""
-        path = self._persist_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
+    @staticmethod
+    def _write_count(path: Path, today: date, requests_today: int) -> None:
+        """Writes the count, tmp-file-then-replace for atomicity."""
         tmp_path = path.with_suffix(path.suffix + ".tmp")
         tmp_path.write_text(
-            json.dumps({"date": self._date.isoformat(), "requests_today": self._requests_today})
+            json.dumps({"date": today.isoformat(), "requests_today": requests_today})
         )
         tmp_path.replace(path)
 
+    def _reserve_under_file_lock(self) -> bool:
+        """Reads, checks, and (if room remains) increments the persisted count.
+
+        Holds an flock on a sidecar file for the whole read-modify-write
+        cycle, so a concurrent thread or process can't interleave its own
+        cycle in between — the source of the undercounting a Python-level
+        Lock alone can't stop, since flock is scoped to the open file
+        description and so already serializes both. The lock is released by
+        closing `lock_file` on the `with` block's exit; no explicit unlock,
+        since one that raised after a successful write would discard the
+        `True` below and report a reservation that had, in fact, persisted.
+        """
+        path = self._persist_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = path.with_suffix(path.suffix + ".lock")
+        with open(lock_path, "w") as lock_file:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            today = datetime.now(UTC).date()
+            requests_today = self._read_count(path, today)
+            if requests_today >= self._daily_limit:
+                return False
+            self._write_count(path, today, requests_today + 1)
+            return True
+
     def try_reserve(self) -> bool:
-        """Reserves one request against today's budget if any remains.
+        """Reserves one request against today's UTC budget if any remains.
 
         Returns:
-            True if a request was reserved, False if today's budget is spent.
+            True if a request was reserved, False if today's budget is
+            spent or the reservation could not be safely persisted.
         """
-        with self._lock:
-            if not self._loaded_from_disk:
-                self._load_from_disk()
-                self._loaded_from_disk = True
-            today = datetime.now(timezone.utc).date()
-            if today != self._date:
-                self._requests_today = 0
-                self._date = today
-            if self._requests_today >= self._daily_limit:
-                return False
-            self._requests_today += 1
-            self._save_to_disk()
-            return True
+        try:
+            return self._reserve_under_file_lock()
+        except OSError as exc:
+            logger.warning("_NewsApiBudget.try_reserve: disk error — %s", exc)
+            return False
 
 
 _NEWSAPI_BUDGET = _NewsApiBudget()
@@ -704,7 +789,7 @@ def fetch_news(
     ticker: str,
     company_name: str,
     days_back: int = 7,
-) -> Optional[list[dict]]:
+) -> list[dict] | None:
     """Retrieves recent news articles matching a ticker from NewsAPI.
 
     NewsAPI's free Developer tier delays article availability by roughly 24
@@ -727,14 +812,20 @@ def fetch_news(
         return None
 
     if not _NEWSAPI_BUDGET.try_reserve():
-        logger.warning("fetch_news: daily budget of %d requests exhausted", _NEWSAPI_DAILY_LIMIT)
+        # Exhaustion and a disk error both come back as False; try_reserve already
+        # logged the specific cause for a disk error, so this stays cause-agnostic.
+        logger.warning(
+            "fetch_news: no NewsAPI budget slot available (daily cap of %d reached, "
+            "or the reservation failed)",
+            _NEWSAPI_DAILY_LIMIT,
+        )
         return None
 
     try:
         from newsapi import NewsApiClient  # Lazy import; only loaded when NewsAPI is used
 
         client = NewsApiClient(api_key=settings.newsapi_key)
-        from_date = (datetime.now(timezone.utc) - timedelta(days=days_back)).strftime("%Y-%m-%d")
+        from_date = (datetime.now(UTC) - timedelta(days=days_back)).strftime("%Y-%m-%d")
         query = f"{ticker} OR {company_name}"
 
         result = _fetch_news_page(client, query, from_date)

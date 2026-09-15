@@ -7,7 +7,9 @@ places a trade and its output is not advice.
 
 Python ≥3.11, one package. `argus/` is the system, `api/` is the HTTP gateway,
 `scripts/` holds the CLI entry points declared in `pyproject.toml`, `tests/`
-mirrors `argus/` file-for-file.
+mostly mirrors `argus/` one file per module — a few (e.g. `config.py`,
+`risk/paper_book.py`) have no dedicated test file and are exercised only
+indirectly through the modules that consume them.
 
 ## What you need to know before touching the code
 

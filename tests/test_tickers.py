@@ -31,7 +31,16 @@ def test_rejects_the_repro_set(ticker):
 
 
 _ACCEPTED = [
-    "AAPL", "MSFT", "BRK.B", "BRK-B", "BF-B", "F", "T", "V", "UNH", "GOOGL",
+    "AAPL",
+    "MSFT",
+    "BRK.B",
+    "BRK-B",
+    "BF-B",
+    "F",
+    "T",
+    "V",
+    "UNH",
+    "GOOGL",
 ]
 
 _INDICES_AND_CRYPTO_PAIRS = ["^GSPC", "^DJI", "BTC-USD", "ETH-USD"]

@@ -8,8 +8,7 @@ shared by the fundamental and sentiment agents.
 
 import logging
 import sqlite3
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+from datetime import UTC, datetime, timedelta
 
 import pandas as pd
 import pytest
@@ -74,7 +73,7 @@ def test_get_returns_none_when_refreshed_before_today(cache):
     """A ticker refreshed on a prior UTC day is treated as stale, not served."""
     cache.put("AAPL", _bars(["2026-08-11"]))
 
-    yesterday = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
+    yesterday = (datetime.now(UTC).date() - timedelta(days=1)).isoformat()
     cache._conn.execute(
         "UPDATE daily_ohlcv_refresh SET refreshed_on = ? WHERE ticker = ?", (yesterday, "AAPL")
     )
@@ -126,7 +125,8 @@ def test_dst_straddling_insert_returns_a_monotonic_et_frame():
     padding = pd.date_range("2025-11-02 04:00:00", periods=4, freq="1min", tz="UTC")
     for i, ts in enumerate(padding):
         buffer.insert_candle(
-            "AAPL", {"timestamp": ts, "open": i, "high": i + 1, "low": i, "close": i, "volume": 1000}
+            "AAPL",
+            {"timestamp": ts, "open": i, "high": i + 1, "low": i, "close": i, "volume": 1000},
         )
 
     candles = dst_straddling_candles(n_per_side=6)
@@ -240,6 +240,25 @@ def test_insert_candles_is_a_noop_for_an_empty_list():
     assert buffer.get_all_tickers() == []
 
 
+def test_insert_candles_without_a_timestamp_do_not_collide_with_each_other():
+    """Several timestamp-less candles in one batch each get a distinct stored row.
+
+    The primary key is (ticker, timestamp); stamping every missing timestamp with
+    the same `datetime.now()` call would collide under the upsert and silently
+    keep only the last one.
+    """
+    buffer = _buffer(50)
+    candles = [
+        {"open": i, "high": i, "low": i, "close": float(i), "volume": 100.0} for i in range(15)
+    ]
+
+    buffer.insert_candles("AAPL", candles)
+
+    df = buffer.get_candles("AAPL")
+    assert len(df) == 15
+    assert sorted(df["close"].tolist()) == [float(i) for i in range(15)]
+
+
 def test_insert_candle_delegates_to_insert_candles(monkeypatch):
     """The single-candle path is a thin wrapper over the bulk path."""
     buffer = _buffer()
@@ -254,7 +273,8 @@ def test_insert_candle_delegates_to_insert_candles(monkeypatch):
 
 
 def test_row_counts_returns_per_ticker_counts_without_the_get_candles_floor():
-    """row_counts() reports real per-ticker counts, including below get_candles' own 14-row floor."""
+    """row_counts() reports real per-ticker counts, including below get_candles' own
+    14-row floor."""
     buffer = _buffer(50)
     for i in range(5):
         buffer.insert_candle("AAPL", {"timestamp": f"2024-01-02T09:{i:02d}:00", "close": float(i)})
@@ -362,7 +382,7 @@ def test_ttl_cache_keys_differing_only_in_one_component_do_not_share_a_value():
     sessions replaying the same ticker must not share a cached value, and a
     live call (session_seed=None) must not be conflated with either.
     """
-    cache: TTLCache[tuple[str, Optional[int]], str] = TTLCache(ttl=timedelta(days=7))
+    cache: TTLCache[tuple[str, int | None], str] = TTLCache(ttl=timedelta(days=7))
 
     cache.set(("AAPL", 20240101), "session 1")
     cache.set(("AAPL", 20240102), "session 2")
@@ -382,3 +402,67 @@ def test_ttl_cache_set_refreshes_the_stored_timestamp():
     clock.now += timedelta(hours=23)
 
     assert cache.get("AAPL") == "neutral"
+
+
+def test_ttl_cache_get_drops_an_expired_entry_rather_than_leaving_it_in_place():
+    """An expired entry is removed from the underlying store on read, not just skipped."""
+    cache, clock = _clocked_ttl_cache()
+
+    cache.set("AAPL", "bullish")
+    clock.now += timedelta(days=1)
+    assert cache.get("AAPL") is None
+
+    assert "AAPL" not in cache._entries
+
+
+def test_ttl_cache_set_sweeps_expired_entries_before_storing():
+    """Storing a new key evicts every already-expired entry, not just the key being set."""
+    cache, clock = _clocked_ttl_cache()
+
+    cache.set("AAPL", "bullish")
+    clock.now += timedelta(days=1)
+    cache.set("MSFT", "neutral")
+
+    assert "AAPL" not in cache._entries
+    assert cache.get("MSFT") == "neutral"
+
+
+def test_ttl_cache_max_entries_evicts_the_oldest_entry_at_capacity():
+    """A new key at capacity evicts the single oldest surviving entry, not the whole store."""
+    clock = _FakeClock(datetime(2026, 1, 1, 12, 0, 0))
+    cache: TTLCache[str, str] = TTLCache(ttl=timedelta(days=1), clock=clock, max_entries=2)
+
+    cache.set("AAPL", "bullish")
+    clock.now += timedelta(minutes=1)
+    cache.set("MSFT", "neutral")
+    clock.now += timedelta(minutes=1)
+    cache.set("GOOG", "bearish")
+
+    assert cache.get("AAPL") is None
+    assert cache.get("MSFT") == "neutral"
+    assert cache.get("GOOG") == "bearish"
+
+
+def test_ttl_cache_max_entries_does_not_evict_when_refreshing_an_existing_key():
+    """Re-setting a key already in the store never triggers capacity eviction for it."""
+    clock = _FakeClock(datetime(2026, 1, 1, 12, 0, 0))
+    cache: TTLCache[str, str] = TTLCache(ttl=timedelta(days=1), clock=clock, max_entries=2)
+
+    cache.set("AAPL", "bullish")
+    cache.set("MSFT", "neutral")
+    cache.set("AAPL", "bearish")
+
+    assert cache.get("AAPL") == "bearish"
+    assert cache.get("MSFT") == "neutral"
+
+
+def test_ttl_cache_with_no_max_entries_stays_unbounded():
+    """Omitting max_entries preserves the prior unbounded behavior for existing callers."""
+    clock = _FakeClock(datetime(2026, 1, 1, 12, 0, 0))
+    cache: TTLCache[str, int] = TTLCache(ttl=timedelta(days=1), clock=clock)
+
+    for i in range(1000):
+        cache.set(f"T{i}", i)
+
+    assert cache.get("T0") == 0
+    assert cache.get("T999") == 999

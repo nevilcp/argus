@@ -25,20 +25,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 import api.main as api_main
-import argus.risk.kill_switch as kill_switch_module
-from argus.data.live_session_cache import AdmissionResult, LiveSessionCache
+from argus.data.live_session_cache import AdmissionResult
 
 _PAYLOAD = {"tickers": ["AAPL"], "total_wealth": 100_000, "invest_pct": 0.5}
 
 
 @pytest.fixture(autouse=True)
-def _reset_singletons(monkeypatch):
-    """Clears the kill-switch singleton and installs a fresh live session cache around each test."""
-    kill_switch_module._kill_switch = None
-    monkeypatch.setattr(api_main, "_live_cache", LiveSessionCache(interval_minutes=1))
-    monkeypatch.setattr(api_main.settings, "ARGUS_API_KEY", "")
-    yield
-    kill_switch_module._kill_switch = None
+def _reset_singletons(_fresh_live_cache, _no_api_key):
+    """Kill switch, live cache, and API key are all reset around each test via conftest fixtures."""
 
 
 @pytest.fixture
@@ -69,7 +63,7 @@ def test_analyze_market_closed_outranks_bar_age(client, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "admission_field, expected_substring",
+    ("admission_field", "expected_substring"),
     [
         ("absent", "warming up"),
         ("stalled", "stalled"),
@@ -79,7 +73,8 @@ def test_analyze_market_closed_outranks_bar_age(client, monkeypatch):
 def test_analyze_maps_each_admission_group_to_its_own_response_text(
     client, monkeypatch, admission_field, expected_substring
 ):
-    """Each of LiveSessionCache.admit()'s three rejection groups produces distinct response wording."""
+    """Each of LiveSessionCache.admit()'s three rejection groups produces distinct
+    response wording."""
     _pipeline(monkeypatch, market_hours=True)
     result = AdmissionResult(**{admission_field: ["AAPL"]})
     monkeypatch.setattr(api_main._live_cache, "admit", mock.Mock(return_value=result))

@@ -12,60 +12,73 @@ Not responsible for:
 
 Dependencies:
   - scipy (SLSQP optimizer)
-  - yfinance, via data/fetchers.py (GICS sector lookup)
+  - yfinance, via the MarketDataProvider seam (GICS sector lookup)
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime
-from typing import Optional
+from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 
 from argus.config import settings
-from argus.data import fetchers
+from argus.data.cache import TTLCache
 from argus.params import RISK
 from argus.schemas.signals import RiskAssessment, RiskVerdict
 from argus.seams import LiveMarketDataProvider, MarketDataProvider
 
 logger = logging.getLogger("argus.risk")
 
-# Stores (sector, cached_at) per ticker; 24h TTL reflects M&A/spin-off reclassification.
-_SECTOR_CACHE: dict[str, tuple[str, datetime]] = {}
-_SECTOR_CACHE_TTL_SECONDS = RISK.sector_cache_ttl_seconds  # 24 hours
+# 24h TTL reflects M&A/spin-off reclassification; max_entries bounds the store
+# independently of TTL rather than relying incidentally on the ticker universe's size.
+_SECTOR_CACHE: TTLCache[str, str] = TTLCache(
+    ttl=timedelta(seconds=RISK.sector_cache_ttl_seconds),
+    max_entries=RISK.sector_cache_max_entries,
+)
 
 
-def get_sector(ticker: str) -> str:
+def get_sector(ticker: str, market_data: MarketDataProvider) -> str:
     """Dynamically retrieves and caches the GICS sector classification for a ticker.
 
-    Uses a module-level dict with a 24-hour TTL to avoid redundant yfinance
+    Uses a module-level TTLCache with a 24-hour TTL to avoid redundant yfinance
     round-trips within a session while still reflecting corporate reclassifications
     (e.g. acquisitions, spin-offs) across multi-day server runs. Routes through
-    fetchers.fetch_ticker_info rather than calling yfinance directly, so this
+    the MarketDataProvider seam rather than calling yfinance directly, so this
     lookup gets the same retry/back-off classification as every other fetch.
+
+    Caching is skipped for a non-live provider: fixture reads are cheap and
+    deterministic, so there's no round-trip to save, and a shared cache would
+    otherwise leak one fixture session's sector into a later session's lookup
+    for the same ticker (see argus/backtesting/replay.py, which constructs a
+    fresh FixtureMarketDataProvider per session in the same process).
 
     Args:
         ticker: Equity ticker symbol.
+        market_data: Provider for the ticker-info lookup.
 
     Returns:
         GICS sector string (e.g. 'Technology'), or 'Unknown' on fetch failure.
     """
-    if ticker in _SECTOR_CACHE:
-        sector, cached_at = _SECTOR_CACHE[ticker]
-        if (datetime.now() - cached_at).total_seconds() < _SECTOR_CACHE_TTL_SECONDS:  # noqa: DTZ005
-            return sector
+    is_live = isinstance(market_data, LiveMarketDataProvider)
+
+    if is_live:
+        cached = _SECTOR_CACHE.get(ticker)
+        if cached is not None:
+            return cached
 
     try:
-        info = fetchers.fetch_ticker_info(ticker)
+        info = market_data.ticker_info(ticker)
         sector = info.get("sector", "Unknown")
-        _SECTOR_CACHE[ticker] = (sector, datetime.now())  # noqa: DTZ005
+        if is_live:
+            _SECTOR_CACHE.set(ticker, sector)
         return sector
     except Exception as exc:
         logger.warning("Failed to fetch sector for %s, defaulting to 'Unknown': %s", ticker, exc)
-        _SECTOR_CACHE[ticker] = ("Unknown", datetime.now())  # noqa: DTZ005
+        if is_live:
+            _SECTOR_CACHE.set(ticker, "Unknown")
         return "Unknown"
 
 
@@ -73,7 +86,7 @@ def compute_asset_returns(
     positions: list[dict],
     price_history: dict[str, pd.Series],
     lookback: int = RISK.returns_lookback_days,
-    dropped: Optional[list[str]] = None,
+    dropped: list[str] | None = None,
 ) -> pd.DataFrame:
     """Calculates raw (unweighted) daily historical returns per asset over a lookback window.
 
@@ -107,7 +120,9 @@ def compute_asset_returns(
 
 
 def compute_portfolio_returns(
-    positions: list[dict], price_history: dict[str, pd.Series], lookback: int = RISK.returns_lookback_days
+    positions: list[dict],
+    price_history: dict[str, pd.Series],
+    lookback: int = RISK.returns_lookback_days,
 ) -> pd.DataFrame:
     """Calculates daily historical returns adjusted by proposed weights over a lookback window.
 
@@ -120,14 +135,17 @@ def compute_portfolio_returns(
         DataFrame of weighted daily returns per ticker, with NaN rows dropped.
     """
     asset_returns = compute_asset_returns(positions, price_history, lookback)
-    # Reindexed to asset_returns' columns so a dropped ticker doesn't reappear as all-NaN via .mul().
+    # Reindexed to asset_returns' columns so a dropped ticker doesn't reappear as
+    # all-NaN via .mul().
     weights = pd.Series({pos["ticker"]: pos["weight"] for pos in positions}).reindex(
         asset_returns.columns
     )
     return asset_returns.mul(weights)
 
 
-def historical_var(portfolio_returns: pd.Series, confidence: float = RISK.var_confidence) -> float:
+def historical_var(
+    portfolio_returns: pd.Series, confidence: float = RISK.var_confidence
+) -> float | None:
     """Evaluates historical Value-at-Risk (VaR) at a target confidence percentile.
 
     Args:
@@ -135,16 +153,20 @@ def historical_var(portfolio_returns: pd.Series, confidence: float = RISK.var_co
         confidence: Confidence level for VaR calculation (default 0.99 = 99%).
 
     Returns:
-        Positive VaR value representing the worst-case daily loss at the given confidence.
+        Positive VaR value representing the worst-case daily loss at the given
+        confidence, or None when there is no return history to measure it from —
+        a zero would trivially clear every downstream threshold.
     """
     if portfolio_returns.empty:
-        return 0.0
+        return None
     percentile = (1.0 - confidence) * 100.0
     val = float(np.percentile(portfolio_returns.dropna(), percentile))
     return abs(val)
 
 
-def conditional_var(portfolio_returns: pd.Series, confidence: float = RISK.cvar_confidence) -> float:
+def conditional_var(
+    portfolio_returns: pd.Series, confidence: float = RISK.cvar_confidence
+) -> float | None:
     """Calculates Conditional Value-at-Risk (CVaR / Expected Shortfall) in the tail distribution.
 
     Args:
@@ -152,11 +174,13 @@ def conditional_var(portfolio_returns: pd.Series, confidence: float = RISK.cvar_
         confidence: Confidence level (default 0.99).
 
     Returns:
-        Positive CVaR value, or the VaR value if no returns fall below the VaR threshold.
+        Positive CVaR value, the VaR value if no returns fall below the VaR
+        threshold, or None when there is no return history to measure it from.
     """
     if portfolio_returns.empty:
-        return 0.0
+        return None
     var = historical_var(portfolio_returns, confidence)
+    assert var is not None  # non-empty series always yields a VaR value
     tail = portfolio_returns[portfolio_returns <= -var]
     return abs(float(tail.mean())) if len(tail) > 0 else var
 
@@ -165,7 +189,7 @@ def ols_portfolio_beta(
     positions: list[dict],
     price_history: dict[str, pd.Series],
     benchmark_ticker: str = "SPY",
-    market_data: Optional[MarketDataProvider] = None,
+    market_data: MarketDataProvider | None = None,
     lookback: int = RISK.returns_lookback_days,
 ) -> float:
     """Computes weighted Ordinary Least Squares (OLS) portfolio beta against a benchmark index.
@@ -225,47 +249,59 @@ def ols_portfolio_beta(
     return float(np.average(betas, weights=weights))
 
 
-def avg_pairwise_correlation(returns_matrix: pd.DataFrame) -> float:
+def avg_pairwise_correlation(returns_matrix: pd.DataFrame) -> float | None:
     """Computes the mean pairwise correlation coefficients for a matrix of asset returns.
 
     Args:
         returns_matrix: DataFrame where each column is a weighted return series for one asset.
 
     Returns:
-        Mean upper-triangle pairwise correlation, or 0.0 for single-asset portfolios.
+        Mean upper-triangle pairwise correlation; 0.0 for single-asset portfolios;
+        None when the positions share no overlapping return history (e.g. a
+        newly-listed ticker), which leaves every pairwise correlation undefined
+        rather than a fabricated 0.0.
     """
     if returns_matrix.shape[1] < 2:
         return 0.0
     corr = returns_matrix.corr()
     upper = corr.where(np.triu(np.ones(corr.shape), k=1).astype(bool))
-    return float(upper.stack().mean())
+    mean_corr = float(upper.stack().mean())
+    return mean_corr if not np.isnan(mean_corr) else None
 
 
-def atr_stop_losses(
-    positions: list[dict], price_history: dict[str, pd.Series], atr_multiplier: float = RISK.atr_multiplier
+def close_to_close_stop_losses(
+    positions: list[dict],
+    price_history: dict[str, pd.Series],
+    stop_multiplier: float = RISK.stop_multiplier,
 ) -> dict[str, float]:
-    """Derives dynamic stop-loss bounds using Average True Range (ATR-14) metrics.
+    """Derives dynamic stop-loss bounds from the mean absolute close-to-close change.
+
+    Not true ATR: real Average True Range needs high/low/prev-close data this
+    path doesn't have, so it understates volatility on large intraday gaps.
+    ``RISK.stop_lookback_period``/``stop_multiplier`` still borrow their values
+    from the standard ATR-14, 2-3x convention as a starting point.
 
     Args:
         positions: List of dicts with key ``ticker``.
         price_history: Mapping of ticker → daily close price Series.
-        atr_multiplier: Multiplier applied to ATR-14 to set the stop distance (default 2.5).
+        stop_multiplier: Multiplier applied to the mean absolute change to set
+            the stop distance (default 2.5).
 
     Returns:
-        Mapping of ticker → stop-loss price level. Tickers with fewer than 14 data points
-        are excluded.
+        Mapping of ticker → stop-loss price level. Tickers with fewer than
+        ``RISK.stop_lookback_period`` data points are excluded.
     """
     stops = {}
     for pos in positions:
         ticker = pos["ticker"]
         if ticker in price_history:
             series = price_history[ticker]
-            if len(series) > RISK.atr_period:
-                # NOTE: true_range is close-to-close, not H-L-Cprev — understates ATR on large intraday gaps.
-                true_range = series.diff().abs().dropna()
-                atr_14 = true_range.tail(RISK.atr_period).mean()
+            if len(series) > RISK.stop_lookback_period:
+                mean_abs_change = (
+                    series.diff().abs().dropna().tail(RISK.stop_lookback_period).mean()
+                )
                 latest_close = float(series.iloc[-1])
-                stops[ticker] = max(0.0, latest_close - (atr_14 * atr_multiplier))
+                stops[ticker] = max(0.0, latest_close - (mean_abs_change * stop_multiplier))
     return stops
 
 
@@ -283,7 +319,7 @@ def component_var(returns_matrix: pd.DataFrame, portfolio_returns: pd.Series) ->
     mvar = {}
     port_std = portfolio_returns.std()
     if port_std == 0 or pd.isna(port_std):
-        return {col: 0.0 for col in returns_matrix.columns}
+        return dict.fromkeys(returns_matrix.columns, 0.0)
 
     for col in returns_matrix.columns:
         cov = np.cov(returns_matrix[col], portfolio_returns)[0, 1]
@@ -313,7 +349,7 @@ class RiskStatisticalEngine:
         market_data: Provider used for price and beta lookups.
     """
 
-    def __init__(self, market_data: Optional[MarketDataProvider] = None) -> None:
+    def __init__(self, market_data: MarketDataProvider | None = None) -> None:
         """Loads gate thresholds from settings.
 
         Args:
@@ -330,7 +366,7 @@ class RiskStatisticalEngine:
         proposed_positions: list[dict],
         current_vix: float,
         total_weight: float,
-    ) -> tuple[list[str], Optional[str]]:
+    ) -> tuple[list[str], str | None]:
         """Runs gate 1: per-position caps, book size, and the VIX blackout.
 
         Args:
@@ -343,16 +379,15 @@ class RiskStatisticalEngine:
             vetoes the book; ``diversification_note`` is informational and is None when
             the position count clears the diversification floor.
         """
-        violations = []
+        violations = [
+            f"{pos['ticker']} weight {pos['weight']:.1%} > limit {self.max_position_pct:.1%}"
+            for pos in proposed_positions
+            if pos["weight"] > self.max_position_pct
+        ]
 
-        for pos in proposed_positions:
-            if pos["weight"] > self.max_position_pct:
-                violations.append(
-                    f"{pos['ticker']} weight {pos['weight']:.1%} > limit {self.max_position_pct:.1%}"
-                )
-
-        # Below-floor diversification is informational, not a violation — small books aren't a VETO fault.
-        diversification_note: Optional[str] = None
+        # Below-floor diversification is informational, not a violation — small books
+        # aren't a VETO fault.
+        diversification_note: str | None = None
         if (
             len(proposed_positions) > 1
             and len(proposed_positions) < RISK.min_positions_diversification
@@ -364,9 +399,11 @@ class RiskStatisticalEngine:
             )
 
         if len(proposed_positions) > RISK.max_positions:
-            # Unreachable via the API (tickers capped at 20 there too); kept for direct callers.
+            # Unreachable via the API (tickers capped at 20 there too); kept for
+            # direct callers.
             violations.append(
-                f"Over-diversification: {len(proposed_positions)} positions (max {RISK.max_positions})"
+                f"Over-diversification: {len(proposed_positions)} positions "
+                f"(max {RISK.max_positions})"
             )
 
         if current_vix >= self.vix_blackout:
@@ -381,8 +418,8 @@ class RiskStatisticalEngine:
         proposed_positions: list[dict],
         price_history: dict[str, pd.Series],
         sector_to_tickers: dict[str, list],
-        convictions: Optional[dict[str, float]],
-    ) -> tuple[dict[str, float], Optional[bool], list[str]]:
+        convictions: dict[str, float] | None,
+    ) -> tuple[dict[str, float], bool | None, list[str]]:
         """Runs gate 2: the SLSQP solve for allocation ceilings under per-sector caps.
 
         Args:
@@ -418,7 +455,8 @@ class RiskStatisticalEngine:
 
         cov = returns_df.cov() * 252
         if not np.isfinite(cov.to_numpy()).all():
-            # Thin overlap can still leave a non-finite matrix even after the drop; SLSQP can't recover.
+            # Thin overlap can still leave a non-finite matrix even after the drop;
+            # SLSQP can't recover.
             optimizer_notes.append(
                 "Covariance: non-finite values in the covariance matrix — "
                 "SLSQP optimization skipped"
@@ -428,7 +466,7 @@ class RiskStatisticalEngine:
         tickers = list(returns_df.columns)
         n = len(tickers)
 
-        def _obj(w: np.ndarray, _conv: Optional[dict[str, float]] = convictions) -> float:
+        def _obj(w: np.ndarray, _conv: dict[str, float] | None = convictions) -> float:
             """Minimizes variance penalized by signed conviction.
 
             Signed conviction (passed from graph.py):
@@ -450,7 +488,7 @@ class RiskStatisticalEngine:
         bounds = tuple((0.0, self.max_position_pct) for _ in range(n))
 
         cons = []
-        for sec, sec_tickers in sector_to_tickers.items():
+        for sec_tickers in sector_to_tickers.values():
             idxs = [i for i, t in enumerate(tickers) if t in sec_tickers]
             cap = self.max_sector_pct
             cons.append(
@@ -484,34 +522,39 @@ class RiskStatisticalEngine:
 
     def _statistical_violations(
         self,
-        var99: float,
-        cvar: float,
+        var99: float | None,
+        cvar: float | None,
         beta: float,
-        corr: float,
+        corr: float | None,
         sector_weights: dict[str, float],
         has_sector_violation: bool,
     ) -> list[str]:
         """Runs gate 3: the VaR, CVaR, beta, correlation, and sector-cap thresholds.
 
         Args:
-            var99: Portfolio 99% historical Value-at-Risk, normalized to a full book.
-            cvar: Portfolio Conditional Value-at-Risk, normalized to a full book.
+            var99: Portfolio 99% historical Value-at-Risk, normalized to a full book,
+                or None when there was no return history to measure it from — that
+                gate is skipped rather than passed on a fabricated 0.0.
+            cvar: Portfolio Conditional Value-at-Risk, normalized to a full book, or
+                None for the same reason as var99.
             beta: Weighted OLS portfolio beta against the benchmark.
-            corr: Mean pairwise correlation across the proposed positions.
+            corr: Mean pairwise correlation across the proposed positions, or None
+                when the positions share no overlapping return history.
             sector_weights: Mapping of GICS sector → summed proposed weight.
             has_sector_violation: Whether any sector exceeds the concentration cap.
 
         Returns:
-            List of breached thresholds, empty when every statistical gate passes.
+            List of breached thresholds, empty when every statistical gate passes
+            or was unmeasurable.
         """
         stat_violations: list[str] = []
-        if var99 > RISK.var_limit:
+        if var99 is not None and var99 > RISK.var_limit:
             stat_violations.append(f"VaR 99%: {var99:.2%} > {RISK.var_limit:.0%} limit")
-        if cvar > RISK.cvar_limit:
+        if cvar is not None and cvar > RISK.cvar_limit:
             stat_violations.append(f"CVaR: {cvar:.2%} > {RISK.cvar_limit:.0%} limit")
         if beta > self.max_port_beta:
             stat_violations.append(f"Beta {beta:.2f} > {self.max_port_beta:.2f}")
-        if corr > RISK.correlation_limit:
+        if corr is not None and corr > RISK.correlation_limit:
             stat_violations.append(f"Avg correlation > {RISK.correlation_limit} — reduce overlap")
         if has_sector_violation:
             for sec, w in sector_weights.items():
@@ -528,7 +571,7 @@ class RiskStatisticalEngine:
         proposed_positions: list[dict],
         price_history: dict[str, pd.Series],
         current_vix: float,
-        convictions: Optional[dict[str, float]] = None,
+        convictions: dict[str, float] | None = None,
     ) -> RiskAssessment:
         """Evaluates a proposed portfolio posture against structural, statistical, and sector caps.
 
@@ -574,7 +617,7 @@ class RiskStatisticalEngine:
         sector_weights: dict[str, float] = {}
         sector_to_tickers: dict[str, list] = {}
         for pos in proposed_positions:
-            sector = get_sector(pos["ticker"])
+            sector = get_sector(pos["ticker"], self.market_data)
             sector_weights[sector] = sector_weights.get(sector, 0.0) + pos["weight"]
             sector_to_tickers.setdefault(sector, []).append(pos["ticker"])
 
@@ -594,6 +637,18 @@ class RiskStatisticalEngine:
         beta = ols_portfolio_beta(proposed_positions, price_history, market_data=self.market_data)
         corr = avg_pairwise_correlation(returns)
 
+        # Informational, not a violation — an unmeasurable stat must not silently
+        # pass its threshold check by being fabricated as 0.0 (RE-102).
+        degraded_notes: list[str] = []
+        if var99 is None or cvar is None:
+            degraded_notes.append(
+                "VaR/CVaR not measurable — insufficient return history for this book"
+            )
+        if corr is None:
+            degraded_notes.append(
+                "Average correlation not measurable — positions share no overlapping return history"
+            )
+
         stat_violations = self._statistical_violations(
             var99, cvar, beta, corr, sector_weights, has_sector_violation
         )
@@ -604,7 +659,10 @@ class RiskStatisticalEngine:
                 verdict=RiskVerdict.REDUCE,
                 approved_weight=min(total_weight * RISK.reduce_weight_multiplier, total_weight),
                 proposed_weight=total_weight,
-                veto_reasons=stat_violations + diversification_notes + optimizer_notes,
+                veto_reasons=stat_violations
+                + diversification_notes
+                + optimizer_notes
+                + degraded_notes,
                 optimal_weights=optimal_weights,
                 optimizer_converged=optimizer_converged,
                 var_99=var99,
@@ -617,19 +675,23 @@ class RiskStatisticalEngine:
                 timestamp=datetime.now(),  # noqa: DTZ005
             )
 
-        stops = atr_stop_losses(proposed_positions, price_history)
+        stops = close_to_close_stop_losses(proposed_positions, price_history)
         mvar = component_var(returns, port_returns)
 
         primary_ticker = proposed_positions[0]["ticker"] if proposed_positions else ""
         stop_val = stops.get(primary_ticker, 0.0)
         mvar_val = mvar.get(primary_ticker, 0.0)
 
-        logger.debug("Risk evaluate: APPROVE (VaR99: %.2f%%, Beta: %.2f)", var99 * 100, beta)
+        logger.debug(
+            "Risk evaluate: APPROVE (VaR99: %s, Beta: %.2f)",
+            f"{var99:.2%}" if var99 is not None else "not measurable",
+            beta,
+        )
         return RiskAssessment(
             verdict=RiskVerdict.APPROVE,
             approved_weight=total_weight,
             proposed_weight=total_weight,
-            veto_reasons=diversification_notes + optimizer_notes,
+            veto_reasons=diversification_notes + optimizer_notes + degraded_notes,
             optimal_weights=optimal_weights,
             optimizer_converged=optimizer_converged,
             var_99=var99,

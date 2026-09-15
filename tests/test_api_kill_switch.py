@@ -21,14 +21,6 @@ from argus.risk import paper_book
 from argus.risk.kill_switch import KillSwitch
 
 
-@pytest.fixture(autouse=True)
-def _reset_kill_switch_singleton():
-    """Clears the module-level KillSwitch singleton before and after each test."""
-    kill_switch_module._kill_switch = None
-    yield
-    kill_switch_module._kill_switch = None
-
-
 @pytest.fixture
 def client():
     """A TestClient over api.main.app without running its lifespan startup."""
@@ -95,6 +87,27 @@ def test_kill_switch_reset_rebases_the_persisted_paper_book(client, monkeypatch,
     assert rebased.equity == pytest.approx(150_000.0)
     assert rebased.high_water_mark == pytest.approx(150_000.0)
     assert rebased.rebased_at is not None
+
+
+def test_kill_switch_reset_refuses_to_rebase_over_a_corrupt_paper_book(
+    client, monkeypatch, tmp_path
+):
+    """A corrupt paper_equity.json fails the reset with a clear 500, not a silent fresh rebase.
+
+    Falling back to a fresh book here would drop the old file's runs_applied,
+    letting an already-applied run get double-compounded by the next
+    reconcile pass — the same hazard load()'s hard-failure behavior guards
+    against elsewhere.
+    """
+    monkeypatch.setattr(api_main.settings, "ARGUS_API_KEY", "")
+    kill_switch_module._kill_switch = KillSwitch("MODERATE")
+    book_path = tmp_path / "paper_equity.json"  # ARGUS_DATA_DIR is this tmp_path (conftest)
+    book_path.write_text('{"equity": 80000.0, "high_wat')
+
+    response = client.post("/kill-switch/reset", params={"new_inception_value": 150_000})
+
+    assert response.status_code == 500
+    assert book_path.read_text() == '{"equity": 80000.0, "high_wat'
 
 
 def test_kill_switch_reset_rejects_value_at_or_below_floor(client, monkeypatch):
