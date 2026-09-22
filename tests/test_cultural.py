@@ -82,7 +82,7 @@ def _macro(
 def test_embedding_identity_check_backfills_a_collection_with_no_recorded_model():
     """A pre-existing collection with no `embedding_model` key gets one backfilled."""
     result = _check_embedding_model_identity({"hnsw:space": "cosine"}, "all-MiniLM-L6-v2")
-    assert result == {"hnsw:space": "cosine", "embedding_model": "all-MiniLM-L6-v2"}
+    assert result == {"embedding_model": "all-MiniLM-L6-v2"}
 
 
 def test_embedding_identity_check_is_a_noop_when_the_model_matches():

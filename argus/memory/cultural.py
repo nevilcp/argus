@@ -74,7 +74,10 @@ def _check_embedding_model_identity(
     persisted_metadata = persisted_metadata or {}
     recorded_model = persisted_metadata.get("embedding_model")
     if recorded_model is None:
-        return {**persisted_metadata, "embedding_model": expected_model}
+        # collection.modify() rejects any metadata dict containing "hnsw:space"
+        # outright, even when the value is unchanged, so the backfill write can
+        # only carry the key actually being added.
+        return {"embedding_model": expected_model}
     if recorded_model != expected_model:
         raise EmbeddingModelMismatchError(
             f"Cultural memory collection was embedded with {recorded_model!r}, but this "
