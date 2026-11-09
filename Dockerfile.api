@@ -57,8 +57,13 @@ COPY --from=builder /opt/model-cache /opt/model-cache
 # pyproject.toml's packages = ["argus", "api", "scripts"]) inside /opt/venv —
 # nothing else needs to be copied into this stage
 
+# HF_HUB_OFFLINE: the models are baked into /opt/model-cache read-only for the
+# non-root user. Without it, transformers asks the Hub for the latest revision at
+# load time, and when that differs from the baked snapshot it tries to download
+# into the read-only cache and dies with a PermissionError.
 ENV PATH="/opt/venv/bin:$PATH" \
     HF_HOME=/opt/model-cache \
+    HF_HUB_OFFLINE=1 \
     PYTHONUNBUFFERED=1
 
 # Baked in at build time (see image.yml) rather than read from the pulled tag,
