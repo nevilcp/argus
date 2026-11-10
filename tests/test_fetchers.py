@@ -308,7 +308,7 @@ def test_newsapi_budget_fails_closed_on_a_corrupt_file_and_heals_it(caplog):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("{not json")
 
-    with caplog.at_level(logging.ERROR, logger="argus.fetchers"):
+    with caplog.at_level(logging.ERROR, logger="argus.data.fetchers"):
         assert budget.try_reserve() is False
 
     assert any("corrupt" in r.message for r in caplog.records)

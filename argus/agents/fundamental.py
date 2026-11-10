@@ -35,7 +35,7 @@ from argus.schemas.signals import FundamentalSignal, FundamentalVerdict
 from argus.seams import GroqLLMClient, LiveMarketDataProvider, LLMClient, MarketDataProvider
 from argus.structured_output import StructuredOutputError, decode
 
-logger = logging.getLogger("argus.fundamental")
+logger = logging.getLogger(__name__)
 
 # Approximate sector-median P/E anchors for the LLM prompt; rough averages, not precise thresholds.
 _SECTOR_PE_MEDIANS: dict[str, float] = {
@@ -293,9 +293,7 @@ class FundamentalAgent:
         if llm_client is None:
             api_key = settings.groq_api_key
             if not api_key:
-                logger.warning(
-                    "FundamentalAgent: GROQ_API_KEY is not set — LLM calls will fail at invocation time."
-                )
+                logger.warning("GROQ_API_KEY is not set — LLM calls will fail at invocation time.")
             llm_client = GroqLLMClient(
                 model=settings.ARGUS_FUNDAMENTAL_MODEL,
                 temperature=STRUCTURED_OUTPUT.llm_temperature,
@@ -338,12 +336,12 @@ class FundamentalAgent:
         """
         cached = self.cache.get((ticker, session_seed))
         if cached:
-            logger.debug("FundamentalAgent.analyze: Cache hit for %s", ticker)
+            logger.debug("Cache hit for %s", ticker)
             return cached
 
         if not self._has_spare_capacity():
             logger.warning(
-                "[Fundamental] Low capacity for %s, skipping %s",
+                "Low capacity for %s, skipping %s",
                 settings.ARGUS_FUNDAMENTAL_MODEL,
                 ticker,
             )
@@ -354,7 +352,7 @@ class FundamentalAgent:
         try:
             fundamentals = self.market_data.fundamentals(ticker)
         except Exception as e:
-            logger.warning("[Fundamental] Failed to fetch fundamentals for %s: %s", ticker, e)
+            logger.warning("Failed to fetch fundamentals for %s: %s", ticker, e)
             if errors is not None:
                 errors.append(f"fundamental_analysis[{ticker}]: failed to fetch fundamentals: {e}")
             return None
@@ -377,18 +375,18 @@ class FundamentalAgent:
                 self.llm_client, SYSTEM_PROMPT, prompt, FundamentalVerdict, repair=True
             )
         except StructuredOutputError as e:
-            logger.warning("[Fundamental] Decode failed for %s: %s", ticker, e)
+            logger.warning("Decode failed for %s: %s", ticker, e)
             if errors is not None:
                 errors.append(f"fundamental_analysis[{ticker}]: {e}")
             return None
         except (RateLimitExceeded, UnregisteredModel) as e:
             # Governor already exhausted its bounded wait; degrade this ticker rather than retry into it.
-            logger.warning("[Fundamental] Governor rejected call for %s: %s", ticker, e)
+            logger.warning("Governor rejected call for %s: %s", ticker, e)
             if errors is not None:
                 errors.append(f"fundamental_analysis[{ticker}]: rate limited: {e}")
             return None
         except Exception as e:
-            logger.error("[Fundamental] API error for %s: %s", ticker, e)
+            logger.error("API error for %s: %s", ticker, e)
             if errors is not None:
                 errors.append(f"fundamental_analysis[{ticker}]: API error: {e}")
             return None
@@ -399,9 +397,7 @@ class FundamentalAgent:
             signal = FundamentalSignal.model_validate(data)
         except ValidationError as e:
             # Merged measured data (e.g. negative debt_to_equity) can fail schema even after a clean decode.
-            logger.warning(
-                "[Fundamental] Measured data failed signal validation for %s: %s", ticker, e
-            )
+            logger.warning("Measured data failed signal validation for %s: %s", ticker, e)
             if errors is not None:
                 errors.append(
                     f"fundamental_analysis[{ticker}]: measured data failed validation: {e}"
@@ -409,7 +405,7 @@ class FundamentalAgent:
             return None
 
         self.cache.set((ticker, session_seed), signal)
-        logger.debug("[Fundamental] Analysis complete for %s -> %s", ticker, signal.signal.value)
+        logger.debug("Analysis complete for %s -> %s", ticker, signal.signal.value)
         return signal
 
     def _has_spare_capacity(self) -> bool:

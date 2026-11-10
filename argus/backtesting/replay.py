@@ -45,7 +45,7 @@ from argus.orchestration.graph import build_graph
 from argus.orchestration.state import initial_state
 from argus.seams import FixtureLLMClient, FixtureMarketDataProvider
 
-logger = logging.getLogger("argus.backtesting.replay")
+logger = logging.getLogger(__name__)
 
 
 def _normalize_as_of(ts: datetime) -> datetime:
@@ -257,6 +257,6 @@ def replay_sessions(session_dirs: list[Path], **kwargs: Any) -> list[SessionResu
     """
     results: list[SessionResult] = []
     for session_dir in session_dirs:
-        logger.info("[Replay] Running session %s", session_dir)
+        logger.info("Running session %s", session_dir)
         results.append(replay_session(session_dir, **kwargs))
     return results

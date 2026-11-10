@@ -33,7 +33,7 @@ from argus.schemas.signals import (
     TechnicalSignal,
 )
 
-logger = logging.getLogger("argus.aggregator")
+logger = logging.getLogger(__name__)
 
 # The agents that cast a vote, in voting order. Reliability and ablation
 # iterate this; the weights and sources below are keyed by the same names.
@@ -144,7 +144,7 @@ class HybridSignalAggregator:
             weighted_votes[name] = vote
 
         if bull_pool + bear_pool + neutral_pool == 0.0:
-            logger.warning("[Aggregator] No signal contributions for %s", ticker)
+            logger.warning("No signal contributions for %s", ticker)
             return AggregatedSignal(
                 ticker=ticker,
                 signal=Signal.NEUTRAL,
@@ -178,7 +178,7 @@ class HybridSignalAggregator:
             and conviction < AGGREGATOR.contraction_conviction_threshold
         ):
             logger.info(
-                "[Aggregator] %s: Contraction regime override — suppressing BULLISH (conv=%.2f)",
+                "%s: Contraction regime override — suppressing BULLISH (conv=%.2f)",
                 ticker,
                 conviction,
             )
@@ -188,7 +188,7 @@ class HybridSignalAggregator:
         conviction = min(conviction, AGGREGATOR.max_conviction)
 
         logger.info(
-            "[Aggregator] %s: %s (conv=%.2f) bull=%.2f bear=%.2f neutral=%.2f",
+            "%s: %s (conv=%.2f) bull=%.2f bear=%.2f neutral=%.2f",
             ticker,
             consensus.value,
             conviction,

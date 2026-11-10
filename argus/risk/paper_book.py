@@ -47,7 +47,7 @@ from argus.orchestration.reconciliation import _needs_reconciliation, compute_re
 from argus.schemas.signals import ARGUSDecision
 from argus.seams import MarketDataProvider
 
-logger = logging.getLogger("argus.paper_book")
+logger = logging.getLogger(__name__)
 
 
 def _close_prices(
@@ -71,7 +71,7 @@ def _close_prices(
             cache[ticker] = market_data.ohlcv_daily(ticker)["close"]
         except Exception as exc:
             logger.warning(
-                "[PaperBook] failed to fetch price history for %s (%s): %s",
+                "failed to fetch price history for %s (%s): %s",
                 ticker,
                 type(exc).__name__,
                 exc,

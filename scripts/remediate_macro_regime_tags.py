@@ -19,17 +19,14 @@ Backs up the sqlite file to <path>.bak-<timestamp> before writing.
 """
 
 import argparse
-import logging
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
 from chromadb.api.types import Metadata
 
-from argus.config import settings
+from argus.infra.log import configure_logging
 from argus.memory.cultural import CulturalMemoryManager, default_chroma_dir
-
-logger = logging.getLogger("argus.remediate_macro_regime_tags")
 
 STALE_REGIME = "EXPANSION"
 REPLACEMENT_REGIME = "unknown"
@@ -37,7 +34,7 @@ REPLACEMENT_REGIME = "unknown"
 
 def main() -> None:
     """Backs up the ChromaDB sqlite file and rewrites stale regime tags to "unknown"."""
-    logging.basicConfig(level=settings.ARGUS_LOG_LEVEL)
+    configure_logging()
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--persist-dir", default=default_chroma_dir())

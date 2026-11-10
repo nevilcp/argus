@@ -326,7 +326,7 @@ def test_interval_change_logs_the_discarded_count(tmp_path, caplog):
         old.insert_candle("AAPL", {"timestamp": f"2024-01-02T09:3{i}:00", "close": float(i)})
     old.close()
 
-    with caplog.at_level(logging.WARNING, logger="argus.cache"):
+    with caplog.at_level(logging.WARNING, logger="argus.data.cache"):
         _buffer(db_path=db_path, interval="5m")
 
     assert any("discarded 3" in record.message for record in caplog.records)

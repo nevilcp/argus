@@ -18,18 +18,16 @@ function of the macro data, and no artifact is written for it.
 """
 
 import argparse
-import logging
 
 from argus.agents.macro import MacroStatisticalAgent
 from argus.config import settings
+from argus.infra.log import configure_logging
 from argus.schemas.signals import Regime
-
-logger = logging.getLogger("argus.train_macro_hmm")
 
 
 def main() -> None:
     """Parses CLI args, fits the HMM, and saves the artifact if it validates."""
-    logging.basicConfig(level=settings.ARGUS_LOG_LEVEL)
+    configure_logging()
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(

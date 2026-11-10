@@ -273,7 +273,7 @@ def test_halt_stays_engaged_but_flags_an_unpersisted_dump(tmp_path, monkeypatch,
     ks._current_portfolio_value = 80_000.0
 
     with (
-        caplog.at_level("CRITICAL", logger="argus.kill_switch"),
+        caplog.at_level("CRITICAL", logger="argus.risk.kill_switch"),
         mock.patch(_FETCH_VIX, return_value=15.0),
     ):
         ks._check()

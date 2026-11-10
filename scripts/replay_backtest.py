@@ -18,12 +18,15 @@ import argparse
 from pathlib import Path
 
 from argus.backtesting.replay import replay_sessions
+from argus.infra.log import configure_logging
 
 DEFAULT_SESSION_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
 
 
 def main() -> None:
     """Replays each given session (default: fixtures dir) and prints its allocation."""
+    configure_logging()
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "session_dirs",

@@ -54,7 +54,7 @@ from argus.params import COLLECTOR
 from argus.risk.kill_switch import get_kill_switch
 from argus.schemas.signals import ARGUSDecision
 
-logger = logging.getLogger("argus.collector")
+logger = logging.getLogger(__name__)
 
 # Decision fields whose absence marks a degraded input; checked on every
 # decision the graph produced so a cycle summary can say which upstream
@@ -181,9 +181,9 @@ def _prune_stale_checkpoints(checkpoint_db_path: str) -> None:
     try:
         pruned = prune_checkpoints(checkpoint_db_path, default_checkpoint_retention_cutoff())
         if pruned:
-            logger.info("run_collection_cycle: pruned %d stale checkpoint thread(s)", pruned)
+            logger.info("pruned %d stale checkpoint thread(s)", pruned)
     except Exception:
-        logger.exception("run_collection_cycle: checkpoint pruning failed")
+        logger.exception("checkpoint pruning failed")
 
 
 async def run_collection_cycle(
@@ -258,7 +258,7 @@ async def run_collection_cycle(
     ks = get_kill_switch()
     if ks is not None and ks.is_halted:
         reason = f"halted: {ks.status.reason}"
-        logger.warning("run_collection_cycle: skipping graph invocation — %s", reason)
+        logger.warning("skipping graph invocation — %s", reason)
         return CollectionResult(ran=False, reason=reason)
 
     session_states = await pipeline.run_once()
@@ -266,12 +266,12 @@ async def run_collection_cycle(
     tickers_with_data = [t for t in universe if t in session_states]
     if not tickers_with_data:
         reason = "market closed" if not pipeline.is_market_hours() else "buffer not yet warm"
-        logger.info("run_collection_cycle: skipping graph invocation — %s", reason)
+        logger.info("skipping graph invocation — %s", reason)
         return CollectionResult(ran=False, reason=reason)
 
     if analyze_lock is not None and analyze_lock.locked():
         reason = "analysis already in progress"
-        logger.info("run_collection_cycle: skipping graph invocation — %s", reason)
+        logger.info("skipping graph invocation — %s", reason)
         return CollectionResult(ran=False, reason=reason)
 
     state = initial_state(
@@ -289,7 +289,7 @@ async def run_collection_cycle(
     config = {"configurable": {"thread_id": thread_id}}
 
     logger.info(
-        "run_collection_cycle: invoking graph for %d/%d ticker(s) with session data",
+        "invoking graph for %d/%d ticker(s) with session data",
         len(tickers_with_data),
         len(universe),
     )
@@ -321,8 +321,7 @@ async def run_collection_cycle(
     )
 
     logger.info(
-        "run_collection_cycle: logged %d decision(s) (%d with allocation), "
-        "macro_regime=%s, outcome=%s",
+        "logged %d decision(s) (%d with allocation), macro_regime=%s, outcome=%s",
         logged,
         decisions_with_allocation,
         macro_regime,

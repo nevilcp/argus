@@ -34,7 +34,7 @@ from argus.schemas.signals import (
     missing_session_state_keys,
 )
 
-logger = logging.getLogger("argus.technical")
+logger = logging.getLogger(__name__)
 
 # Alias for schemas/signals.py's contract; kept for existing refs (incl. tests).
 _REQUIRED_INDICATOR_KEYS = SESSION_STATE_REQUIRED_KEYS
@@ -376,14 +376,14 @@ class TechnicalStatisticalAgent:
                     )
             except Exception as exc:
                 logger.warning(
-                    "batch_analyze: %s failed — %s: %s",
+                    "%s failed — %s: %s",
                     ticker,
                     type(exc).__name__,
                     exc,
                 )
                 errors.append(f"technical_analysis[{ticker}]: {type(exc).__name__}: {exc}")
         logger.debug(
-            "batch_analyze: %d/%d tickers produced valid signals",
+            "%d/%d tickers produced valid signals",
             len(results),
             len(session_states),
         )

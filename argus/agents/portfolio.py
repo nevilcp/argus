@@ -39,7 +39,7 @@ from argus.schemas.signals import (
 from argus.seams import GroqLLMClient, LLMClient
 from argus.structured_output import StructuredOutputError, decode
 
-logger = logging.getLogger("argus.portfolio")
+logger = logging.getLogger(__name__)
 
 
 def half_kelly_weight(
@@ -202,9 +202,7 @@ class PortfolioManagerAgent:
         if llm_client is None:
             api_key = settings.groq_api_key
             if not api_key:
-                logger.warning(
-                    "PortfolioManagerAgent: GROQ_API_KEY is not set — LLM calls will fail at invocation time."
-                )
+                logger.warning("GROQ_API_KEY is not set — LLM calls will fail at invocation time.")
             llm_client = GroqLLMClient(
                 model=settings.ARGUS_PORTFOLIO_MODEL,
                 temperature=PORTFOLIO.llm_temperature,
@@ -271,7 +269,7 @@ class PortfolioManagerAgent:
                     failure paths that return None.
             """
             if level == "error":
-                logger.error("[Portfolio] %s", msg)
+                logger.error("%s", msg)
             else:
                 logger.warning(msg)
             if adjustments is not None:
@@ -294,7 +292,7 @@ class PortfolioManagerAgent:
         approved_tickers = [t for t, s in snapshots.items() if s.risk_approved]
 
         if not approved_tickers:
-            logger.debug("[Portfolio] No approved tickers. Reverting to all-cash.")
+            logger.debug("No approved tickers. Reverting to all-cash.")
             return self._all_cash_allocation(investable)
 
         # PA-4: invest_pct can be unreachable for a small universe; state the achievable ceiling instead.

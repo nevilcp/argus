@@ -37,7 +37,7 @@ import pandas as pd
 from argus.config import settings
 from argus.infra.clock import MARKET_TZ, now_local
 
-logger = logging.getLogger("argus.cache")
+logger = logging.getLogger(__name__)
 
 
 class TTLCache[K: Hashable, V]:
@@ -250,8 +250,7 @@ class OHLCVBuffer:
         self._conn.commit()
         if cursor.rowcount:
             logger.warning(
-                "OHLCVBuffer: interval is now %s, discarded %d row(s) written under a "
-                "different interval",
+                "interval is now %s, discarded %d row(s) written under a different interval",
                 self._interval,
                 cursor.rowcount,
             )
@@ -316,7 +315,7 @@ class OHLCVBuffer:
             self._conn.execute(_PRUNE_OHLCV, (ticker, ticker, self._buffer_size))
             self._conn.commit()
 
-        logger.debug("OHLCVBuffer.insert_candles: %s ← %d candle(s)", ticker, len(rows))
+        logger.debug("%s ← %d candle(s)", ticker, len(rows))
 
     def get_candles(self, ticker: str) -> pd.DataFrame | None:
         """Retrieves buffered candles as a pandas DataFrame, tz-converted to ET.
@@ -336,7 +335,7 @@ class OHLCVBuffer:
 
         if len(rows) < _MIN_CANDLE_ROWS:
             logger.debug(
-                "OHLCVBuffer.get_candles: %s has only %d rows (min %d)",
+                "%s has only %d rows (min %d)",
                 ticker,
                 len(rows),
                 _MIN_CANDLE_ROWS,
@@ -352,7 +351,7 @@ class OHLCVBuffer:
         df.sort_index(inplace=True)
         df = df.tz_convert(MARKET_TZ.key)
         df = df.astype(float)
-        logger.debug("OHLCVBuffer.get_candles: %s → %d rows", ticker, len(df))
+        logger.debug("%s → %d rows", ticker, len(df))
         return df
 
     def get_all_tickers(self) -> list[str]:
@@ -389,7 +388,7 @@ class OHLCVBuffer:
             )
             self._conn.commit()
         if cursor.rowcount:
-            logger.info("OHLCVBuffer.prune_untracked: discarded %d row(s)", cursor.rowcount)
+            logger.info("discarded %d row(s)", cursor.rowcount)
         return cursor.rowcount
 
     def row_counts(self) -> dict[str, int]:
@@ -508,7 +507,7 @@ class DailyBarCache:
         df["trading_date"] = pd.to_datetime(df["trading_date"])
         df.set_index("trading_date", inplace=True)
         df.index.name = None
-        logger.debug("DailyBarCache.get: %s → %d cached rows", ticker, len(df))
+        logger.debug("%s → %d cached rows", ticker, len(df))
         return df
 
     def put(self, ticker: str, df: pd.DataFrame) -> None:
@@ -547,7 +546,7 @@ class DailyBarCache:
             self._conn.execute(_UPSERT_DAILY_REFRESH, (ticker, today))
             self._conn.commit()
 
-        logger.debug("DailyBarCache.put: %s ← %d rows, refreshed_on=%s", ticker, len(rows), today)
+        logger.debug("%s ← %d rows, refreshed_on=%s", ticker, len(rows), today)
 
     def close(self) -> None:
         """Closes the underlying database connection."""

@@ -31,7 +31,7 @@ from argus.params import RISK
 from argus.schemas.signals import RiskAssessment, RiskVerdict
 from argus.seams import LiveMarketDataProvider, MarketDataProvider
 
-logger = logging.getLogger("argus.risk")
+logger = logging.getLogger(__name__)
 
 # 24h TTL reflects M&A/spin-off reclassification; max_entries bounds the store
 # independently of TTL rather than relying incidentally on the ticker universe's size.
@@ -220,7 +220,7 @@ def ols_portfolio_beta(
             )
             spy_returns = spy_df["close"].tail(lookback + 1).pct_change().dropna()
         except Exception:
-            logger.warning("ols_portfolio_beta: benchmark fetch failed, returning 1.0")
+            logger.warning("benchmark fetch failed, returning 1.0")
             return 1.0
     else:
         spy_returns = price_history[benchmark_ticker].tail(lookback + 1).pct_change().dropna()
@@ -511,12 +511,12 @@ class RiskStatisticalEngine:
         )
         optimizer_converged = bool(res.success)
         if not res.success:
-            logger.warning("[Risk] SLSQP solve did not converge: %s", res.message)
+            logger.warning("SLSQP solve did not converge: %s", res.message)
             return {}, optimizer_converged, optimizer_notes
 
         optimal_weights = {tickers[i]: float(res.x[i]) for i in range(n)}
         logger.debug(
-            "[Risk] SLSQP optimal weights: %s",
+            "SLSQP optimal weights: %s",
             {t: f"{w:.3f}" for t, w in optimal_weights.items()},
         )
         return optimal_weights, optimizer_converged, optimizer_notes

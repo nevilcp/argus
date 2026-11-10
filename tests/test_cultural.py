@@ -430,7 +430,7 @@ def test_get_cultural_memory_ignores_a_later_persist_dir_and_warns(monkeypatch, 
     fake_manager = mock.Mock(persist_dir=str(tmp_path / "first"))
     monkeypatch.setattr(cultural_module, "_cultural_memory", fake_manager)
 
-    with caplog.at_level("WARNING", logger="argus.cultural_memory"):
+    with caplog.at_level("WARNING", logger="argus.memory.cultural"):
         returned = get_cultural_memory(str(tmp_path / "second"))
 
     assert returned is fake_manager

@@ -46,7 +46,7 @@ from datetime import UTC, datetime
 
 from argus.config import settings
 
-logger = logging.getLogger("argus.governor")
+logger = logging.getLogger(__name__)
 
 
 class RateLimitExceeded(Exception):
@@ -176,14 +176,14 @@ def _observe_axis(
         limit = int(headers[limit_header])
         remaining = int(headers[remaining_header])
     except (ValueError, TypeError) as e:
-        logger.warning("[Governor] Malformed %s headers for %s: %s", axis, model, e)
+        logger.warning("Malformed %s headers for %s: %s", axis, model, e)
         return None
 
     reset_at: float | None = None
     try:
         reset_at = now + _parse_reset_duration(headers[reset_header])
     except ValueError as e:
-        logger.warning("[Governor] Unparseable %s reset for %s: %s", axis, model, e)
+        logger.warning("Unparseable %s reset for %s: %s", axis, model, e)
     return limit, remaining, reset_at
 
 
@@ -320,7 +320,7 @@ class RateLimitGovernor:
             usage.requests_today = 0
             usage.tokens_today = 0
             usage.current_date = today
-            logger.debug("RateLimitGovernor: daily counters reset for new UTC day")
+            logger.debug("daily counters reset for new UTC day")
 
     def _prune_window(self, usage: ModelUsage) -> None:
         """Drops entries older than ``_WINDOW_SECONDS`` from both rolling windows.
@@ -420,7 +420,7 @@ class RateLimitGovernor:
                     if usage.limits_observed and usage.remaining_requests is not None:
                         usage.remaining_requests = max(0, usage.remaining_requests - 1)
                     logger.debug(
-                        "[Governor] %s — today: %d req, %d tok | this window: %d req, %d tok",
+                        "%s — today: %d req, %d tok | this window: %d req, %d tok",
                         model,
                         usage.requests_today,
                         usage.tokens_today,
@@ -439,7 +439,7 @@ class RateLimitGovernor:
                 oldest = usage.requests_window[0] if usage.requests_window else time.monotonic()
                 wait_seconds = max(1.0, _WINDOW_SECONDS - (time.monotonic() - oldest))
                 logger.warning(
-                    "[Governor] Window limit approached for %s (attempt %d/%d). Sleeping %.1fs.",
+                    "Window limit approached for %s (attempt %d/%d). Sleeping %.1fs.",
                     model,
                     attempt + 1,
                     self._MAX_WAIT_ATTEMPTS,
@@ -491,7 +491,7 @@ class RateLimitGovernor:
                 )
             usage.limits_observed = True
             logger.debug(
-                "[Governor] %s — observed limits: req=%s/%s tok=%s/%s",
+                "%s — observed limits: req=%s/%s tok=%s/%s",
                 model,
                 usage.remaining_requests,
                 usage.limit_requests,

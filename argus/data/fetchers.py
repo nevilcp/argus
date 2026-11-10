@@ -47,7 +47,7 @@ from argus.infra.backoff import full_jitter_delay
 from argus.infra.files import atomic_write_text
 from argus.params import SYSTEM
 
-logger = logging.getLogger("argus.fetchers")
+logger = logging.getLogger(__name__)
 
 
 class DataFetchError(Exception):
@@ -312,7 +312,7 @@ def fetch_ohlcv_daily(ticker: str, period: str = "2y") -> pd.DataFrame:
     Raises:
         DataFetchError: If the returned DataFrame is empty after all retries.
     """
-    logger.debug("fetch_ohlcv_daily: ticker=%s period=%s", ticker, period)
+    logger.debug("ticker=%s period=%s", ticker, period)
     raw = yf.download(
         ticker,
         period=period,
@@ -327,7 +327,7 @@ def fetch_ohlcv_daily(ticker: str, period: str = "2y") -> pd.DataFrame:
         )
     df = _normalise_ohlcv(raw)
     df.sort_index(inplace=True)
-    logger.info("fetch_ohlcv_daily: %s → %d rows", ticker, len(df))
+    logger.info("%s → %d rows", ticker, len(df))
     return df
 
 
@@ -347,7 +347,7 @@ def fetch_ohlcv_intraday(ticker: str, interval: str = "5m", period: str = "5d") 
         DataFetchError: If the returned DataFrame is empty.
     """
     logger.debug(
-        "fetch_ohlcv_intraday: ticker=%s interval=%s period=%s",
+        "ticker=%s interval=%s period=%s",
         ticker,
         interval,
         period,
@@ -367,7 +367,7 @@ def fetch_ohlcv_intraday(ticker: str, interval: str = "5m", period: str = "5d") 
         )
     df = _normalise_ohlcv(raw)
     df.sort_index(inplace=True)
-    logger.info("fetch_ohlcv_intraday: %s [%s] → %d rows", ticker, interval, len(df))
+    logger.info("%s [%s] → %d rows", ticker, interval, len(df))
     return df
 
 
@@ -435,14 +435,14 @@ def fetch_multiple_daily(tickers: list[str], period: str = "1y") -> dict[str, pd
                     cache.put(ticker, df)
                 except Exception as exc:
                     logger.warning(
-                        "fetch_multiple_daily: failed for %s — %s: %s",
+                        "failed for %s — %s: %s",
                         ticker,
                         type(exc).__name__,
                         exc,
                     )
 
     logger.info(
-        "fetch_multiple_daily: %d/%d tickers fetched successfully (%d from cache)",
+        "%d/%d tickers fetched successfully (%d from cache)",
         len(results),
         len(tickers),
         len(tickers) - len(to_fetch),
@@ -466,7 +466,7 @@ def fetch_fundamentals(ticker: str) -> dict:
         operating_margin, net_margin, fcf_yield, debt_to_equity, current_ratio,
         roe, roic, sector, industry, marketCap, p_fcf, as_of_date.
     """
-    logger.debug("fetch_fundamentals: ticker=%s", ticker)
+    logger.debug("ticker=%s", ticker)
     info: dict = yf.Ticker(ticker).info
 
     fcf = info.get("freeCashflow")
@@ -495,7 +495,7 @@ def fetch_fundamentals(ticker: str) -> dict:
         "as_of_date": date.today().isoformat(),  # noqa: DTZ011
     }
     logger.info(
-        "fetch_fundamentals: %s → %d keys populated",
+        "%s → %d keys populated",
         ticker,
         sum(1 for v in result.values() if v is not None),
     )
@@ -516,7 +516,7 @@ def fetch_ticker_info(ticker: str) -> dict:
     Returns:
         Raw info dict as returned by yfinance.Ticker(ticker).info.
     """
-    logger.debug("fetch_ticker_info: ticker=%s", ticker)
+    logger.debug("ticker=%s", ticker)
     return yf.Ticker(ticker).info
 
 
@@ -536,7 +536,7 @@ def fetch_ticker_calendar(ticker: str) -> Any:
         (DataFrame or dict) varies across yfinance versions; callers must
         handle both.
     """
-    logger.debug("fetch_ticker_calendar: ticker=%s", ticker)
+    logger.debug("ticker=%s", ticker)
     return yf.Ticker(ticker).calendar
 
 
@@ -568,10 +568,10 @@ def fetch_fred_series(series_id: str, start: str = "2018-01-01") -> pd.Series:
     cache_key = f"{series_id}::{start}"
     cached = _FRED_CACHE.get(cache_key)
     if cached is not None:
-        logger.debug("fetch_fred_series: cache hit for %s", series_id)
+        logger.debug("cache hit for %s", series_id)
         return cached
 
-    logger.debug("fetch_fred_series: fetching %s from FRED", series_id)
+    logger.debug("fetching %s from FRED", series_id)
     from fredapi import Fred  # Lazy import; only loaded when FRED is actually used
 
     fred = Fred(api_key=settings.fred_api_key)
@@ -584,7 +584,7 @@ def fetch_fred_series(series_id: str, start: str = "2018-01-01") -> pd.Series:
 
     _FRED_CACHE.set(cache_key, raw)
 
-    logger.info("fetch_fred_series: %s → %d observations", series_id, len(raw))
+    logger.info("%s → %d observations", series_id, len(raw))
     return raw
 
 
@@ -619,7 +619,7 @@ def _latest_fred_value(
             series = transform(series)
         return float(series.dropna().iloc[-1])
     except Exception as exc:
-        logger.warning("fetch_macro_bundle: %s (%s) failed — %s", key, series_id, exc)
+        logger.warning("%s (%s) failed — %s", key, series_id, exc)
         return None
 
 
@@ -638,11 +638,11 @@ def fetch_macro_bundle() -> dict:
     try:
         bundle["vix"] = fetch_vix()
     except Exception as exc:
-        logger.warning("fetch_macro_bundle: vix fetch failed — %s", exc)
+        logger.warning("vix fetch failed — %s", exc)
         bundle["vix"] = None
 
     logger.info(
-        "fetch_macro_bundle: populated %d/%d fields",
+        "populated %d/%d fields",
         sum(1 for v in bundle.values() if v is not None),
         len(bundle),
     )
@@ -736,8 +736,7 @@ class _NewsApiBudget:
                 # reset the day's count. Mark today as spent instead; tomorrow's date
                 # makes the file stale, so the budget heals on its own.
                 logger.error(
-                    "_NewsApiBudget: %s is corrupt; blocking NewsAPI requests for the "
-                    "rest of the UTC day",
+                    "%s is corrupt; blocking NewsAPI requests for the rest of the UTC day",
                     path,
                 )
                 self._write_count(path, today, self._daily_limit)
@@ -757,7 +756,7 @@ class _NewsApiBudget:
         try:
             return self._reserve_under_file_lock()
         except OSError as exc:
-            logger.warning("_NewsApiBudget.try_reserve: disk error — %s", exc)
+            logger.warning("disk error — %s", exc)
             return False
 
 
@@ -832,7 +831,7 @@ def fetch_news(
         an empty list, which means the request succeeded but found nothing.
     """
     if not settings.newsapi_key:
-        logger.debug("fetch_news: NEWSAPI_KEY not set")
+        logger.debug("NEWSAPI_KEY not set")
         return None
 
     try:
@@ -843,11 +842,11 @@ def fetch_news(
         query = f"{ticker} OR {company_name}"
 
         result = _fetch_news_page(client, query, from_date)
-        logger.info("fetch_news: %s → %d articles", ticker, len(result))
+        logger.info("%s → %d articles", ticker, len(result))
         return result
 
     except DataFetchError as exc:
-        logger.warning("fetch_news: %s failed — %s", ticker, exc)
+        logger.warning("%s failed — %s", ticker, exc)
         return None
 
 
@@ -861,7 +860,7 @@ def fetch_vix() -> float:
     Raises:
         DataFetchError: If yfinance returns an empty DataFrame for ^VIX.
     """
-    logger.debug("fetch_vix: downloading ^VIX")
+    logger.debug("downloading ^VIX")
     raw = yf.download("^VIX", period="5d", interval="1d", progress=False, threads=False)
     if raw.empty:
         raise DataFetchError("yfinance returned empty DataFrame for ^VIX")
@@ -872,5 +871,5 @@ def fetch_vix() -> float:
 
     col = "Close" if "Close" in raw.columns else raw.columns[0]
     vix = float(raw[col].dropna().iloc[-1])
-    logger.info("fetch_vix: current VIX = %.2f", vix)
+    logger.info("current VIX = %.2f", vix)
     return vix

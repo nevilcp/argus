@@ -300,7 +300,7 @@ def test_load_missing_file_returns_unfitted_and_logs_error(
     """A missing artifact path logs an ERROR and returns an unfitted classifier."""
     missing_path = tmp_path / "does_not_exist.joblib"
 
-    with caplog.at_level(logging.ERROR, logger="argus.macro"):
+    with caplog.at_level(logging.ERROR, logger="argus.agents.macro"):
         classifier = RegimeClassifier.load(missing_path)
 
     assert not classifier.is_fitted
@@ -319,7 +319,7 @@ def test_load_corrupt_file_returns_unfitted_and_logs_error(
     corrupt_path = tmp_path / "corrupt.joblib"
     corrupt_path.write_bytes(b"this is not a valid joblib pickle")
 
-    with caplog.at_level(logging.ERROR, logger="argus.macro"):
+    with caplog.at_level(logging.ERROR, logger="argus.agents.macro"):
         classifier = RegimeClassifier.load(corrupt_path)
 
     assert not classifier.is_fitted
@@ -339,7 +339,7 @@ def test_load_version_mismatch_returns_unfitted_and_logs_error(
     payload["metadata"]["hmmlearn_version"] = "0.0.0-incompatible"
     joblib.dump(payload, artifact_path)
 
-    with caplog.at_level(logging.ERROR, logger="argus.macro"):
+    with caplog.at_level(logging.ERROR, logger="argus.agents.macro"):
         loaded = RegimeClassifier.load(artifact_path)
 
     assert not loaded.is_fitted
@@ -519,7 +519,7 @@ def test_analyze_falls_back_to_rule_based_when_window_assembly_fails(
     )
     agent.classifier = _fit_synthetic_classifier()
 
-    with caplog.at_level(logging.WARNING, logger="argus.macro"):
+    with caplog.at_level(logging.WARNING, logger="argus.agents.macro"):
         ctx = agent.analyze()
 
     assert ctx is not None

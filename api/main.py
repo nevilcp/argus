@@ -53,6 +53,7 @@ from argus.data.live_session_cache import LiveSessionCache
 from argus.data.pipeline import MFTDataPipeline
 from argus.data.tickers import TICKER_PATTERN
 from argus.infra.clock import now_local, now_market
+from argus.infra.log import configure_logging
 from argus.memory.cultural import get_cultural_memory
 from argus.orchestration.collector import (
     CollectionResult,
@@ -73,7 +74,7 @@ from argus.risk import paper_book
 from argus.risk.kill_switch import get_kill_switch, initialize_kill_switch
 from argus.seams import LiveMarketDataProvider
 
-logger = logging.getLogger("argus.api")
+logger = logging.getLogger(__name__)
 
 _live_cache: LiveSessionCache | None = None
 
@@ -123,7 +124,7 @@ async def _mft_session_callback(session_states: dict) -> None:
         _live_cache.publish(session_states, _mft_pipeline.tickers)
 
     logger.info(
-        "[MFT] Live session cache updated: %d ticker(s)",
+        "Live session cache updated: %d ticker(s)",
         len(_live_cache) if _live_cache is not None else 0,
     )
 
@@ -186,9 +187,9 @@ async def _collector_loop(pipeline: MFTDataPipeline, compiled_graph) -> None:
                 checkpoint_db_path=str(settings.data_path("argus_graph.db")),
                 analyze_lock=_analyze_semaphore,
             )
-            logger.info("[Collector] cycle result: %s", _last_collection_result)
+            logger.info("cycle result: %s", _last_collection_result)
         except Exception:
-            logger.exception("[Collector] cycle failed")
+            logger.exception("cycle failed")
         await asyncio.sleep(settings.ARGUS_COLLECTOR_INTERVAL_SECONDS)
 
 
@@ -210,28 +211,22 @@ def _reconcile_once() -> None:
         decisions_log_path=str(settings.data_path("decisions.jsonl")),
         checkpoint_db_path=str(settings.data_path("argus_graph.db")),
     )
-    logger.info(
-        "[Reconcile] stored %d/%d outcome(s)", report.outcomes_stored, report.decisions_loaded
-    )
+    logger.info("stored %d/%d outcome(s)", report.outcomes_stored, report.decisions_loaded)
     # Zeroed-out defaults rather than real values unless the paper-book step ran
     if report.paper_book_updated:
-        logger.info(
-            "[Reconcile] equity=$%.2f (drawdown=%.1f%%)", report.equity, report.drawdown * 100
-        )
+        logger.info("equity=$%.2f (drawdown=%.1f%%)", report.equity, report.drawdown * 100)
     if report.decisions_compacted is not None:
-        logger.info(
-            "[Reconcile] decisions.jsonl compacted: %d retained", report.decisions_compacted
-        )
+        logger.info("decisions.jsonl compacted: %d retained", report.decisions_compacted)
     if report.decisions_retired_unresolved:
         logger.info(
-            "[Reconcile] retired %d decision(s) as permanently unresolved",
+            "retired %d decision(s) as permanently unresolved",
             report.decisions_retired_unresolved,
         )
     if report.checkpoints_pruned is not None:
-        logger.info("[Reconcile] checkpoint threads pruned: %d", report.checkpoints_pruned)
-    logger.info("[Reconcile] PENDING snapshots expired: %d", report.pending_snapshots_expired)
+        logger.info("checkpoint threads pruned: %d", report.checkpoints_pruned)
+    logger.info("PENDING snapshots expired: %d", report.pending_snapshots_expired)
     for error in report.errors:
-        logger.error("[Reconcile] %s", error)
+        logger.error("%s", error)
 
     if report.paper_book_updated:
         ks = get_kill_switch()
@@ -270,25 +265,7 @@ async def _reconcile_loop() -> None:
         try:
             await asyncio.to_thread(_reconcile_once)
         except Exception:
-            logger.exception("[Reconcile] cycle failed")
-
-
-def _configure_logging() -> None:
-    """Attaches a stream handler to the ``argus`` logger tree so ARGUS_LOG_LEVEL takes effect.
-
-    Under uvicorn the root logger has no handlers at level WARNING, so every
-    argus.* `logger.info`/`debug` call is silently dropped and
-    ARGUS_LOG_LEVEL is inert. `propagate = False` stops uvicorn's own
-    logging config from resetting this. Idempotent, so re-running lifespan
-    (e.g. across tests) doesn't stack duplicate handlers.
-    """
-    argus_logger = logging.getLogger("argus")
-    argus_logger.setLevel(settings.ARGUS_LOG_LEVEL)
-    argus_logger.propagate = False
-    if not argus_logger.handlers:
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-        argus_logger.addHandler(handler)
+            logger.exception("cycle failed")
 
 
 def _assert_single_worker() -> None:
@@ -385,7 +362,7 @@ def _warn_on_permissive_security_defaults() -> None:
         )
     if not settings.ARGUS_API_KEY:
         logger.warning(
-            "[Startup] ARGUS_API_KEY is unset: /analyze and /kill-switch/reset accept requests "
+            "ARGUS_API_KEY is unset: /analyze and /kill-switch/reset accept requests "
             "with no X-API-Key check. Set it for a deployment reachable outside a trusted network."
         )
 
@@ -424,7 +401,7 @@ async def lifespan(app: FastAPI):
         _macro_status_agent, \
         _live_cache
 
-    _configure_logging()
+    configure_logging()
     _warn_on_permissive_security_defaults()
     _assert_single_worker()
     _assert_registered_models()
@@ -434,10 +411,10 @@ async def lifespan(app: FastAPI):
 
     _macro_status_agent = MacroStatisticalAgent()
     if _macro_status_agent.classifier.is_fitted:
-        logger.info("[Startup] Macro HMM artifact loaded: %s", settings.ARGUS_HMM_MODEL_PATH)
+        logger.info("Macro HMM artifact loaded: %s", settings.ARGUS_HMM_MODEL_PATH)
     else:
         logger.warning(
-            "[Startup] Macro HMM artifact not loaded; classifier will use the rule-based fallback."
+            "Macro HMM artifact not loaded; classifier will use the rule-based fallback."
         )
 
     # Seeded from ARGUS_UNIVERSE so the pipeline starts collecting immediately
@@ -448,7 +425,7 @@ async def lifespan(app: FastAPI):
         _mft_pipeline.start(on_session_ready=_mft_session_callback), "MFTDataPipeline"
     )
     logger.info(
-        "[Startup] MFT pipeline background task launched: %d ticker(s).",
+        "MFT pipeline background task launched: %d ticker(s).",
         len(settings.ARGUS_UNIVERSE),
     )
 
@@ -457,14 +434,14 @@ async def lifespan(app: FastAPI):
             _collector_loop(_mft_pipeline, _graph), "CollectorLoop"
         )
         logger.info(
-            "[Startup] Unattended collector loop launched (interval=%ds).",
+            "Unattended collector loop launched (interval=%ds).",
             settings.ARGUS_COLLECTOR_INTERVAL_SECONDS,
         )
 
     if settings.ARGUS_RECONCILE_ENABLED:
         _reconcile_task = _start_background_task(_reconcile_loop(), "ReconcileLoop")
         logger.info(
-            "[Startup] Daily reconciliation loop launched (hour=%d ET).",
+            "Daily reconciliation loop launched (hour=%d ET).",
             settings.ARGUS_RECONCILE_HOUR_ET,
         )
 
@@ -480,16 +457,16 @@ async def lifespan(app: FastAPI):
     if ks is not None:
         ks.update_portfolio_value(book.equity)
     logger.info(
-        "[Startup] Kill switch initialized (paper equity=$%.2f, peak=$%.2f).",
+        "Kill switch initialized (paper equity=$%.2f, peak=$%.2f).",
         book.equity,
         book.high_water_mark,
     )
 
-    logger.info("[Startup] Governor initialized: %s", governor.get_usage_report())
+    logger.info("Governor initialized: %s", governor.get_usage_report())
 
     yield
 
-    logger.info("[Shutdown] Stopping background tasks...")
+    logger.info("Stopping background tasks...")
     if _mft_pipeline is not None:
         await _mft_pipeline.stop()
 
@@ -512,7 +489,7 @@ async def lifespan(app: FastAPI):
         fcntl.flock(_process_lock_file, fcntl.LOCK_UN)
         _process_lock_file.close()
 
-    logger.info("[Shutdown] Complete.")
+    logger.info("Complete.")
 
 
 app = FastAPI(title="ARGUS API", version=argus.__version__, lifespan=lifespan)
@@ -622,7 +599,7 @@ async def health():
     try:
         can_make_calls = governor.get_remaining_capacity(settings.ARGUS_PORTFOLIO_MODEL) > 0
     except Exception:
-        logger.exception("[API] /health governor capacity check failed")
+        logger.exception("/health governor capacity check failed")
         can_make_calls = False
 
     background_tasks = {
@@ -739,7 +716,7 @@ async def analyze(req: AnalysisRequest):
             raise HTTPException(503, "New positions blocked. VIX above threshold.")
         if req.risk_tolerance != ks.risk_tolerance:
             logger.warning(
-                "[API] Request risk_tolerance=%s differs from the kill switch's configured "
+                "Request risk_tolerance=%s differs from the kill switch's configured "
                 "risk_tolerance=%s; the configured threshold still governs this request.",
                 req.risk_tolerance,
                 ks.risk_tolerance,
@@ -788,7 +765,7 @@ async def analyze(req: AnalysisRequest):
         )
 
     live_states = admission.admitted
-    logger.info("[API] MFT cache hit for all %d tickers", len(live_states))
+    logger.info("MFT cache hit for all %d tickers", len(live_states))
 
     state = initial_state(
         req.tickers,
@@ -823,23 +800,21 @@ async def analyze(req: AnalysisRequest):
         # The underlying thread can't be cancelled and keeps running — async
         # job submission is a possible future improvement — but the server no
         # longer holds the connection open past a proxy's own timeout with no signal.
-        logger.error(
-            "[API] Graph run exceeded the %ss deadline", settings.ARGUS_ANALYZE_DEADLINE_SECONDS
-        )
+        logger.error("Graph run exceeded the %ss deadline", settings.ARGUS_ANALYZE_DEADLINE_SECONDS)
         raise HTTPException(
             504,
             f"Analysis did not complete within {settings.ARGUS_ANALYZE_DEADLINE_SECONDS}s. "
             "It may still be running and consuming governor quota in the background.",
         ) from None
     except RateLimitExceeded as e:
-        logger.warning("[API] Governor rate limit exhausted: %s", e)
+        logger.warning("Governor rate limit exhausted: %s", e)
         raise HTTPException(429, f"Rate limit exhausted: {e}") from e
     except UnregisteredModel as e:
-        logger.error("[API] Model configuration error: %s", e)
+        logger.error("Model configuration error: %s", e)
         raise HTTPException(503, f"Model configuration error: {e}") from e
     except Exception as e:
         ref = uuid4()
-        logger.error("[API] Graph error (ref %s): %s", ref, e, exc_info=True)
+        logger.error("Graph error (ref %s): %s", ref, e, exc_info=True)
         raise HTTPException(500, f"Agent graph error (ref {ref})") from e
 
     # /analyze is the other entry point into the graph besides the unattended

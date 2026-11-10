@@ -7,6 +7,7 @@ Responsibilities:
   - Provide an opt-in network guard a test can request to prove it never
     falls through to a real socket call
   - Isolate every test from the production candle buffer
+  - Restore the logger trees `configure_logging` mutates
   - Reset the kill-switch singleton and api.main's live-session-cache /
     API-key singletons that several api.main test modules each used to
     reset independently
@@ -20,6 +21,7 @@ Not responsible for:
 
 from __future__ import annotations
 
+import logging
 import socket
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -30,6 +32,7 @@ import api.main as api_main
 import argus.risk.kill_switch as kill_switch_module
 from argus.config import settings
 from argus.data.live_session_cache import LiveSessionCache
+from argus.infra.log import LOG_ROOTS
 
 GOLDEN_DIR = Path(__file__).resolve().parent / "fixtures" / "golden"
 
@@ -81,6 +84,23 @@ def _reset_kill_switch_singleton() -> Iterator[None]:
     kill_switch_module._kill_switch = None
     yield
     kill_switch_module._kill_switch = None
+
+
+@pytest.fixture(autouse=True)
+def _reset_logging_trees() -> Iterator[None]:
+    """Clears the logger trees `configure_logging` touches, before and after each test.
+
+    `configure_logging` sets ``propagate = False``, which would otherwise stop
+    every later test's ``caplog`` from seeing records once any test (the API
+    lifespan, a script's ``main()``) had called it.
+    """
+    trees = [logging.getLogger(name) for name in LOG_ROOTS]
+    saved = [(list(t.handlers), t.level, t.propagate) for t in trees]
+    for tree in trees:
+        tree.handlers = []
+    yield
+    for tree, (handlers, level, propagate) in zip(trees, saved, strict=True):
+        tree.handlers, tree.level, tree.propagate = handlers, level, propagate
 
 
 @pytest.fixture
