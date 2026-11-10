@@ -641,6 +641,24 @@ async def test_stop_ends_the_loop_promptly(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_start_after_stop_clears_the_stop_event(monkeypatch):
+    """A restarted pipeline paces its sweeps again instead of inheriting the old stop signal."""
+    pipeline = MFTDataPipeline([], interval="1m")
+    await pipeline.stop()
+    assert pipeline._stop_event.is_set()
+    seen: list[bool] = []
+
+    async def recording_fetch_loop(on_session_ready):
+        seen.append(pipeline._stop_event.is_set())
+
+    monkeypatch.setattr(pipeline, "_fetch_loop", recording_fetch_loop)
+
+    await pipeline.start(on_session_ready=_noop_callback)
+
+    assert seen == [False]
+
+
+@pytest.mark.asyncio
 async def test_close_buffer_waits_out_an_in_flight_buffer_worker():
     """close_buffer blocks until a worker holding _buffer_op_lock releases it."""
     pipeline = MFTDataPipeline([], interval="1m")

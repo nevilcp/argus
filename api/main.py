@@ -986,5 +986,6 @@ async def kill_switch_status():
         "triggered_at": status.triggered_at.isoformat() if status.triggered_at else None,
         "realized_drawdown": status.realized_drawdown,
         "current_vix": status.current_vix,
+        "halt_persisted": status.halt_persisted,
         "risk_tolerance": ks.risk_tolerance,
     }

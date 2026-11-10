@@ -141,3 +141,4 @@ def test_kill_switch_status_reports_gate_state(client):
     assert body["halted"] is False
     assert body["current_vix"] == pytest.approx(18.0)
     assert body["risk_tolerance"] == "MODERATE"
+    assert body["halt_persisted"] is True
