@@ -19,6 +19,7 @@ from newsapi.newsapi_exception import NewsAPIException
 
 from argus.data import fetchers
 from argus.data.cache import DailyBarCache, TTLCache
+from tests.helpers.candles import daily_bars
 
 
 def _http_error(status_code: int, headers: dict | None = None) -> requests.exceptions.HTTPError:
@@ -530,14 +531,6 @@ def test_fetch_news_returns_none_after_retries_exhausted(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _stub_daily_frame() -> pd.DataFrame:
-    """Minimal single-row daily OHLCV frame for cache round-trip tests."""
-    return pd.DataFrame(
-        {"open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0], "volume": [100.0]},
-        index=pd.to_datetime(["2026-08-12"]),
-    )
-
-
 def test_fetch_multiple_daily_serves_second_call_from_cache(monkeypatch):
     """A ticker already refreshed today is not refetched on a second call the same day."""
     monkeypatch.setattr(fetchers, "_DAILY_BAR_CACHE", DailyBarCache(db_path=":memory:"))
@@ -546,7 +539,7 @@ def test_fetch_multiple_daily_serves_second_call_from_cache(monkeypatch):
 
     def fake_fetch(ticker, period):
         calls["n"] += 1
-        return _stub_daily_frame()
+        return daily_bars(["2026-08-12"])
 
     monkeypatch.setattr(fetchers, "fetch_ohlcv_daily", fake_fetch)
 

@@ -24,7 +24,6 @@ from __future__ import annotations
 import logging
 import socket
 from collections.abc import Callable, Iterator
-from pathlib import Path
 
 import pytest
 
@@ -33,8 +32,9 @@ import argus.risk.kill_switch as kill_switch_module
 from argus.config import settings
 from argus.data.live_session_cache import LiveSessionCache
 from argus.infra.log import LOG_ROOTS
+from tests.helpers.paths import FIXTURES_DIR
 
-GOLDEN_DIR = Path(__file__).resolve().parent / "fixtures" / "golden"
+GOLDEN_DIR = FIXTURES_DIR / "golden"
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:

@@ -51,8 +51,7 @@ from argus.schemas.signals import (
     YieldCurve,
 )
 from argus.seams import FixtureLLMClient, FixtureMarketDataProvider
-
-FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
+from tests.helpers.paths import FIXTURES_DIR
 
 
 def _technical(

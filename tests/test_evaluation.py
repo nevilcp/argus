@@ -9,7 +9,6 @@ reused here).
 """
 
 from datetime import datetime
-from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -29,6 +28,7 @@ from argus.backtesting.evaluation import (
 from argus.backtesting.replay import SessionResult, replay_session
 from argus.orchestration.aggregator import HybridSignalAggregator
 from argus.schemas.signals import ARGUSDecision, Signal
+from tests.helpers.paths import FIXTURES_DIR
 from tests.test_reconciliation import (
     _allocation,
     _FakeMarketData,
@@ -36,8 +36,6 @@ from tests.test_reconciliation import (
     _technical,
     _ten_day_series,
 )
-
-FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 
 def _decision_with_signal(
