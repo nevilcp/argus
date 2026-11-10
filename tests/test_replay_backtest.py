@@ -37,3 +37,13 @@ def test_positional_args_are_parsed_as_session_dirs(monkeypatch):
         main()
 
     fake.assert_called_once_with([Path("dir_a"), Path("dir_b")])
+
+
+def test_replay_stdout_matches_snapshot(monkeypatch, capsys, assert_golden):
+    """The fixture session's printed allocation equals the committed pre-cleanup output."""
+    monkeypatch.setattr("sys.argv", ["replay_backtest.py"])
+    main()
+
+    # The session directory is an absolute, machine-specific path.
+    stdout = capsys.readouterr().out.replace(str(DEFAULT_SESSION_DIR), "<FIXTURES>")
+    assert_golden("replay_stdout.txt", stdout)
