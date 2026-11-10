@@ -179,7 +179,7 @@ def _apply_portfolio_cap(single: RiskAssessment, cap: float) -> dict:
     """
     if cap < RISK.slsqp_zero_cap_epsilon:
         # A cap this small is no room to allocate, not a REDUCE — REDUCE still
-        # counts as approved (see state.py's TickerSnapshot.risk_approved) and the
+        # counts as approved (see schemas/signals.py's TickerSnapshot.risk_approved) and the
         # prompt would demand invest_pct deployment against a 0% cap
         return {
             "verdict": RiskVerdict.VETO,

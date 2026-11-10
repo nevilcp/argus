@@ -61,7 +61,7 @@ see the notes under each entry.
   of every agent's output plus the resulting allocation, logged once per session. A
   decision is a `TickerSnapshot` plus its allocation and the session's timestamp.
 
-- **TickerSnapshot** (`argus/orchestration/state.py`) — the per-ticker join of every
+- **TickerSnapshot** (`argus/schemas/signals.py`) — the per-ticker join of every
   agent's output before an allocation exists: technical, fundamental, sentiment, risk,
   and aggregated signals. Built on demand from `ARGUSState` by `build_ticker_snapshots`,
   never stored in state or the checkpoint. What a decision is built from.

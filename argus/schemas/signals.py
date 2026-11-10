@@ -7,6 +7,7 @@ Responsibilities:
   - Define all typed schema classes used for inter-agent signal propagation
   - Enforce field-level validation constraints (conviction caps, weight bounds)
   - Provide cross-model validators that prevent silent allocation bugs
+  - Define TickerSnapshot, the plain per-ticker view the portfolio agent reads
 
 Not responsible for:
   - Signal computation (see individual agent modules)
@@ -22,6 +23,7 @@ import math
 import uuid
 import warnings
 from collections import Counter
+from dataclasses import dataclass
 from datetime import date, datetime
 from enum import StrEnum
 from typing import Annotated
@@ -742,6 +744,41 @@ class ARGUSDecision(BaseModel):
         return sum(s.api_calls_used for s in sources if s is not None)
 
 
+@dataclass(frozen=True)
+class TickerSnapshot:
+    """The per-ticker join of every specialist agent's output for one session.
+
+    A pure, on-demand projection of ARGUSState's parallel per-ticker maps —
+    never stored in state or the checkpoint, and never validated or
+    serialized the way the schemas.signals models are. See build_ticker_snapshots.
+
+    Attributes:
+        technical: This ticker's TechnicalSignal, or None if absent.
+        fundamental: This ticker's FundamentalSignal, or None if absent.
+        sentiment: This ticker's SentimentSignal, or None if absent.
+        risk: This ticker's RiskAssessment, or None if the risk node never evaluated it.
+        aggregated: This ticker's AggregatedSignal, or None if absent.
+    """
+
+    technical: TechnicalSignal | None = None
+    fundamental: FundamentalSignal | None = None
+    sentiment: SentimentSignal | None = None
+    risk: RiskAssessment | None = None
+    aggregated: AggregatedSignal | None = None
+
+    @property
+    def risk_approved(self) -> bool:
+        """Whether this ticker's risk verdict permits an equity allocation.
+
+        Returns:
+            True for APPROVE or REDUCE; False for VETO or a missing assessment.
+        """
+        return self.risk is not None and self.risk.verdict in (
+            RiskVerdict.APPROVE,
+            RiskVerdict.REDUCE,
+        )
+
+
 __all__ = [
     "SESSION_STATE_REQUIRED_KEYS",
     "ARGUSDecision",
@@ -761,6 +798,7 @@ __all__ = [
     "SentimentVerdict",
     "Signal",
     "TechnicalSignal",
+    "TickerSnapshot",
     "VixRegime",
     "YieldCurve",
     "missing_session_state_keys",

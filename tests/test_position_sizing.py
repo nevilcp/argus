@@ -9,8 +9,7 @@ wealth rather than wealth pre-scaled by invest_pct.
 import json
 
 from argus.agents.portfolio import PortfolioManagerAgent
-from argus.orchestration.state import TickerSnapshot
-from argus.schemas.signals import AggregatedSignal, Signal
+from argus.schemas.signals import AggregatedSignal, Signal, TickerSnapshot
 from argus.seams import FixtureLLMClient
 from tests.helpers.builders import risk_assessment, user_profile
 

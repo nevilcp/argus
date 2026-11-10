@@ -6,7 +6,8 @@ Shared state dictionary schema for the ARGUS LangGraph execution graph.
 Responsibilities:
   - Define the TypedDict shared across all LangGraph nodes
   - Document input/output field contracts per execution stage
-  - Project each ticker's specialist outputs into one typed TickerSnapshot
+  - Project each ticker's specialist outputs into one TickerSnapshot (defined in
+    argus.schemas.signals, since the portfolio agent reads it)
 
 Not responsible for:
   - State mutation (handled by individual node functions in graph.py)
@@ -16,7 +17,6 @@ Not responsible for:
 from __future__ import annotations
 
 import operator
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated, TypedDict
 
@@ -27,9 +27,9 @@ from argus.schemas.signals import (
     MacroContext,
     PortfolioAllocation,
     RiskAssessment,
-    RiskVerdict,
     SentimentSignal,
     TechnicalSignal,
+    TickerSnapshot,
 )
 
 
@@ -178,41 +178,6 @@ def initial_state(
         decisions=[],
         errors=[],
     )
-
-
-@dataclass(frozen=True)
-class TickerSnapshot:
-    """The per-ticker join of every specialist agent's output for one session.
-
-    A pure, on-demand projection of ARGUSState's parallel per-ticker maps —
-    never stored in state or the checkpoint, and never validated or
-    serialized the way the schemas.signals models are. See build_ticker_snapshots.
-
-    Attributes:
-        technical: This ticker's TechnicalSignal, or None if absent.
-        fundamental: This ticker's FundamentalSignal, or None if absent.
-        sentiment: This ticker's SentimentSignal, or None if absent.
-        risk: This ticker's RiskAssessment, or None if the risk node never evaluated it.
-        aggregated: This ticker's AggregatedSignal, or None if absent.
-    """
-
-    technical: TechnicalSignal | None = None
-    fundamental: FundamentalSignal | None = None
-    sentiment: SentimentSignal | None = None
-    risk: RiskAssessment | None = None
-    aggregated: AggregatedSignal | None = None
-
-    @property
-    def risk_approved(self) -> bool:
-        """Whether this ticker's risk verdict permits an equity allocation.
-
-        Returns:
-            True for APPROVE or REDUCE; False for VETO or a missing assessment.
-        """
-        return self.risk is not None and self.risk.verdict in (
-            RiskVerdict.APPROVE,
-            RiskVerdict.REDUCE,
-        )
 
 
 def build_ticker_snapshots(state: ARGUSState) -> dict[str, TickerSnapshot]:
