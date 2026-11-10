@@ -28,7 +28,7 @@ from argus.data.cache import TTLCache
 from argus.infra.clock import now_local
 from argus.orchestration.governor import RateLimitExceeded, UnregisteredModel
 from argus.params import SENTIMENT, STRUCTURED_OUTPUT
-from argus.schemas.prompting import schema_block
+from argus.schemas.prompting import UNTRUSTED_GUARD, schema_block, wrap_untrusted
 from argus.schemas.signals import SentimentSignal, SentimentVerdict
 from argus.seams import GroqLLMClient, LiveMarketDataProvider, LLMClient, MarketDataProvider
 from argus.structured_output import StructuredOutputError, decode
@@ -254,9 +254,8 @@ def _build_synthesis_prompt(ticker: str, metrics: dict) -> str:
     metrics_str = "\n".join(lines)
 
     prompt = (
-        f'<sentiment_data ticker="{ticker}" as_of="intraday">\n'
-        f"{metrics_str}\n"
-        "</sentiment_data>\n"
+        f"{wrap_untrusted('sentiment_data', metrics_str, {'ticker': ticker, 'as_of': 'intraday'})}\n"
+        f"{UNTRUSTED_GUARD}\n"
         "\n"
         "Step 1 — Recall domain rules:\n"
         "  • net_finbert_score > +0.30 with pct_positive > 0.55 → strong positive regime.\n"

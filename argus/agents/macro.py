@@ -46,7 +46,14 @@ from argus.config import settings
 from argus.data.macro_features import build_macro_feature_frame
 from argus.infra.clock import now_local
 from argus.params import MACRO
-from argus.schemas.signals import MacroContext, Regime, SectorSignal, VixRegime, YieldCurve
+from argus.schemas.signals import (
+    MacroContext,
+    Regime,
+    SectorSignal,
+    Trend,
+    VixRegime,
+    YieldCurve,
+)
 from argus.seams import LiveMarketDataProvider, MarketDataProvider
 
 logger = logging.getLogger(__name__)
@@ -763,7 +770,7 @@ class MacroStatisticalAgent:
         threshold: float,
         *,
         label: str,
-    ) -> str:
+    ) -> Trend:
         """Buckets a value's move against the same series `lag` periods back.
 
         Args:
@@ -777,7 +784,7 @@ class MacroStatisticalAgent:
             label: Short name of the trend, used only in the failure log line.
 
         Returns:
-            "RISING", "FALLING", or "STABLE" — the last also being the fallback
+            A Trend: RISING, FALLING, or STABLE — the last also being the fallback
             when the series cannot be fetched or is shorter than `lag`.
         """
         try:
@@ -785,12 +792,12 @@ class MacroStatisticalAgent:
             if len(series) > lag:
                 lagged = series.iloc[-(lag + 1)]
                 if current_value > lagged + threshold:
-                    return "RISING"
+                    return Trend.RISING
                 if current_value < lagged - threshold:
-                    return "FALLING"
+                    return Trend.FALLING
         except Exception as exc:
             logger.warning("Failed to compute %s trend; defaulting to STABLE: %s", label, exc)
-        return "STABLE"
+        return Trend.STABLE
 
     def analyze(self) -> MacroContext | None:
         """Compiles real-time economic indicators into a unified MacroContext.
