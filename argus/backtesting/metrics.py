@@ -27,10 +27,11 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
+from argus.params import SYSTEM
+
 logger = logging.getLogger(__name__)
 
-_TRADING_DAYS_PER_YEAR = 252
-_ANNUALIZATION = math.sqrt(_TRADING_DAYS_PER_YEAR)
+_ANNUALIZATION = math.sqrt(SYSTEM.trading_days_per_year)
 _VAR_PERCENTILE = 5  # 5th percentile == the 95% historical VaR level
 
 
@@ -87,9 +88,9 @@ def _return_and_drawdown_metrics(returns: pd.Series, risk_free_rate: float) -> d
     """Return, volatility, risk-adjusted-ratio and drawdown statistics of the strategy alone."""
     mean_ret = float(returns.mean())
     std_ret = float(returns.std())
-    daily_rf = risk_free_rate / _TRADING_DAYS_PER_YEAR
+    daily_rf = risk_free_rate / SYSTEM.trading_days_per_year
     downside_deviation = float(np.sqrt(np.mean(np.minimum(returns - daily_rf, 0) ** 2)))
-    annualized_return = mean_ret * _TRADING_DAYS_PER_YEAR
+    annualized_return = mean_ret * SYSTEM.trading_days_per_year
 
     cum_returns = (1 + returns).cumprod()
     rolling_max = cum_returns.cummax()
@@ -134,14 +135,14 @@ def _benchmark_metrics(returns: pd.Series, benchmark: pd.Series, risk_free_rate:
         return metrics
 
     mean_ret = float(returns.mean())
-    daily_rf = risk_free_rate / _TRADING_DAYS_PER_YEAR
+    daily_rf = risk_free_rate / SYSTEM.trading_days_per_year
     benchmark_variance = float(np.var(benchmark, ddof=1))
 
     if float(benchmark.std()) > 0 and benchmark_variance > 0:
         beta = float(np.cov(returns, benchmark)[0, 1] / benchmark_variance)
         alpha_daily = mean_ret - (daily_rf + beta * (float(benchmark.mean()) - daily_rf))
         metrics["beta"] = beta
-        metrics["alpha_annualized"] = alpha_daily * _TRADING_DAYS_PER_YEAR
+        metrics["alpha_annualized"] = alpha_daily * SYSTEM.trading_days_per_year
         metrics["r_squared"] = float(np.corrcoef(returns, benchmark)[0, 1] ** 2)
 
     active_return = returns - benchmark

@@ -14,7 +14,7 @@ from unittest import mock
 
 import pytest
 
-from argus.risk.kill_switch import KillSwitch
+from argus.params import KILL_SWITCH
 from argus.seams import FixtureMarketDataProvider
 from tests.helpers.kill_switch import FETCH_VIX, check_at_vix, expire_vix_cache, make_ks
 
@@ -57,7 +57,7 @@ def test_vix_fetch_failure_sets_blackout_after_n_consecutive_failures():
     assert ks.new_positions_allowed
 
     with mock.patch(FETCH_VIX, side_effect=RuntimeError("down")):
-        for _ in range(KillSwitch._VIX_FAILURE_HALT_THRESHOLD - 1):
+        for _ in range(KILL_SWITCH.vix_failure_halt_threshold - 1):
             ks._check()
             assert ks.new_positions_allowed
         ks._check()
@@ -69,7 +69,7 @@ def test_vix_fetch_success_resets_failure_counter():
     """A single genuine reading between failures resets the consecutive-failure count."""
     ks = make_ks("MODERATE")
     with mock.patch(FETCH_VIX, side_effect=RuntimeError("down")):
-        for _ in range(KillSwitch._VIX_FAILURE_HALT_THRESHOLD - 1):
+        for _ in range(KILL_SWITCH.vix_failure_halt_threshold - 1):
             ks._check()
 
     check_at_vix(ks, 15.0)
@@ -77,7 +77,7 @@ def test_vix_fetch_success_resets_failure_counter():
 
     expire_vix_cache(ks)  # otherwise these failures would be cache hits, not real fetches
     with mock.patch(FETCH_VIX, side_effect=RuntimeError("down")):
-        for _ in range(KillSwitch._VIX_FAILURE_HALT_THRESHOLD - 1):
+        for _ in range(KILL_SWITCH.vix_failure_halt_threshold - 1):
             ks._check()
     assert ks.new_positions_allowed  # only 4 consecutive failures since the reset, not 5
 

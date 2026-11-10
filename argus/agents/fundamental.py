@@ -29,7 +29,7 @@ from argus.config import settings
 from argus.data.cache import TTLCache
 from argus.infra.clock import now_local
 from argus.orchestration.governor import RateLimitExceeded, UnregisteredModel
-from argus.params import STRUCTURED_OUTPUT
+from argus.params import FUNDAMENTAL, STRUCTURED_OUTPUT
 from argus.schemas.prompting import field_list
 from argus.schemas.signals import FundamentalSignal, FundamentalVerdict
 from argus.seams import GroqLLMClient, LiveMarketDataProvider, LLMClient, MarketDataProvider
@@ -38,6 +38,7 @@ from argus.structured_output import StructuredOutputError, decode
 logger = logging.getLogger(__name__)
 
 # Approximate sector-median P/E anchors for the LLM prompt; rough averages, not precise thresholds.
+# Provenance: ARBITRARY — no cited source or as-of date, so treat them as rough anchors.
 _SECTOR_PE_MEDIANS: dict[str, float] = {
     "Technology": 32.0,
     "Consumer Cyclical": 24.0,
@@ -51,10 +52,6 @@ _SECTOR_PE_MEDIANS: dict[str, float] = {
     "Real Estate": 35.0,
     "Basic Materials": 16.0,
 }
-_DEFAULT_PE_MEDIAN = 20.0
-
-# Reserve fraction of RPM held back so the portfolio agent (GOV-13) has room after a batch.
-_CAPACITY_RESERVE_FRACTION = 0.1
 
 # Measured from market_data.fundamentals(); LLM only supplies signal/conviction/moat/reasoning.
 _MEASURED_FUNDAMENTAL_FIELDS = (
@@ -139,7 +136,7 @@ def build_compact_prompt(ticker: str, pit_data: dict, anon_id: str | None = None
     as_of = pit_data.get("as_of_date", "")
 
     sector = fundamentals.get("sector", "Unknown")
-    industry_median_pe = _SECTOR_PE_MEDIANS.get(sector, _DEFAULT_PE_MEDIAN)
+    industry_median_pe = _SECTOR_PE_MEDIANS.get(sector, FUNDAMENTAL.default_sector_pe_median)
 
     METRIC_LABELS = {
         "pe_ttm": ("P/E Ratio", f"x earnings   [industry median ~{industry_median_pe:.1f}x]"),
@@ -259,7 +256,7 @@ def _signal_payload(
     data["sector"] = data["sector"] or "Unknown"
     data["industry"] = data["industry"] or "Unknown"
 
-    data["reasoning"] = data["reasoning"][:400]
+    data["reasoning"] = data["reasoning"][: FUNDAMENTAL.reasoning_char_limit]
     return data
 
 
@@ -297,8 +294,7 @@ class FundamentalAgent:
             llm_client = GroqLLMClient(
                 model=settings.ARGUS_FUNDAMENTAL_MODEL,
                 temperature=STRUCTURED_OUTPUT.llm_temperature,
-                # gpt-oss-120b peaked at 327 completion tokens on fixture prompts; 450 leaves ~35% headroom.
-                max_tokens=450,
+                max_tokens=FUNDAMENTAL.max_tokens,
                 api_key=api_key,
             )
         self.llm_client = llm_client
@@ -413,9 +409,11 @@ class FundamentalAgent:
 
         Returns:
             True when the client's remaining capacity still covers the reserve kept
-            for the same-model portfolio agent (see ``_CAPACITY_RESERVE_FRACTION``).
+            for the same-model portfolio agent (see ``FUNDAMENTAL.capacity_reserve_fraction``).
         """
-        capacity_reserve = max(1, int(settings.ARGUS_GROQ_RPM * _CAPACITY_RESERVE_FRACTION))
+        capacity_reserve = max(
+            1, int(settings.ARGUS_GROQ_RPM * FUNDAMENTAL.capacity_reserve_fraction)
+        )
         return self.llm_client.remaining_capacity() >= capacity_reserve
 
     def batch_analyze(

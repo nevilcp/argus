@@ -45,7 +45,7 @@ from argus.config import settings
 from argus.data.cache import DailyBarCache, TTLCache
 from argus.infra.backoff import full_jitter_delay
 from argus.infra.files import atomic_write_text
-from argus.params import SYSTEM
+from argus.params import MACRO, SYSTEM
 
 logger = logging.getLogger(__name__)
 
@@ -546,7 +546,7 @@ _FRED_CACHE: TTLCache[str, pd.Series] = TTLCache(
 
 
 @_with_retry
-def fetch_fred_series(series_id: str, start: str = "2018-01-01") -> pd.Series:
+def fetch_fred_series(series_id: str, start: str = MACRO.fred_default_start) -> pd.Series:
     """Fetches a macroeconomic timeline from the Federal Reserve Economic Database (FRED).
 
     Responses are cached in-process for 6 hours to avoid redundant FRED API calls

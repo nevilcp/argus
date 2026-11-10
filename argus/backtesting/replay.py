@@ -43,6 +43,7 @@ from uuid import uuid4
 from argus.infra.clock import MARKET_TZ
 from argus.orchestration.graph import build_graph
 from argus.orchestration.state import initial_state
+from argus.params import EVALUATION
 from argus.seams import FixtureLLMClient, FixtureMarketDataProvider
 
 logger = logging.getLogger(__name__)
@@ -165,8 +166,8 @@ def _load_session_states(session_dir: Path) -> tuple[list[str], dict[str, dict]]
 
 def replay_session(
     session_dir: Path,
-    total_wealth: float = 100_000.0,
-    invest_pct: float = 0.8,
+    total_wealth: float = EVALUATION.replay_total_wealth,
+    invest_pct: float = EVALUATION.replay_invest_pct,
     risk_tolerance: str = "MODERATE",
     closed_loop: bool = False,
 ) -> SessionResult:

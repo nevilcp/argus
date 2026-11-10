@@ -36,6 +36,7 @@ import pandas as pd
 
 from argus.config import settings
 from argus.infra.clock import MARKET_TZ, now_local
+from argus.params import SYSTEM
 
 logger = logging.getLogger(__name__)
 
@@ -203,7 +204,13 @@ class OHLCVBuffer:
     by the async fetch loop. Thread safety is enforced by a single module-level lock.
     """
 
-    def __init__(self, db_path: str = ":memory:", buffer_size: int = 78, *, interval: str) -> None:
+    def __init__(
+        self,
+        db_path: str = ":memory:",
+        buffer_size: int = SYSTEM.default_buffer_size,
+        *,
+        interval: str,
+    ) -> None:
         """Opens (or creates) the SQLite-backed candle buffer.
 
         Args:

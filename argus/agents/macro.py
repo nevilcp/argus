@@ -579,12 +579,12 @@ class RegimeClassifier:
         """
         vix = v.get("vix")
         t10y2y = v.get("t10y2y")
-        vix = vix if vix is not None else 20.0
-        t10y2y = t10y2y if t10y2y is not None else 0.0
+        vix = vix if vix is not None else MACRO.default_vix
+        t10y2y = t10y2y if t10y2y is not None else MACRO.rule_default_t10y2y
 
-        if vix > 30.0 or t10y2y < -0.5:
+        if vix > MACRO.rule_contraction_vix_above or t10y2y < MACRO.rule_contraction_t10y2y_below:
             return Regime.CONTRACTION.value, 0.6
-        elif vix < 18.0 and t10y2y > 0.3:
+        elif vix < MACRO.rule_expansion_vix_below and t10y2y > MACRO.rule_expansion_t10y2y_above:
             return Regime.EXPANSION.value, 0.6
         else:
             return Regime.TRANSITIONAL.value, 0.5
@@ -693,7 +693,7 @@ class MacroStatisticalAgent:
         self._cache_ttl_hours = 6
         self.market_data = market_data or LiveMarketDataProvider()
 
-    def fit_on_history(self, start_date: str = "2010-01-01") -> None:
+    def fit_on_history(self, start_date: str = MACRO.hmm_fit_start) -> None:
         """Fetches complete macroeconomic histories to fit the latent HMM classifier.
 
         Offline training utility, not exercised by the live `analyze()` path
@@ -703,7 +703,7 @@ class MacroStatisticalAgent:
 
         Args:
             start_date: ISO date string defining the beginning of the training window.
-                Defaults to 2010-01-01 to include the post-GFC recovery cycle.
+                Defaults to MACRO.hmm_fit_start, which includes the post-GFC recovery cycle.
         """
         logger.debug("Fetching macro history from %s for HMM fitting...", start_date)
         try:
@@ -829,7 +829,7 @@ class MacroStatisticalAgent:
             logger.warning(
                 "vix is None from FRED bundle; proceeding with regime classification only."
             )
-            vix = 20.0
+            vix = MACRO.default_vix
 
         # window_final holds the classifier's actual scored row, avoiding a
         # disagreeing second fetch.
@@ -877,11 +877,11 @@ class MacroStatisticalAgent:
 
         # Buckets on absolute VIX, not percentile — EXTREME is the governor's
         # kill-switch zone by level.
-        if vix < 15:
+        if vix < MACRO.vix_low_max:
             vix_regime = VixRegime.LOW
-        elif vix < 25:
+        elif vix < MACRO.vix_medium_max:
             vix_regime = VixRegime.MEDIUM
-        elif vix < 35:
+        elif vix < MACRO.vix_high_max:
             vix_regime = VixRegime.HIGH
         else:
             vix_regime = VixRegime.EXTREME
@@ -911,9 +911,9 @@ class MacroStatisticalAgent:
             ),
         )
 
-        if t10y2y < -0.1:
+        if t10y2y < MACRO.yield_curve_inverted_below:
             yield_curve = YieldCurve.INVERTED
-        elif abs(t10y2y) < 0.15:
+        elif t10y2y < MACRO.yield_curve_flat_below:
             yield_curve = YieldCurve.FLAT
         else:
             yield_curve = YieldCurve.NORMAL

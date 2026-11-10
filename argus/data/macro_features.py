@@ -84,7 +84,10 @@ def build_macro_feature_frame(provider: MarketDataProvider, start: str) -> pd.Da
             "cpi_yoy": cpi.pct_change(12) * 100.0,
             "d_fed_funds_6m": fed_funds.diff(6),
             "d_unemp_12m": unemployment.diff(12),
-            "vix_pctile": vix.rolling(1260, min_periods=252).rank(pct=True) * 100.0,
+            "vix_pctile": vix.rolling(
+                MACRO.vix_percentile_window_days, min_periods=MACRO.vix_percentile_min_periods
+            ).rank(pct=True)
+            * 100.0,
         }
     )
     frame = frame.resample("ME").last()

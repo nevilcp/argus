@@ -16,8 +16,9 @@ Responsibilities:
 
 Not responsible for:
   - Running the replay itself (see backtesting/replay.py)
-  - Deciding what horizon/dead-band/threshold to use (fixed ahead of time
-    and read from argus/params.py, not re-derived here)
+  - Choosing the horizon and dead-band: the caller passes them in
+    (scripts/run_evaluation.py defaults them from RECONCILIATION). The
+    bootstrap settings are fixed ahead of time in argus/params.py (EVALUATION)
 
 Dependencies:
   - numpy, pandas, scipy (statistics)
@@ -43,12 +44,9 @@ from scipy import stats
 from argus.backtesting.metrics import compute_all_metrics
 from argus.backtesting.replay import SessionResult, replay_session
 from argus.orchestration.reconciliation import compute_realized_return
+from argus.params import EVALUATION
 from argus.schemas.signals import ARGUSDecision, RiskVerdict, Signal
 from argus.seams import MarketDataProvider
-
-_BOOTSTRAP_RESAMPLES = 2000
-_BOOTSTRAP_SEED = 0
-_CI_ALPHA = 0.05
 
 
 def signed_conviction(decision: ARGUSDecision) -> float | None:
@@ -175,9 +173,9 @@ def hit_rate_with_deadband(
 def bootstrap_ci(
     pairs: Sequence[PairedOutcome],
     statistic_fn: Callable[[Sequence[PairedOutcome]], float | None],
-    n_resamples: int = _BOOTSTRAP_RESAMPLES,
-    alpha: float = _CI_ALPHA,
-    seed: int = _BOOTSTRAP_SEED,
+    n_resamples: int = EVALUATION.bootstrap_resamples,
+    alpha: float = EVALUATION.ci_alpha,
+    seed: int = EVALUATION.bootstrap_seed,
 ) -> tuple[float | None, float | None]:
     """Percentile bootstrap CI for a statistic over paired (conviction, return) outcomes.
 
