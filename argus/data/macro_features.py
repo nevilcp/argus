@@ -24,7 +24,7 @@ from __future__ import annotations
 import pandas as pd
 
 from argus.params import MACRO
-from argus.seams import MarketDataProvider
+from argus.ports import MarketDataProvider
 
 
 def _lagged_fred_series(

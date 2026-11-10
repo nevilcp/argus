@@ -7,7 +7,7 @@ Replaces the three near-identical fence-strip/parse/validate/retry blocks
 that used to live in agents/fundamental.py, agents/sentiment.py, and
 agents/portfolio.py, which now all call in here instead. Composed over the
 existing LLMClient transport port rather than widening it — see
-argus/seams.py's LLMClient docstring.
+argus/ports.py's LLMClient docstring.
 
 Responsibilities:
   - Strip a markdown code fence from a raw LLM response, in any of its four
@@ -46,7 +46,7 @@ from pydantic import BaseModel, ValidationError
 
 from argus.infra.backoff import capped_backoff, full_jitter_delay
 from argus.params import STRUCTURED_OUTPUT
-from argus.seams import LLMClient, RetryableTransportError
+from argus.ports import LLMClient, RetryableTransportError
 
 logger = logging.getLogger(__name__)
 

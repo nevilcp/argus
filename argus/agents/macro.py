@@ -46,6 +46,7 @@ from argus.config import settings
 from argus.data.macro_features import build_macro_feature_frame
 from argus.infra.clock import now_local
 from argus.params import MACRO
+from argus.ports import MarketDataProvider
 from argus.schemas.signals import (
     MacroContext,
     Regime,
@@ -54,7 +55,7 @@ from argus.schemas.signals import (
     VixRegime,
     YieldCurve,
 )
-from argus.seams import LiveMarketDataProvider, MarketDataProvider
+from argus.seams import LiveMarketDataProvider
 
 logger = logging.getLogger(__name__)
 

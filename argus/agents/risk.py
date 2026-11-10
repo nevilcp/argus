@@ -28,8 +28,9 @@ from argus.config import settings
 from argus.data.cache import TTLCache
 from argus.infra.clock import now_local
 from argus.params import RISK, SYSTEM
+from argus.ports import MarketDataProvider
 from argus.schemas.signals import UNKNOWN_SECTOR, RiskAssessment, RiskVerdict
-from argus.seams import LiveMarketDataProvider, MarketDataProvider
+from argus.seams import LiveMarketDataProvider
 
 logger = logging.getLogger(__name__)
 

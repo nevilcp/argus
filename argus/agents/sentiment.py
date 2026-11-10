@@ -25,12 +25,13 @@ import pandas as pd
 
 from argus.config import settings
 from argus.data.cache import TTLCache
+from argus.governor import RateLimitExceeded, UnregisteredModel
 from argus.infra.clock import now_local
-from argus.orchestration.governor import RateLimitExceeded, UnregisteredModel
 from argus.params import SENTIMENT, STRUCTURED_OUTPUT
+from argus.ports import LLMClient, MarketDataProvider
 from argus.schemas.prompting import UNTRUSTED_GUARD, schema_block, wrap_untrusted
 from argus.schemas.signals import SentimentSignal, SentimentVerdict
-from argus.seams import GroqLLMClient, LiveMarketDataProvider, LLMClient, MarketDataProvider
+from argus.seams import GroqLLMClient, LiveMarketDataProvider
 from argus.structured_output import StructuredOutputError, decode
 
 logger = logging.getLogger(__name__)

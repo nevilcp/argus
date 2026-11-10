@@ -294,7 +294,7 @@ deployment reachable outside a trusted network must set both before going live.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ARGUS_FUNDAMENTAL_MODEL` | `openai/gpt-oss-120b` | Model backing the fundamental agent. Must be a member of `REGISTERED_MODELS` in `argus/orchestration/governor.py`. |
+| `ARGUS_FUNDAMENTAL_MODEL` | `openai/gpt-oss-120b` | Model backing the fundamental agent. Must be a member of `REGISTERED_MODELS` in `argus/governor.py`. |
 | `ARGUS_SENTIMENT_MODEL` | `openai/gpt-oss-20b` | Model backing the sentiment agent. Same registration requirement. |
 | `ARGUS_PORTFOLIO_MODEL` | `openai/gpt-oss-120b` | Model backing the portfolio manager agent. Same registration requirement. |
 | `ARGUS_GROQ_RPM` | `30` | Bootstrap requests-per-minute floor for the rate governor, before Groq's response headers correct it per-model. |
@@ -454,8 +454,10 @@ With the default `.env`, this alone gives the same unattended behavior — hourl
 │   ├── risk/             # Kill-switch daemon and drawdown/VIX blackout logic
 │   ├── schemas/          # Pydantic data contracts defining all inter-agent signaling
 │   ├── config.py         # Typed Settings (env vars) shared across all modules
+│   ├── governor.py       # Groq rate-limit governor
 │   ├── params.py         # Provenance-tagged numeric constants
-│   └── seams.py          # Market-data/LLM injection seam used by tests and replay
+│   ├── ports.py          # MarketDataProvider / LLMClient protocols
+│   └── seams.py          # Live and fixture adapters for those ports, used by tests and replay
 ├── scripts/              # collect_session, reconcile_outcomes, replay_backtest, run_evaluation
 ├── .github/workflows/    # ci.yml (lint/type-check/test gate), image.yml, collector.yml, reconcile.yml
 ├── data/                 # (Auto-generated, gitignored) Persistent intraday buffer, checkpoint DB, decision log

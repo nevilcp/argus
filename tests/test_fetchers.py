@@ -127,28 +127,28 @@ def test_reset_yfinance_session_clears_in_memory_and_persisted_cookie():
 
 
 # ---------------------------------------------------------------------------
-# _retry_after_seconds
+# retry_after_seconds
 # ---------------------------------------------------------------------------
 
 
 def test_retry_after_seconds_reads_header():
     """A Retry-After header is parsed as seconds."""
-    assert fetchers._retry_after_seconds(_http_error(429, {"Retry-After": "5.5"})) == 5.5
+    assert fetchers.retry_after_seconds(_http_error(429, {"Retry-After": "5.5"})) == 5.5
 
 
 def test_retry_after_seconds_missing_header_returns_none():
     """No Retry-After header means no override."""
-    assert fetchers._retry_after_seconds(_http_error(429)) is None
+    assert fetchers.retry_after_seconds(_http_error(429)) is None
 
 
 def test_retry_after_seconds_no_response_returns_none():
     """An exception with no .response attribute at all is handled, not raised."""
-    assert fetchers._retry_after_seconds(ValueError("boom")) is None
+    assert fetchers.retry_after_seconds(ValueError("boom")) is None
 
 
 def test_retry_after_seconds_malformed_value_returns_none():
     """A non-numeric Retry-After value is treated as absent rather than raising."""
-    assert fetchers._retry_after_seconds(_http_error(429, {"Retry-After": "soon"})) is None
+    assert fetchers.retry_after_seconds(_http_error(429, {"Retry-After": "soon"})) is None
 
 
 # ---------------------------------------------------------------------------

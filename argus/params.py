@@ -722,7 +722,7 @@ class CollectorParams:
 class GovernorParams:
     """Token estimation and rolling-window admission for the Groq rate governor.
 
-    See orchestration/governor.py.
+    See argus/governor.py.
     """
 
     word_to_token_ratio: float = p(

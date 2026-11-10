@@ -14,7 +14,7 @@ import pytest
 from pydantic import ValidationError
 
 from argus.agents.portfolio import PortfolioManagerAgent
-from argus.orchestration.governor import RateLimitExceeded
+from argus.governor import RateLimitExceeded
 from argus.orchestration.state import TickerSnapshot
 from argus.params import PORTFOLIO, SYSTEM
 from argus.schemas.signals import (

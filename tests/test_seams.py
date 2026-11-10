@@ -15,12 +15,12 @@ import pytest
 
 from argus.agents.fundamental import FundamentalAgent
 from argus.agents.sentiment import SentimentAgent
+from argus.ports import RetryableTransportError
 from argus.schemas.signals import FundamentalSignal, SentimentSignal
 from argus.seams import (
     FixtureLLMClient,
     FixtureMarketDataProvider,
     GroqLLMClient,
-    RetryableTransportError,
     _groq_retry_delay,
 )
 from tests.helpers.paths import FIXTURES_DIR

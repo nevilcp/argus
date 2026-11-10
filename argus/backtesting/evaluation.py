@@ -45,8 +45,8 @@ from argus.backtesting.metrics import compute_all_metrics
 from argus.backtesting.replay import SessionResult, replay_session
 from argus.orchestration.reconciliation import compute_realized_return
 from argus.params import EVALUATION
+from argus.ports import MarketDataProvider
 from argus.schemas.signals import ARGUSDecision, RiskVerdict, Signal
-from argus.seams import MarketDataProvider
 
 
 def signed_conviction(decision: ARGUSDecision) -> float | None:
