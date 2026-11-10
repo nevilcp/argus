@@ -22,9 +22,13 @@ def _no_upcoming_earnings(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_aggregate_finbert_scores_empty():
-    """An empty article list returns the neutral, low-confidence default."""
+    """An empty article list returns the neutral default with zero confidence.
+
+    Zero is what the article-volume formula (min(n / 10, 1)) gives for n = 0, and it
+    sits below the prompt's "< 0.30 means thin evidence" threshold; 0.3 sat just above it.
+    """
     res = aggregate_finbert_scores([])
-    assert res == {"net": 0.0, "pct_pos": 0.0, "pct_neg": 0.0, "confidence": 0.3}
+    assert res == {"net": 0.0, "pct_pos": 0.0, "pct_neg": 0.0, "confidence": 0.0}
 
 
 def test_aggregate_finbert_scores_decay():

@@ -393,6 +393,52 @@ class _StubLiveMarketData(LiveMarketDataProvider):
         return {"sector": self._sector}
 
 
+class _FlakyLiveMarketData(LiveMarketDataProvider):
+    """A LiveMarketDataProvider whose ticker_info fails once, then succeeds."""
+
+    def __init__(self, sector: str) -> None:
+        self._sector = sector
+        self.calls = 0
+
+    def ticker_info(self, ticker: str) -> dict:
+        self.calls += 1
+        if self.calls == 1:
+            raise ConnectionError("yfinance blip")
+        return {"sector": self._sector}
+
+
+def test_get_sector_retries_after_a_failed_fetch_instead_of_caching_unknown(monkeypatch) -> None:
+    """A transient fetch failure is not cached, so the next call asks again."""
+    monkeypatch.setattr(
+        "argus.agents.risk._SECTOR_CACHE",
+        TTLCache(ttl=timedelta(seconds=RISK.sector_cache_ttl_seconds), max_entries=10),
+    )
+    market_data = _FlakyLiveMarketData("Technology")
+
+    assert get_sector("AAPL", market_data) == "Unknown"
+    assert get_sector("AAPL", market_data) == "Technology"
+    assert market_data.calls == 2
+
+
+def test_get_sector_caches_a_successful_response_that_lacks_a_sector(monkeypatch) -> None:
+    """A successful lookup with no sector field is a stable answer and may be cached."""
+    monkeypatch.setattr(
+        "argus.agents.risk._SECTOR_CACHE",
+        TTLCache(ttl=timedelta(seconds=RISK.sector_cache_ttl_seconds), max_entries=10),
+    )
+
+    class _NoSector(_StubLiveMarketData):
+        def ticker_info(self, ticker: str) -> dict:
+            self.calls += 1
+            return {}
+
+    market_data = _NoSector("unused")
+
+    assert get_sector("AAPL", market_data) == "Unknown"
+    assert get_sector("AAPL", market_data) == "Unknown"
+    assert market_data.calls == 1
+
+
 def test_get_sector_cache_evicts_the_oldest_entry_at_capacity(monkeypatch) -> None:
     """The live sector cache is bounded: a new ticker at capacity evicts the oldest one."""
     monkeypatch.setattr(

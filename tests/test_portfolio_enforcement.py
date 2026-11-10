@@ -318,3 +318,28 @@ def test_allocate_states_achievable_deployment_ceiling_not_raw_invest_pct():
     # 3 tickers capped at 0.15 each => achievable ceiling is 0.45, not the requested 0.95
     assert "deployment_ceiling: 45%" in llm_client.last_prompt
     assert "invest_pct: 95%" in llm_client.last_prompt
+
+
+@pytest.mark.parametrize("total_wealth", [None, 0.0, -5.0])
+def test_allocate_without_positive_total_wealth_returns_none_and_records_it(total_wealth):
+    """A missing or non-positive capital base fails the allocation instead of raising.
+
+    The all-cash fallback builds a PortfolioAllocation whose capital must be positive, so
+    passing it 0.0 would raise a ValidationError out of allocate().
+    """
+    llm = _CapturingLLMClient({})
+    agent = PortfolioManagerAgent(llm_client=llm)
+    adjustments: list[str] = []
+    profile = {**_profile(), "total_wealth": total_wealth}
+
+    for snapshots in (_approved("AAPL"), {}):
+        adjustments.clear()
+        alloc = agent.allocate(
+            user_profile=profile, snapshots=snapshots, macro=None, adjustments=adjustments
+        )
+
+        assert alloc is None
+        assert len(adjustments) == 1
+        assert adjustments[0].startswith("portfolio_allocation:")
+        assert "total_wealth" in adjustments[0]
+    assert llm.last_prompt is None
