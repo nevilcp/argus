@@ -6,6 +6,7 @@ computation, and reading decisions back out of the LangGraph checkpoint.
 
 import json
 import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
@@ -474,6 +475,16 @@ def test_reconcile_decisions_fetches_each_ticker_price_history_once():
 # ---------------------------------------------------------------------------
 
 
+def test_load_decisions_from_checkpoints_on_a_missing_db_returns_empty_and_creates_nothing(
+    tmp_path,
+):
+    """A missing checkpoint database reads as empty without sqlite creating the file."""
+    db_path = tmp_path / "does_not_exist.db"
+
+    assert load_decisions_from_checkpoints(str(db_path)) == []
+    assert not db_path.exists()
+
+
 def test_load_decisions_from_checkpoints_round_trips_a_real_graph_run(tmp_path):
     """Checkpoints round-trip real ARGUSDecision objects, not degraded dicts."""
     universe = ["AAPL", "MSFT", "NVDA", "GOOGL", "JPM", "XOM"]
@@ -580,6 +591,63 @@ def test_compact_decisions_jsonl_drops_sessions_before_cutoff(tmp_path):
     assert result.retired_unresolved == 0
     tickers = {d.ticker for d in load_decisions_from_jsonl(str(path))}
     assert tickers == {"EXACT", "NEW"}
+
+
+def test_compact_decisions_jsonl_preserves_malformed_lines_and_counts_them(tmp_path):
+    """A line that fails to parse is written back verbatim rather than silently deleted."""
+    path = _write_decisions_log(
+        tmp_path / "decisions.jsonl",
+        ARGUSDecision(ticker="OLD", session_timestamp=datetime(2026, 1, 1)),
+        ARGUSDecision(ticker="NEW", session_timestamp=datetime(2026, 1, 20)),
+    )
+    with open(path, "a", encoding="utf-8") as f:
+        f.write('{"ticker": "BROKEN", "session_timestamp": \n')
+
+    result = _compact(path, cutoff=datetime(2026, 1, 10))
+
+    assert result.retained == 1
+    assert result.malformed_preserved == 1
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert '{"ticker": "BROKEN", "session_timestamp":' in lines
+    assert {d.ticker for d in load_decisions_from_jsonl(str(path))} == {"NEW"}
+
+
+def test_append_issued_during_compaction_is_not_lost(tmp_path, monkeypatch):
+    """An append that arrives mid-compaction lands after it instead of being overwritten."""
+    from argus.orchestration import collector, reconciliation
+
+    path = _write_decisions_log(
+        tmp_path / "decisions.jsonl",
+        ARGUSDecision(ticker="OLD", session_timestamp=datetime(2026, 1, 1)),
+        ARGUSDecision(ticker="NEW", session_timestamp=datetime(2026, 1, 20)),
+    )
+    mid_compaction = threading.Event()
+    release = threading.Event()
+    real_needs = reconciliation._needs_reconciliation
+
+    def _held(decision):
+        # Called per decision after the log was read and before it is rewritten
+        mid_compaction.set()
+        assert release.wait(timeout=10)
+        return real_needs(decision)
+
+    monkeypatch.setattr(reconciliation, "_needs_reconciliation", _held)
+
+    compactor = threading.Thread(target=_compact, args=(path, datetime(2026, 1, 10)))
+    compactor.start()
+    assert mid_compaction.wait(timeout=10)
+
+    appender = threading.Thread(
+        target=collector.append_decisions_jsonl,
+        args=([ARGUSDecision(ticker="LATE", session_timestamp=datetime(2026, 1, 21))], str(path)),
+    )
+    appender.start()
+    appender.join(timeout=0.5)  # blocked on the lock when the fix is in; done at once without it
+    release.set()
+    compactor.join(timeout=10)
+    appender.join(timeout=10)
+
+    assert {d.ticker for d in load_decisions_from_jsonl(str(path))} == {"NEW", "LATE"}
 
 
 def test_compact_decisions_jsonl_missing_file_is_a_noop():

@@ -42,6 +42,7 @@ Dependencies:
 
 from __future__ import annotations
 
+import fcntl
 import logging
 import sqlite3
 from collections.abc import Collection, Iterator
@@ -345,6 +346,29 @@ def reconcile_decisions(
 
 
 @contextmanager
+def decisions_log_lock(path: str | Path) -> Iterator[None]:
+    """Holds an exclusive lock on a decisions.jsonl log for the duration of the block.
+
+    Appenders (the collector and /analyze) and the compactor all rewrite or extend
+    the same file, from different threads and, with the scheduled collector,
+    different processes. An append that landed between compaction's read and its
+    replace would otherwise be overwritten. The lock is an flock on a sidecar
+    ``<path>.lock`` file, the same pattern as fetchers._NewsApiBudget; flock is
+    scoped to the open file description, so it serializes threads and processes alike.
+    Released when the sidecar file is closed on exit.
+
+    Args:
+        path: The decisions.jsonl path whose sidecar lock to take.
+    """
+    log_path = Path(path)
+    lock_path = log_path.with_suffix(log_path.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        yield
+
+
+@contextmanager
 def _checkpoint_saver(db_path: str) -> Iterator[SqliteSaver]:
     """Opens a SqliteSaver over the checkpoint database, closing its connection on exit."""
     conn = sqlite3.connect(db_path, check_same_thread=False)
@@ -385,12 +409,50 @@ def load_decisions_from_checkpoints(db_path: str = "argus_graph.db") -> list[ARG
         Every ARGUSDecision found across all threads. Empty list if the
         database doesn't exist yet or holds no checkpoints.
     """
+    if not Path(db_path).exists():
+        # sqlite3.connect would otherwise create an empty database file here
+        return []
+
     decisions: list[ARGUSDecision] = []
     with _checkpoint_saver(db_path) as saver:
         for _thread_id, checkpoint in _newest_checkpoint_per_thread(saver):
             channel_values = checkpoint.get("channel_values", {})
             decisions.extend(channel_values.get("decisions") or [])
     return decisions
+
+
+def _read_decisions_jsonl(path: str) -> tuple[list[ARGUSDecision], list[str]]:
+    """Reads a JSONL decision log, separating parsed decisions from lines that fail to parse.
+
+    Args:
+        path: Path to a JSONL file of ARGUSDecision.model_dump_json() lines.
+
+    Returns:
+        (decisions, malformed_lines): every parsed ARGUSDecision, and the raw text of
+        each non-blank line that failed to parse. Both empty if the file doesn't exist.
+    """
+    file_path = Path(path)
+    if not file_path.exists():
+        return [], []
+
+    decisions: list[ARGUSDecision] = []
+    malformed: list[str] = []
+    with open(file_path, encoding="utf-8") as f:
+        for line_no, raw_line in enumerate(f, start=1):
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                decisions.append(ARGUSDecision.model_validate_json(line))
+            except Exception as exc:
+                logger.warning(
+                    "load_decisions_from_jsonl: skipping malformed line %d in %s: %s",
+                    line_no,
+                    path,
+                    exc,
+                )
+                malformed.append(line)
+    return decisions, malformed
 
 
 def load_decisions_from_jsonl(path: str) -> list[ARGUSDecision]:
@@ -410,26 +472,7 @@ def load_decisions_from_jsonl(path: str) -> list[ARGUSDecision]:
         doesn't exist yet. A line that fails to parse is logged and skipped
         rather than aborting the whole read.
     """
-    file_path = Path(path)
-    if not file_path.exists():
-        return []
-
-    decisions: list[ARGUSDecision] = []
-    with open(file_path, encoding="utf-8") as f:
-        for line_no, raw_line in enumerate(f, start=1):
-            line = raw_line.strip()
-            if not line:
-                continue
-            try:
-                decisions.append(ARGUSDecision.model_validate_json(line))
-            except Exception as exc:
-                logger.warning(
-                    "load_decisions_from_jsonl: skipping malformed line %d in %s: %s",
-                    line_no,
-                    path,
-                    exc,
-                )
-    return decisions
+    return _read_decisions_jsonl(path)[0]
 
 
 @dataclass
@@ -443,10 +486,13 @@ class CompactionResult:
             received an outcome — distinct from `retained`'s complement,
             which also includes decisions dropped as routine, already-resolved
             cleanup.
+        malformed_preserved: Count of lines that failed to parse and were written
+            back verbatim, so a compaction never deletes evidence it cannot read.
     """
 
     retained: int
     retired_unresolved: int = 0
+    malformed_preserved: int = 0
 
 
 def compact_decisions_jsonl(
@@ -483,53 +529,67 @@ def compact_decisions_jsonl(
         resolved_ids: decision_id values that already have a stored outcome.
 
     Returns:
-        A CompactionResult. Both fields are 0 (and no file written) if the
+        A CompactionResult. Every field is 0 (and no file written) if the
         file doesn't exist yet.
     """
     file_path = Path(path)
     if not file_path.exists():
         return CompactionResult(retained=0)
 
-    decisions = load_decisions_from_jsonl(path)
     cutoff_naive = _as_naive_timestamp(cutoff)
     unresolved_cutoff_naive = _as_naive_timestamp(unresolved_cutoff)
 
-    kept: list[ARGUSDecision] = []
-    retired_unresolved = 0
-    for decision in decisions:
-        session_ts = _as_naive_timestamp(decision.session_timestamp)
-        if session_ts >= cutoff_naive:
-            kept.append(decision)
-            continue
+    # Read through replace under one lock: an append landing between the read and the
+    # replace would otherwise be overwritten by the rewrite below.
+    with decisions_log_lock(path):
+        decisions, malformed = _read_decisions_jsonl(path)
 
-        resolved = decision.decision_id in resolved_ids or not _needs_reconciliation(decision)
-        if resolved:
-            continue
-        if session_ts >= unresolved_cutoff_naive:
-            kept.append(decision)
-        else:
-            retired_unresolved += 1
+        kept: list[ARGUSDecision] = []
+        retired_unresolved = 0
+        for decision in decisions:
+            session_ts = _as_naive_timestamp(decision.session_timestamp)
+            if session_ts >= cutoff_naive:
+                kept.append(decision)
+                continue
 
-    if len(kept) == len(decisions):
-        return CompactionResult(retained=len(kept), retired_unresolved=retired_unresolved)
+            resolved = decision.decision_id in resolved_ids or not _needs_reconciliation(decision)
+            if resolved:
+                continue
+            if session_ts >= unresolved_cutoff_naive:
+                kept.append(decision)
+            else:
+                retired_unresolved += 1
 
-    tmp_path = file_path.with_suffix(file_path.suffix + ".tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        for decision in kept:
-            f.write(decision.model_dump_json() + "\n")
-    tmp_path.replace(file_path)
+        result = CompactionResult(
+            retained=len(kept),
+            retired_unresolved=retired_unresolved,
+            malformed_preserved=len(malformed),
+        )
+        if len(kept) == len(decisions):
+            return result
+
+        # Lines that failed to parse are carried over verbatim: dropping them would
+        # silently and permanently delete records this code merely cannot read.
+        tmp_path = file_path.with_suffix(file_path.suffix + ".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            for decision in kept:
+                f.write(decision.model_dump_json() + "\n")
+            for line in malformed:
+                f.write(line + "\n")
+        tmp_path.replace(file_path)
 
     logger.info(
         "compact_decisions_jsonl: kept %d/%d decision(s) in %s (cutoff=%s, retired %d "
-        "unresolved past %s)",
+        "unresolved past %s, preserved %d malformed line(s))",
         len(kept),
         len(decisions),
         path,
         cutoff_naive.isoformat(),
         retired_unresolved,
         unresolved_cutoff_naive.isoformat(),
+        len(malformed),
     )
-    return CompactionResult(retained=len(kept), retired_unresolved=retired_unresolved)
+    return result
 
 
 def default_checkpoint_retention_cutoff() -> datetime:

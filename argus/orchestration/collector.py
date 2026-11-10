@@ -45,6 +45,7 @@ from pathlib import Path
 from argus.config import settings
 from argus.data.pipeline import MFTDataPipeline
 from argus.orchestration.reconciliation import (
+    decisions_log_lock,
     default_checkpoint_retention_cutoff,
     prune_checkpoints,
 )
@@ -138,7 +139,9 @@ def append_decisions_jsonl(decisions: list[ARGUSDecision], path: str) -> int:
 
     log_path = Path(path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(log_path, "a", encoding="utf-8") as f:
+    # Held so a concurrent compaction (reconciliation.compact_decisions_jsonl) can't
+    # read the log, then replace it over this append.
+    with decisions_log_lock(log_path), open(log_path, "a", encoding="utf-8") as f:
         for decision in decisions:
             stamped = decision.model_copy(update={"image_tag": settings.ARGUS_IMAGE_TAG})
             f.write(stamped.model_dump_json() + "\n")
@@ -191,7 +194,7 @@ async def run_collection_cycle(
     *,
     pipeline: MFTDataPipeline,
     compiled_graph,
-    decisions_log_path: str = "data/decisions.jsonl",
+    decisions_log_path: str | None = None,
     checkpoint_db_path: str | None = None,
     analyze_lock: asyncio.Semaphore | None = None,
 ) -> CollectionResult:
@@ -226,7 +229,10 @@ async def run_collection_cycle(
             rather than reconstructing them every cycle. Each ``.invoke()``
             still opens its own checkpoint connection — see
             graph.py's ``_CheckpointedGraph``.
-        decisions_log_path: JSONL file each cycle's decisions are appended to.
+        decisions_log_path: JSONL file each cycle's decisions are appended to. None
+            (default) resolves to ``<ARGUS_DATA_DIR>/decisions.jsonl`` at call time,
+            so tests/conftest.py's per-test ARGUS_DATA_DIR override also isolates a
+            call site that omits this argument.
         checkpoint_db_path: LangGraph checkpoint database this cycle's
             compiled_graph checkpoints to. When given, stale checkpoint
             threads are pruned (see _prune_stale_checkpoints) before this
@@ -313,6 +319,8 @@ async def run_collection_cycle(
         final_state = await asyncio.to_thread(compiled_graph.invoke, state, config)
 
     decisions: list[ARGUSDecision] = final_state.get("decisions") or []
+    if decisions_log_path is None:
+        decisions_log_path = str(Path(settings.ARGUS_DATA_DIR) / "decisions.jsonl")
     logged = append_decisions_jsonl(decisions, decisions_log_path)
     errors = final_state.get("errors") or []
 
