@@ -35,7 +35,7 @@ from typing import Any
 from argus.config import settings
 from argus.infra.clock import as_naive_timestamp
 from argus.params import MEMORY, RECONCILIATION
-from argus.schemas.signals import ARGUSDecision, MacroContext
+from argus.schemas.signals import ARGUSDecision, MacroContext, Outcome
 
 logger = logging.getLogger(__name__)
 
@@ -216,11 +216,11 @@ class CulturalMemoryManager:
                 module's — see its docstring's "Not responsible for" list.
         """
         if actual_return_pct > RECONCILIATION.min_abs_return_for_storage:
-            prefix = "SUCCESSFUL"
+            prefix = Outcome.SUCCESSFUL
         elif actual_return_pct < -RECONCILIATION.min_abs_return_for_storage:
-            prefix = "FAILED"
+            prefix = Outcome.FAILED
         else:
-            prefix = "FLAT"
+            prefix = Outcome.FLAT
 
         technical = decision.technical
         macro_regime = decision.macro.macro_regime.value if decision.macro else "unknown"
@@ -234,7 +234,7 @@ class CulturalMemoryManager:
         sent_finbert = decision.sentiment.finbert_net_score if decision.sentiment else None
         agg_conv = decision.aggregated.conviction if decision.aggregated else "N/A"
 
-        document = f"""{prefix} PATTERN:
+        document = f"""{prefix.value} PATTERN:
 Macro regime: {macro_regime}
 VIX regime: {vix_regime}
 Technical signal: {tech_sig}
@@ -254,7 +254,7 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
             metadatas=[
                 {
                     "regime": macro_regime,
-                    "outcome": prefix,
+                    "outcome": prefix.value,
                     "return_pct": float(round(actual_return_pct, 4)),
                     "holding_days": int(holding_days),
                     "timestamp": decision.session_timestamp.isoformat(),
@@ -277,7 +277,7 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
     def _retrieve_by_outcome(
         self,
         query: str,
-        outcome: str,
+        outcome: Outcome,
         regime: str,
         n_results: int,
         as_of: datetime | None,
@@ -289,7 +289,7 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
 
         Args:
             query: Free-text similarity query.
-            outcome: Stored ``outcome`` metadata value to filter on ("SUCCESSFUL"/"FAILED").
+            outcome: Outcome to filter on (SUCCESSFUL or FAILED).
             regime: Macro regime to scope the lookup to.
             n_results: Maximum number of documents to return.
             as_of: When given, excludes documents stored after this timestamp.
@@ -301,7 +301,7 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
         if self.collection.count() == 0:
             return []
 
-        conditions: list[dict[str, Any]] = [{"outcome": outcome}, {"regime": regime}]
+        conditions: list[dict[str, Any]] = [{"outcome": outcome.value}, {"regime": regime}]
         if as_of is not None:
             conditions.append({"timestamp": {"$lte": as_of.isoformat()}})
 
@@ -351,7 +351,7 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
         vix_regime = current_macro.vix_regime.value
         return self._retrieve_by_outcome(
             query=(f"Macro regime {regime}, VIX {vix_regime}, {current_technical_summary}"),
-            outcome="SUCCESSFUL",
+            outcome=Outcome.SUCCESSFUL,
             regime=regime,
             n_results=n_results,
             as_of=as_of,
@@ -380,7 +380,7 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
         regime = current_macro.macro_regime.value
         return self._retrieve_by_outcome(
             query=f"Failed trades in {regime} regime",
-            outcome="FAILED",
+            outcome=Outcome.FAILED,
             regime=regime,
             n_results=n_results,
             as_of=as_of,
@@ -434,7 +434,7 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
             if not metadatas:
                 return 0.5, 0
 
-            wins = sum(1 for m in metadatas if m.get("outcome") == "SUCCESSFUL")
+            wins = sum(1 for m in metadatas if m.get("outcome") == Outcome.SUCCESSFUL)
             n = len(metadatas)
             k = MEMORY.accuracy_shrinkage_k
             return (float(wins) + k * 0.5) / (n + k), n
@@ -479,16 +479,16 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
                 outcome = m.get("outcome")
                 regime = str(m.get("regime", "unknown"))
 
-                if outcome == "PENDING":
+                if outcome == Outcome.PENDING:
                     pending += 1
                     continue
 
                 settled += 1
                 total_ret += float(m.get("return_pct", 0.0) or 0.0)  # type: ignore[arg-type]  # chromadb metadata values are typed as a broad scalar union
-                if outcome == "SUCCESSFUL":
+                if outcome == Outcome.SUCCESSFUL:
                     wins += 1
                     regime_wins[regime] = regime_wins.get(regime, 0) + 1
-                elif outcome == "FAILED":
+                elif outcome == Outcome.FAILED:
                     fails += 1
 
             best_regime = max(regime_wins, key=lambda r: regime_wins[r], default="N/A")
@@ -543,7 +543,7 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
                 metadatas=[
                     {
                         "regime": macro_regime,
-                        "outcome": "PENDING",
+                        "outcome": Outcome.PENDING.value,
                         "ticker": decision.ticker,
                         "agg_signal": agg_signal,
                         "allocated": str(decision.allocation is not None),
@@ -584,7 +584,7 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
             Count of snapshots deleted.
         """
         try:
-            results = self.collection.get(where={"outcome": "PENDING"})
+            results = self.collection.get(where={"outcome": Outcome.PENDING.value})
         except Exception as e:
             logger.warning("Failed to query PENDING snapshots for expiry: %s", e)
             return 0

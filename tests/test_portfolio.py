@@ -182,3 +182,8 @@ def test_full_universe_prompt_reservation_fits_the_tpm_floor():
 
     floor = BOOTSTRAP_LIMITS[settings.ARGUS_PORTFOLIO_MODEL]["tokens_per_minute"]
     assert reserved <= floor
+
+
+def test_the_prompt_quotes_the_same_advisor_note_limit_the_schema_enforces():
+    """The prompt and PositionAllocation share one advisor-note limit."""
+    assert f"Maximum {PORTFOLIO.advisor_note_char_limit} characters" in SYSTEM_PROMPT

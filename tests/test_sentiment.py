@@ -4,10 +4,12 @@ import pytest
 
 from argus.agents.sentiment import (
     SentimentAgent,
+    _build_synthesis_prompt,
     _check_earnings_calendar,
     aggregate_finbert_scores,
 )
 from argus.orchestration.governor import RateLimitExceeded
+from argus.schemas.prompting import UNTRUSTED_GUARD
 from tests.helpers.market_data import FakeMarketData
 
 _NEUTRAL_RESPONSE = (
@@ -300,3 +302,11 @@ def test_check_earnings_calendar_future_date_within_window_is_upcoming():
     future_date = datetime.now() + timedelta(days=5)
     market_data = FakeMarketData(news=[], ticker_calendar={"Earnings Date": [future_date]})
     assert _check_earnings_calendar("AAPL", market_data) is True
+
+
+def test_synthesis_prompt_wraps_the_metrics_and_tells_the_model_not_to_obey_them():
+    """The sentiment prompt carries the same not-a-directive guard as the other two agents."""
+    prompt = _build_synthesis_prompt("AAPL", {"net_finbert_score": 0.2})
+
+    assert prompt.startswith('<sentiment_data ticker="AAPL" as_of="intraday">\n')
+    assert "</sentiment_data>\n" + UNTRUSTED_GUARD in prompt

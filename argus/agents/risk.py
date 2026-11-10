@@ -28,7 +28,7 @@ from argus.config import settings
 from argus.data.cache import TTLCache
 from argus.infra.clock import now_local
 from argus.params import RISK, SYSTEM
-from argus.schemas.signals import RiskAssessment, RiskVerdict
+from argus.schemas.signals import UNKNOWN_SECTOR, RiskAssessment, RiskVerdict
 from argus.seams import LiveMarketDataProvider, MarketDataProvider
 
 logger = logging.getLogger(__name__)
@@ -61,7 +61,7 @@ def get_sector(ticker: str, market_data: MarketDataProvider) -> str:
         market_data: Provider for the ticker-info lookup.
 
     Returns:
-        GICS sector string (e.g. 'Technology'), or 'Unknown' on fetch failure.
+        GICS sector string (e.g. 'Technology'), or UNKNOWN_SECTOR on fetch failure.
     """
     is_live = isinstance(market_data, LiveMarketDataProvider)
 
@@ -72,15 +72,17 @@ def get_sector(ticker: str, market_data: MarketDataProvider) -> str:
 
     try:
         info = market_data.ticker_info(ticker)
-        sector = info.get("sector", "Unknown")
+        sector = info.get("sector", UNKNOWN_SECTOR)
         if is_live:
             _SECTOR_CACHE.set(ticker, sector)
         return sector
     except Exception as exc:
-        # Not cached: a transient failure would otherwise pin "Unknown" for the cache's
+        # Not cached: a transient failure would otherwise pin UNKNOWN_SECTOR for the cache's
         # whole TTL, while a successful response lacking a sector (cached above) is stable.
-        logger.warning("Failed to fetch sector for %s, defaulting to 'Unknown': %s", ticker, exc)
-        return "Unknown"
+        logger.warning(
+            "Failed to fetch sector for %s, defaulting to %r: %s", ticker, UNKNOWN_SECTOR, exc
+        )
+        return UNKNOWN_SECTOR
 
 
 def compute_asset_returns(

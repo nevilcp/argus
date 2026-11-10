@@ -24,7 +24,7 @@ import warnings
 from collections import Counter
 from datetime import date, datetime
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated
 
 from pydantic import (
     BaseModel,
@@ -35,7 +35,7 @@ from pydantic import (
     model_validator,
 )
 
-from argus.params import PORTFOLIO, SYSTEM
+from argus.params import FUNDAMENTAL, PORTFOLIO, SENTIMENT, SYSTEM
 from argus.schemas.prompting import PromptText
 
 
@@ -86,6 +86,35 @@ class SectorSignal(StrEnum):
     GROWTH_FAVORED = "GROWTH_FAVORED"  # risk-on, lower rates
     VALUE_FAVORED = "VALUE_FAVORED"  # rising rates, reflation
     DEFENSIVE = "DEFENSIVE"  # high VIX / contraction regime
+
+
+class Trend(StrEnum):
+    """Direction of a macro series over its comparison lag."""
+
+    RISING = "RISING"
+    FALLING = "FALLING"
+    STABLE = "STABLE"
+
+
+class DecayRisk(StrEnum):
+    """How fast a sentiment signal is expected to lose its predictive value."""
+
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+
+
+class Outcome(StrEnum):
+    """Resolution state of a stored decision profile in cultural memory."""
+
+    SUCCESSFUL = "SUCCESSFUL"
+    FAILED = "FAILED"
+    FLAT = "FLAT"  # |return| within the dead band: neither a win nor a loss
+    PENDING = "PENDING"  # snapshot stored, outcome not yet reconciled
+
+
+# Sector reported when it can't be fetched; risk and fundamental agents both emit it.
+UNKNOWN_SECTOR = "Unknown"
 
 
 SESSION_STATE_REQUIRED_KEYS: frozenset[str] = frozenset(
@@ -191,23 +220,19 @@ class MacroContext(BaseModel):
             "classifier fell back to the fixed-confidence rule-based heuristic"
         ),
     )
-    interest_rate_trend: Literal["RISING", "FALLING", "STABLE"] = Field(
-        ..., description="Direction of short-term interest rates"
-    )
+    interest_rate_trend: Trend = Field(..., description="Direction of short-term interest rates")
     yield_curve_shape: YieldCurve = Field(..., description="10Y-2Y Treasury spread shape")
     vix_regime: VixRegime = Field(..., description="Categorical VIX bucket")
     vix_percentile: float = Field(
         ..., ge=0.0, le=100.0, description="VIX vs. trailing 252-day distribution"
     )
-    inflation_trajectory: Literal["RISING", "FALLING", "STABLE"] = Field(
-        ..., description="Direction of CPI year-over-year rate"
-    )
+    inflation_trajectory: Trend = Field(..., description="Direction of CPI year-over-year rate")
     sector_rotation_signal: SectorSignal = Field(..., description="Macro-implied sector preference")
     agent_multipliers: dict[str, float] = Field(
         ...,
         description=(
             "Conviction multipliers keyed by agent name "
-            "(fundamental, technical, sentiment). Range [0.5, 1.5]."
+            "(fundamental, technical, sentiment). Each in (0, 2]."
         ),
     )
     api_calls_used: int = Field(0, ge=0)
@@ -215,20 +240,20 @@ class MacroContext(BaseModel):
 
     @field_validator("agent_multipliers", mode="before")
     @classmethod
-    def validate_multiplier_keys(cls, v: dict[str, float]) -> dict[str, float]:
-        """Ensures required agent keys exist, defaulting missing ones to 1.0.
+    def validate_agent_multipliers(cls, v: dict[str, float]) -> dict[str, float]:
+        """Fills missing agent keys with 1.0 and checks every multiplier is in (0, 2].
 
         Args:
-            v: Raw multiplier dict from the macro agent.
+            v: Raw multiplier dict from the macro agent; not modified.
 
         Returns:
-            Validated dict with at least fundamental, technical, and sentiment keys.
+            A new dict with at least fundamental, technical, and sentiment keys.
 
         Raises:
             ValueError: If any multiplier falls outside (0, 2].
         """
-        required = {"fundamental", "technical", "sentiment"}
-        for key in required:
+        v = dict(v)
+        for key in ("fundamental", "technical", "sentiment"):
             v.setdefault(key, 1.0)
         for key, mult in v.items():
             if not (0.0 < mult <= 2.0):
@@ -282,7 +307,7 @@ class FundamentalVerdict(BaseModel):
         ..., description="Directional label"
     )
     conviction: Annotated[_Conviction, PromptText("conviction (float 0.0-1.0)")]
-    moat_score: Annotated[float, PromptText("moat_score (int 1-10)")] = Field(
+    moat_score: Annotated[float, PromptText("moat_score (float 0.0-10.0)")] = Field(
         ..., ge=0.0, le=10.0, description="Qualitative competitive moat [0, 10]"
     )
     reasoning: Annotated[str, PromptText("reasoning (string ≤80 words, no markdown)")] = Field(
@@ -316,7 +341,9 @@ class FundamentalSignal(BaseModel):
         ..., ge=0.0, le=10.0, description="Qualitative competitive moat [0, 10]"
     )
     reasoning: str = Field(
-        ..., max_length=400, description="LLM-generated investment thesis (≤400 chars)"
+        ...,
+        max_length=FUNDAMENTAL.reasoning_char_limit,
+        description=f"LLM-generated investment thesis (≤{FUNDAMENTAL.reasoning_char_limit} chars)",
     )
 
     api_calls_used: int = Field(1, ge=0)
@@ -334,9 +361,9 @@ class SentimentVerdict(BaseModel):
         ..., description="Directional label"
     )
     conviction: Annotated[_Conviction, PromptText("<float 0.0-1.0>")]
-    sentiment_decay_risk: Annotated[
-        Literal["LOW", "MEDIUM", "HIGH"], PromptText('"LOW|MEDIUM|HIGH"')
-    ] = Field(..., description="Estimated speed at which the sentiment signal will decay")
+    sentiment_decay_risk: Annotated[DecayRisk, PromptText('"LOW|MEDIUM|HIGH"')] = Field(
+        ..., description="Estimated speed at which the sentiment signal will decay"
+    )
     reasoning: Annotated[str, PromptText('"<≤60 words citing the primary driver>"')] = Field(
         ..., description="LLM rationale for the signal"
     )
@@ -376,11 +403,13 @@ class SentimentSignal(BaseModel):
 
     signal: Signal = Field(..., description="Directional label")
     conviction: _Conviction
-    sentiment_decay_risk: Literal["LOW", "MEDIUM", "HIGH"] = Field(
+    sentiment_decay_risk: DecayRisk = Field(
         ..., description="Estimated speed at which the sentiment signal will decay"
     )
     reasoning: str = Field(
-        ..., max_length=400, description="LLM rationale for the signal (≤400 chars)"
+        ...,
+        max_length=SENTIMENT.reasoning_char_limit,
+        description=f"LLM rationale for the signal (≤{SENTIMENT.reasoning_char_limit} chars)",
     )
     api_calls_used: int = Field(1, ge=0)
     timestamp: datetime = Field(..., description="Naive local timestamp of signal production")
@@ -584,14 +613,16 @@ class PositionAllocation(BaseModel):
     stop_loss: float = Field(..., description="Stop-loss price level")
     target_price: float | None = Field(None, description="12-month price target (optional)")
     thesis: str = Field(
-        ..., max_length=120, description="One-sentence position thesis (≤120 chars)"
+        ...,
+        max_length=PORTFOLIO.thesis_char_limit,
+        description=f"One-sentence position thesis (≤{PORTFOLIO.thesis_char_limit} chars)",
     )
     advisor_note: str | None = Field(
         None,
-        max_length=600,
+        max_length=PORTFOLIO.advisor_note_char_limit,
         description=(
             "Professional multi-sentence advisory rationale generated by the "
-            "Portfolio Manager (≤600 chars)"
+            f"Portfolio Manager (≤{PORTFOLIO.advisor_note_char_limit} chars)"
         ),
     )
     composite_conviction: float = Field(
@@ -645,7 +676,7 @@ class PortfolioAllocation(BaseModel):
 
     @model_validator(mode="after")
     def total_allocation_sums_to_one(self) -> PortfolioAllocation:
-        """Verifies that equity weights + cash_reserve_pct sum to 1.0 ± 0.05.
+        """Verifies that equity weights + cash_reserve_pct sum to within [0.95, 1.01].
 
         The upper bound (> 1.01) prevents leverage by catching over-allocation.
         The lower bound (< 0.95) catches a silent under-deployment bug where the LLM

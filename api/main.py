@@ -39,7 +39,6 @@ import sys
 from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
-from typing import Literal
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
@@ -51,7 +50,7 @@ from argus.agents.macro import MacroStatisticalAgent
 from argus.config import settings, web_concurrency
 from argus.data.live_session_cache import LiveSessionCache
 from argus.data.pipeline import MFTDataPipeline
-from argus.data.tickers import TICKER_PATTERN
+from argus.data.tickers import is_valid_ticker
 from argus.infra.clock import now_local, now_market
 from argus.infra.log import configure_logging
 from argus.memory.cultural import get_cultural_memory
@@ -72,6 +71,12 @@ from argus.orchestration.state import initial_state
 from argus.params import SYSTEM
 from argus.risk import paper_book
 from argus.risk.kill_switch import get_kill_switch, initialize_kill_switch
+from argus.schemas.requests import (
+    MAX_INVEST_PCT,
+    MIN_INVEST_PCT,
+    MIN_TOTAL_WEALTH,
+    RiskTolerance,
+)
 from argus.seams import LiveMarketDataProvider
 
 logger = logging.getLogger(__name__)
@@ -523,9 +528,9 @@ class AnalysisRequest(BaseModel):
     """Request payload defining parameters for stock universe valuation and rebalancing."""
 
     tickers: list[str] = Field(min_length=1, max_length=20)
-    total_wealth: float = Field(gt=1000)
-    invest_pct: float = Field(gt=0.05, le=0.95)
-    risk_tolerance: Literal["CONSERVATIVE", "MODERATE", "AGGRESSIVE"] = "MODERATE"
+    total_wealth: float = Field(gt=MIN_TOTAL_WEALTH)
+    invest_pct: float = Field(gt=MIN_INVEST_PCT, le=MAX_INVEST_PCT)
+    risk_tolerance: RiskTolerance = "MODERATE"
 
     @field_validator("tickers")
     @classmethod
@@ -539,10 +544,10 @@ class AnalysisRequest(BaseModel):
         pattern check runs.
 
         Raises:
-            ValueError: If any entry doesn't match TICKER_PATTERN after normalization.
+            ValueError: If any entry isn't a valid ticker after normalization.
         """
         normalized = [t.strip().upper() for t in tickers]
-        invalid = [t for t in normalized if not TICKER_PATTERN.fullmatch(t)]
+        invalid = [t for t in normalized if not is_valid_ticker(t)]
         if invalid:
             raise ValueError(f"Invalid ticker symbol(s): {invalid}")
         return list(dict.fromkeys(normalized))
@@ -870,7 +875,7 @@ async def get_governor_report():
 
 
 @app.post("/kill-switch/reset", dependencies=[Depends(require_api_key)])
-async def reset_kill_switch(new_inception_value: float = Query(gt=1000)):
+async def reset_kill_switch(new_inception_value: float = Query(gt=MIN_TOTAL_WEALTH)):
     """Resets the safety monitoring daemon to a new inception capital base.
 
     Also deletes any persisted halt-dump files (see KillSwitch.reset), so a

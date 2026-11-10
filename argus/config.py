@@ -23,7 +23,7 @@ from __future__ import annotations
 import os
 from dataclasses import asdict
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated
 
 from dotenv import load_dotenv
 from pydantic import Field, field_validator
@@ -36,6 +36,12 @@ from argus.params import (
     SYSTEM,
 )
 from argus.params import TECHNICAL_INDICATOR_WEIGHTS as _TECHNICAL_WEIGHTS
+from argus.schemas.requests import (
+    MAX_INVEST_PCT,
+    MIN_INVEST_PCT,
+    MIN_TOTAL_WEALTH,
+    RiskTolerance,
+)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -143,16 +149,16 @@ class Settings(BaseSettings):
     )
     ARGUS_TOTAL_WEALTH: float = Field(
         default=COLLECTOR.total_wealth,
-        gt=1000,
+        gt=MIN_TOTAL_WEALTH,
         description="Total wealth used by unattended collection cycles",
     )
     ARGUS_INVEST_PCT: float = Field(
         default=COLLECTOR.invest_pct,
-        gt=0.05,
-        le=0.95,
+        gt=MIN_INVEST_PCT,
+        le=MAX_INVEST_PCT,
         description="Invest fraction used by unattended collection cycles",
     )
-    ARGUS_RISK_TOLERANCE: Literal["CONSERVATIVE", "MODERATE", "AGGRESSIVE"] = Field(
+    ARGUS_RISK_TOLERANCE: RiskTolerance = Field(
         default="MODERATE", description="Risk tolerance used by unattended collection cycles"
     )
     ARGUS_CORS_ORIGINS: Annotated[list[str], NoDecode] = Field(
