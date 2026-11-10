@@ -30,7 +30,7 @@ from argus.infra.clock import now_local
 from argus.params import KILL_SWITCH
 from argus.seams import LiveMarketDataProvider, MarketDataProvider
 
-logger = logging.getLogger("argus.kill_switch")
+logger = logging.getLogger(__name__)
 
 
 def _default_runs_dir() -> str:

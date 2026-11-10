@@ -48,7 +48,7 @@ from argus.infra.backoff import capped_backoff, full_jitter_delay
 from argus.params import STRUCTURED_OUTPUT
 from argus.seams import LLMClient, RetryableTransportError
 
-logger = logging.getLogger("argus.structured_output")
+logger = logging.getLogger(__name__)
 
 
 class StructuredOutputError(Exception):
@@ -215,9 +215,7 @@ def decode[T: BaseModel](
             delay = full_jitter_delay(attempt, base, cap, retry_after=retry_after)
         else:
             delay = retry_after if retry_after is not None else capped_backoff(attempt, base, cap)
-        logger.warning(
-            "[StructuredOutput] Attempt %d %s failed: %s", attempt + 1, stage, last_error
-        )
+        logger.warning("Attempt %d %s failed: %s", attempt + 1, stage, last_error)
         time.sleep(delay)
 
     raise AssertionError("unreachable: loop always returns or raises")

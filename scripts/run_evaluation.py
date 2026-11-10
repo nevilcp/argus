@@ -18,7 +18,6 @@ returns rather than fixture data.
 from __future__ import annotations
 
 import argparse
-import logging
 from pathlib import Path
 
 from argus.backtesting.evaluation import (
@@ -29,11 +28,9 @@ from argus.backtesting.evaluation import (
     trade_level_win_loss_stats,
 )
 from argus.backtesting.replay import replay_session
-from argus.config import settings
+from argus.infra.log import configure_logging
 from argus.params import RECONCILIATION
 from argus.seams import LiveMarketDataProvider
-
-logger = logging.getLogger("argus.run_evaluation")
 
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
 
@@ -94,7 +91,7 @@ def _print_evaluation(label: str, result: EvaluationResult) -> None:
 
 def main() -> None:
     """Replays open-loop and closed-loop sessions and prints the evaluation report."""
-    logging.basicConfig(level=settings.ARGUS_LOG_LEVEL)
+    configure_logging()
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixtures-dir", type=Path, default=FIXTURES_DIR)

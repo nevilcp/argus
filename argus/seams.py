@@ -42,7 +42,7 @@ from langchain_groq import ChatGroq
 from argus.data import fetchers
 from argus.orchestration.governor import estimate_tokens, governor
 
-logger = logging.getLogger("argus.seams")
+logger = logging.getLogger(__name__)
 
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
 

@@ -286,7 +286,7 @@ deployment reachable outside a trusted network must set both before going live.
 | `ARGUS_TOTAL_WEALTH` | `100000` | Total wealth used by unattended collection cycles. |
 | `ARGUS_INVEST_PCT` | `0.6` | Invest fraction used by unattended collection cycles. |
 | `ARGUS_RISK_TOLERANCE` | `MODERATE` | Risk tolerance used by unattended collection cycles. |
-| `ARGUS_LOG_LEVEL` | `INFO` | Root log level for `argus.*` loggers. |
+| `ARGUS_LOG_LEVEL` | `INFO` | Log level for the `argus`, `api` and `scripts` loggers. |
 | `ARGUS_HMM_MODEL_PATH` | `argus/models/macro_hmm.joblib` | Path to the persisted macro `RegimeClassifier` artifact (see [Training the Macro Classifier](#training-the-macro-classifier)). |
 | `ARGUS_IMAGE_TAG` | `unknown` | Commit-identified image tag baked in at Docker build time (see `image.yml`); not meant to be set by hand. |
 

@@ -45,7 +45,7 @@ from argus.infra.clock import now_market
 from argus.params import SYSTEM
 from argus.schemas.signals import missing_session_state_keys
 
-logger = logging.getLogger("argus.pipeline")
+logger = logging.getLogger(__name__)
 
 _MARKET_OPEN = dtime(9, 30)
 _MARKET_CLOSE = dtime(16, 0)
@@ -213,9 +213,7 @@ def _last_column_value(
     matches = [c for c in df.columns if c.upper().startswith(prefix)]
     if not matches:
         if missing_label:
-            logger.warning(
-                "_compress_candles: %s column not found in %s", missing_label, list(df.columns)
-            )
+            logger.warning("%s column not found in %s", missing_label, list(df.columns))
         return None
     return float(df[matches[0]].iloc[-1])
 
@@ -427,7 +425,7 @@ class MFTDataPipeline:
         self.running = True
         # A stop() leaves the event set; left set, a restarted loop would skip its pacing waits
         self._stop_event.clear()
-        logger.info("MFTDataPipeline.start: launching fetch loop")
+        logger.info("launching fetch loop")
         await self._fetch_loop(on_session_ready)
 
     async def _wait_or_stop(self, timeout: float) -> None:
@@ -456,17 +454,14 @@ class MFTDataPipeline:
         valid = [t for t in tickers if is_valid_ticker(t)]
         invalid = [t for t in tickers if not is_valid_ticker(t)]
         if invalid:
-            logger.warning(
-                "MFTDataPipeline.register_tickers: rejected malformed ticker(s): %s", invalid
-            )
+            logger.warning("rejected malformed ticker(s): %s", invalid)
 
         new = [t for t in valid if t not in self.tickers]
         room = max(SYSTEM.max_tracked_tickers - len(self.tickers), 0)
         accepted, dropped = new[:room], new[room:]
         if dropped:
             logger.warning(
-                "MFTDataPipeline.register_tickers: universe cap (%d) reached; dropping %d "
-                "ticker(s): %s",
+                "universe cap (%d) reached; dropping %d ticker(s): %s",
                 SYSTEM.max_tracked_tickers,
                 len(dropped),
                 dropped,
@@ -474,7 +469,7 @@ class MFTDataPipeline:
         if accepted:
             self.tickers.extend(accepted)
             logger.info(
-                "MFTDataPipeline.register_tickers: added %d ticker(s): %s",
+                "added %d ticker(s): %s",
                 len(accepted),
                 accepted,
             )
@@ -509,7 +504,7 @@ class MFTDataPipeline:
             self.tickers.remove(ticker)
             self.last_requested_at.pop(ticker, None)
         logger.info(
-            "MFTDataPipeline._evict_stale_tickers: evicted %d unused ticker(s): %s",
+            "evicted %d unused ticker(s): %s",
             len(stale),
             stale,
         )
@@ -518,7 +513,7 @@ class MFTDataPipeline:
         """Signals active loops to stop execution."""
         self.running = False
         self._stop_event.set()
-        logger.info("MFTDataPipeline.stop: shutdown requested")
+        logger.info("shutdown requested")
 
     async def close_buffer(self) -> None:
         """Closes the candle buffer, waiting out any still-running buffer worker first.
@@ -555,7 +550,7 @@ class MFTDataPipeline:
         if self._is_market_hours():
             await self._sweep_once()
         else:
-            logger.debug("run_once: outside market hours — compressing existing buffer only")
+            logger.debug("outside market hours — compressing existing buffer only")
         return await asyncio.to_thread(self.compress_all)
 
     async def _sweep_once(self) -> None:
@@ -570,7 +565,7 @@ class MFTDataPipeline:
         """
         self._evict_stale_tickers()
         tickers_snapshot = list(self.tickers)
-        logger.debug("_sweep_once: starting universe sweep (%d tickers)", len(tickers_snapshot))
+        logger.debug("starting universe sweep (%d tickers)", len(tickers_snapshot))
         last = len(tickers_snapshot) - 1
         for i, ticker in enumerate(tickers_snapshot):
             await self._fetch_one_ticker(ticker)
@@ -603,11 +598,11 @@ class MFTDataPipeline:
                     try:
                         await on_session_ready(session_states)
                     except Exception as exc:
-                        logger.error("_fetch_loop: callback raised %s: %s", type(exc).__name__, exc)
+                        logger.error("callback raised %s: %s", type(exc).__name__, exc)
                 else:
-                    logger.debug("_fetch_loop: outside market hours — idle")
+                    logger.debug("outside market hours — idle")
             except Exception as exc:
-                logger.error("_fetch_loop: sweep failed — %s: %s", type(exc).__name__, exc)
+                logger.error("sweep failed — %s: %s", type(exc).__name__, exc)
 
             elapsed = time.monotonic() - started
             await self._wait_or_stop(max(0.0, _FETCH_INTERVAL - elapsed))
@@ -624,9 +619,7 @@ class MFTDataPipeline:
                 if self.buffer.get_candles(ticker) is not None:
                     return True
             except Exception as exc:
-                logger.warning(
-                    "_buffer_warm: %s check failed — %s: %s", ticker, type(exc).__name__, exc
-                )
+                logger.warning("%s check failed — %s: %s", ticker, type(exc).__name__, exc)
         return False
 
     async def _fetch_one_ticker(self, ticker: str) -> None:
@@ -647,11 +640,11 @@ class MFTDataPipeline:
         try:
             n_candles, latest_close = await asyncio.to_thread(self._fetch_and_insert, ticker)
             if n_candles == 0:
-                logger.warning("_fetch_one_ticker: empty result for %s", ticker)
+                logger.warning("empty result for %s", ticker)
                 return
 
             logger.debug(
-                "_fetch_one_ticker: %s → %d candles inserted, latest close=%.2f",
+                "%s → %d candles inserted, latest close=%.2f",
                 ticker,
                 n_candles,
                 latest_close,
@@ -659,7 +652,7 @@ class MFTDataPipeline:
 
         except Exception as exc:
             logger.warning(
-                "_fetch_one_ticker: %s failed — %s: %s",
+                "%s failed — %s: %s",
                 ticker,
                 type(exc).__name__,
                 exc,
@@ -732,7 +725,7 @@ class MFTDataPipeline:
                     missing = missing_session_state_keys(state)
                     if missing:
                         logger.warning(
-                            "compress_all: %s missing/non-finite required keys %s — omitting",
+                            "%s missing/non-finite required keys %s — omitting",
                             ticker,
                             missing,
                         )
@@ -740,13 +733,13 @@ class MFTDataPipeline:
                     states[ticker] = state
                 except Exception as exc:
                     logger.warning(
-                        "compress_all: %s compression failed — %s: %s",
+                        "%s compression failed — %s: %s",
                         ticker,
                         type(exc).__name__,
                         exc,
                     )
             self.buffer.prune_untracked(tracked)
-        logger.info("compress_all: %d tickers compressed", len(states))
+        logger.info("%d tickers compressed", len(states))
         return states
 
     def _compress_candles(self, df: pd.DataFrame) -> dict | None:

@@ -27,7 +27,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-logger = logging.getLogger("argus.backtesting.metrics")
+logger = logging.getLogger(__name__)
 
 _TRADING_DAYS_PER_YEAR = 252
 _ANNUALIZATION = math.sqrt(_TRADING_DAYS_PER_YEAR)

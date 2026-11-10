@@ -24,21 +24,19 @@ import argparse
 import asyncio
 import dataclasses
 import json
-import logging
 import sys
 from pathlib import Path
 
 from argus.config import settings
 from argus.data.pipeline import MFTDataPipeline
+from argus.infra.log import configure_logging
 from argus.orchestration.collector import CycleOutcome, run_collection_cycle
 from argus.orchestration.graph import build_graph
-
-logger = logging.getLogger("argus.collect_session")
 
 
 def main() -> None:
     """Parses CLI args, runs one collection cycle, and prints the outcome."""
-    logging.basicConfig(level=settings.ARGUS_LOG_LEVEL)
+    configure_logging()
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(

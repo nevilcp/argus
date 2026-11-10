@@ -154,7 +154,9 @@ class Settings(BaseSettings):
             "local development behind a trusted network boundary, not production."
         ),
     )
-    ARGUS_LOG_LEVEL: str = Field(default="INFO", description="Root log level for argus.* loggers")
+    ARGUS_LOG_LEVEL: str = Field(
+        default="INFO", description="Log level for the argus, api and scripts loggers"
+    )
 
     ARGUS_IMAGE_TAG: str = Field(
         default="unknown",

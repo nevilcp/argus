@@ -64,7 +64,7 @@ from argus.params import RECONCILIATION
 from argus.schemas.signals import ARGUSDecision
 from argus.seams import MarketDataProvider
 
-logger = logging.getLogger("argus.reconciliation")
+logger = logging.getLogger(__name__)
 
 
 def credit_primary_driver(
@@ -267,7 +267,7 @@ def reconcile_decision(
         primary_driver=primary_driver,
     )
     logger.info(
-        "[Reconcile] %s (%s): %+.2f%% over %d days, primary_driver=%s",
+        "%s (%s): %+.2f%% over %d days, primary_driver=%s",
         decision.ticker,
         decision.decision_id,
         actual_return_pct * 100,
@@ -317,7 +317,7 @@ def reconcile_decisions(
                 ]
             except Exception as exc:
                 logger.warning(
-                    "[Reconcile] failed to fetch price history for %s (%s): %s",
+                    "failed to fetch price history for %s (%s): %s",
                     decision.ticker,
                     type(exc).__name__,
                     exc,
@@ -434,7 +434,7 @@ def _read_decisions_jsonl(path: str) -> tuple[list[ARGUSDecision], list[str]]:
                 decisions.append(ARGUSDecision.model_validate_json(line))
             except Exception as exc:
                 logger.warning(
-                    "load_decisions_from_jsonl: skipping malformed line %d in %s: %s",
+                    "skipping malformed line %d in %s: %s",
                     line_no,
                     path,
                     exc,
@@ -562,7 +562,7 @@ def compact_decisions_jsonl(
         atomic_write_text(file_path, "".join(line + "\n" for line in lines))
 
     logger.info(
-        "compact_decisions_jsonl: kept %d/%d decision(s) in %s (cutoff=%s, retired %d "
+        "kept %d/%d decision(s) in %s (cutoff=%s, retired %d "
         "unresolved past %s, preserved %d malformed line(s))",
         len(kept),
         len(decisions),
@@ -632,7 +632,7 @@ def prune_checkpoints(db_path: str, cutoff: datetime) -> int:
         conn.execute("VACUUM")
 
     logger.info(
-        "prune_checkpoints: deleted %d thread(s) from %s (cutoff=%s)",
+        "deleted %d thread(s) from %s (cutoff=%s)",
         len(stale_threads),
         db_path,
         cutoff_naive.isoformat(),
@@ -702,7 +702,7 @@ def _pass_step(report: ReconciliationReport, label: str) -> Iterator[None]:
     try:
         yield
     except Exception as exc:
-        logger.exception("[Reconcile] %s failed", label)
+        logger.exception("%s failed", label)
         report.errors.append(f"{label} failed: {exc}")
 
 

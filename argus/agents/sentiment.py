@@ -33,7 +33,7 @@ from argus.schemas.signals import SentimentSignal, SentimentVerdict
 from argus.seams import GroqLLMClient, LiveMarketDataProvider, LLMClient, MarketDataProvider
 from argus.structured_output import StructuredOutputError, decode
 
-logger = logging.getLogger("argus.sentiment")
+logger = logging.getLogger(__name__)
 
 # Rough estimate of a fundamental_analysis Groq round-trip; not tuned against real latency.
 _FANOUT_PACE_SECONDS_PER_TICKER = 2.5
@@ -79,7 +79,7 @@ def get_finbert():
     if _FINBERT_PIPELINE is None:
         from transformers import pipeline
 
-        logger.debug("[FinBERT] Loading ProsusAI/finbert pipeline (first load may take ~30s)...")
+        logger.debug("Loading ProsusAI/finbert pipeline (first load may take ~30s)...")
         _FINBERT_PIPELINE = pipeline(
             task="text-classification",
             model="ProsusAI/finbert",
@@ -89,7 +89,7 @@ def get_finbert():
             max_length=512,
             truncation=True,
         )
-        logger.debug("[FinBERT] Loaded successfully.")
+        logger.debug("Loaded successfully.")
     return _FINBERT_PIPELINE
 
 
@@ -137,7 +137,7 @@ def score_headlines_with_finbert(articles: list[dict]) -> list[dict]:
                 }
             )
         except Exception as e:
-            logger.debug("[FinBERT] Error on headline: %s", e)
+            logger.debug("Error on headline: %s", e)
     return results
 
 
@@ -208,7 +208,7 @@ def _check_earnings_calendar(ticker: str, market_data: MarketDataProvider) -> bo
             if 0 <= (dt.tz_localize(None) - now_local()).days <= 14:
                 return True
     except Exception as e:
-        logger.debug("[EarningsCalendar] %s check failed: %s", ticker, e)
+        logger.debug("%s check failed: %s", ticker, e)
     return False
 
 
@@ -336,9 +336,7 @@ class SentimentAgent:
         if llm_client is None:
             api_key = settings.groq_api_key
             if not api_key:
-                logger.warning(
-                    "SentimentAgent: GROQ_API_KEY is not set — LLM calls will fail at invocation time."
-                )
+                logger.warning("GROQ_API_KEY is not set — LLM calls will fail at invocation time.")
             llm_client = GroqLLMClient(
                 model=settings.ARGUS_SENTIMENT_MODEL,
                 temperature=STRUCTURED_OUTPUT.llm_temperature,
@@ -385,18 +383,18 @@ class SentimentAgent:
         try:
             verdict = decode(self.llm_client, SYSTEM_PROMPT, prompt, SentimentVerdict, repair=False)
         except StructuredOutputError as e:
-            logger.warning("[Sentiment] Decode failed for %s: %s", ticker, e)
+            logger.warning("Decode failed for %s: %s", ticker, e)
             if errors is not None:
                 errors.append(f"sentiment_analysis[{ticker}]: {e}")
             return None
         except (RateLimitExceeded, UnregisteredModel) as e:
             # Governor already exhausted its bounded wait; degrade this ticker rather than retry into it.
-            logger.warning("[Sentiment] Governor rejected call for %s: %s", ticker, e)
+            logger.warning("Governor rejected call for %s: %s", ticker, e)
             if errors is not None:
                 errors.append(f"sentiment_analysis[{ticker}]: rate limited: {e}")
             return None
         except Exception as e:
-            logger.error("[Sentiment] API error for %s: %s", ticker, e)
+            logger.error("API error for %s: %s", ticker, e)
             if errors is not None:
                 errors.append(f"sentiment_analysis[{ticker}]: API error: {e}")
             return None
@@ -440,7 +438,7 @@ class SentimentAgent:
         try:
             news = self.market_data.news(ticker, company_name or ticker, days_back=7)
         except Exception as e:
-            logger.warning("[Sentiment] %s news fetch raised: %s", ticker, e)
+            logger.warning("%s news fetch raised: %s", ticker, e)
             news = None
 
         news_list = news or []
@@ -494,7 +492,7 @@ class SentimentAgent:
             try:
                 res = self.analyze(ticker, company_name=company_name, errors=errors)
             except Exception as exc:
-                logger.warning("batch_analyze: %s failed — %s: %s", ticker, type(exc).__name__, exc)
+                logger.warning("%s failed — %s: %s", ticker, type(exc).__name__, exc)
                 errors.append(f"sentiment_analysis[{ticker}]: {type(exc).__name__}: {exc}")
                 continue
             if res is not None:

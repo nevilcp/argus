@@ -7,7 +7,7 @@ Covers:
   - `_assert_registered_models`
   - `_acquire_process_lock`'s cross-process guard (an exclusive flock on
     `${ARGUS_DATA_DIR}/argus.lock`)
-  - `_configure_logging` and `/health`'s background-task liveness reporting
+  - `configure_logging` and `/health`'s background-task liveness reporting
   - `_warn_on_permissive_security_defaults`
 
 The boot-time guards are pure sys.argv/settings checks, so they're exercised
@@ -28,7 +28,9 @@ from fastapi.testclient import TestClient
 
 import api.main as api_main
 import argus.risk.kill_switch as kill_switch_module
+from argus.config import settings
 from argus.data.live_session_cache import LiveSessionCache
+from argus.infra.log import LOG_ROOTS, configure_logging
 from argus.risk.kill_switch import KillSwitch
 
 
@@ -128,38 +130,37 @@ def test_acquire_process_lock_rejects_a_second_holder(monkeypatch, tmp_path):
             api_main._process_lock_file = None
 
 
-@pytest.fixture(autouse=True)
-def _reset_argus_logger():
-    """Clears the "argus" logger's handlers around each test in this module."""
-    argus_logger = logging.getLogger("argus")
-    original_handlers = list(argus_logger.handlers)
-    original_level = argus_logger.level
-    original_propagate = argus_logger.propagate
-    argus_logger.handlers = []
-    yield
-    argus_logger.handlers = original_handlers
-    argus_logger.level = original_level
-    argus_logger.propagate = original_propagate
+@pytest.mark.parametrize("root", LOG_ROOTS)
+def test_configure_logging_attaches_a_handler_at_the_configured_level(monkeypatch, root):
+    """configure_logging makes ARGUS_LOG_LEVEL take effect on every logger tree."""
+    monkeypatch.setattr(settings, "ARGUS_LOG_LEVEL", "DEBUG")
 
+    configure_logging()
 
-def test_configure_logging_attaches_a_handler_at_the_configured_level(monkeypatch):
-    """_configure_logging makes ARGUS_LOG_LEVEL take effect on the argus logger tree."""
-    monkeypatch.setattr(api_main.settings, "ARGUS_LOG_LEVEL", "DEBUG")
-
-    api_main._configure_logging()
-
-    argus_logger = logging.getLogger("argus")
-    assert len(argus_logger.handlers) == 1
-    assert argus_logger.level == logging.DEBUG
-    assert argus_logger.propagate is False
+    tree = logging.getLogger(root)
+    assert len(tree.handlers) == 1
+    assert tree.level == logging.DEBUG
+    assert tree.propagate is False
 
 
 def test_configure_logging_is_idempotent():
-    """Calling _configure_logging twice (e.g. across repeated lifespans) doesn't stack handlers."""
-    api_main._configure_logging()
-    api_main._configure_logging()
+    """Calling configure_logging twice (e.g. across repeated lifespans) doesn't stack handlers."""
+    configure_logging()
+    configure_logging()
 
-    assert len(logging.getLogger("argus").handlers) == 1
+    assert all(len(logging.getLogger(root).handlers) == 1 for root in LOG_ROOTS)
+
+
+def test_configure_logging_formats_records_with_module_and_function():
+    """A record is rendered as `<module>.<function>: <message>`, so messages need no tag prefix."""
+    configure_logging()
+
+    handler = logging.getLogger("argus").handlers[0]
+    record = logging.LogRecord(
+        "argus.data.cache", logging.INFO, __file__, 1, "hello", None, None, func="put"
+    )
+
+    assert "argus.data.cache.put: hello" in handler.format(record)
 
 
 def test_warns_on_permissive_cors_and_blank_api_key(monkeypatch, caplog):
@@ -167,7 +168,7 @@ def test_warns_on_permissive_cors_and_blank_api_key(monkeypatch, caplog):
     monkeypatch.setattr(api_main.settings, "ARGUS_CORS_ORIGINS", ["*"])
     monkeypatch.setattr(api_main.settings, "ARGUS_API_KEY", "")
 
-    with caplog.at_level(logging.WARNING, logger="argus.api"):
+    with caplog.at_level(logging.WARNING, logger="api.main"):
         api_main._warn_on_permissive_security_defaults()
 
     messages = [r.message for r in caplog.records]
@@ -180,7 +181,7 @@ def test_no_warning_once_cors_and_api_key_are_configured(monkeypatch, caplog):
     monkeypatch.setattr(api_main.settings, "ARGUS_CORS_ORIGINS", ["https://example.com"])
     monkeypatch.setattr(api_main.settings, "ARGUS_API_KEY", "a-real-secret")
 
-    with caplog.at_level(logging.WARNING, logger="argus.api"):
+    with caplog.at_level(logging.WARNING, logger="api.main"):
         api_main._warn_on_permissive_security_defaults()
 
     assert caplog.records == []

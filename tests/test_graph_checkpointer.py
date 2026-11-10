@@ -18,7 +18,7 @@ def test_open_checkpointer_failure_returns_none_logs_and_closes_the_connection(
         graph_module, "SqliteSaver", mock.Mock(side_effect=RuntimeError("bad schema"))
     )
 
-    with caplog.at_level(logging.WARNING, logger="argus.graph"):
+    with caplog.at_level(logging.WARNING, logger="argus.orchestration.graph"):
         result = graph_module._open_checkpointer(str(tmp_path / "graph.db"))
 
     assert result is None
@@ -34,7 +34,7 @@ def test_open_checkpointer_failure_before_connecting_returns_none_and_logs(
         graph_module.sqlite3, "connect", mock.Mock(side_effect=OSError("disk is read-only"))
     )
 
-    with caplog.at_level(logging.WARNING, logger="argus.graph"):
+    with caplog.at_level(logging.WARNING, logger="argus.orchestration.graph"):
         result = graph_module._open_checkpointer(str(tmp_path / "graph.db"))
 
     assert result is None

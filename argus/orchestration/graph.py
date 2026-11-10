@@ -63,7 +63,7 @@ from argus.schemas.signals import (
 )
 from argus.seams import LiveMarketDataProvider, LLMClient, MarketDataProvider
 
-logger = logging.getLogger("argus.graph")
+logger = logging.getLogger(__name__)
 
 # Every schemas.signals model nested in ARGUSState must be listed here or the
 # checkpointer's msgpack deserializer degrades it to a plain dict; shared with
@@ -114,7 +114,7 @@ def _open_checkpointer(checkpoint_db_path: str) -> SqliteSaver | None:
         return SqliteSaver(conn, serde=build_checkpoint_serde())
     except Exception:
         logger.warning(
-            "_open_checkpointer: could not open %s; running without a checkpointer",
+            "could not open %s; running without a checkpointer",
             checkpoint_db_path,
             exc_info=True,
         )
@@ -217,7 +217,7 @@ def _session_reliability(
     except (ImportError, OSError, ChromaError) as exc:
         # Same guard as node_retrieve_cultural_memory; degrade every agent to the
         # 0.5 neutral prior rather than crash
-        logger.warning("node_signal_aggregation: cultural memory unavailable: %s", exc)
+        logger.warning("cultural memory unavailable: %s", exc)
         return neutral_reliability, neutral_counts, False
 
     return (
@@ -249,8 +249,7 @@ def _resolve_vix(
         return market_data.vix(), None
     except Exception as exc:
         logger.warning(
-            "node_risk_evaluation: VIX fetch failed with no macro_context; "
-            "falling back to vix=20.0: %s",
+            "VIX fetch failed with no macro_context; falling back to vix=20.0: %s",
             exc,
         )
         return 20.0, f"risk_evaluation: VIX fetch failed, used fallback vix=20.0 ({exc})"
@@ -392,7 +391,7 @@ def build_graph(
         macro_ctx = macro_agent.analyze()
         if macro_ctx is None:
             logger.error(
-                "node_macro_analysis: MacroStatisticalAgent returned None (FRED data unavailable). "
+                "MacroStatisticalAgent returned None (FRED data unavailable). "
                 "The three specialist agents run independently and will still produce a "
                 "degraded, macro-agnostic allocation this session."
             )
@@ -470,7 +469,7 @@ def build_graph(
             # extra. OSError/ChromaError: persist_dir unwritable or an
             # incompatible on-disk Chroma schema. All three degrade to the same
             # empty result as no macro context, rather than crashing the node
-            logger.warning("node_retrieve_cultural_memory: cultural memory unavailable: %s", exc)
+            logger.warning("cultural memory unavailable: %s", exc)
             return {"cultural_memory": {"wisdom": [], "warnings": []}}
 
         as_of = state.get("as_of")
@@ -605,7 +604,7 @@ def build_graph(
 
             return {"risk_assessments": assessments, "errors": errors}
         except Exception as exc:
-            logger.exception("node_risk_evaluation: unexpected failure")
+            logger.exception("unexpected failure")
             errors.append(f"risk_evaluation: unexpected failure: {exc}")
             return {"risk_assessments": {}, "errors": errors}
 
@@ -651,7 +650,7 @@ def build_graph(
             # allocate() has already appended the specific failing stage (LLM call,
             # JSON parse, response enforcement, or schema validation) to errors
             logger.error(
-                "node_portfolio_allocation: PortfolioManagerAgent returned None. "
+                "PortfolioManagerAgent returned None. "
                 "Skipping portfolio_allocation to allow graceful exit."
             )
             return {"errors": errors}
@@ -669,7 +668,7 @@ def build_graph(
         """
         allocation = state.get("portfolio_allocation")
         if not allocation:
-            logger.warning("[log_decisions] No portfolio_allocation in state; skipping.")
+            logger.warning("No portfolio_allocation in state; skipping.")
             return {"decisions": []}
 
         positions = {pos.ticker: pos for pos in allocation.portfolio}
@@ -683,7 +682,7 @@ def build_graph(
             memory = get_cultural_memory()
         except (ImportError, OSError, ChromaError) as exc:
             # Same guard as node_retrieve_cultural_memory
-            logger.warning("node_log_decisions: cultural memory unavailable: %s", exc)
+            logger.warning("cultural memory unavailable: %s", exc)
             memory = None
 
         ticker_snapshots = build_ticker_snapshots(state)
@@ -711,11 +710,11 @@ def build_graph(
 
             except Exception as exc:
                 msg = f"log_decisions: failed to build decision for {ticker}: {exc}"
-                logger.warning("[log_decisions] %s", msg)
+                logger.warning("%s", msg)
                 errors.append(msg)
 
         logger.info(
-            "[log_decisions] Logged %d/%d decisions to cultural memory.",
+            "Logged %d/%d decisions to cultural memory.",
             stored_count,
             len(universe),
         )

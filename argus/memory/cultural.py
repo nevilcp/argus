@@ -37,7 +37,7 @@ from argus.infra.clock import as_naive_timestamp
 from argus.params import MEMORY, RECONCILIATION
 from argus.schemas.signals import ARGUSDecision, MacroContext
 
-logger = logging.getLogger("argus.cultural_memory")
+logger = logging.getLogger(__name__)
 
 # Model downloaded once to ~/.cache/sentence-transformers on first invocation.
 _EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
@@ -135,7 +135,7 @@ class CulturalMemoryManager:
         os.makedirs(persist_dir, exist_ok=True)
         if is_fresh:
             logger.warning(
-                "[Memory] %s did not exist; created a fresh, empty cultural memory "
+                "%s did not exist; created a fresh, empty cultural memory "
                 "store there. If this is unexpected, check the process's working directory.",
                 persist_dir,
             )
@@ -160,12 +160,12 @@ class CulturalMemoryManager:
         if backfill_metadata is not None:
             self.collection.modify(metadata=backfill_metadata)
             logger.info(
-                "[Memory] Backfilled embedding_model=%s onto a pre-existing collection "
+                "Backfilled embedding_model=%s onto a pre-existing collection "
                 "with no recorded model",
                 _EMBEDDING_MODEL_NAME,
             )
         self.persist_dir = persist_dir
-        logger.info("[Memory] Cultural Memory Manager initialized at %s", persist_dir)
+        logger.info("Cultural Memory Manager initialized at %s", persist_dir)
 
     def already_reconciled(self, decision_ids: list[str]) -> set[str]:
         """Returns the subset of decision_ids that already have a stored trade outcome.
@@ -270,9 +270,9 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
         try:
             self.collection.delete(ids=[snapshot_id])
         except Exception as e:
-            logger.warning("[Memory] Failed to delete snapshot %s: %s", snapshot_id, e)
+            logger.warning("Failed to delete snapshot %s: %s", snapshot_id, e)
 
-        logger.info("[Memory] Stored %s trade pattern. Total: %d", prefix, self.collection.count())
+        logger.info("Stored %s trade pattern. Total: %d", prefix, self.collection.count())
 
     def _retrieve_by_outcome(
         self,
@@ -313,7 +313,7 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
             )
             return results["documents"][0] if results and results["documents"] else []
         except Exception as e:
-            logger.warning("[Memory] Failed to retrieve %s: %s", label, e)
+            logger.warning("Failed to retrieve %s: %s", label, e)
             return []
 
     def retrieve_wisdom(
@@ -439,7 +439,7 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
             k = MEMORY.accuracy_shrinkage_k
             return (float(wins) + k * 0.5) / (n + k), n
         except Exception as e:
-            logger.warning("[Memory] Failed to compute agent accuracy: %s", e)
+            logger.warning("Failed to compute agent accuracy: %s", e)
             return 0.5, 0
 
     def summary_stats(self) -> dict[str, Any]:
@@ -502,7 +502,7 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
                 "best_regime_for_wins": best_regime,
             }
         except Exception as e:
-            logger.warning("[Memory] Failed to compute summary stats: %s", e)
+            logger.warning("Failed to compute summary stats: %s", e)
             return {"total_stored": count}
 
     def store_decision_snapshot(self, decision: ARGUSDecision) -> bool:
@@ -553,13 +553,13 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
                 ],
             )
             logger.info(
-                "[Memory] Snapshotted decision for %s (ID=%s)",
+                "Snapshotted decision for %s (ID=%s)",
                 decision.ticker,
                 decision.decision_id,
             )
             return True
         except Exception as e:
-            logger.warning("[Memory] Failed to snapshot decision for %s: %s", decision.ticker, e)
+            logger.warning("Failed to snapshot decision for %s: %s", decision.ticker, e)
             return False
 
     def expire_pending_snapshots(self, cutoff: datetime) -> int:
@@ -586,7 +586,7 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
         try:
             results = self.collection.get(where={"outcome": "PENDING"})
         except Exception as e:
-            logger.warning("[Memory] Failed to query PENDING snapshots for expiry: %s", e)
+            logger.warning("Failed to query PENDING snapshots for expiry: %s", e)
             return 0
 
         ids = results.get("ids") or []
@@ -611,10 +611,10 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
         try:
             self.collection.delete(ids=stale_ids)
         except Exception as e:
-            logger.warning("[Memory] Failed to delete stale PENDING snapshot(s): %s", e)
+            logger.warning("Failed to delete stale PENDING snapshot(s): %s", e)
             return 0
 
-        logger.info("[Memory] Expired %d stale PENDING snapshot(s)", len(stale_ids))
+        logger.info("Expired %d stale PENDING snapshot(s)", len(stale_ids))
         return len(stale_ids)
 
 
@@ -662,7 +662,7 @@ def get_cultural_memory(persist_dir: str | None = None) -> CulturalMemoryManager
                 return _cultural_memory
     if os.path.abspath(persist_dir) != _cultural_memory.persist_dir:
         logger.warning(
-            "[Memory] get_cultural_memory(persist_dir=%r) ignored; the process-wide "
+            "get_cultural_memory(persist_dir=%r) ignored; the process-wide "
             "singleton is already initialized at %s.",
             persist_dir,
             _cultural_memory.persist_dir,

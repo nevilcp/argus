@@ -26,20 +26,18 @@ Not responsible for:
 from __future__ import annotations
 
 import argparse
-import logging
 
 from argus.config import settings
+from argus.infra.log import configure_logging
 from argus.memory.cultural import get_cultural_memory
 from argus.orchestration.reconciliation import run_reconciliation_pass
 from argus.params import RECONCILIATION
 from argus.seams import LiveMarketDataProvider
 
-logger = logging.getLogger("argus.reconcile_outcomes")
-
 
 def main() -> None:
     """Parses CLI args, runs one reconciliation pass, and prints its report."""
-    logging.basicConfig(level=settings.ARGUS_LOG_LEVEL)
+    configure_logging()
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(

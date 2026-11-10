@@ -49,7 +49,7 @@ from argus.params import MACRO
 from argus.schemas.signals import MacroContext, Regime, SectorSignal, VixRegime, YieldCurve
 from argus.seams import LiveMarketDataProvider, MarketDataProvider
 
-logger = logging.getLogger("argus.macro")
+logger = logging.getLogger(__name__)
 
 # Scaler/HMM column order; persisted in metadata to catch mismatches. See data/macro_features.py.
 FEATURE_COLUMNS = ["d_fed_funds_6m", "d_unemp_12m", "cpi_yoy", "t10y2y", "vix_pctile"]
@@ -237,7 +237,7 @@ class RegimeClassifier:
         """
         df = macro_history.dropna().copy()
         if df.empty:
-            logger.warning("RegimeClassifier.fit: Empty DataFrame after dropping NaNs.")
+            logger.warning("Empty DataFrame after dropping NaNs.")
             return
 
         n_components = self.hmm.n_components
@@ -347,9 +347,9 @@ class RegimeClassifier:
                     (k - 1) + k * (k - 1) + k * n_features + k * n_features * (n_features + 1) // 2
                 )
                 bic = -2 * log_likelihood + n_params * np.log(n_obs)
-                logger.info("RegimeClassifier.fit: BIC diagnostic k=%d -> %.1f", k, bic)
+                logger.info("BIC diagnostic k=%d -> %.1f", k, bic)
             except Exception as exc:
-                logger.debug("RegimeClassifier.fit: BIC diagnostic failed for k=%d: %s", k, exc)
+                logger.debug("BIC diagnostic failed for k=%d: %s", k, exc)
 
     def _map_states(self, df: pd.DataFrame, recession_series: pd.Series | None = None) -> None:
         """Maps hidden states to human-readable regimes.
@@ -616,7 +616,7 @@ class RegimeClassifier:
         }
         joblib.dump(payload, path)
         logger.info(
-            "RegimeClassifier.save: wrote artifact to %s (%d observations)",
+            "wrote artifact to %s (%d observations)",
             path,
             self.n_train_observations,
         )
@@ -654,14 +654,14 @@ class RegimeClassifier:
                 classifier.hmm.startprob_ = cls._stationary_startprob(classifier.hmm.transmat_)
 
             logger.info(
-                "RegimeClassifier.load: loaded artifact from %s (trained %s, %d observations)",
+                "loaded artifact from %s (trained %s, %d observations)",
                 path,
                 metadata.get("trained_at"),
                 classifier.n_train_observations,
             )
             return classifier
         except Exception as exc:
-            logger.error("RegimeClassifier.load: failed to load artifact from %s: %s", path, exc)
+            logger.error("failed to load artifact from %s: %s", path, exc)
             return cls()
 
 
@@ -715,7 +715,7 @@ class MacroStatisticalAgent:
                 recession_series = usrec.resample("ME").last()
             except Exception as exc:
                 logger.warning(
-                    "fit_on_history: failed to fetch NBER USREC series (%s); "
+                    "failed to fetch NBER USREC series (%s); "
                     "CONTRACTION will not be labelled on this fit.",
                     exc,
                 )
@@ -808,7 +808,7 @@ class MacroStatisticalAgent:
         if self._cache:
             ctx, cached_at = self._cache
             if (now_local() - cached_at).total_seconds() < self._cache_ttl_hours * 3600:
-                logger.debug("MacroStatisticalAgent.analyze: Cache hit.")
+                logger.debug("Cache hit.")
                 return ctx
 
         current = self.market_data.macro_bundle()
@@ -819,7 +819,7 @@ class MacroStatisticalAgent:
 
         if vix is None and fed_funds_raw is None and t10y2y_raw is None:
             logger.error(
-                "analyze: FRED bundle returned no usable data (vix, fed_funds, t10y2y all None). "
+                "FRED bundle returned no usable data (vix, fed_funds, t10y2y all None). "
                 "Returning None to allow graceful exit."
             )
             return None
@@ -827,7 +827,7 @@ class MacroStatisticalAgent:
         vix_defaulted = vix is None
         if vix is None:
             logger.warning(
-                "analyze: vix is None from FRED bundle; proceeding with regime classification only."
+                "vix is None from FRED bundle; proceeding with regime classification only."
             )
             vix = 20.0
 
@@ -852,7 +852,7 @@ class MacroStatisticalAgent:
                 window_final = window.iloc[-1]
             except Exception as exc:
                 logger.warning(
-                    "analyze: feature window assembly failed (%s); "
+                    "feature window assembly failed (%s); "
                     "falling back to single-observation inference.",
                     exc,
                 )
@@ -865,9 +865,7 @@ class MacroStatisticalAgent:
         # while actually being derived from a fabricated input.
         vix_percentile = 50.0
         if vix_defaulted:
-            logger.warning(
-                "analyze: vix was defaulted; skipping percentile computation, using neutral 50.0"
-            )
+            logger.warning("vix was defaulted; skipping percentile computation, using neutral 50.0")
         else:
             try:
                 vix_hist = self.market_data.ohlcv_daily("^VIX", period="2y")
@@ -976,5 +974,5 @@ class MacroStatisticalAgent:
         )
 
         self._cache = (ctx, now_local())
-        logger.debug("analyze: new MacroContext generated (Regime: %s)", regime.value)
+        logger.debug("new MacroContext generated (Regime: %s)", regime.value)
         return ctx
