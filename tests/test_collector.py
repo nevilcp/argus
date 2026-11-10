@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 from unittest import mock
 
@@ -107,6 +108,24 @@ async def _run_cycle(graph: mock.Mock, **kwargs: Any):
         compiled_graph=graph,
         **kwargs,
     )
+
+
+@pytest.mark.asyncio
+async def test_run_collection_cycle_default_log_path_honors_argus_data_dir(tmp_path, monkeypatch):
+    """With no decisions_log_path, decisions go under ARGUS_DATA_DIR, not the working dir."""
+    elsewhere = tmp_path / "cwd"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    graph = mock.Mock()
+    graph.invoke = mock.Mock(
+        return_value={"decisions": [_decision()], "errors": [], "macro_context": None}
+    )
+
+    await _run_cycle(graph)
+
+    log = Path(settings.ARGUS_DATA_DIR) / "decisions.jsonl"
+    assert len(log.read_text(encoding="utf-8").splitlines()) == 1
+    assert not (elsewhere / "data" / "decisions.jsonl").exists()
 
 
 @pytest.mark.asyncio
