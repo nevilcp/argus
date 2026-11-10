@@ -158,7 +158,7 @@ def aggregate_finbert_scores(scored: list[dict], decay_rate: float = 0.95) -> di
         Dict with keys ``net``, ``pct_pos``, ``pct_neg``, ``confidence``.
     """
     if not scored:
-        return {"net": 0.0, "pct_pos": 0.0, "pct_neg": 0.0, "confidence": 0.3}
+        return {"net": 0.0, "pct_pos": 0.0, "pct_neg": 0.0, "confidence": 0.0}
 
     n = len(scored)
     weights = [decay_rate ** (n - 1 - i) for i in range(n)]

@@ -317,6 +317,33 @@ def test_expire_pending_snapshots_deletes_only_entries_before_cutoff():
     manager.collection.delete.assert_called_once_with(ids=["snapshot_old"])
 
 
+def test_expire_pending_snapshots_handles_tz_aware_timestamps_without_aborting():
+    """A tz-aware stored timestamp is compared as UTC and does not abort the pass."""
+    manager = _manager_with_pending(
+        ids=["aware_old", "naive_old", "aware_new"],
+        timestamps=[
+            "2026-01-01T00:00:00+00:00",
+            "2026-01-02T00:00:00",
+            "2026-01-20T05:00:00-05:00",
+        ],
+    )
+
+    deleted = manager.expire_pending_snapshots(cutoff=datetime(2026, 1, 10))
+
+    assert deleted == 2
+    manager.collection.delete.assert_called_once_with(ids=["aware_old", "naive_old"])
+
+
+def test_expire_pending_snapshots_skips_an_unparseable_timestamp():
+    """A timestamp that does not parse is skipped, not fatal, and not deleted."""
+    manager = _manager_with_pending(
+        ids=["garbled", "old"], timestamps=["not-a-date", "2026-01-01T00:00:00"]
+    )
+
+    assert manager.expire_pending_snapshots(cutoff=datetime(2026, 1, 10)) == 1
+    manager.collection.delete.assert_called_once_with(ids=["old"])
+
+
 def test_expire_pending_snapshots_nothing_stale_does_not_call_delete():
     """When every PENDING snapshot is at or after cutoff, delete() is never called."""
     manager = _manager_with_pending(ids=["snapshot_new"], timestamps=["2026-01-20T00:00:00"])

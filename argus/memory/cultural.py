@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime
+from datetime import UTC, datetime
 from threading import Lock
 from typing import Any
 
@@ -593,10 +593,17 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
             if not timestamp_raw:
                 continue
             try:
-                if datetime.fromisoformat(str(timestamp_raw)) < cutoff:
-                    stale_ids.append(doc_id)
+                timestamp = datetime.fromisoformat(str(timestamp_raw))
             except ValueError:
                 continue
+            # Comparing aware with the naive cutoff raises TypeError and would abort the
+            # whole pass; convert to UTC then drop tzinfo (as
+            # reconciliation._as_naive_timestamp does, which can't be imported here without
+            # a cycle).
+            if timestamp.tzinfo is not None:
+                timestamp = timestamp.astimezone(UTC).replace(tzinfo=None)
+            if timestamp < cutoff:
+                stale_ids.append(doc_id)
 
         if not stale_ids:
             return 0

@@ -76,9 +76,9 @@ def get_sector(ticker: str, market_data: MarketDataProvider) -> str:
             _SECTOR_CACHE.set(ticker, sector)
         return sector
     except Exception as exc:
+        # Not cached: a transient failure would otherwise pin "Unknown" for the cache's
+        # whole TTL, while a successful response lacking a sector (cached above) is stable.
         logger.warning("Failed to fetch sector for %s, defaulting to 'Unknown': %s", ticker, exc)
-        if is_live:
-            _SECTOR_CACHE.set(ticker, "Unknown")
         return "Unknown"
 
 

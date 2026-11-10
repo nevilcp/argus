@@ -261,15 +261,6 @@ class PortfolioManagerAgent:
                 swallowed into ``adjustments``.
             UnregisteredModel: If the configured model has no rate-limit profile.
         """
-        total_wealth = user_profile.get("total_wealth")
-        # Capital base is total wealth; invest_pct (RULE 3) is applied once by the LLM, not pre-scaled here.
-        investable = float(total_wealth) if total_wealth is not None else 0.0
-
-        approved_tickers = [t for t, s in snapshots.items() if s.risk_approved]
-
-        if not approved_tickers:
-            logger.debug("[Portfolio] No approved tickers. Reverting to all-cash.")
-            return self._all_cash_allocation(investable)
 
         def record(msg: str, level: str = "warning") -> None:
             """Logs one enforcement or failure note and mirrors it into ``adjustments``.
@@ -285,6 +276,26 @@ class PortfolioManagerAgent:
                 logger.warning(msg)
             if adjustments is not None:
                 adjustments.append(msg)
+
+        total_wealth = user_profile.get("total_wealth")
+        # Capital base is total wealth; invest_pct (RULE 3) is applied once by the LLM, not pre-scaled here.
+        investable = float(total_wealth) if total_wealth is not None else 0.0
+
+        if investable <= 0:
+            # PortfolioAllocation requires positive capital, so even the all-cash
+            # fallback would raise a ValidationError out of allocate() here.
+            record(
+                "portfolio_allocation: total_wealth missing or not positive "
+                f"({total_wealth!r}); cannot build an allocation",
+                "error",
+            )
+            return None
+
+        approved_tickers = [t for t, s in snapshots.items() if s.risk_approved]
+
+        if not approved_tickers:
+            logger.debug("[Portfolio] No approved tickers. Reverting to all-cash.")
+            return self._all_cash_allocation(investable)
 
         # PA-4: invest_pct can be unreachable for a small universe; state the achievable ceiling instead.
         invest_pct = float(user_profile.get("invest_pct", 1.0))
