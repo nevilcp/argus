@@ -21,8 +21,8 @@ from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from argus.config import settings
+from argus.orchestration.checkpoint import build_checkpoint_serde
 from argus.orchestration.collector import CycleOutcome, append_decisions_jsonl, run_collection_cycle
-from argus.orchestration.graph import build_checkpoint_serde
 from argus.params import COLLECTOR, RECONCILIATION
 from argus.schemas.signals import ARGUSDecision
 from tests.helpers.builders import argus_decision, position_allocation

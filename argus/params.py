@@ -95,6 +95,13 @@ class SystemParams:
     trading_days_per_year: int = p(
         252, Provenance.LITERATURE, "252 = standard US trading days per year"
     )
+    mft_fetch_interval_seconds: int = p(
+        300,
+        Provenance.ARBITRARY,
+        "cadence of the MFT pipeline's sweep and publish loop in data/pipeline.py, "
+        "and the base of the freshness budgets in data/live_session_cache.py; not "
+        "evaluated against alternatives",
+    )
     freshness_margin_seconds: int = p(
         60,
         Provenance.ARBITRARY,

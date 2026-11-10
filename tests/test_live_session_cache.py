@@ -25,7 +25,6 @@ from argus.data.live_session_cache import (
     max_bar_age_seconds,
     session_state_ttl_seconds,
 )
-from argus.data.pipeline import _FETCH_INTERVAL
 from argus.params import SYSTEM
 
 _ET = ZoneInfo("America/New_York")
@@ -48,13 +47,19 @@ def _publish(
 
 def test_session_state_ttl_seconds_tolerates_one_missed_sweep():
     """The write-age TTL covers two fetch sweeps, not one decision cycle's worth."""
-    assert session_state_ttl_seconds() == 2 * _FETCH_INTERVAL + SYSTEM.freshness_margin_seconds
+    assert (
+        session_state_ttl_seconds()
+        == 2 * SYSTEM.mft_fetch_interval_seconds + SYSTEM.freshness_margin_seconds
+    )
 
 
 def test_max_bar_age_seconds_scales_with_interval():
     """The bar-age budget grows with the candle interval, matching the expected
     480s-at-1m figure."""
-    assert max_bar_age_seconds(1) == _FETCH_INTERVAL + 2 * 1 * 60 + SYSTEM.freshness_margin_seconds
+    assert (
+        max_bar_age_seconds(1)
+        == SYSTEM.mft_fetch_interval_seconds + 2 * 1 * 60 + SYSTEM.freshness_margin_seconds
+    )
     assert max_bar_age_seconds(1) == 480
     assert max_bar_age_seconds(5) > max_bar_age_seconds(1)
 
@@ -117,10 +122,16 @@ def test_admit_fails_closed_on_a_naive_bar_timestamp():
 
 
 def test_admit_passes_a_bar_one_full_fetch_interval_old():
-    """A bar as old as one full _FETCH_INTERVAL still clears max_bar_age_seconds."""
+    """A bar as old as one full fetch interval still clears max_bar_age_seconds."""
     cache = LiveSessionCache(interval_minutes=1)
     now = datetime.now(_ET)
-    _publish(cache, "AAPL", now=now, bar_age_seconds=_FETCH_INTERVAL, write_age_seconds=5)
+    _publish(
+        cache,
+        "AAPL",
+        now=now,
+        bar_age_seconds=SYSTEM.mft_fetch_interval_seconds,
+        write_age_seconds=5,
+    )
 
     result = cache.admit(["AAPL"], now)
 

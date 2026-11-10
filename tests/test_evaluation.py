@@ -230,6 +230,25 @@ def test_collect_paired_outcomes_skips_decisions_with_no_aggregated_signal():
     assert collect_paired_outcomes([decision], market_data, horizon_days=5) == []
 
 
+def test_collect_paired_outcomes_fetches_each_ticker_once():
+    """Decisions sharing a ticker share one price fetch, and unpositioned ones fetch none."""
+    decisions = [
+        _decision_with_signal(Signal.BULLISH, 0.8, ticker="A", price=100.0),
+        _decision_with_signal(Signal.BULLISH, 0.7, ticker="A", price=100.0),
+        _decision_with_signal(Signal.BEARISH, 0.6, ticker="B", price=100.0),
+    ]
+    decisions[2] = decisions[2].model_copy(update={"allocation": None})
+    dates = pd.date_range(datetime(2026, 1, 1), periods=10, freq="D")
+    market_data = FakeMarketData.from_closes(
+        {"A": pd.Series([100.0 + i for i in range(10)], index=dates)}
+    )
+
+    pairs = collect_paired_outcomes(decisions, market_data, horizon_days=5)
+
+    assert len(pairs) == 2
+    assert market_data.calls["ohlcv_daily"] == 1
+
+
 def test_evaluate_decisions_end_to_end_on_multiple_tickers():
     """Evaluation over multiple tickers scores each decision against its own price series."""
     decisions = [

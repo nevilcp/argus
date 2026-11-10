@@ -60,7 +60,7 @@ _FETCH_PERIOD = f"{_FETCH_PERIOD_DAYS}d"
 
 # Once a ticker's buffer already holds an indicator-ready depth, a sweep only
 # needs to catch the candles written since the last one — "1d" (yfinance's
-# shortest supported intraday period) comfortably covers one _FETCH_INTERVAL
+# shortest supported intraday period) comfortably covers one mft_fetch_interval_seconds
 # gap, and insert_candles' INSERT OR REPLACE makes the overlap with what's
 # already buffered a no-op rather than a duplicate
 _STEADY_STATE_FETCH_PERIOD = "1d"
@@ -69,8 +69,6 @@ _STEADY_STATE_FETCH_PERIOD = "1d"
 # resolution regardless of the raw fetch interval — RSI-14 on 1m bars is a
 # 14-minute lookback, too twitchy for a decision cadence measured in tens of minutes
 _INDICATOR_RESAMPLE_MINUTES = 5
-
-_FETCH_INTERVAL = 300
 
 _INTERVAL_RE = re.compile(r"^(\d+)(m|h)$")
 
@@ -442,7 +440,7 @@ class MFTDataPipeline:
 
         Safe to call while the pipeline is running. The ``_fetch_loop`` reads
         ``self.tickers`` on every iteration, so new entries are picked up within
-        ``_FETCH_INTERVAL`` seconds. This is the single enforcement point for
+        ``mft_fetch_interval_seconds`` seconds. This is the single enforcement point for
         ticker-shape validation and the SYSTEM.max_tracked_tickers cap:
         __init__ routes its initial universe through here too.
 
@@ -558,7 +556,7 @@ class MFTDataPipeline:
 
         Pauses ``SYSTEM.min_inter_request_seconds`` between requests — a fixed
         floor against yfinance rate limiting, not a spread computed to fill
-        ``_FETCH_INTERVAL``; that framing was wrong in principle (pacing exists
+        ``mft_fetch_interval_seconds``; that framing was wrong in principle (pacing exists
         for rate limiting, not to occupy the cadence budget) and meaningless for
         a one-shot ``run_once()`` sweep. Iterates over a snapshot of
         ``self.tickers`` so that concurrent ``register_tickers`` calls cannot corrupt iteration.
@@ -580,10 +578,10 @@ class MFTDataPipeline:
         was only fresh for a fraction of each publish cycle, since
         ``max_bar_age_seconds`` was sized off the fetch cadence while
         publication ran on a slower one. Sleeps only the remainder of
-        ``_FETCH_INTERVAL`` after each pass, not a full interval on top of
+        ``mft_fetch_interval_seconds`` after each pass, not a full interval on top of
         however long the pass itself took — otherwise the real cadence drifts
-        to pass_duration + _FETCH_INTERVAL instead of the intended
-        _FETCH_INTERVAL.
+        to pass_duration + mft_fetch_interval_seconds instead of the intended
+        mft_fetch_interval_seconds.
 
         Args:
             on_session_ready: Async callable receiving the ``session_states`` dict
@@ -605,7 +603,7 @@ class MFTDataPipeline:
                 logger.error("sweep failed — %s: %s", type(exc).__name__, exc)
 
             elapsed = time.monotonic() - started
-            await self._wait_or_stop(max(0.0, _FETCH_INTERVAL - elapsed))
+            await self._wait_or_stop(max(0.0, SYSTEM.mft_fetch_interval_seconds - elapsed))
 
     def _buffer_warm(self) -> bool:
         """Checks whether any tracked ticker already has an indicator-ready buffer depth.
@@ -665,7 +663,7 @@ class MFTDataPipeline:
         still cold (a new ticker, or the first sweep after a restart);
         otherwise fetches just `_STEADY_STATE_FETCH_PERIOD`'s worth.
         Re-downloading and re-upserting two full days of 1-minute candles
-        every `_FETCH_INTERVAL` regardless of how warm the buffer already is
+        every `mft_fetch_interval_seconds` regardless of how warm the buffer already is
         multiplies out to ~15,600 row upserts per sweep at 20 tickers, almost
         all of them re-writing rows already on disk unchanged.
 
