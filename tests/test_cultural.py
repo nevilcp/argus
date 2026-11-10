@@ -16,6 +16,7 @@ from argus.memory.cultural import (
     CulturalMemoryManager,
     EmbeddingModelMismatchError,
     _check_embedding_model_identity,
+    default_chroma_dir,
     get_cultural_memory,
 )
 from argus.params import MEMORY, RECONCILIATION
@@ -434,3 +435,18 @@ def test_get_cultural_memory_ignores_a_later_persist_dir_and_warns(monkeypatch, 
 
     assert returned is fake_manager
     assert any("ignored" in r.message for r in caplog.records)
+
+
+def test_default_chroma_dir_prefers_the_explicit_setting(monkeypatch):
+    """ARGUS_CHROMA_DIR, when set, is the store's location."""
+    monkeypatch.setattr(cultural_module.settings, "ARGUS_CHROMA_DIR", "/srv/chroma")
+
+    assert default_chroma_dir() == "/srv/chroma"
+
+
+def test_default_chroma_dir_falls_back_to_the_data_dir(monkeypatch):
+    """With no explicit setting the store lives under ARGUS_DATA_DIR."""
+    monkeypatch.setattr(cultural_module.settings, "ARGUS_CHROMA_DIR", "")
+    monkeypatch.setattr(cultural_module.settings, "ARGUS_DATA_DIR", "/srv/data")
+
+    assert default_chroma_dir() == "/srv/data/chroma_db"
