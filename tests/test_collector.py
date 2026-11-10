@@ -4,8 +4,7 @@ The unattended collector shares /analyze's concurrency slot rather than
 invoking the graph alongside a live /analyze run, and skips rather than
 waits when the slot is already held.
 
-The kill-switch gate is not covered here; see tests/test_kill_switch.py's
-"Collector gate" section for that.
+The kill-switch gate is not covered here; see tests/test_kill_switch_collector_gate.py.
 """
 
 from __future__ import annotations
