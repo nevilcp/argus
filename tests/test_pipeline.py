@@ -398,7 +398,6 @@ def test_momentum_1d_is_stable_under_dropping_up_to_10_oldest_bars(drop: int):
     assert trimmed == baseline
 
 
-@pytest.mark.asyncio
 async def test_sweep_uses_a_constant_inter_request_gap_independent_of_universe_size(monkeypatch):
     """Per-ticker fetch pause is constant regardless of how many tickers."""
 
@@ -423,7 +422,6 @@ async def test_sweep_uses_a_constant_inter_request_gap_independent_of_universe_s
     assert big_elapsed == pytest.approx(19 * SYSTEM.min_inter_request_seconds, abs=0.1)
 
 
-@pytest.mark.asyncio
 async def test_fetch_loop_sleeps_the_remainder_of_the_interval_not_a_full_one(monkeypatch):
     """A fetch_loop iteration's wait is shortened by however long the sweep itself took."""
     pipeline = MFTDataPipeline([], interval="1m")
@@ -449,7 +447,6 @@ async def test_fetch_loop_sleeps_the_remainder_of_the_interval_not_a_full_one(mo
     assert waits[0] == pytest.approx(_FETCH_INTERVAL - 0.05, abs=0.05)
 
 
-@pytest.mark.asyncio
 async def test_fetch_loop_cadence_holds_across_a_slow_sweep(monkeypatch):
     """Sweep start gap tracks _FETCH_INTERVAL, not sweep duration plus interval."""
     monkeypatch.setattr(pipeline_module, "_FETCH_INTERVAL", 0.2)
@@ -476,7 +473,6 @@ async def test_fetch_loop_cadence_holds_across_a_slow_sweep(monkeypatch):
     assert all(gap == pytest.approx(0.2, abs=0.05) for gap in gaps)
 
 
-@pytest.mark.asyncio
 async def test_fetch_loop_publishes_compressed_state_after_each_sweep():
     """Publication is merged into the fetch loop: one sweep, one compress, one callback."""
     pipeline = MFTDataPipeline(["AAPL"], interval="1m")
@@ -593,7 +589,6 @@ def test_buffer_warm_skips_a_ticker_whose_get_candles_raises(monkeypatch):
     assert pipeline._buffer_warm() is True
 
 
-@pytest.mark.asyncio
 async def test_start_propagates_a_fetch_loop_exception(monkeypatch):
     """start() surfaces _fetch_loop's exception rather than swallowing it (single loop now)."""
     pipeline = MFTDataPipeline([], interval="1m")
@@ -607,7 +602,6 @@ async def test_start_propagates_a_fetch_loop_exception(monkeypatch):
         await pipeline.start(on_session_ready=_noop_callback)
 
 
-@pytest.mark.asyncio
 async def test_stop_ends_the_loop_promptly(monkeypatch):
     """stop() wakes the loop immediately rather than waiting out its full interval."""
     pipeline = MFTDataPipeline([], interval="1m")
@@ -622,7 +616,6 @@ async def test_stop_ends_the_loop_promptly(monkeypatch):
     await asyncio.wait_for(task, timeout=2.0)
 
 
-@pytest.mark.asyncio
 async def test_start_after_stop_clears_the_stop_event(monkeypatch):
     """A restarted pipeline paces its sweeps again instead of inheriting the old stop signal."""
     pipeline = MFTDataPipeline([], interval="1m")
@@ -640,7 +633,6 @@ async def test_start_after_stop_clears_the_stop_event(monkeypatch):
     assert seen == [False]
 
 
-@pytest.mark.asyncio
 async def test_close_buffer_waits_out_an_in_flight_buffer_worker():
     """close_buffer blocks until a worker holding _buffer_op_lock releases it."""
     pipeline = MFTDataPipeline([], interval="1m")

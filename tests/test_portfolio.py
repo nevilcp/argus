@@ -132,7 +132,7 @@ def test_build_signal_table():
     assert "AAPL:" in table
     assert "MSFT:" in table
     assert "TSLA:" not in table
-    # .value, not str(Enum) — py>=3.11 would otherwise leak the class name into the prompt
+    # .value, not str(Enum) — str(Enum) would otherwise leak the class name into the prompt
     assert "MACRO: EXPANSION | VIX 12.50 (LOW) | GROWTH_FAVORED" in table
     assert "FUND=BULLISH(0.80)" in table
     assert "TECH=NEUTRAL(0.50)" in table

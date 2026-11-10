@@ -172,9 +172,9 @@ def test_store_trade_outcome_persists_flat_returns_instead_of_dropping_them():
 def test_store_trade_outcome_writes_vix_regime_value_not_enum_repr():
     """The stored document text uses VixRegime's .value, not its str(Enum) repr.
 
-    Python >= 3.11 includes the class name in a str-Enum's default
-    __format__, so an f-string without .value would write "VixRegime.HIGH"
-    into the document instead of "HIGH".
+    A str-Enum's default __format__ includes the class name, so an f-string
+    without .value would write "VixRegime.HIGH" into the document instead of
+    "HIGH".
     """
     manager = _manager_with_metadatas([])
     decision = ARGUSDecision(

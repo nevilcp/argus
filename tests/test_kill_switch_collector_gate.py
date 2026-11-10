@@ -12,14 +12,11 @@ from __future__ import annotations
 
 from unittest import mock
 
-import pytest
-
 import argus.risk.kill_switch as kill_switch_module
 from argus.orchestration.collector import run_collection_cycle
 from tests.helpers.kill_switch import make_ks
 
 
-@pytest.mark.asyncio
 async def test_collector_skips_when_kill_switch_halted():
     """run_collection_cycle refuses to run while this process's kill switch is halted."""
     ks = make_ks("MODERATE")
@@ -44,7 +41,6 @@ async def test_collector_skips_when_kill_switch_halted():
     pipeline.run_once.assert_not_called()
 
 
-@pytest.mark.asyncio
 async def test_collector_runs_when_no_kill_switch_initialized():
     """A process with no kill switch initialized (get_kill_switch() is None) is ungated."""
     assert kill_switch_module.get_kill_switch() is None

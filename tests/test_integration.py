@@ -159,7 +159,6 @@ class TestEndToEnd:
         assert f"{horizon_days}d" in kwargs["exit_reason"]
 
     @pytest.mark.live_network
-    @pytest.mark.asyncio
     @mock.patch("argus.agents.portfolio.PortfolioManagerAgent.allocate")
     @mock.patch("argus.orchestration.graph.get_cultural_memory")
     @mock.patch("argus.agents.fundamental.FundamentalAgent.analyze")

@@ -211,7 +211,6 @@ def test_health_reports_ok_when_no_background_tasks_are_configured(client):
     assert body["newest_cache_entry_age_seconds"] is None
 
 
-@pytest.mark.asyncio
 async def test_health_returns_503_naming_a_crashed_background_task(monkeypatch):
     """A task that died with an exception makes /health a 503 naming it."""
 
@@ -230,7 +229,6 @@ async def test_health_returns_503_naming_a_crashed_background_task(monkeypatch):
     assert "mft_pipeline" in exc_info.value.detail
 
 
-@pytest.mark.asyncio
 async def test_health_returns_503_naming_a_cancelled_background_task(monkeypatch):
     """A task that stopped via cancellation (not just an exception) is also reported dead."""
 

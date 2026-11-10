@@ -187,7 +187,6 @@ def test_analyze_rejects_when_kill_switch_trips_during_the_graph_run(client, mon
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_mft_session_callback_evicts_untracked_tickers(monkeypatch):
     """A ticker dropped from the tracked universe is also dropped from the live cache."""
     fake_pipeline = mock.Mock()

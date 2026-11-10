@@ -76,7 +76,6 @@ def test_seconds_until_next_reconcile_matches_utc_diff_on_a_normal_day():
     assert seconds == expected == 9 * 3600
 
 
-@pytest.mark.asyncio
 async def test_reconcile_loop_runs_its_cycle_body_via_to_thread(monkeypatch):
     """`_reconcile_loop` offloads its per-cycle body through asyncio.to_thread, not inline."""
     real_sleep = asyncio.sleep
