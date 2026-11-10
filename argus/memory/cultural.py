@@ -571,7 +571,7 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
         never fetchable again), would otherwise sit PENDING indefinitely,
         growing the collection and dragging summary_stats.pending_count up
         forever. Called on the same reconciliation cadence as
-        orchestration.reconciliation.prune_checkpoints and
+        orchestration.checkpoint.prune_checkpoints and
         compact_decisions_jsonl, with the same horizon-plus-margin cutoff — a
         snapshot that old has already had its chance to settle.
 

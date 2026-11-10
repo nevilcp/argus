@@ -19,7 +19,7 @@ Not responsible for:
 Dependencies:
   - langgraph
   - argus.agents.* (all six specialist agents)
-  - SQLite checkpointer (argus_graph.db) for resumable runs
+  - argus.orchestration.checkpoint (the SQLite checkpointer, argus_graph.db)
 
 Agent wiring is a build_graph() parameter, not a module-level singleton:
 every agent that touches the network or an LLM accepts a
@@ -30,15 +30,10 @@ build_graph() themselves rather than importing a shared instance.
 """
 
 import logging
-import sqlite3
 from datetime import datetime
-from pathlib import Path
 
 import pandas as pd
 from chromadb.errors import ChromaError
-from langchain_core.runnables import RunnableConfig
-from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
-from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, StateGraph
 
 from argus.agents.fundamental import FundamentalAgent
@@ -51,6 +46,7 @@ from argus.config import settings
 from argus.infra.clock import now_local
 from argus.memory.cultural import get_cultural_memory
 from argus.orchestration.aggregator import SPECIALIST_AGENTS, HybridSignalAggregator
+from argus.orchestration.checkpoint import CheckpointedGraph
 from argus.orchestration.state import ARGUSState, build_ticker_snapshots
 from argus.params import AGGREGATOR, RISK, SYSTEM
 from argus.ports import LLMClient, MarketDataProvider
@@ -66,97 +62,11 @@ from argus.seams import LiveMarketDataProvider
 
 logger = logging.getLogger(__name__)
 
-# Every schemas.signals model nested in ARGUSState must be listed here or the
-# checkpointer's msgpack deserializer degrades it to a plain dict; shared with
-# reconciliation.py's checkpoint loader so the two allowlists can't drift apart
-_CHECKPOINT_MODEL_CLASSES = (
-    "MacroContext",
-    "TechnicalSignal",
-    "FundamentalSignal",
-    "SentimentSignal",
-    "RiskAssessment",
-    "AggregatedSignal",
-    "PositionAllocation",
-    "PortfolioAllocation",
-    "ARGUSDecision",
-)
-
 # The three specialists HybridSignalAggregator votes over, and so the three whose
 # per-regime reliability is looked up; macro scales their weights rather than voting
 
 # Signed conviction convention shared with risk.py: positive is long-side pressure
 _SIGNAL_SIGN = {Signal.BULLISH: 1.0, Signal.BEARISH: -1.0, Signal.NEUTRAL: 0.0}
-
-
-def build_checkpoint_serde() -> JsonPlusSerializer:
-    """Returns the JsonPlusSerializer used to read/write ARGUSState checkpoints."""
-    return JsonPlusSerializer(
-        allowed_msgpack_modules=[
-            ("argus.schemas.signals", cls) for cls in _CHECKPOINT_MODEL_CLASSES
-        ]
-    )
-
-
-def _open_checkpointer(checkpoint_db_path: str) -> SqliteSaver | None:
-    """Opens a fresh SqliteSaver connection, or None if the path can't be opened.
-
-    Args:
-        checkpoint_db_path: SQLite file to checkpoint to.
-
-    Returns:
-        A new SqliteSaver, or None on any I/O failure (a checkpointer-less
-        compile still runs the graph, just without resumability).
-    """
-    conn: sqlite3.Connection | None = None
-    try:
-        if checkpoint_db_path != ":memory:":
-            Path(checkpoint_db_path).parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(checkpoint_db_path, check_same_thread=False)
-        return SqliteSaver(conn, serde=build_checkpoint_serde())
-    except Exception:
-        logger.warning(
-            "could not open %s; running without a checkpointer",
-            checkpoint_db_path,
-            exc_info=True,
-        )
-        if conn is not None:
-            conn.close()
-        return None
-
-
-class _CheckpointedGraph:
-    """Compiles the DAG fresh, with its own SQLite connection, on every invoke().
-
-    StateGraph.compile() does no I/O beyond opening the checkpoint connection;
-    the expensive part — constructing the six agents (LLM clients, the macro
-    HMM classifier load from disk) — happens once in build_graph() and is
-    captured in the node closures this wraps. Concurrent callers (parallel
-    /analyze requests, the unattended collector loop) therefore each get their
-    own sqlite3.Connection instead of contending on one shared checkpointer.
-    """
-
-    def __init__(self, builder: StateGraph, checkpoint_db_path: str):
-        """Stores the built (but not compiled) graph and its checkpoint path."""
-        self._builder = builder
-        self._checkpoint_db_path = checkpoint_db_path
-
-    def invoke(self, state: ARGUSState, config: RunnableConfig | None = None) -> dict:
-        """Compiles with a fresh checkpointer and invokes the graph once.
-
-        Args:
-            state: Initial ARGUSState for this session.
-            config: LangGraph run config, e.g. ``{"configurable": {"thread_id": ...}}``.
-
-        Returns:
-            The final ARGUSState dict produced by the run.
-        """
-        checkpointer = _open_checkpointer(self._checkpoint_db_path)
-        compiled = self._builder.compile(checkpointer=checkpointer)
-        try:
-            return compiled.invoke(state, config)
-        finally:
-            if checkpointer is not None:
-                checkpointer.conn.close()
 
 
 def _summarize_technical_posture(aggregated_signals: dict[str, AggregatedSignal]) -> str:
@@ -325,9 +235,9 @@ def build_graph(
             also isolates a call site that omits this argument.
 
     Returns:
-        A _CheckpointedGraph, ready for .invoke(). Recompiles with a fresh
+        A CheckpointedGraph, ready for .invoke(). Recompiles with a fresh
         checkpointer connection on every call rather than baking one
-        connection into a single compiled graph — see _CheckpointedGraph.
+        connection into a single compiled graph — see checkpoint.CheckpointedGraph.
     """
     if checkpoint_db_path is None:
         checkpoint_db_path = str(settings.data_path("argus_graph.db"))
@@ -765,4 +675,4 @@ def build_graph(
     builder.add_edge("portfolio_allocation", "log_decisions")
     builder.add_edge("log_decisions", END)
 
-    return _CheckpointedGraph(builder, checkpoint_db_path)
+    return CheckpointedGraph(builder, checkpoint_db_path)

@@ -25,7 +25,7 @@ Responsibilities:
 
 Not responsible for:
   - Reconciling individual decisions into cultural memory (see
-    orchestration/reconciliation.py, which this module calls into)
+    orchestration/reconciliation.py, which calls into this module)
   - Deciding when the kill switch halts (see risk/kill_switch.py)
 """
 
@@ -43,41 +43,11 @@ import pandas as pd
 from argus.config import settings
 from argus.infra.clock import now_local
 from argus.infra.files import atomic_write_text
-from argus.orchestration.reconciliation import _needs_reconciliation, compute_realized_return
+from argus.outcomes import close_prices, compute_realized_return, needs_reconciliation
 from argus.ports import MarketDataProvider
 from argus.schemas.signals import ARGUSDecision
 
 logger = logging.getLogger(__name__)
-
-
-def _close_prices(
-    ticker: str,
-    market_data: MarketDataProvider,
-    cache: dict[str, pd.Series | None],
-) -> pd.Series | None:
-    """Returns a ticker's daily close series, fetching each ticker at most once per cache.
-
-    Args:
-        ticker: Ticker to price.
-        market_data: Source of the daily close price series.
-        cache: Per-call memo, mutated in place; a failed fetch is cached as
-            None so a broken ticker isn't retried for every decision on it.
-
-    Returns:
-        The close price series, or None if the fetch failed.
-    """
-    if ticker not in cache:
-        try:
-            cache[ticker] = market_data.ohlcv_daily(ticker)["close"]
-        except Exception as exc:
-            logger.warning(
-                "failed to fetch price history for %s (%s): %s",
-                ticker,
-                type(exc).__name__,
-                exc,
-            )
-            cache[ticker] = None
-    return cache[ticker]
 
 
 def _weighted_run_return(
@@ -90,11 +60,11 @@ def _weighted_run_return(
 
     Args:
         run_decisions: Decisions sharing one session_timestamp, all already
-            confirmed by _needs_reconciliation.
+            confirmed by needs_reconciliation.
         market_data: Source of each ticker's daily close price series.
         horizon_days: Calendar days after session_timestamp defining each
             decision's target exit date.
-        prices_by_ticker: Price memo shared across runs, see _close_prices.
+        prices_by_ticker: Price memo shared across runs, see outcomes.close_prices.
 
     Returns:
         The weighted-average return, or None if nothing in the run has
@@ -103,7 +73,7 @@ def _weighted_run_return(
     weighted_sum = 0.0
     weight_total = 0.0
     for decision in run_decisions:
-        prices = _close_prices(decision.ticker, market_data, prices_by_ticker)
+        prices = close_prices(decision.ticker, market_data, prices_by_ticker)
         if prices is None:
             continue
         outcome = compute_realized_return(decision, market_data, horizon_days, prices=prices)
@@ -111,7 +81,7 @@ def _weighted_run_return(
             continue
 
         actual_return_pct, _, _ = outcome
-        assert decision.allocation is not None, "_needs_reconciliation already confirmed this"
+        assert decision.allocation is not None, "needs_reconciliation already confirmed this"
         weight = decision.allocation.allocation_pct
         weighted_sum += actual_return_pct * weight
         weight_total += weight
@@ -149,7 +119,7 @@ def compute_run_returns(
     """
     by_run: dict[datetime, list[ARGUSDecision]] = defaultdict(list)
     for decision in decisions:
-        if _needs_reconciliation(decision):
+        if needs_reconciliation(decision):
             by_run[decision.session_timestamp].append(decision)
 
     horizon = timedelta(days=horizon_days)

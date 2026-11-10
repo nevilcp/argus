@@ -44,11 +44,11 @@ from pathlib import Path
 from argus.config import settings
 from argus.data.pipeline import MFTDataPipeline
 from argus.infra.clock import now_local
-from argus.orchestration.reconciliation import (
-    decisions_log_lock,
+from argus.orchestration.checkpoint import (
     default_checkpoint_retention_cutoff,
     prune_checkpoints,
 )
+from argus.orchestration.reconciliation import decisions_log_lock
 from argus.orchestration.state import initial_state
 from argus.params import COLLECTOR
 from argus.risk.kill_switch import get_kill_switch
@@ -228,7 +228,7 @@ async def run_collection_cycle(
             the six agents (LLM clients, the macro HMM classifier load) once
             rather than reconstructing them every cycle. Each ``.invoke()``
             still opens its own checkpoint connection — see
-            graph.py's ``_CheckpointedGraph``.
+            checkpoint.py's ``CheckpointedGraph``.
         decisions_log_path: JSONL file each cycle's decisions are appended to. None
             (default) resolves to ``<ARGUS_DATA_DIR>/decisions.jsonl`` at call time,
             so tests/conftest.py's per-test ARGUS_DATA_DIR override also isolates a

@@ -24,9 +24,9 @@ Dependencies:
   - numpy, pandas, scipy (statistics)
   - argus.backtesting.metrics (compute_all_metrics, reused for its
     trade-level block rather than duplicated)
-  - argus.orchestration.reconciliation (compute_realized_return, reused
-    rather than duplicated — this is the same function that feeds
-    cultural.store_trade_outcome in production)
+  - argus.outcomes (compute_realized_return, reused rather than duplicated —
+    this is the same function that feeds cultural.store_trade_outcome in
+    production)
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ from scipy import stats
 
 from argus.backtesting.metrics import compute_all_metrics
 from argus.backtesting.replay import SessionResult, replay_session
-from argus.orchestration.reconciliation import compute_realized_return
+from argus.outcomes import compute_realized_return, needs_reconciliation
 from argus.params import EVALUATION
 from argus.ports import MarketDataProvider
 from argus.schemas.signals import ARGUSDecision, RiskVerdict, Signal
@@ -87,7 +87,7 @@ def collect_paired_outcomes(
 ) -> list[PairedOutcome]:
     """Pairs signed conviction with realized forward return for every reconcilable decision.
 
-    Reuses reconciliation.compute_realized_return — the same function that
+    Reuses outcomes.compute_realized_return — the same function that
     feeds cultural.store_trade_outcome in production — so this evaluation
     measures exactly the decisions that would actually be reconciled, not a
     parallel notion of "outcome". Decisions with no aggregated signal, no
@@ -106,11 +106,18 @@ def collect_paired_outcomes(
         One PairedOutcome per reconcilable decision.
     """
     pairs: list[PairedOutcome] = []
+    prices_by_ticker: dict[str, pd.Series] = {}
     for decision in decisions:
         conv = signed_conviction(decision)
-        if conv is None:
+        if conv is None or not needs_reconciliation(decision):
             continue
-        outcome = compute_realized_return(decision, market_data, horizon_days)
+        # One fetch per ticker, however many decisions share it. A failed fetch
+        # raises rather than skipping, so a partial evaluation is never silent
+        if decision.ticker not in prices_by_ticker:
+            prices_by_ticker[decision.ticker] = market_data.ohlcv_daily(decision.ticker)["close"]
+        outcome = compute_realized_return(
+            decision, market_data, horizon_days, prices=prices_by_ticker[decision.ticker]
+        )
         if outcome is None:
             continue
         actual_return_pct, holding_days, _exit_reason = outcome

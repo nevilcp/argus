@@ -12,15 +12,14 @@ Shapley, and horizon_days is provisional pending a pre-registered evaluation.
 
 Responsibilities:
   - credit_primary_driver: leave-one-out ablation over HybridSignalAggregator
-  - compute_realized_return: entry/exit close prices -> (return, holding_days, reason)
   - reconcile_decision / reconcile_decisions: orchestrate the above into
     cultural.store_trade_outcome calls
   - load_decisions_from_checkpoints: read ARGUSDecision objects back out of
     argus_graph.db
   - load_decisions_from_jsonl: read ARGUSDecision objects back out of a
     decisions.jsonl log (the unattended collector's lighter-weight alternative)
-  - prune_checkpoints / compact_decisions_jsonl: bound the two decision
-    stores above so neither grows forever
+  - compact_decisions_jsonl: bound the decisions.jsonl log so it doesn't grow
+    forever (checkpoint pruning lives in orchestration/checkpoint.py)
   - run_reconciliation_pass: compose the above plus the paper-book update
     into the one reconciliation sequence both api/main.py and
     scripts/reconcile_outcomes.py run
@@ -32,19 +31,17 @@ Not responsible for:
 
 Dependencies:
   - argus.orchestration.aggregator (HybridSignalAggregator)
-  - argus.orchestration.graph (build_checkpoint_serde)
+  - argus.orchestration.checkpoint (open_saver, prune_checkpoints)
+  - argus.outcomes (compute_realized_return, needs_reconciliation, close_prices)
   - argus.memory.cultural (CulturalMemoryManager)
-  - argus.seams (MarketDataProvider)
-  - argus.risk.paper_book (PaperBook; imported inside run_reconciliation_pass
-    to break the cycle, since paper_book imports back into this module)
-  - langgraph (SqliteSaver, to read argus_graph.db)
+  - argus.ports (MarketDataProvider)
+  - argus.risk.paper_book (the paper-book update in run_reconciliation_pass)
 """
 
 from __future__ import annotations
 
 import fcntl
 import logging
-import sqlite3
 from collections.abc import Collection, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -52,16 +49,20 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
-from langgraph.checkpoint.base import Checkpoint
-from langgraph.checkpoint.sqlite import SqliteSaver
 
 from argus.infra.clock import as_naive_timestamp, now_local
 from argus.infra.files import atomic_write_text
 from argus.memory.cultural import CulturalMemoryManager
 from argus.orchestration.aggregator import SPECIALIST_AGENTS, HybridSignalAggregator
-from argus.orchestration.graph import build_checkpoint_serde
+from argus.orchestration.checkpoint import (
+    newest_checkpoint_per_thread,
+    open_saver,
+    prune_checkpoints,
+)
+from argus.outcomes import close_prices, compute_realized_return, needs_reconciliation
 from argus.params import RECONCILIATION
 from argus.ports import MarketDataProvider
+from argus.risk import paper_book
 from argus.schemas.signals import ARGUSDecision
 
 logger = logging.getLogger(__name__)
@@ -136,92 +137,6 @@ def credit_primary_driver(
             best_name = name
 
     return best_name
-
-
-def _needs_reconciliation(decision: ARGUSDecision) -> bool:
-    """Whether a decision took a position that could have a realized outcome."""
-    return (
-        decision.technical is not None
-        and decision.allocation is not None
-        and decision.allocation.allocation_pct > 0
-    )
-
-
-def _realized_return_from_prices(
-    decision: ARGUSDecision, prices: pd.Series, horizon_days: int
-) -> tuple[float, int, str] | None:
-    """Pairs a decision's entry price with a later close drawn from an already-fetched series.
-
-    Args:
-        decision: Completed ARGUSDecision; caller has already confirmed
-            _needs_reconciliation(decision).
-        prices: Close-price Series for decision.ticker.
-        horizon_days: Calendar days after session_timestamp defining the
-            target exit date.
-
-    Returns:
-        (actual_return_pct, holding_days, exit_reason), or None when the
-        price series doesn't yet extend past the target exit date — horizon
-        not reached, deferred rather than fabricated.
-    """
-    assert decision.technical is not None, "caller must confirm _needs_reconciliation(decision)"
-    entry_price = decision.technical.current_price
-    entry_date = as_naive_timestamp(decision.session_timestamp)
-    target_exit_date = entry_date + timedelta(days=horizon_days)
-
-    prices = prices.copy()
-    prices.index = pd.DatetimeIndex([as_naive_timestamp(ts) for ts in prices.index])
-
-    on_or_after = prices[prices.index >= target_exit_date].sort_index()
-    if on_or_after.empty:
-        return None
-
-    exit_date = on_or_after.index[0]
-    exit_price = float(on_or_after.iloc[0])
-
-    actual_return_pct = (exit_price - entry_price) / entry_price
-    holding_days = (exit_date - entry_date).days
-    exit_reason = f"horizon reached ({horizon_days}d target, {holding_days}d actual)"
-
-    return actual_return_pct, holding_days, exit_reason
-
-
-def compute_realized_return(
-    decision: ARGUSDecision,
-    market_data: MarketDataProvider,
-    horizon_days: int,
-    *,
-    prices: pd.Series | None = None,
-) -> tuple[float, int, str] | None:
-    """Computes realized return by pairing the decision's entry price with a later close.
-
-    Entry price is decision.technical.current_price — the close the
-    technical agent scored against at decision time. Exit price is the first
-    close on or after session_timestamp + horizon_days, read from
-    market_data.ohlcv_daily().
-
-    Args:
-        decision: Completed ARGUSDecision.
-        market_data: Source of the ticker's daily close price series.
-        horizon_days: Calendar days after session_timestamp defining the
-            target exit date.
-        prices: Pre-fetched close-price Series for decision.ticker. Passed by
-            callers batching one fetch per ticker across several decisions
-            (see reconcile_decisions, risk/paper_book.py); fetched here when
-            omitted.
-
-    Returns:
-        (actual_return_pct, holding_days, exit_reason), or None when there is
-        nothing to reconcile: no technical signal (no entry price), no
-        allocation or a zero/negative-weight allocation (no position was
-        taken), or the price series doesn't yet extend past the target exit
-        date — horizon not reached, deferred rather than fabricated.
-    """
-    if not _needs_reconciliation(decision):
-        return None
-    if prices is None:
-        prices = market_data.ohlcv_daily(decision.ticker)["close"]
-    return _realized_return_from_prices(decision, prices, horizon_days)
 
 
 def reconcile_decision(
@@ -304,27 +219,13 @@ def reconcile_decisions(
     """
     already_done = cultural.already_reconciled([d.decision_id for d in decisions])
     candidates = [
-        d for d in decisions if d.decision_id not in already_done and _needs_reconciliation(d)
+        d for d in decisions if d.decision_id not in already_done and needs_reconciliation(d)
     ]
 
     prices_by_ticker: dict[str, pd.Series | None] = {}
     stored = 0
     for decision in candidates:
-        if decision.ticker not in prices_by_ticker:
-            try:
-                prices_by_ticker[decision.ticker] = market_data.ohlcv_daily(decision.ticker)[
-                    "close"
-                ]
-            except Exception as exc:
-                logger.warning(
-                    "failed to fetch price history for %s (%s): %s",
-                    decision.ticker,
-                    type(exc).__name__,
-                    exc,
-                )
-                prices_by_ticker[decision.ticker] = None
-
-        prices = prices_by_ticker[decision.ticker]
+        prices = close_prices(decision.ticker, market_data, prices_by_ticker)
         if prices is None:
             continue
         if reconcile_decision(decision, market_data, cultural, horizon_days, prices=prices):
@@ -356,31 +257,6 @@ def decisions_log_lock(path: str | Path) -> Iterator[None]:
         yield
 
 
-@contextmanager
-def _checkpoint_saver(db_path: str) -> Iterator[SqliteSaver]:
-    """Opens a SqliteSaver over the checkpoint database, closing its connection on exit."""
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    try:
-        yield SqliteSaver(conn, serde=build_checkpoint_serde())
-    finally:
-        conn.close()
-
-
-def _newest_checkpoint_per_thread(saver: SqliteSaver) -> Iterator[tuple[str, Checkpoint]]:
-    """Yields each thread's newest checkpoint exactly once, as (thread_id, checkpoint).
-
-    SqliteSaver.list() yields checkpoints newest-first, so a thread's first tuple
-    is its most recent — and so most complete — one.
-    """
-    seen_threads: set[str] = set()
-    for tup in saver.list(None):
-        thread_id = tup.config["configurable"]["thread_id"]
-        if thread_id in seen_threads:
-            continue
-        seen_threads.add(thread_id)
-        yield thread_id, tup.checkpoint
-
-
 def load_decisions_from_checkpoints(db_path: str = "argus_graph.db") -> list[ARGUSDecision]:
     """Reads every session's decisions back out of the LangGraph checkpoint database.
 
@@ -402,8 +278,8 @@ def load_decisions_from_checkpoints(db_path: str = "argus_graph.db") -> list[ARG
         return []
 
     decisions: list[ARGUSDecision] = []
-    with _checkpoint_saver(db_path) as saver:
-        for _thread_id, checkpoint in _newest_checkpoint_per_thread(saver):
+    with open_saver(db_path) as saver:
+        for _thread_id, checkpoint in newest_checkpoint_per_thread(saver):
             channel_values = checkpoint.get("channel_values", {})
             decisions.extend(channel_values.get("decisions") or [])
     return decisions
@@ -540,7 +416,7 @@ def compact_decisions_jsonl(
                 kept.append(decision)
                 continue
 
-            resolved = decision.decision_id in resolved_ids or not _needs_reconciliation(decision)
+            resolved = decision.decision_id in resolved_ids or not needs_reconciliation(decision)
             if resolved:
                 continue
             if session_ts >= unresolved_cutoff_naive:
@@ -573,71 +449,6 @@ def compact_decisions_jsonl(
         len(malformed),
     )
     return result
-
-
-def default_checkpoint_retention_cutoff() -> datetime:
-    """The prune_checkpoints cutoff at RECONCILIATION's declared default horizon.
-
-    Shared by collector.py's per-cycle pruning and this module's own
-    run_reconciliation_pass (whenever its horizon_days is left at the default), so
-    the two prune paths can't silently drift onto different windows.
-    """
-    return now_local() - timedelta(
-        days=RECONCILIATION.horizon_days + RECONCILIATION.retention_margin_days
-    )
-
-
-def prune_checkpoints(db_path: str, cutoff: datetime) -> int:
-    """Deletes every checkpoint thread whose most recent checkpoint predates cutoff, then VACUUMs.
-
-    Each build_graph() invocation checkpoints under a fresh, never-reused
-    thread_id (see build_graph()'s callers) and nothing resumes a thread by
-    id, so a thread's checkpoints exist only as load_decisions_from_checkpoints'
-    read path — a fallback now that decisions.jsonl is the durable
-    record both /analyze and the collector write to. Retention, not removal:
-    the checkpoint DB stays available as that fallback for anything within the
-    reconciliation window, it just no longer grows without bound.
-
-    Args:
-        db_path: Path to the SQLite file build_graph() checkpoints to.
-        cutoff: Threads whose newest checkpoint timestamp is before this are
-            deleted. Should be tz-naive, matching the naive timestamps
-            LangGraph checkpoint metadata is compared against here.
-
-    Returns:
-        Count of threads deleted. 0 if the database doesn't exist yet.
-    """
-    if not Path(db_path).exists():
-        return 0
-
-    cutoff_naive = as_naive_timestamp(cutoff)
-    with _checkpoint_saver(db_path) as saver:
-        stale_threads: list[str] = []
-        for thread_id, checkpoint in _newest_checkpoint_per_thread(saver):
-            ts_raw = checkpoint.get("ts")
-            if ts_raw is None:
-                continue
-            if as_naive_timestamp(datetime.fromisoformat(ts_raw)) < cutoff_naive:
-                stale_threads.append(thread_id)
-
-        if not stale_threads:
-            return 0
-
-        params = [(thread_id,) for thread_id in stale_threads]
-        conn = saver.conn
-        cur = conn.cursor()
-        cur.executemany("DELETE FROM checkpoints WHERE thread_id = ?", params)
-        cur.executemany("DELETE FROM writes WHERE thread_id = ?", params)
-        conn.commit()
-        conn.execute("VACUUM")
-
-    logger.info(
-        "deleted %d thread(s) from %s (cutoff=%s)",
-        len(stale_threads),
-        db_path,
-        cutoff_naive.isoformat(),
-    )
-    return len(stale_threads)
 
 
 @dataclass
@@ -762,11 +573,6 @@ def run_reconciliation_pass(
             unlike the bounded stores below, these aren't independent of the
             rest of the pass, so a failure here is the caller's to handle.
     """
-    # Deferred: argus.risk.paper_book imports this module for
-    # _needs_reconciliation/compute_realized_return, so importing it at
-    # module level here would be circular.
-    from argus.risk import paper_book
-
     if decisions_log_path:
         decisions = load_decisions_from_jsonl(decisions_log_path)
     elif checkpoint_db_path:

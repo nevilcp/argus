@@ -34,9 +34,8 @@ real elapsed time, which is wrong by exactly the DST offset across a
 transition.
 
 Dependencies:
-  - argus.data.pipeline (_FETCH_INTERVAL, the sweep cadence both thresholds
-    below are built from)
-  - argus.params (SYSTEM.freshness_margin_seconds)
+  - argus.params (SYSTEM.mft_fetch_interval_seconds, the sweep cadence both thresholds
+    below are built from, and SYSTEM.freshness_margin_seconds)
 """
 
 from __future__ import annotations
@@ -45,7 +44,6 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from argus.data.pipeline import _FETCH_INTERVAL
 from argus.infra.clock import now_market
 from argus.params import SYSTEM
 
@@ -57,7 +55,7 @@ def session_state_ttl_seconds() -> int:
         Budget in seconds: two fetch sweeps — tolerating one missed sweep
         before an entry counts as stalled — plus a fixed jitter margin.
     """
-    return 2 * _FETCH_INTERVAL + SYSTEM.freshness_margin_seconds
+    return 2 * SYSTEM.mft_fetch_interval_seconds + SYSTEM.freshness_margin_seconds
 
 
 def max_bar_age_seconds(interval_minutes: int) -> int:
@@ -74,7 +72,11 @@ def max_bar_age_seconds(interval_minutes: int) -> int:
         Budget in seconds: one fetch sweep plus two candle intervals plus a
         fixed jitter margin.
     """
-    return _FETCH_INTERVAL + 2 * interval_minutes * 60 + SYSTEM.freshness_margin_seconds
+    return (
+        SYSTEM.mft_fetch_interval_seconds
+        + 2 * interval_minutes * 60
+        + SYSTEM.freshness_margin_seconds
+    )
 
 
 def _bar_age_seconds(state: dict, now_et: datetime) -> float | None:

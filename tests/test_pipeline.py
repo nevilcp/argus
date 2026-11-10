@@ -17,7 +17,6 @@ import argus.data.pipeline as pipeline_module
 from argus.config import settings
 from argus.data.cache import OHLCVBuffer
 from argus.data.pipeline import (
-    _FETCH_INTERVAL,
     _FETCH_PERIOD,
     _STEADY_STATE_FETCH_PERIOD,
     MFTDataPipeline,
@@ -443,13 +442,13 @@ async def test_fetch_loop_sleeps_the_remainder_of_the_interval_not_a_full_one(mo
     await pipeline._fetch_loop(_noop_callback)
 
     assert len(waits) == 1
-    assert waits[0] < _FETCH_INTERVAL
-    assert waits[0] == pytest.approx(_FETCH_INTERVAL - 0.05, abs=0.05)
+    assert waits[0] < SYSTEM.mft_fetch_interval_seconds
+    assert waits[0] == pytest.approx(SYSTEM.mft_fetch_interval_seconds - 0.05, abs=0.05)
 
 
 async def test_fetch_loop_cadence_holds_across_a_slow_sweep(monkeypatch):
-    """Sweep start gap tracks _FETCH_INTERVAL, not sweep duration plus interval."""
-    monkeypatch.setattr(pipeline_module, "_FETCH_INTERVAL", 0.2)
+    """Sweep start gap tracks mft_fetch_interval_seconds, not sweep duration plus interval."""
+    _override_system(monkeypatch, mft_fetch_interval_seconds=0.2)
     pipeline = MFTDataPipeline([], interval="1m")
     monkeypatch.setattr(pipeline, "_is_market_hours", lambda: True)
     monkeypatch.setattr(pipeline, "compress_all", lambda: {})
@@ -612,7 +611,7 @@ async def test_stop_ends_the_loop_promptly(monkeypatch):
     await pipeline.stop()
 
     # Without the stop_event-based wait, this would block for up to
-    # _FETCH_INTERVAL seconds instead of returning almost immediately
+    # mft_fetch_interval_seconds instead of returning almost immediately
     await asyncio.wait_for(task, timeout=2.0)
 
 

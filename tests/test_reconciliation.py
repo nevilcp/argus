@@ -19,21 +19,21 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 from argus.memory.cultural import CulturalMemoryManager
 from argus.orchestration.aggregator import HybridSignalAggregator
-from argus.orchestration.graph import build_checkpoint_serde, build_graph
+from argus.orchestration.checkpoint import build_checkpoint_serde, prune_checkpoints
+from argus.orchestration.graph import build_graph
 from argus.orchestration.reconciliation import (
     CompactionResult,
     ReconciliationReport,
     compact_decisions_jsonl,
-    compute_realized_return,
     credit_primary_driver,
     load_decisions_from_checkpoints,
     load_decisions_from_jsonl,
-    prune_checkpoints,
     reconcile_decision,
     reconcile_decisions,
     run_reconciliation_pass,
 )
 from argus.orchestration.state import ARGUSState
+from argus.outcomes import compute_realized_return
 from argus.params import RECONCILIATION
 from argus.risk import paper_book
 from argus.risk.paper_book import PaperBook
@@ -516,7 +516,7 @@ def test_append_issued_during_compaction_is_not_lost(tmp_path, monkeypatch):
     )
     mid_compaction = threading.Event()
     release = threading.Event()
-    real_needs = reconciliation._needs_reconciliation
+    real_needs = reconciliation.needs_reconciliation
 
     def _held(decision):
         # Called per decision after the log was read and before it is rewritten
@@ -524,7 +524,7 @@ def test_append_issued_during_compaction_is_not_lost(tmp_path, monkeypatch):
         assert release.wait(timeout=10)
         return real_needs(decision)
 
-    monkeypatch.setattr(reconciliation, "_needs_reconciliation", _held)
+    monkeypatch.setattr(reconciliation, "needs_reconciliation", _held)
 
     compactor = threading.Thread(target=_compact, args=(path, datetime(2026, 1, 10)))
     compactor.start()
