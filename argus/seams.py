@@ -431,6 +431,15 @@ class GroqLLMClient:
             token_usage.get("completion_tokens", 0),
         )
 
+        # A cut-off reply otherwise surfaces downstream as an opaque json_parse error.
+        if response.response_metadata.get("finish_reason") == "length":
+            logger.warning(
+                "[%s] reply truncated at max_tokens=%d (finish_reason=length); "
+                "reasoning tokens count against this budget",
+                self._model,
+                self._max_tokens,
+            )
+
         return _response_text(response.content)
 
 

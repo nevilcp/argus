@@ -2,8 +2,16 @@ from datetime import datetime
 
 import pytest
 
-from argus.agents.portfolio import build_signal_table, half_kelly_weight
+from argus.agents.portfolio import (
+    SYSTEM_PROMPT,
+    PortfolioManagerAgent,
+    build_signal_table,
+    half_kelly_weight,
+)
+from argus.config import settings
+from argus.orchestration.governor import BOOTSTRAP_LIMITS, estimate_tokens
 from argus.orchestration.state import TickerSnapshot
+from argus.params import PORTFOLIO
 from argus.schemas.signals import (
     MacroContext,
     Regime,
@@ -11,6 +19,7 @@ from argus.schemas.signals import (
     RiskVerdict,
     Signal,
 )
+from argus.seams import FixtureLLMClient
 
 
 def test_half_kelly_weight_bullish():
@@ -136,3 +145,36 @@ def test_build_signal_table():
     assert "Cap=5.0%" in table  # MSFT reduced weight
     assert "Evidence=3/3" in table  # AAPL has all three specialists present
     assert "Evidence=0/3" in table  # MSFT has no aggregated signal
+
+
+def test_full_universe_prompt_reservation_fits_the_tpm_floor():
+    """The governor reserves prompt + max_tokens up front; if that alone exceeds the
+    tokens-per-minute floor it can never admit the call and raises RateLimitExceeded."""
+    snapshots = {
+        ticker: TickerSnapshot(
+            fundamental=MockSignal(Signal.BULLISH, 0.8),
+            technical=MockSignal(Signal.NEUTRAL, 0.5),
+            sentiment=MockSignal(Signal.BULLISH, 0.7),
+            aggregated=MockSignal(
+                Signal.BULLISH, 0.85, agents_present=["fundamental", "technical", "sentiment"]
+            ),
+            risk=_risk(RiskVerdict.APPROVE, 0.05, var_99=0.02, stop_loss=150.0, portfolio_beta=1.1),
+        )
+        for ticker in settings.ARGUS_UNIVERSE
+    }
+    agent = PortfolioManagerAgent(llm_client=FixtureLLMClient({}))
+    prompt = agent._build_allocation_prompt(
+        100_000,
+        0.9,
+        0.9,
+        {},
+        build_signal_table(snapshots, None),
+        dict.fromkeys(snapshots, 0.05),
+        ["x" * 200] * 3,
+        ["x" * 200] * 3,
+    )
+
+    reserved = estimate_tokens(SYSTEM_PROMPT, prompt, PORTFOLIO.llm_max_tokens)
+
+    floor = BOOTSTRAP_LIMITS[settings.ARGUS_PORTFOLIO_MODEL]["tokens_per_minute"]
+    assert reserved <= floor

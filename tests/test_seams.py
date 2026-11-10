@@ -270,3 +270,29 @@ def test_groq_llm_client_success_does_not_release_reservation():
 
     mock_release.assert_not_called()
     mock_record.assert_called_once()
+
+
+def test_groq_llm_client_warns_when_reply_is_truncated(caplog):
+    """finish_reason=length is logged, not left as an opaque downstream json_parse error."""
+    client = _client_with_mocked_llm()
+    response = _fake_success_response()
+    response.response_metadata["finish_reason"] = "length"
+    client._llm.invoke.return_value = response
+
+    with caplog.at_level("WARNING", logger="argus.seams"):
+        client.complete("system", "user")
+
+    assert "finish_reason=length" in caplog.text
+
+
+def test_groq_llm_client_does_not_warn_on_normal_stop(caplog):
+    """A reply that stopped on its own produces no truncation warning."""
+    client = _client_with_mocked_llm()
+    response = _fake_success_response()
+    response.response_metadata["finish_reason"] = "stop"
+    client._llm.invoke.return_value = response
+
+    with caplog.at_level("WARNING", logger="argus.seams"):
+        client.complete("system", "user")
+
+    assert "finish_reason=length" not in caplog.text

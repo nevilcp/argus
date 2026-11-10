@@ -320,11 +320,13 @@ class PortfolioParams:
         0.05, Provenance.CONVENTION, "near-zero temperature for reproducible structured output"
     )
     llm_max_tokens: int = p(
-        1000,
+        3000,
         Provenance.ARBITRARY,
-        "gpt-oss-120b at reasoning_effort='low' on a reconstructed dense-portfolio "
-        "prompt peaked at 785 completion tokens (up to 458 reasoning) across 4 runs; "
-        "1000 leaves ~25% headroom",
+        "1000 truncated every attempt of the first live 20-ticker run (JSON cut off at "
+        "chars 2498-3268; reasoning tokens share this budget). A full 20-position reply "
+        "is ~1,500 tokens plus up to ~460 reasoning (gpt-oss-120b, reasoning_effort='low'); "
+        "3000 leaves ~50% headroom. Upper bound: the governor reserves max_tokens plus "
+        "the ~2,000-token prompt up front, and must stay under the 6,000 TPM bootstrap floor",
     )
     equity_floor_adjustment: float = p(
         0.05, Provenance.ARBITRARY, "no basis for this specific adjustment"
