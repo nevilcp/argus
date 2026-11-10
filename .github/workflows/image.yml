@@ -5,6 +5,7 @@ on:
     branches: ["main"]
     paths:
       - "Dockerfile.api"
+      - ".dockerignore"
       - "pyproject.toml"
       - "README.md"
       - "LICENSE"

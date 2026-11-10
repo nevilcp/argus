@@ -1,5 +1,8 @@
 # syntax=docker/dockerfile:1
 
+# Declared once so both stages below always share the same base image.
+ARG PYTHON_IMAGE=python:3.14-slim@sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60ae62a8b53525ef6
+
 # ─── Builder ────────────────────────────────────────────────────────────────
 # Compiles/installs everything (hmmlearn and scipy need gcc/g++ on some
 # platforms) into an isolated venv, and bakes in the ML models the cultural-
@@ -9,8 +12,8 @@
 # the same commit would otherwise produce a different image on different
 # days. image.yml's weekly cron rebuilds from this same pinned digest, so it
 # no longer refreshes the base image itself — the digest needs a manual
-# bump (both stages below, kept in sync) when a new base image is wanted.
-FROM python:3.14-slim@sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60ae62a8b53525ef6 AS builder
+# bump (the PYTHON_IMAGE arg at the top) when a new base image is wanted.
+FROM ${PYTHON_IMAGE} AS builder
 
 WORKDIR /app
 
@@ -43,7 +46,7 @@ RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTr
 # ─── Runtime ────────────────────────────────────────────────────────────────
 # Same digest as the builder stage above, so both stages resolve to the
 # identical base image.
-FROM python:3.14-slim@sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60ae62a8b53525ef6
+FROM ${PYTHON_IMAGE}
 
 WORKDIR /app
 

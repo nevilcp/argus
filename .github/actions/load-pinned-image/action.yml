@@ -1,0 +1,40 @@
+name: Load pinned ARGUS image
+description: >
+  Reads the image tag image.yml pinned on the argus-deploy branch and logs in
+  to GHCR so the calling job can `docker run` it.
+
+inputs:
+  github-token:
+    description: Token used to log in to GHCR
+    required: true
+
+outputs:
+  tag:
+    description: Pinned image tag, or "latest" if argus-deploy has never been published
+    value: ${{ steps.read.outputs.tag }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check out pinned image tag
+      uses: actions/checkout@v7
+      continue-on-error: true # first-ever run: the argus-deploy branch doesn't exist yet
+      with:
+        ref: argus-deploy
+        path: deploy
+
+    - name: Read pinned image tag
+      # See image.yml's "Pin scheduled jobs to this build" step: falls back
+      # to :latest only if the argus-deploy branch has never been published.
+      id: read
+      shell: bash
+      run: |
+        tag="$(cat deploy/image-tag.txt 2>/dev/null || echo latest)"
+        echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+    - name: Log in to GHCR
+      uses: docker/login-action@v4
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ inputs.github-token }}

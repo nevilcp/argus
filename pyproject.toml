@@ -65,11 +65,7 @@ packages = ["argus", "api", "scripts"]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0.0",
-    "pytest-asyncio>=0.24.0",
-    "pytest-cov>=5.0.0",
-    "pytest-mock>=3.14.0",
-    "hypothesis>=6.100.0",
+    "argus[test]",
     # Linter and type-checker are pinned exactly, not floored. With `ruff>=0.7.0`
     # the enforced rule set was whatever the installed version happened to default
     # to: 0.15 defaults to E4/E7/E9/F, 0.16 defaults to a much larger set, so the
@@ -80,7 +76,6 @@ dev = [
 ]
 test = [
     "pytest>=8.0.0",
-    "pytest-mock>=3.14.0",
     "pytest-asyncio>=0.24.0",
     "hypothesis>=6.100.0",
 ]
@@ -97,6 +92,9 @@ models = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "live_network: hits live Yahoo Finance/FRED endpoints; skipped when they are unreachable",
+]
 
 [tool.ruff]
 line-length = 100
@@ -116,7 +114,12 @@ target-version = "py314"
 # Deliberately left out: D (pydocstyle) fights this repo's prose-heavy
 # explanatory docstrings; ANN and PL duplicate what mypy and Pydantic already
 # enforce; S (bandit) is mostly noise on test asserts.
-select = ["E", "W", "F", "I", "UP", "B", "SIM", "C4", "RUF", "PT", "DTZ", "PERF"]
+select = ["E", "W", "F", "I", "UP", "B", "SIM", "C4", "RUF", "PT", "DTZ", "PERF", "PLR0915"]
+
+[tool.ruff.lint.pylint]
+# Caps function length. Set to the current maximum (build_graph) so nothing
+# new can grow past it; the long-functions PR lowers it as functions shrink.
+max-statements = 154
 
 [tool.ruff.lint.per-file-ignores]
 # Test fixtures deliberately construct the same naive local timestamps production
