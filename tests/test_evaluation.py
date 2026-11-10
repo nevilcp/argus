@@ -143,6 +143,25 @@ def test_hit_rate_excludes_returns_inside_deadband():
     assert hit_rate is None
 
 
+def test_hit_rate_excludes_neutral_pairs():
+    """A NEUTRAL call (signed conviction 0.0) makes no directional claim, so it is not scored."""
+    pairs = _pairs([0.0], [-0.05])
+    hit_rate, n_scored = hit_rate_with_deadband(pairs, deadband=0.01)
+    assert n_scored == 0
+    assert hit_rate is None
+
+
+def test_hit_rate_scores_only_the_directional_pairs_in_a_mixed_set():
+    """Neutral pairs neither add hits nor dilute the denominator."""
+    pairs = _pairs(
+        convictions=[0.5, -0.5, 0.0, 0.0],
+        returns=[0.05, 0.05, -0.05, 0.05],  # long hits, short misses, neutrals ignored
+    )
+    hit_rate, n_scored = hit_rate_with_deadband(pairs, deadband=0.01)
+    assert n_scored == 2
+    assert hit_rate == 0.5
+
+
 # ---------------------------------------------------------------------------
 # trade_level_win_loss_stats
 # ---------------------------------------------------------------------------
