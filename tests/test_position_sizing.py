@@ -7,14 +7,12 @@ wealth rather than wealth pre-scaled by invest_pct.
 """
 
 import json
-from datetime import datetime
 
 from argus.agents.portfolio import PortfolioManagerAgent
 from argus.orchestration.state import TickerSnapshot
-from argus.schemas.signals import AggregatedSignal, RiskAssessment, RiskVerdict, Signal
+from argus.schemas.signals import AggregatedSignal, Signal
 from argus.seams import FixtureLLMClient
-
-TIMESTAMP = datetime(2026, 1, 1)
+from tests.helpers.builders import risk_assessment, user_profile
 
 # An all-cash response: these tests read the prompt the agent built, not its output
 _ALL_CASH_BODY = {
@@ -23,17 +21,6 @@ _ALL_CASH_BODY = {
     "expected_sharpe": None,
     "rebalance_trigger": "MONTHLY",
 }
-
-
-def _risk(approved_weight: float = 0.15) -> RiskAssessment:
-    return RiskAssessment(
-        verdict=RiskVerdict.APPROVE,
-        approved_weight=approved_weight,
-        proposed_weight=approved_weight,
-        var_99=0.05,
-        portfolio_beta=1.0,
-        timestamp=TIMESTAMP,
-    )
 
 
 def _snapshot(
@@ -45,7 +32,7 @@ def _snapshot(
 ) -> TickerSnapshot:
     """A risk-approved snapshot whose aggregated signal is what the Kelly anchor reads."""
     return TickerSnapshot(
-        risk=_risk(),
+        risk=risk_assessment(),
         aggregated=AggregatedSignal(
             ticker=ticker,
             signal=signal,
@@ -56,11 +43,6 @@ def _snapshot(
             reliability_n=reliability_n or {},
         ),
     )
-
-
-def _profile(invest_pct: float = 0.5) -> dict:
-    """The user profile every allocate() call in this module passes."""
-    return {"total_wealth": 100_000.0, "invest_pct": invest_pct, "risk_tolerance": "MODERATE"}
 
 
 def _agent_with_capture(body: dict) -> tuple[PortfolioManagerAgent, list[str]]:
@@ -97,7 +79,7 @@ def test_bearish_ticker_receives_no_kelly_anchor():
         ),
     }
     agent, prompts = _agent_with_capture(_ALL_CASH_BODY)
-    agent.allocate(user_profile=_profile(), snapshots=snapshots, macro=None)
+    agent.allocate(user_profile=user_profile(), snapshots=snapshots, macro=None)
 
     assert len(prompts) == 1
     assert "BULL: half-Kelly suggests" in prompts[0]
@@ -119,7 +101,7 @@ def test_kelly_anchor_block_omitted_when_no_agent_has_data():
         ),
     }
     agent, prompts = _agent_with_capture(_ALL_CASH_BODY)
-    agent.allocate(user_profile=_profile(), snapshots=snapshots, macro=None)
+    agent.allocate(user_profile=user_profile(), snapshots=snapshots, macro=None)
 
     assert len(prompts) == 1
     assert "HALF-KELLY ANCHORS: omitted" in prompts[0]
@@ -138,7 +120,7 @@ def test_kelly_anchor_uses_primary_drivers_measured_win_rate_not_conviction():
         ),
     }
     agent, prompts = _agent_with_capture(_ALL_CASH_BODY)
-    agent.allocate(user_profile=_profile(), snapshots=snapshots, macro=None)
+    agent.allocate(user_profile=user_profile(), snapshots=snapshots, macro=None)
 
     # b=2, p=0.7, q=0.3: full Kelly (2*0.7-0.3)/2=0.55, half=0.275, clipped to the 0.15 cap
     assert "AAPL: half-Kelly suggests 15.0%" in prompts[0]
@@ -168,8 +150,8 @@ def test_capital_base_is_total_wealth_not_wealth_times_invest_pct():
     }
     agent, prompts = _agent_with_capture(body)
     alloc = agent.allocate(
-        user_profile=_profile(invest_pct=0.8),
-        snapshots={"AAPL": TickerSnapshot(risk=_risk())},
+        user_profile=user_profile(invest_pct=0.8),
+        snapshots={"AAPL": TickerSnapshot(risk=risk_assessment())},
         macro=None,
     )
 

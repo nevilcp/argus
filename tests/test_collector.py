@@ -25,7 +25,8 @@ from argus.config import settings
 from argus.orchestration.collector import CycleOutcome, append_decisions_jsonl, run_collection_cycle
 from argus.orchestration.graph import build_checkpoint_serde
 from argus.params import COLLECTOR, RECONCILIATION
-from argus.schemas.signals import ARGUSDecision, PositionAllocation
+from argus.schemas.signals import ARGUSDecision
+from tests.helpers.builders import argus_decision, position_allocation
 
 
 def _put_checkpoint(db_path: str, thread_id: str, ts: datetime) -> None:
@@ -63,20 +64,10 @@ _SESSION_STATES = {"AAPL": {"timestamp": "2024-01-02T09:30:00-05:00"}}
 
 def _decision(ticker: str = "AAPL", *, with_allocation: bool = False) -> ARGUSDecision:
     """Builds a minimal ARGUSDecision, optionally carrying a real allocation."""
-    allocation = None
-    if with_allocation:
-        allocation = PositionAllocation(
-            ticker=ticker,
-            allocation_pct=0.05,
-            allocation_usd=5_000.0,
-            stop_loss=90.0,
-            thesis="test thesis",
-            composite_conviction=0.5,
-            time_horizon="30 days",
-        )
-    return ARGUSDecision(
-        ticker=ticker, session_timestamp=datetime(2024, 1, 2), allocation=allocation
+    allocation = (
+        position_allocation(ticker, 0.05, composite_conviction=0.5) if with_allocation else None
     )
+    return argus_decision(ticker, datetime(2024, 1, 2), allocation=allocation)
 
 
 def _graph() -> mock.Mock:

@@ -22,12 +22,10 @@ from argus.memory.cultural import (
 from argus.params import MEMORY, RECONCILIATION
 from argus.schemas.signals import (
     ARGUSDecision,
-    MacroContext,
     Regime,
-    SectorSignal,
     VixRegime,
-    YieldCurve,
 )
+from tests.helpers.builders import macro_context
 
 
 def _manager_with_metadatas(metadatas: list[dict]) -> CulturalMemoryManager:
@@ -54,30 +52,6 @@ def _manager_with_pending(ids: list[str], timestamps: list[str]) -> CulturalMemo
         "metadatas": [{"outcome": "PENDING", "timestamp": ts} for ts in timestamps],
     }
     return manager
-
-
-def _macro(
-    regime: Regime = Regime.EXPANSION, vix_regime: VixRegime = VixRegime.MEDIUM
-) -> MacroContext:
-    return MacroContext(
-        fed_funds=4.0,
-        cpi_yoy=3.0,
-        unemployment=4.0,
-        t10y2y=0.1,
-        consumer_sentiment=60.0,
-        vix_level=18.0,
-        macro_regime=regime,
-        regime_confidence=0.7,
-        model_healthy=True,
-        interest_rate_trend="STABLE",
-        yield_curve_shape=YieldCurve.NORMAL,
-        vix_regime=vix_regime,
-        vix_percentile=40.0,
-        inflation_trajectory="STABLE",
-        sector_rotation_signal=SectorSignal.GROWTH_FAVORED,
-        agent_multipliers={"fundamental": 1.0, "technical": 1.0, "sentiment": 1.0},
-        timestamp=datetime.now(),
-    )
 
 
 def test_embedding_identity_check_backfills_a_collection_with_no_recorded_model():
@@ -206,7 +180,7 @@ def test_store_trade_outcome_writes_vix_regime_value_not_enum_repr():
     decision = ARGUSDecision(
         ticker="AAPL",
         session_timestamp=datetime.now(),
-        macro=_macro(vix_regime=VixRegime.HIGH),
+        macro=macro_context(vix_regime=VixRegime.HIGH),
     )
 
     manager.store_trade_outcome(
@@ -391,7 +365,7 @@ def test_retrieve_wisdom_and_retrieve_warnings_apply_a_symmetric_regime_filter()
     Successes shouldn't be drawn from every regime while failures are
     confined to the current one.
     """
-    macro = _macro(regime=Regime.CONTRACTION)
+    macro = macro_context(regime=Regime.CONTRACTION)
 
     wisdom_manager = _manager_with_query_collection()
     wisdom_manager.retrieve_wisdom(macro, "mixed technicals")
@@ -409,7 +383,7 @@ def test_retrieve_wisdom_as_of_filters_on_timestamp():
     manager = _manager_with_query_collection()
     as_of = datetime(2026, 1, 1)
 
-    manager.retrieve_wisdom(_macro(regime=Regime.EXPANSION), "mixed technicals", as_of=as_of)
+    manager.retrieve_wisdom(macro_context(regime=Regime.EXPANSION), "mixed technicals", as_of=as_of)
 
     where = manager.collection.query.call_args.kwargs["where"]
     assert where == {

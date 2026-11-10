@@ -9,19 +9,8 @@ from datetime import datetime
 import pytest
 from pydantic import ValidationError
 
-from argus.schemas.signals import PortfolioAllocation, PositionAllocation
-
-
-def _position(ticker: str) -> PositionAllocation:
-    return PositionAllocation(
-        ticker=ticker,
-        allocation_pct=0.05,
-        allocation_usd=5_000.0,
-        stop_loss=90.0,
-        thesis="test thesis",
-        composite_conviction=0.6,
-        time_horizon="30 days",
-    )
+from argus.schemas.signals import PortfolioAllocation
+from tests.helpers.builders import position_allocation
 
 
 def test_portfolio_allocation_rejects_a_duplicate_ticker():
@@ -35,7 +24,10 @@ def test_portfolio_allocation_rejects_a_duplicate_ticker():
         PortfolioAllocation(
             session_id="s1",
             user_investable_capital=100_000.0,
-            portfolio=[_position("AAPL"), _position("AAPL")],
+            portfolio=[
+                position_allocation("AAPL", 0.05, composite_conviction=0.6),
+                position_allocation("AAPL", 0.05, composite_conviction=0.6),
+            ],
             cash_reserve_pct=0.90,
             rebalance_trigger="VIX > 35",
             timestamp=datetime.now(),
@@ -47,7 +39,10 @@ def test_portfolio_allocation_accepts_unique_tickers():
     alloc = PortfolioAllocation(
         session_id="s1",
         user_investable_capital=100_000.0,
-        portfolio=[_position("AAPL"), _position("MSFT")],
+        portfolio=[
+            position_allocation("AAPL", 0.05, composite_conviction=0.6),
+            position_allocation("MSFT", 0.05, composite_conviction=0.6),
+        ],
         cash_reserve_pct=0.90,
         rebalance_trigger="VIX > 35",
         timestamp=datetime.now(),

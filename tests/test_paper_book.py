@@ -16,50 +16,17 @@ import argus.risk.kill_switch as kill_switch_module
 from argus.config import settings
 from argus.risk import paper_book
 from argus.risk.paper_book import PaperBook, compute_run_returns
-from argus.schemas.signals import ARGUSDecision, PositionAllocation, Signal, TechnicalSignal
-
-
-def _technical(ticker: str, price: float) -> TechnicalSignal:
-    """Builds a minimal TechnicalSignal, varying only ticker and current_price."""
-    return TechnicalSignal(
-        ticker=ticker,
-        current_price=price,
-        rsi_14=50.0,
-        macd_histogram=0.0,
-        bb_percent_b=0.5,
-        atr_pct=0.02,
-        adx_14=20.0,
-        vwap_distance=0.0,
-        volume_ratio=1.0,
-        momentum_30m=0.0,
-        momentum_1d=0.0,
-        signal=Signal.BULLISH,
-        conviction=0.7,
-        net_score=0.0,
-        timestamp=datetime.now(),
-    )
-
-
-def _allocation(ticker: str, pct: float) -> PositionAllocation:
-    """Builds a minimal PositionAllocation, varying only ticker and allocation_pct."""
-    return PositionAllocation(
-        ticker=ticker,
-        allocation_pct=pct,
-        allocation_usd=pct * 100_000.0,
-        stop_loss=90.0,
-        thesis="test thesis",
-        composite_conviction=0.7,
-        time_horizon="30 days",
-    )
+from argus.schemas.signals import ARGUSDecision
+from tests.helpers.builders import argus_decision, position_allocation, technical_signal
 
 
 def _decision(ticker: str, session_timestamp: datetime, price: float, pct: float) -> ARGUSDecision:
     """Builds a minimal reconciliation-eligible ARGUSDecision."""
-    return ARGUSDecision(
-        ticker=ticker,
-        session_timestamp=session_timestamp,
-        technical=_technical(ticker, price),
-        allocation=_allocation(ticker, pct),
+    return argus_decision(
+        ticker,
+        session_timestamp,
+        technical=technical_signal(ticker=ticker, current_price=price),
+        allocation=position_allocation(ticker, pct),
     )
 
 

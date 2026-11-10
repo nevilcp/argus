@@ -19,15 +19,20 @@ from argus.schemas.signals import (
     Signal,
     TechnicalSignal,
 )
-from tests.test_aggregator_properties import _fundamental, _macro, _sentiment, _technical
+from tests.helpers.builders import (
+    fundamental_signal,
+    macro_context,
+    sentiment_signal,
+    technical_signal,
+)
 
 
 def _split_signals() -> tuple[TechnicalSignal, MacroContext, FundamentalSignal, SentimentSignal]:
     """A genuine three-way split: BULLISH vs. BEARISH vs. NEUTRAL, equal weight."""
-    technical = _technical(Signal.BULLISH, 0.8)
-    fundamental = _fundamental(Signal.BEARISH, 0.8)
-    sentiment = _sentiment(Signal.NEUTRAL, 0.3)
-    macro = _macro(Regime.EXPANSION, fund_mult=1.0, tech_mult=1.0, sent_mult=1.0)
+    technical = technical_signal(Signal.BULLISH, 0.8)
+    fundamental = fundamental_signal(Signal.BEARISH, 0.8)
+    sentiment = sentiment_signal(Signal.NEUTRAL, 0.3)
+    macro = macro_context(Regime.EXPANSION)
     return technical, macro, fundamental, sentiment
 
 

@@ -28,22 +28,17 @@ from argus.backtesting.evaluation import (
 from argus.backtesting.replay import SessionResult, replay_session
 from argus.orchestration.aggregator import HybridSignalAggregator
 from argus.schemas.signals import ARGUSDecision, Signal
+from tests.helpers.builders import macro_context, position_allocation, technical_signal
 from tests.helpers.paths import FIXTURES_DIR
-from tests.test_reconciliation import (
-    _allocation,
-    _FakeMarketData,
-    _macro,
-    _technical,
-    _ten_day_series,
-)
+from tests.test_reconciliation import _FakeMarketData, _ten_day_series
 
 
 def _decision_with_signal(
     signal: Signal, conviction: float, ticker: str = "TEST", price: float = 100.0
 ) -> ARGUSDecision:
     """Builds a decision whose aggregated signal comes from the real aggregator."""
-    technical = _technical(signal, conviction, ticker=ticker, price=price)
-    macro = _macro()
+    technical = technical_signal(signal, conviction, ticker=ticker, current_price=price)
+    macro = macro_context()
     aggregated = HybridSignalAggregator().aggregate(technical, macro, None, None)
     return ARGUSDecision(
         ticker=ticker,
@@ -51,7 +46,7 @@ def _decision_with_signal(
         technical=technical,
         macro=macro,
         aggregated=aggregated,
-        allocation=_allocation(ticker=ticker),
+        allocation=position_allocation(ticker),
     )
 
 

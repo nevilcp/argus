@@ -15,11 +15,11 @@ from argus.params import PORTFOLIO
 from argus.schemas.signals import (
     MacroContext,
     Regime,
-    RiskAssessment,
     RiskVerdict,
     Signal,
 )
 from argus.seams import FixtureLLMClient
+from tests.helpers.builders import risk_assessment
 
 
 def test_half_kelly_weight_bullish():
@@ -58,28 +58,6 @@ class MockSignal:
         self.agents_present = agents_present if agents_present is not None else []
 
 
-def _risk(
-    verdict: RiskVerdict,
-    approved_weight: float,
-    var_99: float,
-    stop_loss: float | None,
-    portfolio_beta: float,
-    veto_reasons: list[str] | None = None,
-) -> RiskAssessment:
-    """Builds a RiskAssessment against a fixed 0.15 proposed weight and zero API cost."""
-    return RiskAssessment(
-        verdict=verdict,
-        proposed_weight=0.15,
-        approved_weight=approved_weight,
-        var_99=var_99,
-        stop_loss=stop_loss,
-        portfolio_beta=portfolio_beta,
-        veto_reasons=veto_reasons or [],
-        api_calls_used=0,
-        timestamp=datetime.now(),
-    )
-
-
 def test_build_signal_table():
     """Vetoed positions are excluded from the table.
 
@@ -113,12 +91,22 @@ def test_build_signal_table():
             aggregated=MockSignal(
                 Signal.BULLISH, 0.85, agents_present=["fundamental", "technical", "sentiment"]
             ),
-            risk=_risk(RiskVerdict.APPROVE, 0.15, var_99=0.02, stop_loss=150.0, portfolio_beta=1.1),
+            risk=risk_assessment(
+                RiskVerdict.APPROVE,
+                0.15,
+                proposed_weight=0.15,
+                api_calls_used=0,
+                var_99=0.02,
+                stop_loss=150.0,
+                portfolio_beta=1.1,
+            ),
         ),
         "TSLA": TickerSnapshot(
-            risk=_risk(
+            risk=risk_assessment(
                 RiskVerdict.VETO,
                 0.0,
+                proposed_weight=0.15,
+                api_calls_used=0,
                 var_99=0.08,
                 stop_loss=None,
                 portfolio_beta=2.0,
@@ -127,7 +115,15 @@ def test_build_signal_table():
         ),
         "MSFT": TickerSnapshot(
             fundamental=MockSignal(Signal.BEARISH, 0.9),
-            risk=_risk(RiskVerdict.REDUCE, 0.05, var_99=0.05, stop_loss=280.0, portfolio_beta=0.9),
+            risk=risk_assessment(
+                RiskVerdict.REDUCE,
+                0.05,
+                proposed_weight=0.15,
+                api_calls_used=0,
+                var_99=0.05,
+                stop_loss=280.0,
+                portfolio_beta=0.9,
+            ),
         ),
     }
 
@@ -158,7 +154,15 @@ def test_full_universe_prompt_reservation_fits_the_tpm_floor():
             aggregated=MockSignal(
                 Signal.BULLISH, 0.85, agents_present=["fundamental", "technical", "sentiment"]
             ),
-            risk=_risk(RiskVerdict.APPROVE, 0.05, var_99=0.02, stop_loss=150.0, portfolio_beta=1.1),
+            risk=risk_assessment(
+                RiskVerdict.APPROVE,
+                0.05,
+                proposed_weight=0.15,
+                api_calls_used=0,
+                var_99=0.02,
+                stop_loss=150.0,
+                portfolio_beta=1.1,
+            ),
         )
         for ticker in settings.ARGUS_UNIVERSE
     }
