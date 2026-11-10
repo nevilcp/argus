@@ -53,14 +53,6 @@ logger = logging.getLogger("argus.macro")
 # Scaler/HMM column order; persisted in metadata to catch mismatches. See data/macro_features.py.
 FEATURE_COLUMNS = ["d_fed_funds_6m", "d_unemp_12m", "cpi_yoy", "t10y2y", "vix_pctile"]
 
-_FEATURE_DEFAULTS = {
-    "d_fed_funds_6m": 0.0,
-    "d_unemp_12m": 0.0,
-    "cpi_yoy": 0.0,
-    "t10y2y": 0.0,
-    "vix_pctile": 50.0,
-}
-
 # Discrimination-gate scenarios (scripts/train_macro_hmm.py); values on FEATURE_COLUMNS' scale.
 DISCRIMINATION_SCENARIOS: dict[str, dict[str, float]] = {
     "goldilocks_boom": {
@@ -519,7 +511,9 @@ class RegimeClassifier:
     def predict(self, current: dict | pd.DataFrame) -> tuple[str, float]:
         """Classifies the current economic regime and returns posterior probability confidence.
 
-        Falls back to static rule-based classification if the model has not been fitted.
+        An unfitted classifier takes the static rule-based path for a dict (see
+        ``rule_based``) and refuses a DataFrame, whose rows carry the model
+        features and none of the raw levels that path reads.
         Accepts either a single observation (dict) or a multi-day feature window
         (DataFrame). A window lets the HMM's transition matrix inform the
         classification via the forward-backward algorithm instead of decoding an
@@ -534,22 +528,29 @@ class RegimeClassifier:
             probability at the window's final timestep (or the single observation).
 
         Raises:
-            ValueError: If the feature array contains a NaN or infinite value.
+            ValueError: If the classifier is unfitted and given a DataFrame; if a fitted
+                classifier's dict lacks a FEATURE_COLUMNS entry or holds None for one;
+                or if the feature array contains a NaN or infinite value.
         """
         if not self.is_fitted:
-            v = current.iloc[-1].to_dict() if isinstance(current, pd.DataFrame) else current
-            return self._rule_based_fallback(v)
+            if isinstance(current, pd.DataFrame):
+                raise ValueError(
+                    "RegimeClassifier.predict: classifier is not fitted; "
+                    "a feature window cannot be classified by the rule-based path"
+                )
+            return self.rule_based(current)
 
         if isinstance(current, pd.DataFrame):
             arr = current[FEATURE_COLUMNS].values
         else:
-            # macro_bundle() keys can be present-but-None; .get(col, default) won't
-            # catch that, nor would `or`.
-            def _value(col: str) -> float:
-                v = current.get(col)
-                return v if v is not None else _FEATURE_DEFAULTS[col]
-
-            arr = np.array([[_value(col) for col in FEATURE_COLUMNS]])
+            # A missing feature is an error, not a neutral value: imputing one would
+            # score the observation as though it had been measured.
+            missing = [col for col in FEATURE_COLUMNS if current.get(col) is None]
+            if missing:
+                raise ValueError(
+                    f"RegimeClassifier.predict: missing or None feature(s): {', '.join(missing)}"
+                )
+            arr = np.array([[current[col] for col in FEATURE_COLUMNS]])
 
         if not np.isfinite(arr).all():
             raise ValueError("RegimeClassifier.predict: feature array contains NaN/inf")
@@ -563,10 +564,10 @@ class RegimeClassifier:
         regime = self.state_to_regime.get(state, Regime.TRANSITIONAL.value)
         return regime, confidence
 
-    def _rule_based_fallback(self, v: dict) -> tuple[str, float]:
-        """Applies static thresholds to classify the regime when the HMM is uncalibrated.
+    def rule_based(self, v: dict) -> tuple[str, float]:
+        """Applies static thresholds to classify the regime when the HMM cannot be used.
 
-        Used during cold-start or when historical data fetch fails. Confidence is fixed
+        Used during cold-start, or when the feature window cannot be assembled. Confidence is fixed
         at 0.6 (CONTRACTION/EXPANSION) or 0.5 (TRANSITIONAL) to signal lower certainty.
 
         Args:
@@ -832,25 +833,31 @@ class MacroStatisticalAgent:
         # window_final holds the classifier's actual scored row, avoiding a
         # disagreeing second fetch.
         window_final: pd.Series | None = None
-        try:
-            history_start = (
-                datetime.now() - timedelta(days=365 * MACRO.inference_history_years)  # noqa: DTZ005
-            ).strftime("%Y-%m-%d")
-            frame = build_macro_feature_frame(self.market_data, start=history_start)
-            window = frame.tail(MACRO.inference_window_months)
-            if window.empty:
-                raise ValueError("feature window empty after build_macro_feature_frame")
-            regime_str, confidence = self.classifier.predict(window)
-            window_final = window.iloc[-1]
-        except Exception as exc:
-            logger.warning(
-                "analyze: feature window assembly failed (%s); "
-                "falling back to single-observation inference.",
-                exc,
-            )
-            regime_str, confidence = self.classifier.predict(current)
-        regime = Regime(regime_str)
         model_healthy = self.classifier.is_fitted
+        if not model_healthy:
+            # The rule-based path reads raw vix/t10y2y, which the bundle carries and a
+            # feature-window row does not, so no window is assembled.
+            regime_str, confidence = self.classifier.rule_based(current)
+        else:
+            try:
+                history_start = (
+                    datetime.now() - timedelta(days=365 * MACRO.inference_history_years)  # noqa: DTZ005
+                ).strftime("%Y-%m-%d")
+                frame = build_macro_feature_frame(self.market_data, start=history_start)
+                window = frame.tail(MACRO.inference_window_months)
+                if window.empty:
+                    raise ValueError("feature window empty after build_macro_feature_frame")
+                regime_str, confidence = self.classifier.predict(window)
+                window_final = window.iloc[-1]
+            except Exception as exc:
+                logger.warning(
+                    "analyze: feature window assembly failed (%s); "
+                    "falling back to single-observation inference.",
+                    exc,
+                )
+                regime_str, confidence = self.classifier.rule_based(current)
+                model_healthy = False
+        regime = Regime(regime_str)
 
         # Neutral placeholder — left as-is when vix itself was defaulted, since a
         # percentile computed against a substituted level would look measured
