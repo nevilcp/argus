@@ -615,6 +615,16 @@ _cultural_memory: CulturalMemoryManager | None = None
 _cultural_memory_lock = Lock()
 
 
+def default_chroma_dir() -> str:
+    """Returns where the cultural-memory store lives when no directory is given.
+
+    Returns:
+        settings.ARGUS_CHROMA_DIR, or <ARGUS_DATA_DIR>/chroma_db if that's unset.
+        Read at call time so a per-test or per-deployment settings override applies.
+    """
+    return settings.ARGUS_CHROMA_DIR or f"{settings.ARGUS_DATA_DIR}/chroma_db"
+
+
 def get_cultural_memory(persist_dir: str | None = None) -> CulturalMemoryManager:
     """Returns the process-wide CulturalMemoryManager, constructing it on first call.
 
@@ -635,7 +645,7 @@ def get_cultural_memory(persist_dir: str | None = None) -> CulturalMemoryManager
         The process-wide CulturalMemoryManager singleton.
     """
     if persist_dir is None:
-        persist_dir = settings.ARGUS_CHROMA_DIR or f"{settings.ARGUS_DATA_DIR}/chroma_db"
+        persist_dir = default_chroma_dir()
 
     global _cultural_memory
     if _cultural_memory is None:

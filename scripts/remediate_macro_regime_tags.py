@@ -10,7 +10,10 @@ evidence.
 
 Not wired into any schedule — run manually, once:
 
-    .venv/bin/python -m scripts.remediate_macro_regime_tags [--persist-dir chroma_db]
+    .venv/bin/python -m scripts.remediate_macro_regime_tags [--persist-dir DIR]
+
+With no --persist-dir it targets the store the app itself uses (ARGUS_CHROMA_DIR, else
+<ARGUS_DATA_DIR>/chroma_db).
 
 Backs up the sqlite file to <path>.bak-<timestamp> before writing.
 """
@@ -21,7 +24,10 @@ import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
+from chromadb.api.types import Metadata
+
 from argus.config import settings
+from argus.memory.cultural import CulturalMemoryManager, default_chroma_dir
 
 logger = logging.getLogger("argus.remediate_macro_regime_tags")
 
@@ -34,7 +40,7 @@ def main() -> None:
     logging.basicConfig(level=settings.ARGUS_LOG_LEVEL)
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--persist-dir", default="./chroma_db")
+    parser.add_argument("--persist-dir", default=default_chroma_dir())
     args = parser.parse_args()
 
     sqlite_path = Path(args.persist_dir) / "chroma.sqlite3"
@@ -47,8 +53,6 @@ def main() -> None:
     )
     shutil.copy2(sqlite_path, backup_path)
     print(f"Backed up {sqlite_path} to {backup_path}")
-
-    from argus.memory.cultural import CulturalMemoryManager
 
     # Opening the collection with its configured embedding_function (rather than
     # bare chromadb.get_or_create_collection, which falls back to Chroma's default
@@ -64,10 +68,12 @@ def main() -> None:
         print(f"No rows tagged {STALE_REGIME}; nothing to remediate.")
         return
 
-    metadatas = [dict(m, regime=REPLACEMENT_REGIME) for m in rows["metadatas"]]
+    metadatas: list[Metadata] = [
+        dict(m, regime=REPLACEMENT_REGIME) for m in rows["metadatas"] or []
+    ]
     documents = [
         doc.replace(f"Macro regime: {STALE_REGIME}", f"Macro regime: {REPLACEMENT_REGIME}")
-        for doc in rows["documents"]
+        for doc in rows["documents"] or []
     ]
 
     collection.update(ids=ids, metadatas=metadatas, documents=documents)
