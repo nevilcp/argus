@@ -106,12 +106,20 @@ def _open_checkpointer(checkpoint_db_path: str) -> SqliteSaver | None:
         A new SqliteSaver, or None on any I/O failure (a checkpointer-less
         compile still runs the graph, just without resumability).
     """
+    conn: sqlite3.Connection | None = None
     try:
         if checkpoint_db_path != ":memory:":
             Path(checkpoint_db_path).parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(checkpoint_db_path, check_same_thread=False)
         return SqliteSaver(conn, serde=build_checkpoint_serde())
     except Exception:
+        logger.warning(
+            "_open_checkpointer: could not open %s; running without a checkpointer",
+            checkpoint_db_path,
+            exc_info=True,
+        )
+        if conn is not None:
+            conn.close()
         return None
 
 

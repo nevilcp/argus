@@ -427,6 +427,8 @@ class MFTDataPipeline:
                 after each sweep during market hours.
         """
         self.running = True
+        # A stop() leaves the event set; left set, a restarted loop would skip its pacing waits
+        self._stop_event.clear()
         logger.info("MFTDataPipeline.start: launching fetch loop")
         await self._fetch_loop(on_session_ready)
 

@@ -57,6 +57,9 @@ class KillSwitchStatus:
         realized_drawdown: Current peak-to-trough drawdown as a fraction.
         current_vix: Most recently observed VIX level, or 0.0 if none has
             been fetched yet.
+        halt_persisted: False when a halt engaged but its crash dump could not
+            be written, so a process restart would resume trading. True
+            otherwise (including when not halted).
     """
 
     halted: bool
@@ -65,6 +68,7 @@ class KillSwitchStatus:
     triggered_at: datetime | None
     realized_drawdown: float
     current_vix: float
+    halt_persisted: bool = True
 
 
 class KillSwitch:
@@ -164,6 +168,8 @@ class KillSwitch:
         self._state_lock = threading.Lock()
         self._halt_reason: str | None = None
         self._halt_time: datetime | None = None
+        # False only while a halt is engaged whose dump could not be written
+        self._halt_persisted: bool = True
 
         self._portfolio_inception_value: float | None = None
         self._current_portfolio_value: float | None = None
@@ -224,7 +230,24 @@ class KillSwitch:
             current_value: Current mark-to-market portfolio value (USD).
         """
         self._current_portfolio_value = current_value
-        self._high_water_mark = max(self._high_water_mark, current_value)
+        self._advance_high_water_mark(current_value)
+
+    def _advance_high_water_mark(self, value: float) -> float:
+        """Raises the high-water mark to ``value`` if it is a new peak, under the state lock.
+
+        The monitor thread and callers of update_portfolio_value both advance the
+        mark; an unlocked read-modify-write could let one overwrite the other's
+        newer peak with a lower one.
+
+        Args:
+            value: Candidate portfolio value (USD).
+
+        Returns:
+            The high-water mark after the update.
+        """
+        with self._state_lock:
+            self._high_water_mark = max(self._high_water_mark, value)
+            return self._high_water_mark
 
     def _marked_value(self) -> float:
         """Returns the latest mark, falling back to inception before the first update.
@@ -288,8 +311,8 @@ class KillSwitch:
             return
 
         current = self._marked_value()
-        self._high_water_mark = max(self._high_water_mark, current)
-        drawdown = _drawdown_fraction(self._high_water_mark, current)
+        high_water_mark = self._advance_high_water_mark(current)
+        drawdown = _drawdown_fraction(high_water_mark, current)
         threshold = self.DRAWDOWN_THRESHOLDS[self.risk_tolerance]
 
         try:
@@ -347,7 +370,6 @@ class KillSwitch:
         """
         timestamp = halt_time.strftime("%Y%m%d_%H%M%S")
         runs_dir = Path(_default_runs_dir())
-        runs_dir.mkdir(parents=True, exist_ok=True)
         filename = runs_dir / f"argus_halt_{timestamp}.json"
 
         dump = {
@@ -364,10 +386,20 @@ class KillSwitch:
         }
 
         try:
+            runs_dir.mkdir(parents=True, exist_ok=True)
             with open(filename, "w") as f:
                 json.dump(dump, f, indent=4)
+            self._halt_persisted = True
         except Exception as e:
-            logger.error("Failed to write halt event file: %s", e)
+            # The halt itself is already engaged in memory; only its survival of a
+            # restart is lost, so make that loud and visible on /kill-switch/status.
+            self._halt_persisted = False
+            logger.critical(
+                "Failed to persist halt event file %s: %s. The halt is ACTIVE but will NOT "
+                "survive a restart until the dump is written or an operator intervenes.",
+                filename,
+                e,
+            )
 
         _prune_halt_dumps(str(runs_dir))
 
@@ -395,6 +427,7 @@ class KillSwitch:
             triggered_at=triggered_at,
             realized_drawdown=drawdown,
             current_vix=self._last_vix or 0.0,
+            halt_persisted=self._halt_persisted,
         )
 
     def _restore_halt_from_file(self, path: Path) -> None:
@@ -460,6 +493,7 @@ class KillSwitch:
         with self._state_lock:
             self._halt_reason = None
             self._halt_time = None
+        self._halt_persisted = True
         self._portfolio_inception_value = new_inception_value
         self._current_portfolio_value = new_inception_value
         self._high_water_mark = new_inception_value
