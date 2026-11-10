@@ -5,6 +5,7 @@ means unavailable, not neutral" contract for NewsAPI.
 """
 
 import json
+import logging
 import multiprocessing
 from datetime import UTC, datetime, timedelta
 from unittest import mock
@@ -285,8 +286,8 @@ def test_newsapi_budget_resets_on_new_day_within_one_instance(monkeypatch):
     assert budget.try_reserve() is True
 
 
-def test_newsapi_budget_treats_wrong_typed_persisted_fields_as_absent():
-    """A syntactically valid but wrong-typed persisted count degrades to 0, not a raise.
+def test_newsapi_budget_fails_closed_on_wrong_typed_persisted_fields():
+    """A syntactically valid but wrong-typed persisted count is corrupt: it blocks, not raises.
 
     A `requests_today` of null (int(None) raises TypeError) is a plausible
     partial-write shape, not just outright-invalid JSON.
@@ -297,6 +298,41 @@ def test_newsapi_budget_treats_wrong_typed_persisted_fields_as_absent():
         json.dumps({"date": today.isoformat(), "requests_today": None})
     )
 
+    assert budget.try_reserve() is False
+
+
+def test_newsapi_budget_fails_closed_on_a_corrupt_file_and_heals_it(caplog):
+    """A corrupt budget file blocks today's requests and is rewritten as an exhausted counter."""
+    budget = fetchers._NewsApiBudget(daily_limit=3)
+    path = budget._persist_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json")
+
+    with caplog.at_level(logging.ERROR, logger="argus.fetchers"):
+        assert budget.try_reserve() is False
+
+    assert any("corrupt" in r.message for r in caplog.records)
+    assert json.loads(path.read_text()) == {
+        "date": datetime.now(UTC).date().isoformat(),
+        "requests_today": 3,
+    }
+    assert budget.try_reserve() is False
+
+
+def test_newsapi_budget_corrupt_file_clears_on_the_next_utc_day(monkeypatch):
+    """The exhausted counter written over a corrupt file is stale tomorrow, so the budget heals."""
+    budget = fetchers._NewsApiBudget(daily_limit=1)
+    path = budget._persist_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("")
+    assert budget.try_reserve() is False
+
+    class _Tomorrow(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.now(tz) + timedelta(days=1)
+
+    monkeypatch.setattr(fetchers, "datetime", _Tomorrow)
     assert budget.try_reserve() is True
 
 
@@ -392,7 +428,7 @@ def test_fetch_news_returns_none_when_reservation_hits_a_disk_error(monkeypatch)
         result = fetchers.fetch_news("AAPL", "Apple Inc")
 
     assert result is None
-    mock_client_cls.assert_not_called()
+    mock_client_cls.return_value.get_everything.assert_not_called()
 
 
 def test_fetch_news_returns_none_without_api_key(monkeypatch):
@@ -410,7 +446,7 @@ def test_fetch_news_returns_none_when_budget_exhausted(monkeypatch):
         result = fetchers.fetch_news("AAPL", "Apple Inc")
 
     assert result is None
-    mock_client_cls.assert_not_called()
+    mock_client_cls.return_value.get_everything.assert_not_called()
 
 
 def test_fetch_news_returns_articles_at_max_page_size(monkeypatch):
@@ -438,6 +474,40 @@ def test_fetch_news_returns_articles_at_max_page_size(monkeypatch):
         {"title": "Real headline", "description": "d", "published_at": "t", "source": "s"}
     ]
     assert mock_client.get_everything.call_args.kwargs["page_size"] == 100
+
+
+def test_fetch_news_reserves_one_budget_slot_per_attempt(monkeypatch):
+    """Every retry of the page fetch is a real NewsAPI request, so each one spends budget."""
+    monkeypatch.setattr(fetchers.settings, "newsapi_key", "test-key")
+    budget = fetchers._NewsApiBudget(daily_limit=100)
+    monkeypatch.setattr(fetchers, "_NEWSAPI_BUDGET", budget)
+    monkeypatch.setattr(fetchers.time, "sleep", lambda _s: None)
+
+    mock_client = mock.Mock()
+    mock_client.get_everything.side_effect = [_http_error(500), {"articles": []}]
+
+    with mock.patch("newsapi.NewsApiClient", return_value=mock_client):
+        result = fetchers.fetch_news("AAPL", "Apple Inc")
+
+    assert result == []
+    assert mock_client.get_everything.call_count == 2
+    assert json.loads(budget._persist_path().read_text())["requests_today"] == 2
+
+
+def test_fetch_news_stops_retrying_once_the_budget_runs_out(monkeypatch):
+    """A retry that finds the budget spent returns None instead of making an unbudgeted request."""
+    monkeypatch.setattr(fetchers.settings, "newsapi_key", "test-key")
+    monkeypatch.setattr(fetchers, "_NEWSAPI_BUDGET", fetchers._NewsApiBudget(daily_limit=1))
+    monkeypatch.setattr(fetchers.time, "sleep", lambda _s: None)
+
+    mock_client = mock.Mock()
+    mock_client.get_everything.side_effect = _http_error(500)
+
+    with mock.patch("newsapi.NewsApiClient", return_value=mock_client):
+        result = fetchers.fetch_news("AAPL", "Apple Inc")
+
+    assert result is None
+    assert mock_client.get_everything.call_count == 1
 
 
 def test_fetch_news_returns_none_after_retries_exhausted(monkeypatch):

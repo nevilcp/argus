@@ -47,10 +47,6 @@ from argus.params import SYSTEM
 
 logger = logging.getLogger("argus.fetchers")
 
-# yfinance ships its own retry/backoff but defaults it off; this is the one
-# place that turns it on, per-process, for every yf.download/yf.Ticker call.
-yf.config.network.retries = 2
-
 
 class DataFetchError(Exception):
     """Raised when a data fetch fails after all retry attempts."""
@@ -691,14 +687,22 @@ class _NewsApiBudget:
         return Path(settings.ARGUS_DATA_DIR) / "newsapi_budget.json"
 
     @staticmethod
-    def _read_count(path: Path, today: date) -> int:
-        """Returns today's persisted request count, or 0 if absent, stale, or corrupt."""
+    def _read_count(path: Path, today: date) -> int | None:
+        """Returns today's persisted request count.
+
+        Returns:
+            The count; 0 if the file is absent or holds a previous day's count;
+            None if its content is corrupt, which the caller must not mistake for
+            an empty budget.
+        """
         try:
             raw = json.loads(path.read_text())
             if date.fromisoformat(raw["date"]) == today:
                 return int(raw["requests_today"])
-        except FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError:
+        except FileNotFoundError:
             pass
+        except KeyError, TypeError, ValueError:  # JSONDecodeError is a ValueError
+            return None
         return 0
 
     @staticmethod
@@ -729,6 +733,17 @@ class _NewsApiBudget:
             fcntl.flock(lock_file, fcntl.LOCK_EX)
             today = datetime.now(UTC).date()
             requests_today = self._read_count(path, today)
+            if requests_today is None:
+                # Treating corrupt content as an empty budget would let a bad write
+                # reset the day's count. Mark today as spent instead; tomorrow's date
+                # makes the file stale, so the budget heals on its own.
+                logger.error(
+                    "_NewsApiBudget: %s is corrupt; blocking NewsAPI requests for the "
+                    "rest of the UTC day",
+                    path,
+                )
+                self._write_count(path, today, self._daily_limit)
+                return False
             if requests_today >= self._daily_limit:
                 return False
             self._write_count(path, today, requests_today + 1)
@@ -762,7 +777,20 @@ def _fetch_news_page(client: Any, query: str, from_date: str) -> list[dict]:
 
     Returns:
         List of dicts with keys: title, description, published_at, source.
+
+    Raises:
+        DataFetchError: If no budget slot is available. The reservation is made
+            here rather than in the caller because every retry of this function is
+            another real NewsAPI request.
     """
+    if not _NEWSAPI_BUDGET.try_reserve():
+        # Exhaustion and a disk error both come back as False; try_reserve already
+        # logged the specific cause for a disk error, so this stays cause-agnostic.
+        raise DataFetchError(
+            f"no NewsAPI budget slot available (daily cap of {_NEWSAPI_DAILY_LIMIT} reached, "
+            "or the reservation failed)"
+        )
+
     response = client.get_everything(
         q=query,
         language="en",
@@ -807,16 +835,6 @@ def fetch_news(
     """
     if not settings.newsapi_key:
         logger.debug("fetch_news: NEWSAPI_KEY not set")
-        return None
-
-    if not _NEWSAPI_BUDGET.try_reserve():
-        # Exhaustion and a disk error both come back as False; try_reserve already
-        # logged the specific cause for a disk error, so this stays cause-agnostic.
-        logger.warning(
-            "fetch_news: no NewsAPI budget slot available (daily cap of %d reached, "
-            "or the reservation failed)",
-            _NEWSAPI_DAILY_LIMIT,
-        )
         return None
 
     try:

@@ -21,7 +21,7 @@ import re
 # 1-5 letter root, optional one-or-two-letter share-class suffix (BRK.B, BRK-B).
 # Deliberately excludes ^GSPC-style indices and BTC-USD-style pairs: neither
 # has the GICS sector or financials the risk and fundamental agents fetch.
-TICKER_PATTERN = re.compile(r"^[A-Z]{1,5}(?:[.-][A-Z]{1,2})?$")
+TICKER_PATTERN = re.compile(r"[A-Z]{1,5}(?:[.-][A-Z]{1,2})?")
 
 
 def is_valid_ticker(ticker: str) -> bool:
@@ -33,4 +33,4 @@ def is_valid_ticker(ticker: str) -> bool:
     Returns:
         True if ticker matches TICKER_PATTERN.
     """
-    return bool(TICKER_PATTERN.match(ticker))
+    return bool(TICKER_PATTERN.fullmatch(ticker))

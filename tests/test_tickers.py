@@ -21,6 +21,8 @@ _REPRO_REJECTIONS = [
     "AAPLLL",
     ".B",
     "AAPL.",
+    "AAPL\n",
+    "BRK.B\n",
 ]
 
 
