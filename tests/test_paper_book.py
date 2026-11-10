@@ -18,6 +18,7 @@ from argus.risk import paper_book
 from argus.risk.paper_book import PaperBook, compute_run_returns
 from argus.schemas.signals import ARGUSDecision
 from tests.helpers.builders import argus_decision, position_allocation, technical_signal
+from tests.helpers.market_data import FakeMarketData
 
 
 def _decision(ticker: str, session_timestamp: datetime, price: float, pct: float) -> ARGUSDecision:
@@ -28,16 +29,6 @@ def _decision(ticker: str, session_timestamp: datetime, price: float, pct: float
         technical=technical_signal(ticker=ticker, current_price=price),
         allocation=position_allocation(ticker, pct),
     )
-
-
-class _FakePrices:
-    """Minimal MarketDataProvider double: only ohlcv_daily is used by paper_book."""
-
-    def __init__(self, closes: dict[str, pd.Series]) -> None:
-        self._closes = closes
-
-    def ohlcv_daily(self, ticker: str, period: str = "2y") -> pd.DataFrame:
-        return pd.DataFrame({"close": self._closes[ticker]})
 
 
 def _series(start: datetime, start_price: float, days: int = 10, drift: float = 1.0) -> pd.Series:
@@ -51,7 +42,7 @@ def test_compute_run_returns_weights_by_allocation_pct():
     start = datetime(2026, 1, 1)
     aaa = _decision("AAA", start, price=100.0, pct=0.1)  # +5% over 5 days
     bbb = _decision("BBB", start, price=200.0, pct=0.15)  # +10% over 5 days
-    prices = _FakePrices(
+    prices = FakeMarketData.from_closes(
         {
             "AAA": _series(start, 100.0, drift=1.0),
             "BBB": _series(start, 200.0, drift=4.0),
@@ -72,7 +63,7 @@ def test_compute_run_returns_partial_maturity_uses_only_matured_subset():
     start = datetime(2026, 1, 1)
     matured = _decision("AAA", start, price=100.0, pct=0.1)  # +5% over 5 days
     unmatured = _decision("BBB", start, price=100.0, pct=0.15)
-    prices = _FakePrices(
+    prices = FakeMarketData.from_closes(
         {
             "AAA": _series(start, 100.0, days=10, drift=1.0),
             "BBB": _series(start, 100.0, days=2, drift=1.0),  # short of the 5-day horizon
@@ -90,7 +81,7 @@ def test_compute_run_returns_omits_runs_with_no_matured_decisions():
     """A run where nothing has matured yet is deferred, not reported as a 0.0 return."""
     start = datetime(2026, 1, 1)
     decision = _decision("AAA", start, price=100.0, pct=0.1)
-    prices = _FakePrices({"AAA": _series(start, 100.0, days=2, drift=1.0)})
+    prices = FakeMarketData.from_closes({"AAA": _series(start, 100.0, days=2, drift=1.0)})
 
     assert compute_run_returns([decision], prices, horizon_days=30) == []
 
@@ -101,7 +92,7 @@ def test_compute_run_returns_groups_by_session_timestamp():
     run2 = datetime(2026, 1, 8)
     d1 = _decision("AAA", run1, price=100.0, pct=0.15)
     d2 = _decision("AAA", run2, price=100.0, pct=0.15)
-    prices = _FakePrices({"AAA": _series(run1, 100.0, days=20, drift=1.0)})
+    prices = FakeMarketData.from_closes({"AAA": _series(run1, 100.0, days=20, drift=1.0)})
 
     results = compute_run_returns([d1, d2], prices, horizon_days=5)
 
@@ -112,7 +103,7 @@ def test_compute_run_returns_skips_decisions_that_took_no_position():
     """A decision with a zero-weight allocation contributes nothing to its run."""
     start = datetime(2026, 1, 1)
     zero_weight = _decision("AAA", start, price=100.0, pct=0.0)
-    prices = _FakePrices({"AAA": _series(start, 100.0, drift=1.0)})
+    prices = FakeMarketData.from_closes({"AAA": _series(start, 100.0, drift=1.0)})
 
     assert compute_run_returns([zero_weight], prices, horizon_days=5) == []
 
@@ -123,7 +114,7 @@ def test_compute_run_returns_skips_runs_inside_the_previous_kept_runs_horizon():
     run2 = run1 + timedelta(days=2)  # inside run1's 5-day horizon
     d1 = _decision("AAA", run1, price=100.0, pct=0.1)
     d2 = _decision("AAA", run2, price=100.0, pct=0.1)
-    prices = _FakePrices({"AAA": _series(run1, 100.0, days=20, drift=1.0)})
+    prices = FakeMarketData.from_closes({"AAA": _series(run1, 100.0, days=20, drift=1.0)})
 
     results = compute_run_returns([d1, d2], prices, horizon_days=5)
 
@@ -136,7 +127,7 @@ def test_compute_run_returns_keeps_runs_exactly_horizon_days_apart():
     run2 = run1 + timedelta(days=5)
     d1 = _decision("AAA", run1, price=100.0, pct=0.1)
     d2 = _decision("AAA", run2, price=100.0, pct=0.1)
-    prices = _FakePrices({"AAA": _series(run1, 100.0, days=20, drift=1.0)})
+    prices = FakeMarketData.from_closes({"AAA": _series(run1, 100.0, days=20, drift=1.0)})
 
     results = compute_run_returns([d1, d2], prices, horizon_days=5)
 
@@ -153,7 +144,7 @@ def test_compute_run_returns_and_paperbook_survive_the_audit_simulation():
         [100.0 * (decay**i) for i in range(days)],
         index=pd.date_range(start=start, periods=days, freq="D"),
     )
-    prices = _FakePrices({"AAA": closes})
+    prices = FakeMarketData.from_closes({"AAA": closes})
     decisions = [
         _decision("AAA", start + timedelta(days=i), price=100.0 * (decay**i), pct=0.15)
         for i in range(120)

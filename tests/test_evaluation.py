@@ -4,7 +4,7 @@ Metric functions are tested against synthetic, deterministic data (no
 network); collect_paired_outcomes, evaluate_decisions, and
 system_behavior_report are tested end-to-end against the one real fixture
 session, with a fake MarketDataProvider standing in for
-LiveMarketDataProvider (see tests/test_reconciliation.py's _FakeMarketData,
+LiveMarketDataProvider (see tests/helpers/market_data.py's FakeMarketData,
 reused here).
 """
 
@@ -29,8 +29,8 @@ from argus.backtesting.replay import SessionResult, replay_session
 from argus.orchestration.aggregator import HybridSignalAggregator
 from argus.schemas.signals import ARGUSDecision, Signal
 from tests.helpers.builders import macro_context, position_allocation, technical_signal
+from tests.helpers.market_data import FakeMarketData, ten_day_series
 from tests.helpers.paths import FIXTURES_DIR
-from tests.test_reconciliation import _FakeMarketData, _ten_day_series
 
 
 def _decision_with_signal(
@@ -213,7 +213,7 @@ def test_bootstrap_ci_reproducible_with_fixed_seed():
 def test_collect_paired_outcomes_pairs_conviction_with_realized_return():
     """Each decision is paired with its forward return over the given horizon."""
     decision = _decision_with_signal(Signal.BULLISH, 0.8, ticker="TEST", price=100.0)
-    market_data = _ten_day_series(datetime(2026, 1, 1), start_price=100.0, ticker="TEST")
+    market_data = ten_day_series(datetime(2026, 1, 1), start_price=100.0, ticker="TEST")
 
     pairs = collect_paired_outcomes([decision], market_data, horizon_days=5)
 
@@ -225,7 +225,7 @@ def test_collect_paired_outcomes_pairs_conviction_with_realized_return():
 def test_collect_paired_outcomes_skips_decisions_with_no_aggregated_signal():
     """Decisions without an aggregated signal produce no paired outcome."""
     decision = ARGUSDecision(ticker="TEST", session_timestamp=datetime(2026, 1, 1))
-    market_data = _ten_day_series(datetime(2026, 1, 1), ticker="TEST")
+    market_data = ten_day_series(datetime(2026, 1, 1), ticker="TEST")
 
     assert collect_paired_outcomes([decision], market_data, horizon_days=5) == []
 
@@ -239,7 +239,7 @@ def test_evaluate_decisions_end_to_end_on_multiple_tickers():
     dates = pd.date_range(datetime(2026, 1, 1), periods=10, freq="D")
     rising = pd.Series([100.0 + i for i in range(10)], index=dates)
     falling = pd.Series([100.0 - i for i in range(10)], index=dates)
-    market_data = _FakeMarketData({"A": rising, "B": falling})
+    market_data = FakeMarketData.from_closes({"A": rising, "B": falling})
 
     result = evaluate_decisions(decisions, market_data, horizon_days=5, deadband=0.01)
 

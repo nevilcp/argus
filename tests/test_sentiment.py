@@ -8,6 +8,7 @@ from argus.agents.sentiment import (
     aggregate_finbert_scores,
 )
 from argus.orchestration.governor import RateLimitExceeded
+from tests.helpers.market_data import FakeMarketData
 
 _NEUTRAL_RESPONSE = (
     '{"signal": "NEUTRAL", "conviction": 0.3, "sentiment_decay_risk": "LOW", "reasoning": "n/a"}'
@@ -57,40 +58,6 @@ def test_aggregate_finbert_scores_confidence_cap():
     assert res["confidence"] == 1.0
 
 
-class _StubMarketData:
-    """Minimal MarketDataProvider stub exposing only what SentimentAgent.analyze uses."""
-
-    def __init__(self, news):
-        self._news = news
-
-    def news(self, ticker, company_name, days_back=7):
-        return self._news
-
-    def ohlcv_daily(self, ticker, period="2y"):
-        raise NotImplementedError
-
-    def multiple_daily(self, tickers, period="1y"):
-        raise NotImplementedError
-
-    def fundamentals(self, ticker):
-        raise NotImplementedError
-
-    def fred_series(self, series_id, start="2018-01-01"):
-        raise NotImplementedError
-
-    def macro_bundle(self):
-        raise NotImplementedError
-
-    def vix(self):
-        raise NotImplementedError
-
-    def ticker_info(self, ticker):
-        raise NotImplementedError
-
-    def ticker_calendar(self, ticker):
-        raise NotImplementedError
-
-
 class _RecordingLLMClient:
     """Stub LLMClient returning a fixed response while recording the prompt it received."""
 
@@ -107,7 +74,7 @@ def test_analyze_degrades_the_ticker_on_governor_exhaustion_without_retrying(mon
     """A RateLimitExceeded from the LLM client fails that ticker immediately, once, into errors."""
     _no_upcoming_earnings(monkeypatch)
 
-    market_data = _StubMarketData(news=[])
+    market_data = FakeMarketData(news=[])
 
     class _RateLimitedLLMClient:
         def __init__(self) -> None:
@@ -134,7 +101,7 @@ def test_analyze_degrades_the_ticker_without_repairing_a_bad_response(monkeypatc
     _no_upcoming_earnings(monkeypatch)
     monkeypatch.setattr("argus.structured_output.time.sleep", lambda s: None)
 
-    market_data = _StubMarketData(news=[])
+    market_data = FakeMarketData(news=[])
     llm = _RecordingLLMClient("not json")
     agent = SentimentAgent(llm_client=llm, market_data=market_data)
 
@@ -150,7 +117,7 @@ def test_analyze_flags_unavailable_news_in_the_llm_prompt(monkeypatch):
     """A None news result surfaces as an explicit False flag, not a silent zero."""
     _no_upcoming_earnings(monkeypatch)
 
-    market_data = _StubMarketData(news=None)
+    market_data = FakeMarketData(news=None)
     llm = _RecordingLLMClient(_NEUTRAL_RESPONSE)
     agent = SentimentAgent(llm_client=llm, market_data=market_data)
 
@@ -185,7 +152,7 @@ def test_analyze_reports_availability_true_with_real_data(monkeypatch):
         ],
     )
 
-    market_data = _StubMarketData(
+    market_data = FakeMarketData(
         news=[{"title": "Real headline", "description": "", "published_at": "", "source": ""}],
     )
     llm = _RecordingLLMClient(
@@ -208,7 +175,7 @@ def test_batch_analyze_paces_only_against_a_live_market_data_provider(monkeypatc
     """Fixture-backed providers skip fan-out pacing so the test suite stays fast."""
     _no_upcoming_earnings(monkeypatch)
 
-    market_data = _StubMarketData(news=[])
+    market_data = FakeMarketData(news=[])
     llm = _RecordingLLMClient(_NEUTRAL_RESPONSE)
     agent = SentimentAgent(llm_client=llm, market_data=market_data)
 
@@ -246,7 +213,7 @@ def test_scored_articles_are_sorted_by_published_at_before_aggregation(monkeypat
 
     monkeypatch.setattr("argus.agents.sentiment.score_headlines_with_finbert", stub_score)
 
-    market_data = _StubMarketData(
+    market_data = FakeMarketData(
         # Relevance order (as NewsAPI returns it): stale/negative ranks first.
         news=[
             {"title": "stale bad news", "published_at": "2024-01-01T00:00:00Z"},
@@ -266,11 +233,7 @@ def test_analyze_tolerates_a_raising_news_provider(monkeypatch):
     """A news provider that raises mid-fetch degrades to unavailable rather than crashing."""
     _no_upcoming_earnings(monkeypatch)
 
-    class _RaisingNewsMarketData(_StubMarketData):
-        def news(self, ticker, company_name, days_back=7):
-            raise RuntimeError("provider outage")
-
-    market_data = _RaisingNewsMarketData(news=None)
+    market_data = FakeMarketData(news=RuntimeError("provider outage"))
     llm = _RecordingLLMClient(_NEUTRAL_RESPONSE)
     agent = SentimentAgent(llm_client=llm, market_data=market_data)
 
@@ -285,7 +248,7 @@ def test_batch_analyze_tolerates_a_single_ticker_raising(monkeypatch):
     """One ticker's uncaught exception must not abort the batch; the rest still complete."""
     _no_upcoming_earnings(monkeypatch)
 
-    market_data = _StubMarketData(news=[])
+    market_data = FakeMarketData(news=[])
     llm = _RecordingLLMClient(_NEUTRAL_RESPONSE)
     agent = SentimentAgent(llm_client=llm, market_data=market_data)
     original_analyze = agent.analyze
@@ -311,12 +274,11 @@ def test_batch_analyze_passes_company_name_for_known_tickers(monkeypatch):
 
     received = {}
 
-    class _RecordingMarketData(_StubMarketData):
-        def news(self, ticker, company_name, days_back=7):
-            received[ticker] = company_name
-            return []
+    def record_news(ticker, company_name, days_back=7):
+        received[ticker] = company_name
+        return []
 
-    market_data = _RecordingMarketData(news=[])
+    market_data = FakeMarketData(news=record_news)
     llm = _RecordingLLMClient(_NEUTRAL_RESPONSE)
     agent = SentimentAgent(llm_client=llm, market_data=market_data)
 
@@ -326,26 +288,15 @@ def test_batch_analyze_passes_company_name_for_known_tickers(monkeypatch):
     assert received["ZZZZ"] == "ZZZZ"  # unmapped ticker falls back to itself
 
 
-class _CalendarMarketData(_StubMarketData):
-    """Stub MarketDataProvider returning a fixed calendar payload for any ticker."""
-
-    def __init__(self, calendar):
-        super().__init__(news=[])
-        self._calendar = calendar
-
-    def ticker_calendar(self, ticker):
-        return self._calendar
-
-
 def test_check_earnings_calendar_past_date_is_not_upcoming():
     """An earnings date in the past must not report an upcoming catalyst."""
     past_date = datetime.now() - timedelta(days=15)
-    market_data = _CalendarMarketData({"Earnings Date": [past_date]})
+    market_data = FakeMarketData(news=[], ticker_calendar={"Earnings Date": [past_date]})
     assert _check_earnings_calendar("AAPL", market_data) is False
 
 
 def test_check_earnings_calendar_future_date_within_window_is_upcoming():
     """An earnings date within the next 14 days reports an upcoming catalyst."""
     future_date = datetime.now() + timedelta(days=5)
-    market_data = _CalendarMarketData({"Earnings Date": [future_date]})
+    market_data = FakeMarketData(news=[], ticker_calendar={"Earnings Date": [future_date]})
     assert _check_earnings_calendar("AAPL", market_data) is True
