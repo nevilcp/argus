@@ -7,7 +7,6 @@ fail; nothing here is decorative.
 """
 
 import json
-from pathlib import Path
 from unittest import mock
 
 import groq
@@ -24,8 +23,8 @@ from argus.seams import (
     RetryableTransportError,
     _groq_retry_delay,
 )
+from tests.helpers.paths import FIXTURES_DIR
 
-FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 

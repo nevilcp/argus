@@ -4,8 +4,7 @@ The unattended collector shares /analyze's concurrency slot rather than
 invoking the graph alongside a live /analyze run, and skips rather than
 waits when the slot is already held.
 
-The kill-switch gate is not covered here; see tests/test_kill_switch.py's
-"Collector gate" section for that.
+The kill-switch gate is not covered here; see tests/test_kill_switch_collector_gate.py.
 """
 
 from __future__ import annotations
@@ -17,7 +16,6 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-import pytest
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -26,7 +24,8 @@ from argus.config import settings
 from argus.orchestration.collector import CycleOutcome, append_decisions_jsonl, run_collection_cycle
 from argus.orchestration.graph import build_checkpoint_serde
 from argus.params import COLLECTOR, RECONCILIATION
-from argus.schemas.signals import ARGUSDecision, PositionAllocation
+from argus.schemas.signals import ARGUSDecision
+from tests.helpers.builders import argus_decision, position_allocation
 
 
 def _put_checkpoint(db_path: str, thread_id: str, ts: datetime) -> None:
@@ -64,20 +63,10 @@ _SESSION_STATES = {"AAPL": {"timestamp": "2024-01-02T09:30:00-05:00"}}
 
 def _decision(ticker: str = "AAPL", *, with_allocation: bool = False) -> ARGUSDecision:
     """Builds a minimal ARGUSDecision, optionally carrying a real allocation."""
-    allocation = None
-    if with_allocation:
-        allocation = PositionAllocation(
-            ticker=ticker,
-            allocation_pct=0.05,
-            allocation_usd=5_000.0,
-            stop_loss=90.0,
-            thesis="test thesis",
-            composite_conviction=0.5,
-            time_horizon="30 days",
-        )
-    return ARGUSDecision(
-        ticker=ticker, session_timestamp=datetime(2024, 1, 2), allocation=allocation
+    allocation = (
+        position_allocation(ticker, 0.05, composite_conviction=0.5) if with_allocation else None
     )
+    return argus_decision(ticker, datetime(2024, 1, 2), allocation=allocation)
 
 
 def _graph() -> mock.Mock:
@@ -110,7 +99,6 @@ async def _run_cycle(graph: mock.Mock, **kwargs: Any):
     )
 
 
-@pytest.mark.asyncio
 async def test_run_collection_cycle_default_log_path_honors_argus_data_dir(tmp_path, monkeypatch):
     """With no decisions_log_path, decisions go under ARGUS_DATA_DIR, not the working dir."""
     elsewhere = tmp_path / "cwd"
@@ -128,7 +116,6 @@ async def test_run_collection_cycle_default_log_path_honors_argus_data_dir(tmp_p
     assert not (elsewhere / "data" / "decisions.jsonl").exists()
 
 
-@pytest.mark.asyncio
 async def test_run_collection_cycle_skips_when_analyze_lock_is_held():
     """A held analyze_lock makes the collector skip rather than invoke the graph."""
     lock = asyncio.Semaphore(1)
@@ -143,7 +130,6 @@ async def test_run_collection_cycle_skips_when_analyze_lock_is_held():
     graph.invoke.assert_not_called()
 
 
-@pytest.mark.asyncio
 async def test_run_collection_cycle_runs_when_analyze_lock_is_free():
     """A free analyze_lock lets the collector acquire it and invoke the graph normally."""
     lock = asyncio.Semaphore(1)
@@ -156,7 +142,6 @@ async def test_run_collection_cycle_runs_when_analyze_lock_is_free():
     assert not lock.locked()
 
 
-@pytest.mark.asyncio
 async def test_run_collection_cycle_runs_unguarded_when_analyze_lock_is_none():
     """No analyze_lock (scripts/collect_session.py's standalone caller) runs unguarded."""
     graph = _graph()
@@ -167,7 +152,6 @@ async def test_run_collection_cycle_runs_unguarded_when_analyze_lock_is_none():
     graph.invoke.assert_called_once()
 
 
-@pytest.mark.asyncio
 async def test_run_collection_cycle_reports_no_op_when_skipped():
     """A cycle that never invokes the graph (market closed) is a NO_OP, not degraded."""
     lock = asyncio.Semaphore(1)
@@ -180,7 +164,6 @@ async def test_run_collection_cycle_reports_no_op_when_skipped():
     assert result.outcome is CycleOutcome.NO_OP
 
 
-@pytest.mark.asyncio
 async def test_run_collection_cycle_reports_success_when_allocations_clear_threshold():
     """Enough decisions carry a real allocation: the cycle is SUCCESS, not DEGRADED."""
     decisions = [
@@ -196,7 +179,6 @@ async def test_run_collection_cycle_reports_success_when_allocations_clear_thres
     assert "allocation" not in result.degraded_inputs
 
 
-@pytest.mark.asyncio
 async def test_run_collection_cycle_reports_degraded_when_no_decision_has_allocation():
     """Twenty decisions, all null allocation: issue #91's "looks like a success" case."""
     decisions = [_decision(with_allocation=False) for _ in range(20)]
@@ -215,7 +197,6 @@ async def test_run_collection_cycle_reports_degraded_when_no_decision_has_alloca
     assert result.degraded_inputs["risk"] == 20
 
 
-@pytest.mark.asyncio
 async def test_run_collection_cycle_prunes_stale_checkpoints_even_when_the_cycle_is_skipped(
     tmp_path,
 ):
@@ -238,7 +219,6 @@ async def test_run_collection_cycle_prunes_stale_checkpoints_even_when_the_cycle
     assert _checkpoint_thread_ids(db_path) == {"fresh-thread"}
 
 
-@pytest.mark.asyncio
 async def test_run_collection_cycle_without_checkpoint_db_path_skips_pruning(monkeypatch):
     """The default (no checkpoint_db_path) leaves pruning out of the cycle entirely."""
     prune = mock.Mock()
@@ -251,7 +231,6 @@ async def test_run_collection_cycle_without_checkpoint_db_path_skips_pruning(mon
     prune.assert_not_called()
 
 
-@pytest.mark.asyncio
 async def test_run_collection_cycle_survives_a_checkpoint_pruning_failure(tmp_path, monkeypatch):
     """A prune_checkpoints failure is logged and swallowed, not left to fail the cycle."""
     db_path = str(tmp_path / "argus_graph.db")

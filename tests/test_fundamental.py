@@ -10,6 +10,7 @@ from argus.agents.fundamental import (
     build_compact_prompt,
 )
 from argus.seams import FixtureLLMClient
+from tests.helpers.market_data import FakeMarketData
 
 # The smallest fundamentals payload FundamentalSignal will validate against
 _MINIMAL_FUNDAMENTALS = {"sector": "Technology", "industry": "Consumer Electronics"}
@@ -17,16 +18,6 @@ _MINIMAL_FUNDAMENTALS = {"sector": "Technology", "industry": "Consumer Electroni
 _VALID_LLM_RESPONSE = json.dumps(
     {"signal": "NEUTRAL", "conviction": 0.5, "moat_score": 5, "reasoning": "r"}
 )
-
-
-class _StubMarketData:
-    """Returns a fixed fundamentals payload regardless of ticker."""
-
-    def __init__(self, fundamentals: dict) -> None:
-        self._fundamentals = fundamentals
-
-    def fundamentals(self, ticker: str) -> dict:
-        return dict(self._fundamentals)
 
 
 class _UnlimitedCapacityLLMClient:
@@ -121,7 +112,7 @@ def test_analyze_overwrites_llm_echoed_ratios_with_measured_data():
         "marketCap": 3_000_000_000_000,
         "p_fcf": 45.0,
     }
-    market_data = _StubMarketData(measured)
+    market_data = FakeMarketData(fundamentals=measured)
 
     # A wrong numeric echo: e.g. as if the model misread 31.5x/2% growth as 12x/45% growth.
     llm_response = json.dumps(
@@ -153,7 +144,7 @@ def test_analyze_anonymizes_and_derives_as_of_date_from_session_seed():
 
     Not from today's date.
     """
-    market_data = _StubMarketData(_MINIMAL_FUNDAMENTALS)
+    market_data = FakeMarketData(fundamentals=_MINIMAL_FUNDAMENTALS)
     llm = _RecordingLLMClient(_VALID_LLM_RESPONSE)
     agent = FundamentalAgent(llm_client=llm, market_data=market_data)
 
@@ -166,7 +157,7 @@ def test_analyze_anonymizes_and_derives_as_of_date_from_session_seed():
 
 def test_analyze_retries_with_the_prior_validation_error_in_the_prompt():
     """A malformed first response's error is carried into the retry prompt, not silently re-sent."""
-    market_data = _StubMarketData(_MINIMAL_FUNDAMENTALS)
+    market_data = FakeMarketData(fundamentals=_MINIMAL_FUNDAMENTALS)
     prompts: list[str] = []
 
     class _FlakyThenValidLLMClient(_UnlimitedCapacityLLMClient):
@@ -186,7 +177,7 @@ def test_analyze_retries_with_the_prior_validation_error_in_the_prompt():
 
 def test_analyze_degrades_the_ticker_on_governor_exhaustion_without_retrying():
     """A RateLimitExceeded from the LLM client fails that ticker immediately, once, into errors."""
-    market_data = _StubMarketData(_MINIMAL_FUNDAMENTALS)
+    market_data = FakeMarketData(fundamentals=_MINIMAL_FUNDAMENTALS)
 
     class _RateLimitedLLMClient(_UnlimitedCapacityLLMClient):
         def __init__(self) -> None:
@@ -213,8 +204,8 @@ def test_analyze_degrades_the_ticker_when_measured_data_fails_signal_validation(
 
     The violation is in the measured data, not the LLM's verdict.
     """
-    market_data = _StubMarketData(
-        {**_MINIMAL_FUNDAMENTALS, "debt_to_equity": -1.5}  # FundamentalSignal requires ge=0.0
+    market_data = FakeMarketData(
+        fundamentals={**_MINIMAL_FUNDAMENTALS, "debt_to_equity": -1.5}  # requires ge=0.0
     )
     llm = _RecordingLLMClient(_VALID_LLM_RESPONSE)
     agent = FundamentalAgent(llm_client=llm, market_data=market_data)
@@ -235,7 +226,7 @@ def test_analyze_does_not_skip_every_ticker_at_a_low_configured_rpm(monkeypatch)
     """
     monkeypatch.setattr(fundamental_module.settings, "ARGUS_GROQ_RPM", 10)
 
-    market_data = _StubMarketData(_MINIMAL_FUNDAMENTALS)
+    market_data = FakeMarketData(fundamentals=_MINIMAL_FUNDAMENTALS)
     llm = FixtureLLMClient({"only": _VALID_LLM_RESPONSE}, key_fn=lambda _p: "only", capacity=10)
     agent = FundamentalAgent(llm_client=llm, market_data=market_data)
 

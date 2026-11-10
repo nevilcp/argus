@@ -16,6 +16,7 @@ from argus.data.cache import TTLCache
 from argus.params import RISK
 from argus.schemas.signals import RiskVerdict
 from argus.seams import LiveMarketDataProvider
+from tests.helpers.market_data import FakeMarketData
 
 _TRADING_YEAR = pd.date_range(start="2023-01-01", periods=253, freq="B")
 
@@ -344,18 +345,6 @@ def test_evaluate_skips_optimizer_on_non_finite_covariance(monkeypatch) -> None:
     assert any(r.startswith("Covariance: non-finite") for r in result.veto_reasons)
 
 
-class _StubTickerInfoMarketData:
-    """Minimal MarketDataProvider stub returning a fixed sector for ticker_info."""
-
-    def __init__(self, sector: str) -> None:
-        self._sector = sector
-        self.calls = 0
-
-    def ticker_info(self, ticker: str) -> dict:
-        self.calls += 1
-        return {"sector": self._sector}
-
-
 def test_get_sector_does_not_cache_across_non_live_providers(monkeypatch) -> None:
     """A non-live provider's sector must never leak into a later, different provider's lookup.
 
@@ -372,13 +361,13 @@ def test_get_sector_does_not_cache_across_non_live_providers(monkeypatch) -> Non
         ),
     )
 
-    session_one = _StubTickerInfoMarketData("Technology")
-    session_two = _StubTickerInfoMarketData("Energy")
+    session_one = FakeMarketData(ticker_info={"sector": "Technology"})
+    session_two = FakeMarketData(ticker_info={"sector": "Energy"})
 
     assert get_sector("AAPL", session_one) == "Technology"
     assert get_sector("AAPL", session_two) == "Energy"
-    assert session_one.calls == 1
-    assert session_two.calls == 1
+    assert session_one.calls["ticker_info"] == 1
+    assert session_two.calls["ticker_info"] == 1
 
 
 class _StubLiveMarketData(LiveMarketDataProvider):

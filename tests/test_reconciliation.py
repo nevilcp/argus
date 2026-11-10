@@ -42,129 +42,20 @@ from argus.schemas.signals import (
     FundamentalSignal,
     MacroContext,
     PositionAllocation,
-    Regime,
-    SectorSignal,
     SentimentSignal,
     Signal,
     TechnicalSignal,
-    VixRegime,
-    YieldCurve,
 )
 from argus.seams import FixtureLLMClient, FixtureMarketDataProvider
-
-FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
-
-
-def _technical(
-    signal: Signal, conviction: float, ticker: str = "TEST", price: float = 100.0
-) -> TechnicalSignal:
-    """Builds a TechnicalSignal with fixed indicators, varying only the given fields."""
-    return TechnicalSignal(
-        ticker=ticker,
-        current_price=price,
-        rsi_14=50.0,
-        macd_histogram=0.0,
-        bb_percent_b=0.5,
-        atr_pct=0.02,
-        adx_14=20.0,
-        vwap_distance=0.0,
-        volume_ratio=1.0,
-        momentum_30m=0.0,
-        momentum_1d=0.0,
-        signal=signal,
-        conviction=conviction,
-        net_score=0.0,
-        timestamp=datetime.now(),
-    )
-
-
-def _fundamental(signal: Signal, conviction: float, ticker: str = "TEST") -> FundamentalSignal:
-    """Builds a FundamentalSignal with fixed fields, varying only the given ones."""
-    return FundamentalSignal(
-        ticker=ticker,
-        sector="Technology",
-        industry="Software",
-        signal=signal,
-        conviction=conviction,
-        moat_score=5.0,
-        reasoning="test",
-        data_as_of_date=datetime.now().date(),
-        timestamp=datetime.now(),
-    )
-
-
-def _sentiment(signal: Signal, conviction: float, ticker: str = "TEST") -> SentimentSignal:
-    """Builds a SentimentSignal with fixed field values, varying only the given fields."""
-    return SentimentSignal(
-        ticker=ticker,
-        finbert_net_score=0.0,
-        pct_positive=0.3,
-        pct_negative=0.3,
-        news_volume_7d=5,
-        upcoming_catalyst=False,
-        signal=signal,
-        conviction=conviction,
-        sentiment_decay_risk="LOW",
-        reasoning="test",
-        timestamp=datetime.now(),
-    )
-
-
-def _macro(regime: Regime = Regime.EXPANSION) -> MacroContext:
-    """Builds a MacroContext with fixed field values, varying only the regime."""
-    return MacroContext(
-        fed_funds=4.0,
-        cpi_yoy=3.0,
-        unemployment=4.0,
-        t10y2y=0.1,
-        consumer_sentiment=60.0,
-        vix_level=18.0,
-        macro_regime=regime,
-        regime_confidence=0.7,
-        model_healthy=True,
-        interest_rate_trend="STABLE",
-        yield_curve_shape=YieldCurve.NORMAL,
-        vix_regime=VixRegime.MEDIUM,
-        vix_percentile=40.0,
-        inflation_trajectory="STABLE",
-        sector_rotation_signal=SectorSignal.GROWTH_FAVORED,
-        agent_multipliers={"fundamental": 1.0, "technical": 1.0, "sentiment": 1.0},
-        timestamp=datetime.now(),
-    )
-
-
-def _allocation(ticker: str = "TEST") -> PositionAllocation:
-    """Builds a PositionAllocation with fixed field values, varying only the ticker."""
-    return PositionAllocation(
-        ticker=ticker,
-        allocation_pct=0.10,
-        allocation_usd=10_000.0,
-        stop_loss=90.0,
-        thesis="test thesis",
-        composite_conviction=0.7,
-        time_horizon="30 days",
-    )
-
-
-class _FakeMarketData:
-    """Minimal MarketDataProvider double: only ohlcv_daily is used by reconciliation."""
-
-    def __init__(self, closes: dict[str, pd.Series]) -> None:
-        """Stores the fixed per-ticker close series to serve from ohlcv_daily."""
-        self._closes = closes
-
-    def ohlcv_daily(self, ticker: str, period: str = "2y") -> pd.DataFrame:
-        """Returns the fixed close series for the given ticker, ignoring period."""
-        return pd.DataFrame({"close": self._closes[ticker]})
-
-
-def _ten_day_series(
-    start: datetime, start_price: float = 100.0, ticker: str = "TEST"
-) -> _FakeMarketData:
-    """Builds a 10-day daily close series rising by 1.0 per day from start_price."""
-    dates = pd.date_range(start=start, periods=10, freq="D")
-    closes = pd.Series([start_price + i for i in range(10)], index=dates)
-    return _FakeMarketData({ticker: closes})
+from tests.helpers.builders import (
+    fundamental_signal,
+    macro_context,
+    position_allocation,
+    sentiment_signal,
+    technical_signal,
+)
+from tests.helpers.market_data import FakeMarketData, ten_day_series
+from tests.helpers.paths import FIXTURES_DIR
 
 
 def _aggregated_decision(
@@ -214,14 +105,16 @@ def test_credit_primary_driver_returns_unknown_with_no_signals():
 
 def test_credit_primary_driver_returns_the_sole_signal_when_only_one_present():
     """With only one agent signal present, that agent is credited by default."""
-    decision = _aggregated_decision(_technical(Signal.BULLISH, 0.8), _macro())
+    decision = _aggregated_decision(technical_signal(Signal.BULLISH, 0.8), macro_context())
     assert credit_primary_driver(decision) == "technical"
 
 
 def test_credit_primary_driver_credits_the_dominant_agent():
     """Leave-one-out ablation credits whichever agent's removal swings conviction most."""
     decision = _aggregated_decision(
-        _technical(Signal.BULLISH, 0.9), _macro(), _fundamental(Signal.BULLISH, 0.1)
+        technical_signal(Signal.BULLISH, 0.9),
+        macro_context(),
+        fundamental_signal(Signal.BULLISH, 0.1),
     )
     assert credit_primary_driver(decision) == "technical"
 
@@ -229,7 +122,9 @@ def test_credit_primary_driver_credits_the_dominant_agent():
 def test_credit_primary_driver_is_symmetric_under_relabeling():
     """Swapping which agent is dominant should swap the credited driver."""
     decision = _aggregated_decision(
-        _technical(Signal.BULLISH, 0.1), _macro(), _fundamental(Signal.BULLISH, 0.9)
+        technical_signal(Signal.BULLISH, 0.1),
+        macro_context(),
+        fundamental_signal(Signal.BULLISH, 0.9),
     )
     assert credit_primary_driver(decision) == "fundamental"
 
@@ -246,10 +141,10 @@ def test_credit_primary_driver_replays_the_baseline_reliability_in_each_ablation
     """
     reliability = {"technical": 0.95, "fundamental": 0.20, "sentiment": 0.50}
     decision = _aggregated_decision(
-        _technical(Signal.BULLISH, 0.9),
-        _macro(),
-        _fundamental(Signal.BEARISH, 0.85),
-        _sentiment(Signal.NEUTRAL, 0.3),
+        technical_signal(Signal.BULLISH, 0.9),
+        macro_context(),
+        fundamental_signal(Signal.BEARISH, 0.85),
+        sentiment_signal(Signal.NEUTRAL, 0.3),
         reliability=reliability,
     )
 
@@ -274,14 +169,14 @@ def test_credit_primary_driver_replays_the_baseline_reliability_in_each_ablation
 def test_compute_realized_return_pairs_entry_and_horizon_close():
     """Realized return pairs the entry-day close with the close N horizon days later."""
     start = datetime(2026, 1, 1)
-    technical = _technical(Signal.BULLISH, 0.8, price=100.0)
+    technical = technical_signal(Signal.BULLISH, 0.8, current_price=100.0)
     decision = ARGUSDecision(
         ticker="TEST",
         session_timestamp=start,
         technical=technical,
-        allocation=_allocation(),
+        allocation=position_allocation(),
     )
-    market_data = _ten_day_series(start, start_price=100.0)
+    market_data = ten_day_series(start, start_price=100.0)
 
     outcome = compute_realized_return(decision, market_data, horizon_days=5)
 
@@ -297,9 +192,9 @@ def test_compute_realized_return_none_without_allocation():
     decision = ARGUSDecision(
         ticker="TEST",
         session_timestamp=datetime(2026, 1, 1),
-        technical=_technical(Signal.BULLISH, 0.8),
+        technical=technical_signal(Signal.BULLISH, 0.8),
     )
-    market_data = _ten_day_series(datetime(2026, 1, 1))
+    market_data = ten_day_series(datetime(2026, 1, 1))
     assert compute_realized_return(decision, market_data, horizon_days=5) is None
 
 
@@ -308,9 +203,9 @@ def test_compute_realized_return_none_without_technical_signal():
     decision = ARGUSDecision(
         ticker="TEST",
         session_timestamp=datetime(2026, 1, 1),
-        allocation=_allocation(),
+        allocation=position_allocation(),
     )
-    market_data = _ten_day_series(datetime(2026, 1, 1))
+    market_data = ten_day_series(datetime(2026, 1, 1))
     assert compute_realized_return(decision, market_data, horizon_days=5) is None
 
 
@@ -325,7 +220,7 @@ def test_compute_realized_return_none_with_zero_weight_allocation():
     decision = ARGUSDecision(
         ticker="TEST",
         session_timestamp=datetime(2026, 1, 1),
-        technical=_technical(Signal.BULLISH, 0.8),
+        technical=technical_signal(Signal.BULLISH, 0.8),
         allocation=PositionAllocation(
             ticker="TEST",
             allocation_pct=0.0,
@@ -336,7 +231,7 @@ def test_compute_realized_return_none_with_zero_weight_allocation():
             time_horizon="30 days",
         ),
     )
-    market_data = _ten_day_series(datetime(2026, 1, 1))
+    market_data = ten_day_series(datetime(2026, 1, 1))
     assert compute_realized_return(decision, market_data, horizon_days=5) is None
 
 
@@ -346,12 +241,10 @@ def test_compute_realized_return_none_when_horizon_not_yet_reached():
     decision = ARGUSDecision(
         ticker="TEST",
         session_timestamp=start,
-        technical=_technical(Signal.BULLISH, 0.8),
-        allocation=_allocation(),
+        technical=technical_signal(Signal.BULLISH, 0.8),
+        allocation=position_allocation(),
     )
-    market_data = _ten_day_series(
-        start
-    )  # only 10 days, short of the 30-day horizon requested below
+    market_data = ten_day_series(start)  # only 10 days, short of the 30-day horizon requested below
     assert compute_realized_return(decision, market_data, horizon_days=30) is None
 
 
@@ -364,13 +257,13 @@ def test_reconcile_decision_stores_outcome_with_ablated_primary_driver():
     """Reconciling a decision stores its outcome tagged with the credited driver."""
     start = datetime(2026, 1, 1)
     decision = _aggregated_decision(
-        _technical(Signal.BULLISH, 0.9, price=100.0),
-        _macro(),
-        _fundamental(Signal.BULLISH, 0.1),
+        technical_signal(Signal.BULLISH, 0.9, current_price=100.0),
+        macro_context(),
+        fundamental_signal(Signal.BULLISH, 0.1),
         session_timestamp=start,
-        allocation=_allocation(),
+        allocation=position_allocation(),
     )
-    market_data = _ten_day_series(start, start_price=100.0)
+    market_data = ten_day_series(start, start_price=100.0)
     cultural = mock.create_autospec(CulturalMemoryManager, instance=True)
 
     stored = reconcile_decision(decision, market_data, cultural, horizon_days=5)
@@ -389,9 +282,9 @@ def test_reconcile_decision_returns_false_and_stores_nothing_with_no_position():
     decision = ARGUSDecision(
         ticker="TEST",
         session_timestamp=datetime(2026, 1, 1),
-        technical=_technical(Signal.BULLISH, 0.8),
+        technical=technical_signal(Signal.BULLISH, 0.8),
     )
-    market_data = _ten_day_series(datetime(2026, 1, 1))
+    market_data = ten_day_series(datetime(2026, 1, 1))
     cultural = mock.create_autospec(CulturalMemoryManager, instance=True)
 
     assert reconcile_decision(decision, market_data, cultural, horizon_days=5) is False
@@ -404,16 +297,16 @@ def test_reconcile_decisions_counts_only_the_ones_actually_reconciled():
     reconcilable = ARGUSDecision(
         ticker="TEST",
         session_timestamp=start,
-        technical=_technical(Signal.BULLISH, 0.8, price=100.0),
-        allocation=_allocation(),
+        technical=technical_signal(Signal.BULLISH, 0.8, current_price=100.0),
+        allocation=position_allocation(),
     )
     not_reconcilable = ARGUSDecision(
         ticker="TEST",
         session_timestamp=start,
-        technical=_technical(Signal.BULLISH, 0.8),
+        technical=technical_signal(Signal.BULLISH, 0.8),
         # no allocation -> nothing to reconcile
     )
-    market_data = _ten_day_series(start, start_price=100.0)
+    market_data = ten_day_series(start, start_price=100.0)
     cultural = mock.create_autospec(CulturalMemoryManager, instance=True)
     cultural.already_reconciled.return_value = set()
 
@@ -431,10 +324,10 @@ def test_reconcile_decisions_skips_decisions_already_reconciled():
     decision = ARGUSDecision(
         ticker="TEST",
         session_timestamp=start,
-        technical=_technical(Signal.BULLISH, 0.8, price=100.0),
-        allocation=_allocation(),
+        technical=technical_signal(Signal.BULLISH, 0.8, current_price=100.0),
+        allocation=position_allocation(),
     )
-    market_data = _ten_day_series(start, start_price=100.0)
+    market_data = ten_day_series(start, start_price=100.0)
     cultural = mock.create_autospec(CulturalMemoryManager, instance=True)
     cultural.already_reconciled.return_value = {decision.decision_id}
 
@@ -450,16 +343,16 @@ def test_reconcile_decisions_fetches_each_ticker_price_history_once():
     first = ARGUSDecision(
         ticker="TEST",
         session_timestamp=start,
-        technical=_technical(Signal.BULLISH, 0.8, price=100.0),
-        allocation=_allocation(),
+        technical=technical_signal(Signal.BULLISH, 0.8, current_price=100.0),
+        allocation=position_allocation(),
     )
     second = ARGUSDecision(
         ticker="TEST",
         session_timestamp=start,
-        technical=_technical(Signal.BULLISH, 0.8, price=101.0),
-        allocation=_allocation(),
+        technical=technical_signal(Signal.BULLISH, 0.8, current_price=101.0),
+        allocation=position_allocation(),
     )
-    market_data = _ten_day_series(start, start_price=100.0)
+    market_data = ten_day_series(start, start_price=100.0)
     market_data.ohlcv_daily = mock.Mock(wraps=market_data.ohlcv_daily)
     cultural = mock.create_autospec(CulturalMemoryManager, instance=True)
     cultural.already_reconciled.return_value = set()
@@ -684,8 +577,8 @@ def test_compact_decisions_jsonl_never_drops_an_unresolved_position_decision_at_
     old = ARGUSDecision(
         ticker="UNRESOLVED",
         session_timestamp=datetime(2020, 1, 1),
-        technical=_technical(Signal.BULLISH, 0.8),
-        allocation=_allocation(ticker="UNRESOLVED"),
+        technical=technical_signal(Signal.BULLISH, 0.8),
+        allocation=position_allocation(ticker="UNRESOLVED"),
     )
     path = _write_decisions_log(tmp_path / "decisions.jsonl", old)
 
@@ -709,8 +602,8 @@ def test_compact_decisions_jsonl_retires_an_unresolved_decision_past_the_wider_c
     old = ARGUSDecision(
         ticker="STALE",
         session_timestamp=datetime(2020, 1, 1),
-        technical=_technical(Signal.BULLISH, 0.8),
-        allocation=_allocation(ticker="STALE"),
+        technical=technical_signal(Signal.BULLISH, 0.8),
+        allocation=position_allocation(ticker="STALE"),
     )
     path = _write_decisions_log(tmp_path / "decisions.jsonl", old)
 
@@ -731,8 +624,8 @@ def test_compact_decisions_jsonl_drops_a_resolved_decision_at_the_routine_cutoff
     old = ARGUSDecision(
         ticker="RESOLVED",
         session_timestamp=datetime(2020, 1, 1),
-        technical=_technical(Signal.BULLISH, 0.8),
-        allocation=_allocation(ticker="RESOLVED"),
+        technical=technical_signal(Signal.BULLISH, 0.8),
+        allocation=position_allocation(ticker="RESOLVED"),
     )
     path = _write_decisions_log(tmp_path / "decisions.jsonl", old)
 
@@ -758,7 +651,7 @@ def test_compact_decisions_jsonl_a_no_position_decision_is_resolved_by_definitio
     old = ARGUSDecision(
         ticker="HOLD",
         session_timestamp=datetime(2020, 1, 1),
-        technical=_technical(Signal.NEUTRAL, 0.0),
+        technical=technical_signal(Signal.NEUTRAL, 0.0),
     )
     path = _write_decisions_log(tmp_path / "decisions.jsonl", old)
 
@@ -902,8 +795,8 @@ def _matured_decision(ticker: str, start: datetime, price: float = 100.0) -> ARG
     return ARGUSDecision(
         ticker=ticker,
         session_timestamp=start,
-        technical=_technical(Signal.BULLISH, 0.8, ticker=ticker, price=price),
-        allocation=_allocation(ticker=ticker),
+        technical=technical_signal(Signal.BULLISH, 0.8, ticker=ticker, current_price=price),
+        allocation=position_allocation(ticker=ticker),
     )
 
 
@@ -953,7 +846,7 @@ def test_run_reconciliation_pass_over_matured_decisions_produces_outcome_and_equ
     book_path = tmp_path / "paper_equity.json"
     paper_book.save(PaperBook(equity=100_000.0, high_water_mark=100_000.0), str(book_path))
 
-    market_data = _ten_day_series(start, start_price=100.0)
+    market_data = ten_day_series(start, start_price=100.0)
     cultural = _autospec_cultural()
 
     report = run_reconciliation_pass(
@@ -997,8 +890,8 @@ def test_run_reconciliation_pass_survives_across_runs_when_resolution_is_unavail
     decision = ARGUSDecision(
         ticker="UNRESOLVED",
         session_timestamp=old_start,
-        technical=_technical(Signal.BULLISH, 0.8, ticker="UNRESOLVED"),
-        allocation=_allocation(ticker="UNRESOLVED"),
+        technical=technical_signal(Signal.BULLISH, 0.8, ticker="UNRESOLVED"),
+        allocation=position_allocation(ticker="UNRESOLVED"),
     )
     decisions_log = _write_decisions_log(tmp_path / "decisions.jsonl", decision)
 
@@ -1006,7 +899,7 @@ def test_run_reconciliation_pass_survives_across_runs_when_resolution_is_unavail
     paper_book.save(PaperBook(equity=100_000.0, high_water_mark=100_000.0), str(book_path))
 
     # Only one day of price history: the horizon's target exit date is never reached.
-    market_data = _FakeMarketData({"UNRESOLVED": pd.Series([100.0], index=[old_start])})
+    market_data = FakeMarketData.from_closes({"UNRESOLVED": pd.Series([100.0], index=[old_start])})
     cultural = _autospec_cultural()
 
     report = run_reconciliation_pass(
@@ -1045,14 +938,14 @@ def test_run_reconciliation_pass_never_double_applies_a_run_whose_other_ticker_r
     fast = ARGUSDecision(
         ticker="FAST",
         session_timestamp=old_start,
-        technical=_technical(Signal.BULLISH, 0.8, ticker="FAST", price=100.0),
-        allocation=_allocation(ticker="FAST"),
+        technical=technical_signal(Signal.BULLISH, 0.8, ticker="FAST", current_price=100.0),
+        allocation=position_allocation(ticker="FAST"),
     )
     slow = ARGUSDecision(
         ticker="SLOW",
         session_timestamp=old_start,
-        technical=_technical(Signal.BULLISH, 0.8, ticker="SLOW", price=100.0),
-        allocation=_allocation(ticker="SLOW"),
+        technical=technical_signal(Signal.BULLISH, 0.8, ticker="SLOW", current_price=100.0),
+        allocation=position_allocation(ticker="SLOW"),
     )
     decisions_log = _write_decisions_log(tmp_path / "decisions.jsonl", fast, slow)
 
@@ -1063,9 +956,8 @@ def test_run_reconciliation_pass_never_double_applies_a_run_whose_other_ticker_r
         [100.0 + i for i in range(20)],
         index=pd.date_range(start=old_start, periods=20, freq="D"),
     )
-    market_data = _FakeMarketData(
-        {"FAST": fast_prices, "SLOW": pd.Series([100.0], index=[old_start])}
-    )
+    closes = {"FAST": fast_prices, "SLOW": pd.Series([100.0], index=[old_start])}
+    market_data = FakeMarketData.from_closes(closes)
     cultural = _FakeCultural()
 
     first = run_reconciliation_pass(
@@ -1082,7 +974,7 @@ def test_run_reconciliation_pass_never_double_applies_a_run_whose_other_ticker_r
     assert {d.ticker for d in load_decisions_from_jsonl(str(decisions_log))} == {"SLOW"}
 
     # SLOW's price history finally extends far enough to mature.
-    market_data._closes["SLOW"] = pd.Series(
+    closes["SLOW"] = pd.Series(
         [100.0 + i for i in range(20)],
         index=pd.date_range(start=old_start, periods=20, freq="D"),
     )
@@ -1107,7 +999,7 @@ def test_run_reconciliation_pass_reading_from_checkpoints_bounds_checkpoints(tmp
     db_path = str(tmp_path / "argus_graph.db")
     _put_checkpoint(db_path, "session-thread", start, [_matured_decision("TEST", start)])
 
-    market_data = _ten_day_series(start, start_price=100.0)
+    market_data = ten_day_series(start, start_price=100.0)
     cultural = _autospec_cultural()
 
     report = run_reconciliation_pass(
@@ -1138,7 +1030,7 @@ def test_run_reconciliation_pass_given_both_paths_bounds_both(tmp_path):
     db_path = str(tmp_path / "argus_graph.db")
     _put_checkpoint(db_path, "stale-thread", datetime(2020, 1, 1))
 
-    market_data = _ten_day_series(start, start_price=100.0)
+    market_data = ten_day_series(start, start_price=100.0)
     cultural = _autospec_cultural()
 
     report = run_reconciliation_pass(
@@ -1171,7 +1063,7 @@ def test_run_reconciliation_pass_one_store_failing_leaves_the_others_bounded_and
     db_path = tmp_path / "argus_graph.db"
     db_path.write_bytes(b"not a sqlite database")
 
-    market_data = _ten_day_series(start, start_price=100.0)
+    market_data = ten_day_series(start, start_price=100.0)
     cultural = _autospec_cultural(expired=3)
 
     report = run_reconciliation_pass(
@@ -1209,7 +1101,7 @@ def test_run_reconciliation_pass_truncated_paper_equity_file_neither_resets_nor_
     truncated = full[: len(full) // 2]
     book_path.write_bytes(truncated)
 
-    market_data = _ten_day_series(start, start_price=100.0)
+    market_data = ten_day_series(start, start_price=100.0)
     cultural = _autospec_cultural()
 
     report = run_reconciliation_pass(
@@ -1249,7 +1141,7 @@ def test_run_reconciliation_pass_paper_book_not_partially_applied_when_its_step_
 
     monkeypatch.setattr(paper_book, "save", _boom)
 
-    market_data = _ten_day_series(start, start_price=100.0)
+    market_data = ten_day_series(start, start_price=100.0)
     cultural = _autospec_cultural()
 
     report = run_reconciliation_pass(

@@ -1,10 +1,11 @@
 """
 tests/helpers/candles.py
 
-Shared tz-aware OHLCV candle builders for pipeline and cache tests.
+Shared OHLCV candle builders for pipeline, cache and fetcher tests.
 
 Responsibilities:
-  - Build a tz-aware America/New_York intraday OHLCV frame of N bars
+  - Build an intraday OHLCV frame of N bars, tz-naive or tz-aware
+  - Build a daily OHLCV frame over explicit dates
   - Build a frame straddling the 2025-11-02 DST fall-back transition
 
 Not responsible for:
@@ -16,10 +17,10 @@ from __future__ import annotations
 
 import pandas as pd
 
-_ET = "America/New_York"
+ET = "America/New_York"
 
 
-def _ohlcv_frame(index: pd.DatetimeIndex) -> pd.DataFrame:
+def _ohlcv_frame(index: pd.DatetimeIndex, volume: int = 1000) -> pd.DataFrame:
     """Builds an OHLCV frame over `index` whose closes rise 0, 1, 2, ... bar by bar."""
     closes = list(range(len(index)))
     return pd.DataFrame(
@@ -28,27 +29,55 @@ def _ohlcv_frame(index: pd.DatetimeIndex) -> pd.DataFrame:
             "high": [c + 1 for c in closes],
             "low": closes,
             "close": closes,
-            "volume": [1000] * len(index),
+            "volume": [volume] * len(index),
         },
         index=index,
     )
 
 
-def et_intraday_candles(
-    n: int, start: str = "2024-01-02 09:30", freq: str = "1min"
+def ohlcv_frame(
+    n: int,
+    *,
+    start: str = "2024-01-02 09:30",
+    freq: str = "1min",
+    tz: str | None = None,
+    volume: int = 1000,
 ) -> pd.DataFrame:
-    """Builds a tz-aware ET intraday OHLCV frame of monotonically increasing bars.
+    """Builds an intraday OHLCV frame of `n` bars whose closes rise 0, 1, 2, ... bar by bar.
 
     Args:
         n: Number of bars.
-        start: Naive local start timestamp, interpreted as ET.
+        start: Local start timestamp, interpreted in `tz` when one is given.
         freq: Pandas frequency string for bar spacing.
+        tz: Timezone of the index (e.g. `ET`); None builds a tz-naive index.
+        volume: Volume of every bar.
 
     Returns:
-        DataFrame with open/high/low/close/volume columns and a tz-aware
-        (America/New_York) DatetimeIndex.
+        DataFrame with open/high/low/close/volume columns and a DatetimeIndex.
     """
-    return _ohlcv_frame(pd.date_range(start, periods=n, freq=freq, tz=_ET))
+    return _ohlcv_frame(pd.date_range(start, periods=n, freq=freq, tz=tz), volume)
+
+
+def daily_bars(dates: list[str]) -> pd.DataFrame:
+    """Builds a minimal daily OHLCV frame with one row per given date.
+
+    Args:
+        dates: ISO date strings, one per row.
+
+    Returns:
+        DataFrame with lowercase OHLCV columns and a tz-naive datetime index.
+    """
+    n = len(dates)
+    return pd.DataFrame(
+        {
+            "open": [1.0] * n,
+            "high": [1.0] * n,
+            "low": [1.0] * n,
+            "close": [float(i) for i in range(n)],
+            "volume": [100.0] * n,
+        },
+        index=pd.to_datetime(dates),
+    )
 
 
 def dst_straddling_candles(n_per_side: int = 6, freq: str = "1min") -> pd.DataFrame:
@@ -70,4 +99,4 @@ def dst_straddling_candles(n_per_side: int = 6, freq: str = "1min") -> pd.DataFr
     pre_utc = pd.date_range("2025-11-02 05:54:00", periods=n_per_side, freq=freq, tz="UTC")
     # 01:00-01:05 EST (UTC-5), the same wall-clock minutes again, one hour later in UTC
     post_utc = pd.date_range("2025-11-02 06:00:00", periods=n_per_side, freq=freq, tz="UTC")
-    return _ohlcv_frame(pre_utc.append(post_utc).tz_convert(_ET))
+    return _ohlcv_frame(pre_utc.append(post_utc).tz_convert(ET))

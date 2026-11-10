@@ -5,13 +5,11 @@ See argus/backtesting/replay.py's own docstring for what a "session" is.
 
 import json
 from datetime import datetime
-from pathlib import Path
 from unittest import mock
 from zoneinfo import ZoneInfo
 
 from argus.backtesting.replay import _normalize_as_of, replay_session, replay_sessions
-
-FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
+from tests.helpers.paths import FIXTURES_DIR
 
 
 def _fixture_capture_date() -> datetime:

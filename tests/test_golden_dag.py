@@ -28,8 +28,8 @@ import pandas as pd
 from argus.orchestration.graph import build_graph
 from argus.orchestration.state import ARGUSState
 from argus.seams import FixtureLLMClient, FixtureMarketDataProvider
+from tests.helpers.paths import FIXTURES_DIR
 
-FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 UNIVERSE = ["AAPL", "MSFT", "NVDA", "GOOGL", "JPM", "XOM"]
 
 

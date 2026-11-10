@@ -14,35 +14,17 @@ from datetime import timedelta
 from unittest import mock
 
 import pytest
-from fastapi.testclient import TestClient
 
 import api.main as api_main
 from argus.infra.clock import now_market
+from tests.helpers.api import api_pipeline
+
+pytestmark = pytest.mark.usefixtures("api_state")
 
 
 def _payload(*tickers: str) -> dict:
     """An /analyze request body that varies only in the tickers it asks for."""
     return {"tickers": list(tickers), "total_wealth": 100_000, "invest_pct": 0.5}
-
-
-@pytest.fixture(autouse=True)
-def _reset_singletons(_fresh_live_cache, _no_api_key):
-    """Kill switch, live cache, and API key are all reset around each test via conftest fixtures."""
-
-
-@pytest.fixture
-def client():
-    """A TestClient over api.main.app without running its lifespan startup."""
-    return TestClient(api_main.app)
-
-
-def _pipeline(monkeypatch, *, market_hours: bool):
-    """Installs a fake MFTDataPipeline as the module-level `_mft_pipeline`."""
-    fake = mock.Mock()
-    fake.is_market_hours.return_value = market_hours
-    fake.interval_minutes = 1
-    monkeypatch.setattr(api_main, "_mft_pipeline", fake)
-    return fake
 
 
 def _seed_cache(ticker: str, *, bar_age_seconds: float, write_age_seconds: float = 0.0):
@@ -82,7 +64,7 @@ def test_analyze_accepts_share_class_tickers(client, monkeypatch):
     runs once the market-hours gate clears — a rejected request must not
     mutate pipeline state.
     """
-    fake_pipeline = _pipeline(monkeypatch, market_hours=True)
+    fake_pipeline = api_pipeline(monkeypatch, market_hours=True)
     response = client.post("/analyze", json=_payload("BRK.B", "BRK-B"))
     assert response.status_code == 503
     fake_pipeline.register_tickers.assert_called_once_with(["BRK.B", "BRK-B"])
@@ -90,7 +72,7 @@ def test_analyze_accepts_share_class_tickers(client, monkeypatch):
 
 def test_analyze_upcases_and_dedupes_tickers(client, monkeypatch):
     """Lowercase, whitespace-padded, and repeated tickers collapse to one upper-cased entry each."""
-    fake_pipeline = _pipeline(monkeypatch, market_hours=True)
+    fake_pipeline = api_pipeline(monkeypatch, market_hours=True)
     response = client.post("/analyze", json=_payload(" aapl ", "AAPL", "msft"))
     assert response.status_code == 503
     fake_pipeline.register_tickers.assert_called_once_with(["AAPL", "MSFT"])
@@ -98,7 +80,7 @@ def test_analyze_upcases_and_dedupes_tickers(client, monkeypatch):
 
 def test_analyze_reports_a_missing_allocation_as_503_not_500(client, monkeypatch):
     """A degraded (no-allocation) graph run is an upstream LLM outage, not a server bug."""
-    _pipeline(monkeypatch, market_hours=True)
+    api_pipeline(monkeypatch, market_hours=True)
     _seed_cache("AAPL", bar_age_seconds=5, write_age_seconds=5)
     fake_graph = mock.Mock()
     fake_graph.invoke.return_value = {"decisions": [], "portfolio_allocation": None}
@@ -112,7 +94,7 @@ def test_analyze_reports_a_missing_allocation_as_503_not_500(client, monkeypatch
 
 def test_analyze_redacts_internal_exception_details(client, monkeypatch):
     """A raw graph exception never reaches the client; only a correlation ref does."""
-    _pipeline(monkeypatch, market_hours=True)
+    api_pipeline(monkeypatch, market_hours=True)
     _seed_cache("AAPL", bar_age_seconds=5, write_age_seconds=5)
     fake_graph = mock.Mock()
     fake_graph.invoke.side_effect = RuntimeError("api_key=sk-secret123 at /etc/passwd")

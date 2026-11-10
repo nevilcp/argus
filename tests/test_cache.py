@@ -14,29 +14,7 @@ import pandas as pd
 import pytest
 
 from argus.data.cache import DailyBarCache, OHLCVBuffer, TTLCache
-from tests.helpers.candles import dst_straddling_candles
-
-
-def _bars(dates: list[str]) -> pd.DataFrame:
-    """Builds a minimal OHLCV DataFrame with one row per given date.
-
-    Args:
-        dates: ISO date strings, one per row.
-
-    Returns:
-        DataFrame with lowercase OHLCV columns and a datetime index.
-    """
-    n = len(dates)
-    return pd.DataFrame(
-        {
-            "open": [1.0] * n,
-            "high": [1.0] * n,
-            "low": [1.0] * n,
-            "close": [float(i) for i in range(n)],
-            "volume": [100.0] * n,
-        },
-        index=pd.to_datetime(dates),
-    )
+from tests.helpers.candles import daily_bars, dst_straddling_candles
 
 
 def _buffer(
@@ -59,7 +37,7 @@ def test_get_returns_none_for_uncached_ticker(cache):
 
 def test_put_then_get_round_trips(cache):
     """A stored ticker's bars come back sorted with the right values, refreshed today."""
-    df = _bars(["2026-08-10", "2026-08-11", "2026-08-12"])
+    df = daily_bars(["2026-08-10", "2026-08-11", "2026-08-12"])
     cache.put("AAPL", df)
 
     result = cache.get("AAPL")
@@ -71,7 +49,7 @@ def test_put_then_get_round_trips(cache):
 
 def test_get_returns_none_when_refreshed_before_today(cache):
     """A ticker refreshed on a prior UTC day is treated as stale, not served."""
-    cache.put("AAPL", _bars(["2026-08-11"]))
+    cache.put("AAPL", daily_bars(["2026-08-11"]))
 
     yesterday = (datetime.now(UTC).date() - timedelta(days=1)).isoformat()
     cache._conn.execute(
@@ -84,8 +62,8 @@ def test_get_returns_none_when_refreshed_before_today(cache):
 
 def test_put_overwrites_prior_rows_for_same_ticker(cache):
     """A second put() for the same ticker replaces (not appends to) its cached bars."""
-    cache.put("AAPL", _bars(["2026-08-11"]))
-    cache.put("AAPL", _bars(["2026-08-11", "2026-08-12"]))
+    cache.put("AAPL", daily_bars(["2026-08-11"]))
+    cache.put("AAPL", daily_bars(["2026-08-11", "2026-08-12"]))
 
     result = cache.get("AAPL")
     assert len(result) == 2
@@ -100,8 +78,8 @@ def test_put_prunes_rows_older_than_the_freshly_fetched_window(cache):
     it by one row per ticker per day and silently widening every consumer
     (e.g. ols_portfolio_beta) past its intended lookback window.
     """
-    cache.put("AAPL", _bars(["2020-01-01", "2020-01-02"]))
-    cache.put("AAPL", _bars(["2026-08-11", "2026-08-12"]))
+    cache.put("AAPL", daily_bars(["2020-01-01", "2020-01-02"]))
+    cache.put("AAPL", daily_bars(["2026-08-11", "2026-08-12"]))
 
     rows = cache._conn.execute(
         "SELECT trading_date FROM daily_ohlcv WHERE ticker = ? ORDER BY trading_date", ("AAPL",)
@@ -112,7 +90,7 @@ def test_put_prunes_rows_older_than_the_freshly_fetched_window(cache):
 
 def test_get_is_isolated_per_ticker(cache):
     """Caching one ticker doesn't make an unrelated ticker appear cached."""
-    cache.put("AAPL", _bars(["2026-08-12"]))
+    cache.put("AAPL", daily_bars(["2026-08-12"]))
     assert cache.get("MSFT") is None
 
 

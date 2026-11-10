@@ -24,28 +24,23 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
-from fastapi.testclient import TestClient
 
 import api.main as api_main
 import argus.risk.kill_switch as kill_switch_module
 from argus.infra.clock import now_market
 from argus.risk.kill_switch import KillSwitch
 from argus.schemas.signals import ARGUSDecision
+from tests.helpers.api import api_pipeline
+
+pytestmark = pytest.mark.usefixtures("api_state")
 
 _PAYLOAD = {"tickers": ["AAPL"], "total_wealth": 100_000, "invest_pct": 0.5}
 
 
 @pytest.fixture(autouse=True)
-def _reset_singletons(_fresh_live_cache, _no_api_key, monkeypatch):
-    """Resets the analyze semaphore for each test (kill switch and live cache handled
-    in conftest)."""
+def _reset_analyze_semaphore(monkeypatch):
+    """Resets the analyze semaphore for each test."""
     monkeypatch.setattr(api_main, "_analyze_semaphore", asyncio.Semaphore(1))
-
-
-@pytest.fixture
-def client():
-    """A TestClient over api.main.app without running its lifespan startup."""
-    return TestClient(api_main.app)
 
 
 def _ready(monkeypatch):
@@ -54,9 +49,7 @@ def _ready(monkeypatch):
     Installs an in-market-hours pipeline and publishes an AAPL state whose bar
     and write times are both recent enough to clear the staleness gates.
     """
-    fake_pipeline = mock.Mock(interval_minutes=1)
-    fake_pipeline.is_market_hours.return_value = True
-    monkeypatch.setattr(api_main, "_mft_pipeline", fake_pipeline)
+    api_pipeline(monkeypatch)
 
     recent = now_market() - timedelta(seconds=5)
     api_main._live_cache.publish({"AAPL": {"timestamp": recent.isoformat()}}, ["AAPL"], now=recent)
@@ -194,7 +187,6 @@ def test_analyze_rejects_when_kill_switch_trips_during_the_graph_run(client, mon
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_mft_session_callback_evicts_untracked_tickers(monkeypatch):
     """A ticker dropped from the tracked universe is also dropped from the live cache."""
     fake_pipeline = mock.Mock()

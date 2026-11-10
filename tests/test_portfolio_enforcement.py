@@ -9,7 +9,6 @@ regardless of cause.
 """
 
 import json
-from datetime import datetime
 
 import pytest
 from pydantic import ValidationError
@@ -22,12 +21,10 @@ from argus.schemas.signals import (
     PortfolioAllocation,
     PositionAllocation,
     ProposedPosition,
-    RiskAssessment,
     RiskVerdict,
 )
 from argus.seams import FixtureLLMClient
-
-TIMESTAMP = datetime(2026, 1, 1)
+from tests.helpers.builders import risk_assessment, user_profile
 
 
 class _CapturingLLMClient:
@@ -46,28 +43,14 @@ class _CapturingLLMClient:
         return json.dumps(self._response_json)
 
 
-def _risk(verdict: RiskVerdict, approved_weight: float, proposed_weight: float) -> RiskAssessment:
-    return RiskAssessment(
-        verdict=verdict,
-        approved_weight=approved_weight,
-        proposed_weight=proposed_weight,
-        var_99=0.05,
-        portfolio_beta=1.0,
-        timestamp=TIMESTAMP,
-    )
-
-
 def _approved(*tickers: str, weight: float = 0.10) -> dict[str, TickerSnapshot]:
     """Snapshots for tickers the risk engine approved at the same per-position cap."""
     return {
-        ticker: TickerSnapshot(risk=_risk(RiskVerdict.APPROVE, weight, weight))
+        ticker: TickerSnapshot(
+            risk=risk_assessment(RiskVerdict.APPROVE, weight, proposed_weight=weight)
+        )
         for ticker in tickers
     }
-
-
-def _profile(invest_pct: float = 0.5) -> dict:
-    """The user profile every allocate() call in this module passes."""
-    return {"total_wealth": 100_000.0, "invest_pct": invest_pct, "risk_tolerance": "MODERATE"}
 
 
 def _position(
@@ -116,7 +99,7 @@ def test_allocate_reraises_on_governor_exhaustion_without_retrying():
     agent = PortfolioManagerAgent(llm_client=llm)
 
     with pytest.raises(RateLimitExceeded):
-        agent.allocate(user_profile=_profile(), snapshots=_approved("AAPL"), macro=None)
+        agent.allocate(user_profile=user_profile(), snapshots=_approved("AAPL"), macro=None)
 
     assert llm.calls == 1
 
@@ -127,7 +110,7 @@ def test_allocate_does_not_repair_a_bad_response(monkeypatch):
     llm_client = _CapturingLLMClient({"cash_reserve_pct": 0.5})
 
     agent = PortfolioManagerAgent(llm_client=llm_client)
-    alloc = agent.allocate(user_profile=_profile(), snapshots=_approved("AAPL"), macro=None)
+    alloc = agent.allocate(user_profile=user_profile(), snapshots=_approved("AAPL"), macro=None)
 
     assert alloc is None
     assert "Your previous response was invalid" not in llm_client.last_prompt
@@ -141,7 +124,9 @@ def test_allocate_enforces_caps_vetoes_and_fabrications_in_code():
     adjustments entry rather than validating silently.
     """
     snapshots = _approved("OVER_CAP")
-    snapshots["VETOED"] = TickerSnapshot(risk=_risk(RiskVerdict.VETO, 0.0, 0.10))
+    snapshots["VETOED"] = TickerSnapshot(
+        risk=risk_assessment(RiskVerdict.VETO, 0.0, proposed_weight=0.10)
+    )
 
     llm_client = _llm_response(
         [
@@ -154,7 +139,7 @@ def test_allocate_enforces_caps_vetoes_and_fabrications_in_code():
     agent = PortfolioManagerAgent(llm_client=llm_client)
     adjustments: list[str] = []
     alloc = agent.allocate(
-        user_profile=_profile(),
+        user_profile=user_profile(),
         snapshots=snapshots,
         macro=None,
         adjustments=adjustments,
@@ -186,7 +171,7 @@ def test_allocate_names_the_json_parse_stage_on_exhausted_retries(monkeypatch):
     agent = PortfolioManagerAgent(llm_client=llm_client)
     adjustments: list[str] = []
     alloc = agent.allocate(
-        user_profile=_profile(),
+        user_profile=user_profile(),
         snapshots=_approved("OVER_CAP"),
         macro=None,
         adjustments=adjustments,
@@ -210,7 +195,7 @@ def test_allocate_names_the_schema_validation_stage_on_exhausted_retries(monkeyp
     agent = PortfolioManagerAgent(llm_client=llm_client)
     adjustments: list[str] = []
     alloc = agent.allocate(
-        user_profile=_profile(),
+        user_profile=user_profile(),
         snapshots=_approved("OVER_CAP"),
         macro=None,
         adjustments=adjustments,
@@ -281,14 +266,14 @@ def test_allocate_clamps_cash_reserve_to_schema_floor_at_high_deployment():
     caps["T6"] = 0.051
 
     snapshots = {
-        ticker: TickerSnapshot(risk=_risk(RiskVerdict.APPROVE, cap, cap))
+        ticker: TickerSnapshot(risk=risk_assessment(RiskVerdict.APPROVE, cap, proposed_weight=cap))
         for ticker, cap in caps.items()
     }
     llm_client = _llm_response([_position(ticker, cap) for ticker, cap in caps.items()])
 
     agent = PortfolioManagerAgent(llm_client=llm_client)
     alloc = agent.allocate(
-        user_profile=_profile(invest_pct=0.95),
+        user_profile=user_profile(invest_pct=0.95),
         snapshots=snapshots,
         macro=None,
     )
@@ -310,7 +295,7 @@ def test_allocate_states_achievable_deployment_ceiling_not_raw_invest_pct():
 
     agent = PortfolioManagerAgent(llm_client=llm_client)
     agent.allocate(
-        user_profile=_profile(invest_pct=0.95),
+        user_profile=user_profile(invest_pct=0.95),
         snapshots=_approved("A", "B", "C", weight=0.15),
         macro=None,
     )
@@ -330,7 +315,7 @@ def test_allocate_without_positive_total_wealth_returns_none_and_records_it(tota
     llm = _CapturingLLMClient({})
     agent = PortfolioManagerAgent(llm_client=llm)
     adjustments: list[str] = []
-    profile = {**_profile(), "total_wealth": total_wealth}
+    profile = {**user_profile(), "total_wealth": total_wealth}
 
     for snapshots in (_approved("AAPL"), {}):
         adjustments.clear()

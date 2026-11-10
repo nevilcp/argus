@@ -33,31 +33,12 @@ from argus.data.pipeline import (
 )
 from argus.infra.clock import now_market
 from argus.params import SYSTEM
-from tests.helpers.candles import dst_straddling_candles, et_intraday_candles
+from tests.helpers.candles import ET, dst_straddling_candles, ohlcv_frame
 
 
 def _override_system(monkeypatch, **fields) -> None:
     """Swaps pipeline_module's SYSTEM params for a copy carrying `fields`."""
     monkeypatch.setattr(pipeline_module, "SYSTEM", dataclasses.replace(SYSTEM, **fields))
-
-
-def _naive_ohlcv(n: int, freq: str = "1min", volume: int = 1000) -> pd.DataFrame:
-    """Builds a tz-naive OHLCV frame of `n` bars whose closes rise 0, 1, 2, ... bar by bar.
-
-    The tz-naive counterpart of tests/helpers/candles.py's et_intraday_candles,
-    for the indicator paths that never see the buffer's tz-aware index.
-    """
-    closes = list(range(n))
-    return pd.DataFrame(
-        {
-            "open": closes,
-            "high": [c + 1 for c in closes],
-            "low": closes,
-            "close": closes,
-            "volume": [volume] * n,
-        },
-        index=pd.date_range("2024-01-01 09:30", periods=n, freq=freq),
-    )
 
 
 def _insert_warm_candles(pipeline: MFTDataPipeline, ticker: str, df: pd.DataFrame) -> None:
@@ -73,7 +54,7 @@ def _insert_warm_candles(pipeline: MFTDataPipeline, ticker: str, df: pd.DataFram
 
 def _seed_buffer(pipeline: MFTDataPipeline, ticker: str, n: int = 20) -> None:
     """Inserts `n` warm candles for `ticker`, all within a single trading day."""
-    _insert_warm_candles(pipeline, ticker, et_intraday_candles(n))
+    _insert_warm_candles(pipeline, ticker, ohlcv_frame(n, tz=ET))
 
 
 def _seed_two_session_buffer(
@@ -85,8 +66,8 @@ def _seed_two_session_buffer(
     cross-session lookback (see argus/data/pipeline.py's `_return_since`),
     unlike `_seed_buffer`'s single-day fixture.
     """
-    day1 = et_intraday_candles(day1_bars, start="2024-01-02 09:30")
-    day2 = et_intraday_candles(day2_bars, start="2024-01-03 09:30")
+    day1 = ohlcv_frame(day1_bars, start="2024-01-02 09:30", tz=ET)
+    day2 = ohlcv_frame(day2_bars, start="2024-01-03 09:30", tz=ET)
     _insert_warm_candles(pipeline, ticker, pd.concat([day1, day2]))
 
 
@@ -113,7 +94,7 @@ def _capture_fetch_period(monkeypatch) -> dict:
 
     def fake_fetch(ticker, interval, period):
         captured["period"] = period
-        return et_intraday_candles(5)
+        return ohlcv_frame(5, tz=ET)
 
     monkeypatch.setattr(pipeline_module, "fetch_ohlcv_intraday", fake_fetch)
     return captured
@@ -213,7 +194,7 @@ def test_compress_candles():
 
     # 400 minutes covers the 390-bar (1 trading day) momentum lookback at 1m resolution,
     # and the monotonic close series gives RSI a known, deterministic value to assert on
-    result = pipeline._compress_candles(_naive_ohlcv(400))
+    result = pipeline._compress_candles(ohlcv_frame(400))
 
     assert "rsi_14" in result
     assert "macd_histogram" in result
@@ -286,7 +267,7 @@ def test_pipeline_derives_buffer_size_from_interval():
 
 def test_resample_ohlcv_aggregates_correctly():
     """Resampling combines OHLCV bars with the standard first/max/min/last/sum rules."""
-    df = _naive_ohlcv(10, volume=100)
+    df = ohlcv_frame(10, volume=100)
 
     resampled = _resample_ohlcv(df, interval_minutes=1, target_minutes=5)
 
@@ -300,7 +281,7 @@ def test_resample_ohlcv_aggregates_correctly():
 
 def test_resample_ohlcv_is_a_noop_when_target_not_coarser():
     """Resampling to a resolution no coarser than the input returns the input unchanged."""
-    df = _naive_ohlcv(5, freq="5min")
+    df = ohlcv_frame(5, freq="5min")
 
     result = _resample_ohlcv(df, interval_minutes=5, target_minutes=5)
 
@@ -309,13 +290,13 @@ def test_resample_ohlcv_is_a_noop_when_target_not_coarser():
 
 def test_momentum_windows_scale_with_interval():
     """momentum_30m locates the bar exactly 30 minutes back at both 1m and 5m resolution."""
-    result_1m = MFTDataPipeline([], interval="1m")._compress_candles(_naive_ohlcv(400))
+    result_1m = MFTDataPipeline([], interval="1m")._compress_candles(ohlcv_frame(400))
     # Last bar is 09:30 + 399min = 16:09; 30 minutes back lands exactly on bar 369
     assert result_1m["momentum_30m"] == pytest.approx((399 / 369) - 1.0, abs=1e-6)
     # Every bar falls on 2024-01-01, so momentum_1d has no strictly-earlier session to reach
     assert result_1m["momentum_1d"] is None
 
-    result_5m = MFTDataPipeline([], interval="5m")._compress_candles(_naive_ohlcv(100, freq="5min"))
+    result_5m = MFTDataPipeline([], interval="5m")._compress_candles(ohlcv_frame(100, freq="5min"))
     # Last bar is 09:30 + 99*5min = 17:45; 30 minutes back lands exactly on bar 93
     assert result_5m["momentum_30m"] == pytest.approx((99 / 93) - 1.0, abs=1e-6)
     assert result_5m["momentum_1d"] is None
@@ -368,9 +349,9 @@ def test_compress_candles_readiness_cliff_at_macd_warmup_floor():
     """33 resampled bars publish nothing; 34 publishes a real (non-None) MACD histogram."""
     pipeline = MFTDataPipeline([], interval="5m")
 
-    assert pipeline._compress_candles(_naive_ohlcv(33, freq="5min")) is None
+    assert pipeline._compress_candles(ohlcv_frame(33, freq="5min")) is None
 
-    result_34 = pipeline._compress_candles(_naive_ohlcv(34, freq="5min"))
+    result_34 = pipeline._compress_candles(ohlcv_frame(34, freq="5min"))
     assert result_34 is not None
     assert result_34["macd_histogram"] is not None
 
@@ -378,7 +359,7 @@ def test_compress_candles_readiness_cliff_at_macd_warmup_floor():
 def test_compress_candles_never_emits_nan():
     """Every float field in a compressed dict is a real number or None, never NaN."""
     pipeline = MFTDataPipeline([], interval="1m")
-    result = pipeline._compress_candles(_naive_ohlcv(400))
+    result = pipeline._compress_candles(ohlcv_frame(400))
     assert result is not None
     for value in result.values():
         if isinstance(value, float):
@@ -387,14 +368,14 @@ def test_compress_candles_never_emits_nan():
 
 def test_return_since_momentum_1d_none_without_a_prior_session():
     """momentum_1d's lookup returns None when the series holds only one calendar day."""
-    close_s = et_intraday_candles(50)["close"]
+    close_s = ohlcv_frame(50, tz=ET)["close"]
     assert _return_since(close_s, pd.Timedelta(days=1), same_session=False) is None
 
 
 def test_return_since_momentum_30m_does_not_reach_into_the_prior_session():
     """30-minute lookup at 09:34 with 5 bars doesn't fall back to prior session."""
-    day1 = et_intraday_candles(390, start="2024-01-02 09:30")
-    day2 = et_intraday_candles(5, start="2024-01-03 09:30")
+    day1 = ohlcv_frame(390, start="2024-01-02 09:30", tz=ET)
+    day2 = ohlcv_frame(5, start="2024-01-03 09:30", tz=ET)
     combined_close = pd.concat([day1["close"], day2["close"]])
     assert _return_since(combined_close, pd.Timedelta(minutes=30), same_session=True) is None
 
@@ -406,8 +387,8 @@ def test_momentum_1d_is_stable_under_dropping_up_to_10_oldest_bars(drop: int):
     Args:
         drop: Number of oldest bars removed from the series before re-checking.
     """
-    day1 = et_intraday_candles(390, start="2024-01-02 09:30")
-    day2 = et_intraday_candles(50, start="2024-01-03 09:30")
+    day1 = ohlcv_frame(390, start="2024-01-02 09:30", tz=ET)
+    day2 = ohlcv_frame(50, start="2024-01-03 09:30", tz=ET)
     close_s = pd.concat([day1["close"], day2["close"]])
 
     baseline = _return_since(close_s, pd.Timedelta(days=1), same_session=False)
@@ -417,7 +398,6 @@ def test_momentum_1d_is_stable_under_dropping_up_to_10_oldest_bars(drop: int):
     assert trimmed == baseline
 
 
-@pytest.mark.asyncio
 async def test_sweep_uses_a_constant_inter_request_gap_independent_of_universe_size(monkeypatch):
     """Per-ticker fetch pause is constant regardless of how many tickers."""
 
@@ -442,7 +422,6 @@ async def test_sweep_uses_a_constant_inter_request_gap_independent_of_universe_s
     assert big_elapsed == pytest.approx(19 * SYSTEM.min_inter_request_seconds, abs=0.1)
 
 
-@pytest.mark.asyncio
 async def test_fetch_loop_sleeps_the_remainder_of_the_interval_not_a_full_one(monkeypatch):
     """A fetch_loop iteration's wait is shortened by however long the sweep itself took."""
     pipeline = MFTDataPipeline([], interval="1m")
@@ -468,7 +447,6 @@ async def test_fetch_loop_sleeps_the_remainder_of_the_interval_not_a_full_one(mo
     assert waits[0] == pytest.approx(_FETCH_INTERVAL - 0.05, abs=0.05)
 
 
-@pytest.mark.asyncio
 async def test_fetch_loop_cadence_holds_across_a_slow_sweep(monkeypatch):
     """Sweep start gap tracks _FETCH_INTERVAL, not sweep duration plus interval."""
     monkeypatch.setattr(pipeline_module, "_FETCH_INTERVAL", 0.2)
@@ -495,7 +473,6 @@ async def test_fetch_loop_cadence_holds_across_a_slow_sweep(monkeypatch):
     assert all(gap == pytest.approx(0.2, abs=0.05) for gap in gaps)
 
 
-@pytest.mark.asyncio
 async def test_fetch_loop_publishes_compressed_state_after_each_sweep():
     """Publication is merged into the fetch loop: one sweep, one compress, one callback."""
     pipeline = MFTDataPipeline(["AAPL"], interval="1m")
@@ -539,7 +516,7 @@ def test_pandas_ta_import_failure_is_a_boot_failure(monkeypatch):
 
 def test_et_intraday_candles_are_tz_aware_and_monotonic():
     """The shared candle builder produces a tz-aware, monotonically increasing ET frame."""
-    df = et_intraday_candles(20)
+    df = ohlcv_frame(20, tz=ET)
     assert len(df) == 20
     assert str(df.index.tz) == "America/New_York"
     assert df.index.is_monotonic_increasing
@@ -612,7 +589,6 @@ def test_buffer_warm_skips_a_ticker_whose_get_candles_raises(monkeypatch):
     assert pipeline._buffer_warm() is True
 
 
-@pytest.mark.asyncio
 async def test_start_propagates_a_fetch_loop_exception(monkeypatch):
     """start() surfaces _fetch_loop's exception rather than swallowing it (single loop now)."""
     pipeline = MFTDataPipeline([], interval="1m")
@@ -626,7 +602,6 @@ async def test_start_propagates_a_fetch_loop_exception(monkeypatch):
         await pipeline.start(on_session_ready=_noop_callback)
 
 
-@pytest.mark.asyncio
 async def test_stop_ends_the_loop_promptly(monkeypatch):
     """stop() wakes the loop immediately rather than waiting out its full interval."""
     pipeline = MFTDataPipeline([], interval="1m")
@@ -641,7 +616,6 @@ async def test_stop_ends_the_loop_promptly(monkeypatch):
     await asyncio.wait_for(task, timeout=2.0)
 
 
-@pytest.mark.asyncio
 async def test_start_after_stop_clears_the_stop_event(monkeypatch):
     """A restarted pipeline paces its sweeps again instead of inheriting the old stop signal."""
     pipeline = MFTDataPipeline([], interval="1m")
@@ -659,7 +633,6 @@ async def test_start_after_stop_clears_the_stop_event(monkeypatch):
     assert seen == [False]
 
 
-@pytest.mark.asyncio
 async def test_close_buffer_waits_out_an_in_flight_buffer_worker():
     """close_buffer blocks until a worker holding _buffer_op_lock releases it."""
     pipeline = MFTDataPipeline([], interval="1m")
@@ -676,7 +649,7 @@ async def test_close_buffer_waits_out_an_in_flight_buffer_worker():
 def test_fetch_and_insert_bulk_inserts_in_one_call(monkeypatch):
     """`_fetch_and_insert` passes the frame to insert_candles in one call."""
     pipeline = MFTDataPipeline([], interval="1m")
-    df = et_intraday_candles(5)
+    df = ohlcv_frame(5, tz=ET)
     df[["open", "high", "low", "close"]] += 100
 
     monkeypatch.setattr(

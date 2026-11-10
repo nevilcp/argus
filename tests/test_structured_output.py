@@ -6,7 +6,6 @@ directly against a mocked LLMClient rather than through any agent.
 """
 
 import json
-from pathlib import Path
 from unittest import mock
 
 import pytest
@@ -16,6 +15,7 @@ from argus.orchestration.governor import RateLimitExceeded, UnregisteredModel
 from argus.params import STRUCTURED_OUTPUT
 from argus.seams import FixtureLLMClient, RetryableTransportError
 from argus.structured_output import StructuredOutputError, _strip_markdown_fence, decode
+from tests.helpers.paths import FIXTURES_DIR
 
 VALID_JSON = '{"signal": "NEUTRAL", "conviction": 0.3}'
 SCHEMA_INVALID_JSON = '{"signal": "NEUTRAL"}'  # missing required "conviction"
@@ -330,7 +330,7 @@ def test_decode_against_fundamental_fixture_response():
         moat_score: int
         reasoning: str
 
-    fixtures_dir = Path(__file__).resolve().parent / "fixtures" / "llm_responses"
+    fixtures_dir = FIXTURES_DIR / "llm_responses"
     llm = FixtureLLMClient.from_fixture_file(
         fixtures_dir / "fundamental.json", key_fn=lambda _prompt: "AAPL"
     )

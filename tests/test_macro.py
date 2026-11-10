@@ -17,42 +17,35 @@ from argus.agents.macro import (
 )
 from argus.config import settings
 from argus.schemas.signals import Regime, VixRegime
+from tests.helpers.market_data import FakeMarketData
 
 _DEFAULT_VIX_CLOSES = [20.0, 20.0, 20.0, 20.0, 10.0]
 
 
-class _StubMarketData:
-    """MarketDataProvider stub for macro.analyze(), with a configurable VIX level and history.
+def _market_data(
+    vix: float | None = 15.0, historical_closes: list[float] | None = None, **overrides
+) -> FakeMarketData:
+    """A provider for macro.analyze(), with a configurable VIX level and history.
 
     Args:
         vix: VIX level reported by macro_bundle().
         historical_closes: Trailing VIX closes ohlcv_daily() reports, which drive
             the VIX percentile calculation.
+        **overrides: Per-method responses replacing the defaults below.
     """
-
-    def __init__(
-        self, vix: float | None = 15.0, historical_closes: list[float] | None = None
-    ) -> None:
-        self._vix = vix
-        self._closes = historical_closes if historical_closes is not None else _DEFAULT_VIX_CLOSES
-
-    def macro_bundle(self) -> dict:
-        """Returns fixed macro indicators carrying the configured VIX level."""
-        return {
-            "vix": self._vix,
+    closes = historical_closes if historical_closes is not None else _DEFAULT_VIX_CLOSES
+    responses = {
+        "macro_bundle": {
+            "vix": vix,
             "fed_funds": 2.0,
             "t10y2y": 1.5,
             "cpi_yoy": 2.0,
             "unemployment": 3.5,
-        }
-
-    def ohlcv_daily(self, ticker: str, period: str = "2y") -> pd.DataFrame:
-        """Returns the configured closes regardless of the ticker or period."""
-        return pd.DataFrame({"close": self._closes})
-
-    def fred_series(self, series_id: str, start: str = "2018-01-01") -> pd.Series:
-        """Returns a fixed series regardless of the FRED series ID or start date."""
-        return pd.Series([1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0])
+        },
+        "ohlcv_daily": lambda ticker, period="2y": pd.DataFrame({"close": closes}),
+        "fred_series": pd.Series([1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]),
+    }
+    return FakeMarketData(**{**responses, **overrides})
 
 
 def test_rule_based_fallback() -> None:
@@ -68,7 +61,7 @@ def test_rule_based_fallback() -> None:
 
 def test_agent_multipliers_expansion(monkeypatch: pytest.MonkeyPatch) -> None:
     """EXPANSION regime with low VIX percentile sets fundamental and sentiment multipliers."""
-    agent = MacroStatisticalAgent(market_data=_StubMarketData())
+    agent = MacroStatisticalAgent(market_data=_market_data())
 
     monkeypatch.setattr(
         agent.classifier, "predict", lambda current_values: (Regime.EXPANSION.value, 0.9)
@@ -91,9 +84,7 @@ def test_vix_regime_buckets_from_level_not_percentile(monkeypatch: pytest.Monkey
     still bucket HIGH.
     """
     # VIX 11, at its 85th trailing percentile (17 of 20 historical closes are lower)
-    low_vix_agent = MacroStatisticalAgent(
-        market_data=_StubMarketData(11.0, [10.0] * 17 + [50.0] * 3)
-    )
+    low_vix_agent = MacroStatisticalAgent(market_data=_market_data(11.0, [10.0] * 17 + [50.0] * 3))
     monkeypatch.setattr(
         low_vix_agent.classifier, "predict", lambda current_values: (Regime.EXPANSION.value, 0.9)
     )
@@ -103,9 +94,7 @@ def test_vix_regime_buckets_from_level_not_percentile(monkeypatch: pytest.Monkey
 
     # VIX 28, at its 25th trailing percentile (5 of 20 historical closes are lower).
     # VixRegime buckets HIGH as 25 <= VIX < 35, so 28 lands HIGH despite the low percentile.
-    high_vix_agent = MacroStatisticalAgent(
-        market_data=_StubMarketData(28.0, [10.0] * 5 + [60.0] * 15)
-    )
+    high_vix_agent = MacroStatisticalAgent(market_data=_market_data(28.0, [10.0] * 5 + [60.0] * 15))
     monkeypatch.setattr(
         high_vix_agent.classifier, "predict", lambda current_values: (Regime.EXPANSION.value, 0.9)
     )
@@ -125,7 +114,7 @@ def test_vix_defaulted_skips_percentile_computation(monkeypatch: pytest.MonkeyPa
     # Historical closes chosen so a computed percentile would clearly differ
     # from the neutral 50.0 placeholder if the fabricated VIX were used.
     agent = MacroStatisticalAgent(
-        market_data=_StubMarketData(vix=None, historical_closes=[10.0] * 17 + [50.0] * 3)
+        market_data=_market_data(vix=None, historical_closes=[10.0] * 17 + [50.0] * 3)
     )
     monkeypatch.setattr(
         agent.classifier, "predict", lambda current_values: (Regime.EXPANSION.value, 0.9)
@@ -486,27 +475,24 @@ def test_discrimination_scenarios_cover_all_feature_columns() -> None:
     assert len(DISCRIMINATION_SCENARIOS) >= 2
 
 
-class _WindowAssemblyFailureMarketData(_StubMarketData):
-    """A MarketDataProvider whose FRED calls always fail, forcing window assembly to fail.
+def _window_assembly_failure_market_data() -> FakeMarketData:
+    """A provider whose FRED calls always fail, forcing window assembly to fail.
 
-    macro_bundle() carries the keys the real fetcher returns (raw levels, none of
-    the five model features), so a fallback that feeds the bundle straight to a
-    fitted model would be handed columns it does not have.
+    macro_bundle() carries the keys the real fetcher returns (raw levels: VIX 35
+    and an inverted curve, none of the five model features), so a fallback that
+    feeds the bundle straight to a fitted model would be handed columns it does
+    not have.
     """
-
-    def macro_bundle(self) -> dict:
-        """Returns a stressed raw-level bundle: VIX 35 and an inverted curve."""
-        return {
+    return _market_data(
+        macro_bundle={
             "vix": 35.0,
             "fed_funds": 5.0,
             "t10y2y": -0.6,
             "cpi_yoy": 3.0,
             "unemployment": 4.0,
-        }
-
-    def fred_series(self, series_id: str, start: str = "2018-01-01") -> pd.Series:
-        """Always raises, simulating a FRED outage during window assembly."""
-        raise RuntimeError("FRED unavailable")
+        },
+        fred_series=RuntimeError("FRED unavailable"),
+    )
 
 
 def test_analyze_falls_back_to_rule_based_when_window_assembly_fails(
@@ -514,7 +500,7 @@ def test_analyze_falls_back_to_rule_based_when_window_assembly_fails(
 ) -> None:
     """A window-assembly failure degrades to the rule-based regime and flags the model unhealthy."""
     agent = MacroStatisticalAgent(
-        market_data=_WindowAssemblyFailureMarketData(),
+        market_data=_window_assembly_failure_market_data(),
         model_path=tmp_path / "no_artifact_here.joblib",
     )
     agent.classifier = _fit_synthetic_classifier()
@@ -542,7 +528,7 @@ def test_unfitted_agent_uses_raw_vix_for_rule_based_regime(
     window = pd.DataFrame([_EXPANSION_POINT] * 6)
     monkeypatch.setattr("argus.agents.macro.build_macro_feature_frame", lambda *a, **k: window)
     agent = MacroStatisticalAgent(
-        market_data=_StubMarketData(vix=35.0),
+        market_data=_market_data(vix=35.0),
         model_path=tmp_path / "no_artifact_here.joblib",
     )
     assert not agent.classifier.is_fitted
