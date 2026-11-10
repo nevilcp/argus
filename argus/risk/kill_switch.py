@@ -116,18 +116,10 @@ class KillSwitch:
         "AGGRESSIVE": KILL_SWITCH.aggressive_drawdown_halt,
     }
 
-    # Consecutive VIX-fetch failures before failing closed (blocking new
-    # positions) rather than continuing to trust a possibly-stale reading
-    _VIX_FAILURE_HALT_THRESHOLD = 5
-
-    # VIX is a daily-close figure; re-fetching it every check is redundant
-    # network load for a value that can't have moved
-    _VIX_CACHE_TTL_SECONDS = 900
-
     def __init__(
         self,
         user_risk_tolerance: str,
-        check_interval_seconds: int = 900,
+        check_interval_seconds: int = KILL_SWITCH.check_interval_seconds,
         market_data: MarketDataProvider | None = None,
     ):
         """Initializes the kill switch, deferring monitoring until start() is called.
@@ -281,7 +273,7 @@ class KillSwitch:
             self._stop_event.wait(self.check_interval)
 
     def _fetch_vix_cached(self) -> float:
-        """Fetches VIX, reusing a recent reading for _VIX_CACHE_TTL_SECONDS.
+        """Fetches VIX, reusing a recent reading for KILL_SWITCH.vix_cache_ttl_seconds.
 
         Raises whatever the underlying fetch raises when the cache is empty
         or stale; a cache hit never raises.
@@ -290,7 +282,7 @@ class KillSwitch:
         if (
             self._vix_cache_value is not None
             and self._vix_cache_fetched_at is not None
-            and now - self._vix_cache_fetched_at < self._VIX_CACHE_TTL_SECONDS
+            and now - self._vix_cache_fetched_at < KILL_SWITCH.vix_cache_ttl_seconds
         ):
             return self._vix_cache_value
 
@@ -304,7 +296,7 @@ class KillSwitch:
 
         Drawdown is measured peak-to-trough against _high_water_mark, not
         against the inception value. A VIX fetch failure never clears an
-        active blackout; after _VIX_FAILURE_HALT_THRESHOLD consecutive
+        active blackout; after KILL_SWITCH.vix_failure_halt_threshold consecutive
         failures it sets one — a monitor that can't observe volatility fails
         closed rather than silently substituting a benign guess.
         """
@@ -324,7 +316,7 @@ class KillSwitch:
                 "VIX fetch failed (%d consecutive): %s", self._consecutive_vix_failures, exc
             )
             if (
-                self._consecutive_vix_failures >= self._VIX_FAILURE_HALT_THRESHOLD
+                self._consecutive_vix_failures >= KILL_SWITCH.vix_failure_halt_threshold
                 and not self._new_positions_blocked.is_set()
             ):
                 self._new_positions_blocked.set()
@@ -577,7 +569,7 @@ def _find_latest_halt_file(runs_dir: str | None = None) -> Path | None:
 def initialize_kill_switch(
     risk_tolerance: str,
     portfolio_value: float,
-    check_interval: int = 900,
+    check_interval: int = KILL_SWITCH.check_interval_seconds,
     market_data: MarketDataProvider | None = None,
 ) -> KillSwitch:
     """Initializes and starts the module-level KillSwitch singleton.
@@ -590,9 +582,8 @@ def initialize_kill_switch(
     Args:
         risk_tolerance: Risk tier string ('CONSERVATIVE', 'MODERATE', 'AGGRESSIVE').
         portfolio_value: Initial portfolio value used as the drawdown base (USD).
-        check_interval: Seconds between monitor loop iterations (default 900,
-            matching the VIX cache TTL — a shorter interval would just re-hit
-            the cache without observing anything new).
+        check_interval: Seconds between monitor loop iterations (defaults to
+            KILL_SWITCH.check_interval_seconds, which matches the VIX cache TTL).
         market_data: Provider for the VIX lookup; defaults to live fetches.
 
     Returns:

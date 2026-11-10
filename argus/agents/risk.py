@@ -27,7 +27,7 @@ from scipy.optimize import minimize
 from argus.config import settings
 from argus.data.cache import TTLCache
 from argus.infra.clock import now_local
-from argus.params import RISK
+from argus.params import RISK, SYSTEM
 from argus.schemas.signals import RiskAssessment, RiskVerdict
 from argus.seams import LiveMarketDataProvider, MarketDataProvider
 
@@ -454,7 +454,7 @@ class RiskStatisticalEngine:
         if returns_df.empty:
             return {}, None, optimizer_notes
 
-        cov = returns_df.cov() * 252
+        cov = returns_df.cov() * SYSTEM.trading_days_per_year
         if not np.isfinite(cov.to_numpy()).all():
             # Thin overlap can still leave a non-finite matrix even after the drop;
             # SLSQP can't recover.

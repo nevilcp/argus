@@ -45,6 +45,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from argus.config import settings
+from argus.params import GOVERNOR
 
 logger = logging.getLogger(__name__)
 
@@ -187,23 +188,10 @@ def _observe_axis(
     return limit, remaining, reset_at
 
 
-# Measured against representative reconstructed prompts (fundamental, sentiment,
-# and portfolio system+user pairs built from tests/fixtures/market_data/): raw
-# content averaged ~2.0 tokens/word (peak ~2.2 on the portfolio prompt's dense
-# numeric signal table), far above the previous 1.3 guess, plus a constant
-# ~15-token template overhead for the role wrapper and special tokens. gpt-oss
-# uses a different tokenizer than the Llama-3.1 one this was originally measured
-# against, but 2.2 is a deliberate over-estimate that still errs safe, so the
-# value stays unchanged. Both figures are rounded up for headroom rather than
-# fit exactly.
-_WORD_TO_TOKEN_RATIO = 2.2
-_CHAT_TEMPLATE_OVERHEAD_TOKENS = 20
-
-
 def estimate_tokens(system_prompt: str, user_prompt: str, max_tokens: int) -> int:
     """Estimates a chat completion's total token consumption before making the call.
 
-    Word count * _WORD_TO_TOKEN_RATIO plus a fixed chat-template overhead
+    Word count * GOVERNOR.word_to_token_ratio plus a fixed chat-template overhead
     approximates prompt-side tokenization; max_tokens stands in for the
     completion side since actual completion length is unknown pre-flight.
     Single estimator shared by every GroqLLMClient call site, replacing three
@@ -219,12 +207,11 @@ def estimate_tokens(system_prompt: str, user_prompt: str, max_tokens: int) -> in
         Estimated total token count to reserve against the governor's budget.
     """
     word_count = len(system_prompt.split()) + len(user_prompt.split())
-    return int(word_count * _WORD_TO_TOKEN_RATIO) + _CHAT_TEMPLATE_OVERHEAD_TOKENS + max_tokens
-
-
-# Rolling admission window — replaces a fixed-minute bucket so a burst can never
-# land 2x budget by straddling a bucket boundary.
-_WINDOW_SECONDS = 60.0
+    return (
+        int(word_count * GOVERNOR.word_to_token_ratio)
+        + GOVERNOR.chat_template_overhead_tokens
+        + max_tokens
+    )
 
 
 @dataclass
@@ -243,10 +230,10 @@ class ModelUsage:
         current_date: UTC date (YYYY-MM-DD) the two counters above were last
             reset for.
         requests_window: Monotonic timestamp of every admitted request within
-            the trailing ``_WINDOW_SECONDS``, pruned lazily on each access —
+            the trailing ``GOVERNOR.window_seconds``, pruned lazily on each access —
             the rolling replacement for a fixed-minute bucket.
         tokens_window: (monotonic timestamp, tokens) pair for every admitted
-            call within the trailing ``_WINDOW_SECONDS``, pruned the same way
+            call within the trailing ``GOVERNOR.window_seconds``, pruned the same way
             as ``requests_window``.
         limit_requests: Provider-reported daily request limit, or None before
             the first header arrives.
@@ -323,12 +310,12 @@ class RateLimitGovernor:
             logger.debug("daily counters reset for new UTC day")
 
     def _prune_window(self, usage: ModelUsage) -> None:
-        """Drops entries older than ``_WINDOW_SECONDS`` from both rolling windows.
+        """Drops entries older than ``GOVERNOR.window_seconds`` from both rolling windows.
 
         Args:
             usage: Mutable ModelUsage instance to prune in place.
         """
-        cutoff = time.monotonic() - _WINDOW_SECONDS
+        cutoff = time.monotonic() - GOVERNOR.window_seconds
         while usage.requests_window and usage.requests_window[0] < cutoff:
             usage.requests_window.popleft()
         while usage.tokens_window and usage.tokens_window[0][0] < cutoff:
@@ -352,8 +339,6 @@ class RateLimitGovernor:
             usage.remaining_requests = usage.limit_requests
             usage.reset_requests_at = None
 
-    _MAX_WAIT_ATTEMPTS = 3
-
     def wait_if_needed(self, model: str, estimated_tokens: int = 500) -> None:
         """Blocks the calling thread until rate limits allow the next request.
 
@@ -363,7 +348,7 @@ class RateLimitGovernor:
         once observed, unenforced before that — matching Tier A's refusal to invent a
         daily figure nothing publishes). If a per-minute limit would be exceeded,
         releases the lock, sleeps out the remainder of the rolling window's oldest
-        entry, then re-checks. Total wait is capped at ``_MAX_WAIT_ATTEMPTS`` sleeps;
+        entry, then re-checks. Total wait is capped at ``GOVERNOR.max_wait_attempts`` sleeps;
         a call still over budget after that raises rather than blocking indefinitely.
         If the provider-reported daily budget is genuinely exhausted, raises
         immediately rather than sleeping — its reset window is on the order of a day,
@@ -376,7 +361,7 @@ class RateLimitGovernor:
         Raises:
             UnregisteredModel: If ``model`` has no known rate-limit profile.
             RateLimitExceeded: If the daily request budget is exhausted, or the
-                request still doesn't fit after ``_MAX_WAIT_ATTEMPTS`` sleeps —
+                request still doesn't fit after ``GOVERNOR.max_wait_attempts`` sleeps —
                 typically because estimated_tokens alone exceeds the tokens-per-minute
                 budget.
         """
@@ -384,7 +369,7 @@ class RateLimitGovernor:
 
         bootstrap = BOOTSTRAP_LIMITS[model]
 
-        for attempt in range(self._MAX_WAIT_ATTEMPTS):
+        for attempt in range(GOVERNOR.max_wait_attempts):
             with self._lock:
                 usage = self._get_usage(model)
                 self._reset_if_new_day(usage)
@@ -437,19 +422,19 @@ class RateLimitGovernor:
                     )
 
                 oldest = usage.requests_window[0] if usage.requests_window else time.monotonic()
-                wait_seconds = max(1.0, _WINDOW_SECONDS - (time.monotonic() - oldest))
+                wait_seconds = max(1.0, GOVERNOR.window_seconds - (time.monotonic() - oldest))
                 logger.warning(
                     "Window limit approached for %s (attempt %d/%d). Sleeping %.1fs.",
                     model,
                     attempt + 1,
-                    self._MAX_WAIT_ATTEMPTS,
+                    GOVERNOR.max_wait_attempts,
                     wait_seconds,
                 )
 
             time.sleep(wait_seconds)
 
         raise RateLimitExceeded(
-            f"{model} still over its per-minute quota after {self._MAX_WAIT_ATTEMPTS} "
+            f"{model} still over its per-minute quota after {GOVERNOR.max_wait_attempts} "
             f"sleep(s); estimated_tokens={estimated_tokens} may itself exceed the "
             "model's tokens-per-minute budget"
         )

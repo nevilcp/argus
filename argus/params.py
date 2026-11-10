@@ -31,7 +31,7 @@ backtest run's metadata; bump it whenever any value below changes.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, is_dataclass
 from enum import StrEnum
 from typing import Any
 
@@ -50,7 +50,7 @@ class Provenance(StrEnum):
     ARBITRARY = "arbitrary"
 
 
-def p(value: Any, provenance: Provenance, note: str = "") -> Any:
+def p[T](value: T, provenance: Provenance, note: str = "") -> T:
     """Declare a dataclass field carrying a provenance tag as metadata.
 
     The field still holds `value` directly — call sites read it like any
@@ -92,7 +92,9 @@ class SystemParams:
     vix_blackout_threshold: float = p(
         35.0, Provenance.CONVENTION, "VIX > 35 is commonly treated as a high-fear regime"
     )
-    lookback_days: int = p(252, Provenance.LITERATURE, "252 = standard US trading days per year")
+    trading_days_per_year: int = p(
+        252, Provenance.LITERATURE, "252 = standard US trading days per year"
+    )
     freshness_margin_seconds: int = p(
         60,
         Provenance.ARBITRARY,
@@ -142,6 +144,26 @@ class SystemParams:
         "unreliable rather than divided by; guards against a near-zero (but not "
         "exactly zero) mean producing an extreme ratio outlier",
     )
+    default_buffer_size: int = p(
+        78,
+        Provenance.ARBITRARY,
+        "OHLCVBuffer's default per-ticker candle cap. 78 equals one 6.5h session of "
+        "5-minute bars, but nothing in the repo records that as the intent; the "
+        "pipeline always passes an explicit size derived from the configured interval",
+    )
+    analyze_deadline_seconds: int = p(
+        360,
+        Provenance.ARBITRARY,
+        "server-side deadline for one /analyze graph run. At the 6,000 TPM bootstrap "
+        "floor, a cold 20-ticker sweep spends ~256s in governor sleeps plus ~50s of "
+        "sentiment pacing; a proxy that times out well before this would leave the "
+        "server burning quota on a request nothing is still waiting on",
+    )
+
+
+# Defined here, not with the other groups at the bottom, because RiskParams and
+# PortfolioParams derive their defaults from it at class-definition time.
+SYSTEM = SystemParams()
 
 
 @dataclass(frozen=True)
@@ -166,6 +188,25 @@ class KillSwitchParams:
     )
     max_halt_dumps_retained: int = p(
         20, Provenance.ARBITRARY, "no basis for this specific retention count"
+    )
+    check_interval_seconds: int = p(
+        900,
+        Provenance.ARBITRARY,
+        "seconds between monitor loop iterations; matches vix_cache_ttl_seconds, "
+        "since a shorter interval would only re-hit the VIX cache without "
+        "observing anything new",
+    )
+    vix_cache_ttl_seconds: int = p(
+        900,
+        Provenance.ARBITRARY,
+        "VIX is a daily-close figure, so re-fetching it every check is redundant "
+        "network load for a value that cannot have moved",
+    )
+    vix_failure_halt_threshold: int = p(
+        5,
+        Provenance.ARBITRARY,
+        "consecutive VIX-fetch failures before failing closed (blocking new "
+        "positions) rather than trusting a possibly-stale reading",
     )
 
 
@@ -317,7 +358,9 @@ class PortfolioParams:
         "assumed average losing-trade return; not fit to ARGUS's own trades",
     )
     kelly_max_position: float = p(
-        0.15, Provenance.CONVENTION, "matches SystemParams.max_single_position_pct"
+        SYSTEM.max_single_position_pct,
+        Provenance.CONVENTION,
+        "derived from SystemParams.max_single_position_pct",
     )
     kelly_divisor: float = p(
         2.0, Provenance.CONVENTION, "half-Kelly is a standard variance-reduction convention"
@@ -366,7 +409,9 @@ class RiskParams:
         "universe — not evaluated against alternatives",
     )
     returns_lookback_days: int = p(
-        252, Provenance.LITERATURE, "252 = standard US trading days per year"
+        SYSTEM.trading_days_per_year,
+        Provenance.LITERATURE,
+        "one year of trading days, from SystemParams.trading_days_per_year",
     )
     var_confidence: float = p(
         0.99, Provenance.CONVENTION, "99% is a standard VaR/CVaR confidence level"
@@ -479,6 +524,73 @@ class MacroParams:
         "above this a state is effectively never leaving, i.e. tracking a rate "
         "era rather than a regime",
     )
+    vix_low_max: float = p(15.0, Provenance.CONVENTION, "VIX below 15 is commonly read as calm")
+    vix_medium_max: float = p(25.0, Provenance.CONVENTION, "VIX 15-25 is commonly read as normal")
+    vix_high_max: float = p(
+        SYSTEM.vix_blackout_threshold,
+        Provenance.CONVENTION,
+        "derived from SystemParams.vix_blackout_threshold: VixRegime.EXTREME is "
+        "the governor's blackout zone by level, so the two must not drift apart",
+    )
+    default_vix: float = p(
+        20.0,
+        Provenance.ARBITRARY,
+        "stand-in VIX when the FRED bundle has none, so regime classification can "
+        "still run; ~long-run median VIX, not computed from data",
+    )
+    rule_contraction_vix_above: float = p(
+        30.0, Provenance.CONVENTION, "rule-based fallback: VIX above 30 reads as stress"
+    )
+    rule_contraction_t10y2y_below: float = p(
+        -0.5, Provenance.ARBITRARY, "rule-based fallback: deep curve inversion, in percent"
+    )
+    rule_expansion_vix_below: float = p(
+        18.0, Provenance.ARBITRARY, "rule-based fallback: calm-market VIX ceiling"
+    )
+    rule_expansion_t10y2y_above: float = p(
+        0.3, Provenance.ARBITRARY, "rule-based fallback: clearly positive curve, in percent"
+    )
+    rule_default_t10y2y: float = p(
+        0.0, Provenance.ARBITRARY, "stand-in 10Y-2Y spread when the FRED bundle has none"
+    )
+    yield_curve_inverted_below: float = p(
+        -0.10,
+        Provenance.CONVENTION,
+        "10Y-2Y spread below -10 bps is classed INVERTED; inversion is the standard "
+        "recession-signal convention, the -10 bps cutoff is not cited",
+    )
+    yield_curve_flat_below: float = p(
+        0.15,
+        Provenance.ARBITRARY,
+        "10Y-2Y spread from the inversion cutoff up to +15 bps is classed FLAT, at "
+        "or above it NORMAL; not evaluated against alternatives",
+    )
+    fred_default_start: str = p(
+        "2018-01-01",
+        Provenance.ARBITRARY,
+        "default start of a FRED series fetch when the caller gives none",
+    )
+    hmm_training_start: str = p(
+        "1990-01-01",
+        Provenance.ARBITRARY,
+        "start of the history scripts/train_macro_hmm.py fits the shipped HMM on",
+    )
+    hmm_fit_start: str = p(
+        "2010-01-01",
+        Provenance.ARBITRARY,
+        "default start for RegimeClassifier.fit_on_history, chosen to include the "
+        "post-GFC recovery cycle",
+    )
+    vix_percentile_window_days: int = p(
+        1260,
+        Provenance.CONVENTION,
+        "5 years of trading days (5 * 252); the rolling window of the vix_pctile feature",
+    )
+    vix_percentile_min_periods: int = p(
+        SYSTEM.trading_days_per_year,
+        Provenance.ARBITRARY,
+        "one year of trading days of VIX history before vix_pctile emits a value",
+    )
 
 
 @dataclass(frozen=True)
@@ -513,6 +625,12 @@ class ReconciliationParams:
         "even though it was never scored — scheduled reconcile ticks can be "
         "dropped by the platform for days at a time, so this must comfortably "
         "outlast that, but no basis for this specific width",
+    )
+    daily_run_hour_et: int = p(
+        17,
+        Provenance.ARBITRARY,
+        "Eastern-time hour of the daily reconcile pass; after the 16:00 ET close, "
+        "so the day's closing prices exist",
     )
 
 
@@ -589,9 +707,160 @@ class CollectorParams:
         "reported DEGRADED and the job fails. 1 is a floor, not a fraction — "
         "not tuned against real degraded-run data",
     )
+    interval_seconds: int = p(
+        3600, Provenance.ARBITRARY, "seconds between automatic collection cycles; a guess"
+    )
+    total_wealth: float = p(
+        100_000.0, Provenance.ARBITRARY, "simulated wealth a collection cycle allocates"
+    )
+    invest_pct: float = p(
+        0.6, Provenance.ARBITRARY, "fraction of total_wealth a collection cycle invests"
+    )
 
 
-SYSTEM = SystemParams()
+@dataclass(frozen=True)
+class GovernorParams:
+    """Token estimation and rolling-window admission for the Groq rate governor.
+
+    See orchestration/governor.py.
+    """
+
+    word_to_token_ratio: float = p(
+        2.2,
+        Provenance.ARBITRARY,
+        "spot-measured on reconstructed fundamental, sentiment and portfolio prompts "
+        "(~2.0 tokens/word on average, peaking ~2.2 on the portfolio prompt's dense "
+        "numeric table) with the Llama-3.1 tokenizer, then rounded up rather than fit; "
+        "gpt-oss tokenizes differently, but 2.2 is a deliberate over-estimate, so it stays",
+    )
+    chat_template_overhead_tokens: int = p(
+        20,
+        Provenance.ARBITRARY,
+        "spot-measured ~15 tokens for the role wrapper and special tokens, rounded up "
+        "for headroom rather than fit",
+    )
+    window_seconds: float = p(
+        60.0,
+        Provenance.LITERATURE,
+        "Groq's rate limits are per minute; a rolling window rather than a "
+        "fixed-minute bucket so a burst can never land 2x budget by straddling a "
+        "bucket boundary",
+    )
+    max_wait_attempts: int = p(
+        3,
+        Provenance.ARBITRARY,
+        "sleeps wait_if_needed makes before giving up with RateLimitExceeded; "
+        "not evaluated against alternatives",
+    )
+    bootstrap_rpm: int = p(
+        30,
+        Provenance.CONVENTION,
+        "conservative free-tier requests-per-minute floor, applied to every "
+        "registered model until Groq's response headers correct it",
+    )
+    bootstrap_tpm: int = p(
+        6_000,
+        Provenance.CONVENTION,
+        "conservative free-tier tokens-per-minute floor, applied to every "
+        "registered model until Groq's response headers correct it",
+    )
+
+
+@dataclass(frozen=True)
+class EvaluationParams:
+    """Bootstrap and power settings for the pre-registered evaluation.
+
+    See backtesting/evaluation.py and scripts/run_evaluation.py. These definitions
+    are pre-registered: changing one invalidates comparison with earlier reports.
+    """
+
+    bootstrap_resamples: int = p(2000, Provenance.CONVENTION, "percentile-bootstrap resample count")
+    bootstrap_seed: int = p(0, Provenance.CONVENTION, "fixed so a report is reproducible")
+    ci_alpha: float = p(0.05, Provenance.CONVENTION, "two-sided 95% confidence interval")
+    min_n_for_power: int = p(
+        6,
+        Provenance.ARBITRARY,
+        "pre-registered: below this many scored decisions (the full fixture universe) "
+        "the report warns that statistical power is very low",
+    )
+    replay_total_wealth: float = p(
+        100_000.0, Provenance.ARBITRARY, "simulated wealth for a replayed session"
+    )
+    replay_invest_pct: float = p(
+        0.8, Provenance.ARBITRARY, "fraction of replay_total_wealth eligible for allocation"
+    )
+
+
+@dataclass(frozen=True)
+class FundamentalParams:
+    """LLM-call and output-bound controls for the fundamental agent.
+
+    See agents/fundamental.py.
+    """
+
+    max_tokens: int = p(
+        450,
+        Provenance.ARBITRARY,
+        "gpt-oss-120b peaked at 327 completion tokens on fixture prompts; 450 leaves ~35% headroom",
+    )
+    capacity_reserve_fraction: float = p(
+        0.1,
+        Provenance.ARBITRARY,
+        "fraction of the RPM budget held back so the portfolio agent has room after "
+        "a fundamental batch",
+    )
+    reasoning_char_limit: int = p(
+        400, Provenance.ARBITRARY, "no basis beyond keeping the rationale short"
+    )
+    default_sector_pe_median: float = p(
+        20.0,
+        Provenance.ARBITRARY,
+        "P/E anchor shown to the LLM for a sector absent from the fixed sector table",
+    )
+
+
+@dataclass(frozen=True)
+class SentimentParams:
+    """LLM-call, news-scoring and output-bound controls for the sentiment agent.
+
+    See agents/sentiment.py.
+    """
+
+    max_tokens: int = p(
+        550,
+        Provenance.ARBITRARY,
+        "gpt-oss-20b peaked at 417 completion tokens on fixture prompts; 550 leaves ~30% headroom",
+    )
+    fanout_pace_seconds_per_ticker: float = p(
+        2.5,
+        Provenance.ARBITRARY,
+        "rough estimate of a fundamental_analysis Groq round-trip; not tuned against real latency",
+    )
+    news_decay_rate: float = p(
+        0.95,
+        Provenance.ARBITRARY,
+        "per-position weight decay from newest to oldest headline; positional, not date-aware",
+    )
+    max_articles_scored: int = p(
+        25, Provenance.ARBITRARY, "headlines sent to FinBERT per ticker, newest-relevance first"
+    )
+    headline_char_limit_for_model: int = p(
+        512, Provenance.CONVENTION, "FinBERT's 512-token input ceiling, applied as characters"
+    )
+    headline_char_limit_stored: int = p(
+        100, Provenance.ARBITRARY, "no basis beyond keeping per-headline text short"
+    )
+    reasoning_char_limit: int = p(
+        400, Provenance.ARBITRARY, "no basis beyond keeping the rationale short"
+    )
+    catalyst_window_days: int = p(
+        14,
+        Provenance.ARBITRARY,
+        "an earnings date within this many days sets upcoming_catalyst; the same "
+        "figure is written into the sentiment prompt text",
+    )
+
+
 KILL_SWITCH = KillSwitchParams()
 TECHNICAL_INDICATOR_WEIGHTS = TechnicalIndicatorWeights()
 TECHNICAL = TechnicalParams()
@@ -603,20 +872,17 @@ RECONCILIATION = ReconciliationParams()
 MEMORY = MemoryParams()
 STRUCTURED_OUTPUT = StructuredOutputParams()
 COLLECTOR = CollectorParams()
+GOVERNOR = GovernorParams()
+EVALUATION = EvaluationParams()
+FUNDAMENTAL = FundamentalParams()
+SENTIMENT = SentimentParams()
 
+# Every module-level dataclass instance is a parameter group; a new group is
+# registered by being defined, not by being listed here. The classes themselves
+# (which are `type`s) and Provenance (an enum) are excluded. A test asserts every
+# group is frozen.
 _ALL_GROUPS: dict[str, Any] = {
-    "SYSTEM": SYSTEM,
-    "KILL_SWITCH": KILL_SWITCH,
-    "TECHNICAL_INDICATOR_WEIGHTS": TECHNICAL_INDICATOR_WEIGHTS,
-    "TECHNICAL": TECHNICAL,
-    "AGGREGATOR": AGGREGATOR,
-    "PORTFOLIO": PORTFOLIO,
-    "RISK": RISK,
-    "MACRO": MACRO,
-    "RECONCILIATION": RECONCILIATION,
-    "MEMORY": MEMORY,
-    "STRUCTURED_OUTPUT": STRUCTURED_OUTPUT,
-    "COLLECTOR": COLLECTOR,
+    name: obj for name, obj in globals().items() if is_dataclass(obj) and not isinstance(obj, type)
 }
 
 

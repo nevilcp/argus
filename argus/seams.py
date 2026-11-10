@@ -41,6 +41,7 @@ from langchain_groq import ChatGroq
 
 from argus.data import fetchers
 from argus.orchestration.governor import estimate_tokens, governor
+from argus.params import MACRO
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,7 @@ class MarketDataProvider(Protocol):
         """Returns the fundamentals ratio payload for a ticker."""
         ...
 
-    def fred_series(self, series_id: str, start: str = "2018-01-01") -> pd.Series:
+    def fred_series(self, series_id: str, start: str = MACRO.fred_default_start) -> pd.Series:
         """Returns a FRED economic time series."""
         ...
 
@@ -111,7 +112,7 @@ class LiveMarketDataProvider:
         """Delegates to fetchers.fetch_fundamentals."""
         return fetchers.fetch_fundamentals(ticker)
 
-    def fred_series(self, series_id: str, start: str = "2018-01-01") -> pd.Series:
+    def fred_series(self, series_id: str, start: str = MACRO.fred_default_start) -> pd.Series:
         """Delegates to fetchers.fetch_fred_series."""
         return fetchers.fetch_fred_series(series_id, start=start)
 
@@ -182,7 +183,7 @@ class FixtureMarketDataProvider:
         """Returns the cached fundamentals payload from the fundamentals fixture."""
         return dict(self._load("fundamentals")[ticker])
 
-    def fred_series(self, series_id: str, start: str = "2018-01-01") -> pd.Series:
+    def fred_series(self, series_id: str, start: str = MACRO.fred_default_start) -> pd.Series:
         """Returns a cached FRED series from the fred_series fixture."""
         record = self._load("fred_series")[series_id]
         return pd.Series(record["values"], index=pd.to_datetime(record["dates"]))

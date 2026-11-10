@@ -6,8 +6,6 @@ from unittest.mock import patch
 import pytest
 
 from argus.orchestration.governor import (
-    _CHAT_TEMPLATE_OVERHEAD_TOKENS,
-    _WORD_TO_TOKEN_RATIO,
     BOOTSTRAP_LIMITS,
     REGISTERED_MODELS,
     RateLimitExceeded,
@@ -16,6 +14,7 @@ from argus.orchestration.governor import (
     _parse_reset_duration,
     estimate_tokens,
 )
+from argus.params import GOVERNOR
 
 # Any registered model exercises the same governor code path; the tests that
 # need two distinct models take them from REGISTERED_MODELS directly.
@@ -76,7 +75,7 @@ def test_governor_admits_after_window_rolls_over(monkeypatch, governor):
 
     A fixed-minute bucket could admit 2x budget across a boundary straddle;
     the rolling window instead tracks each admission's own timestamp, so the
-    request is only clear to retry once _WINDOW_SECONDS has actually elapsed
+    request is only clear to retry once GOVERNOR.window_seconds has actually elapsed
     since the oldest entry.
     """
     req_limit = BOOTSTRAP_LIMITS[MODEL]["requests_per_minute"]
@@ -107,7 +106,7 @@ def test_governor_wait_gives_up_after_max_attempts(mock_sleep, governor):
     with pytest.raises(RateLimitExceeded):
         governor.wait_if_needed(MODEL, BOOTSTRAP_LIMITS[MODEL]["tokens_per_minute"] + 1)
 
-    assert mock_sleep.call_count == governor._MAX_WAIT_ATTEMPTS
+    assert mock_sleep.call_count == GOVERNOR.max_wait_attempts
     usage = governor._get_usage(MODEL)
     assert len(usage.requests_window) == 0
     assert _tokens_this_window(usage) == 0
@@ -220,7 +219,10 @@ def test_estimate_tokens_combines_prompts_and_max_tokens():
     max_tokens = 100
 
     estimated = estimate_tokens(system_prompt, user_prompt, max_tokens)
-    assert estimated == int(5 * _WORD_TO_TOKEN_RATIO) + _CHAT_TEMPLATE_OVERHEAD_TOKENS + 100
+    assert (
+        estimated
+        == int(5 * GOVERNOR.word_to_token_ratio) + GOVERNOR.chat_template_overhead_tokens + 100
+    )
 
 
 def test_observe_headers_overrides_bootstrap(governor):
@@ -261,7 +263,7 @@ def test_observed_tpm_governs_wait_if_needed(mock_sleep, governor):
     # Bootstrap TPM would happily admit this, but the header-observed remaining won't.
     with pytest.raises(RateLimitExceeded):
         governor.wait_if_needed(MODEL, 100_000)
-    assert mock_sleep.call_count == governor._MAX_WAIT_ATTEMPTS
+    assert mock_sleep.call_count == GOVERNOR.max_wait_attempts
 
 
 def test_observed_daily_exhaustion_raises_immediately(governor):

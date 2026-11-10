@@ -52,7 +52,7 @@ from argus.infra.clock import now_local
 from argus.memory.cultural import get_cultural_memory
 from argus.orchestration.aggregator import SPECIALIST_AGENTS, HybridSignalAggregator
 from argus.orchestration.state import ARGUSState, build_ticker_snapshots
-from argus.params import AGGREGATOR, RISK
+from argus.params import AGGREGATOR, RISK, SYSTEM
 from argus.schemas.signals import (
     AggregatedSignal,
     ARGUSDecision,
@@ -545,7 +545,11 @@ def build_graph(
             }
 
             # Joint evaluation captures inter-asset covariance and global diversification limits
-            base_weight = min(0.15, 1.0 / len(universe)) if universe else 0.15
+            base_weight = (
+                min(SYSTEM.max_single_position_pct, 1.0 / len(universe))
+                if universe
+                else SYSTEM.max_single_position_pct
+            )
             full_portfolio = [{"ticker": t, "weight": base_weight} for t in universe]
             portfolio_result = risk_engine.evaluate(
                 full_portfolio, history, vix, convictions=convictions

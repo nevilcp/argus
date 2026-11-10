@@ -75,9 +75,9 @@ class VixRegime(StrEnum):
 class YieldCurve(StrEnum):
     """Yield curve classification based on the US Treasury 10Y-2Y spread."""
 
-    NORMAL = "NORMAL"  # spread > +25 bps
-    FLAT = "FLAT"  # -25 bps ≤ spread ≤ +25 bps
-    INVERTED = "INVERTED"  # spread < -25 bps (recession signal)
+    NORMAL = "NORMAL"  # spread ≥ +15 bps
+    FLAT = "FLAT"  # -10 bps ≤ spread < +15 bps
+    INVERTED = "INVERTED"  # spread < -10 bps (recession signal)
 
 
 class SectorSignal(StrEnum):

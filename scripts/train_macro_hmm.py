@@ -22,6 +22,7 @@ import argparse
 from argus.agents.macro import MacroStatisticalAgent
 from argus.config import settings
 from argus.infra.log import configure_logging
+from argus.params import MACRO
 from argus.schemas.signals import Regime
 
 
@@ -32,7 +33,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--start-date",
-        default="1990-01-01",
+        default=MACRO.hmm_training_start,
         help="ISO date string for the beginning of the training window",
     )
     parser.add_argument(

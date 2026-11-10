@@ -21,6 +21,7 @@ Not responsible for:
 from __future__ import annotations
 
 import os
+from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -28,7 +29,12 @@ from dotenv import load_dotenv
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-from argus.params import SYSTEM
+from argus.params import (
+    COLLECTOR,
+    GOVERNOR,
+    RECONCILIATION,
+    SYSTEM,
+)
 from argus.params import TECHNICAL_INDICATOR_WEIGHTS as _TECHNICAL_WEIGHTS
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -123,19 +129,25 @@ class Settings(BaseSettings):
         default=False, description="Run the graph automatically on a schedule during market hours"
     )
     ARGUS_COLLECTOR_INTERVAL_SECONDS: int = Field(
-        default=3600, description="Seconds between automatic collection cycles"
+        default=COLLECTOR.interval_seconds,
+        description="Seconds between automatic collection cycles",
     )
     ARGUS_RECONCILE_ENABLED: bool = Field(
         default=False, description="Automatically reconcile matured decisions once a day"
     )
     ARGUS_RECONCILE_HOUR_ET: int = Field(
-        default=17, ge=0, le=23, description="Eastern-time hour to run the daily reconcile pass"
+        default=RECONCILIATION.daily_run_hour_et,
+        ge=0,
+        le=23,
+        description="Eastern-time hour to run the daily reconcile pass",
     )
     ARGUS_TOTAL_WEALTH: float = Field(
-        default=100_000.0, gt=1000, description="Total wealth used by unattended collection cycles"
+        default=COLLECTOR.total_wealth,
+        gt=1000,
+        description="Total wealth used by unattended collection cycles",
     )
     ARGUS_INVEST_PCT: float = Field(
-        default=0.6,
+        default=COLLECTOR.invest_pct,
         gt=0.05,
         le=0.95,
         description="Invest fraction used by unattended collection cycles",
@@ -171,17 +183,17 @@ class Settings(BaseSettings):
     # model until Groq's own response headers correct it per-model for the
     # account's actual tier.
     ARGUS_GROQ_RPM: int = Field(
-        default=30,
+        default=GOVERNOR.bootstrap_rpm,
         gt=0,
         description="Bootstrap requests-per-minute floor before headers are observed",
     )
     ARGUS_GROQ_TPM: int = Field(
-        default=6_000,
+        default=GOVERNOR.bootstrap_tpm,
         gt=0,
         description="Bootstrap tokens-per-minute floor before headers are observed",
     )
     ARGUS_ANALYZE_DEADLINE_SECONDS: int = Field(
-        default=360,
+        default=SYSTEM.analyze_deadline_seconds,
         gt=0,
         description=(
             "Server-side deadline for a single /analyze graph run (GOV-12). At the "
@@ -228,14 +240,7 @@ class Settings(BaseSettings):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
 
-    TECHNICAL_INDICATOR_WEIGHTS: dict[str, float] = {
-        "rsi": _TECHNICAL_WEIGHTS.rsi,
-        "macd": _TECHNICAL_WEIGHTS.macd,
-        "bb": _TECHNICAL_WEIGHTS.bb,
-        "adx": _TECHNICAL_WEIGHTS.adx,
-        "vwap": _TECHNICAL_WEIGHTS.vwap,
-        "momentum": _TECHNICAL_WEIGHTS.momentum,
-    }
+    TECHNICAL_INDICATOR_WEIGHTS: dict[str, float] = asdict(_TECHNICAL_WEIGHTS)
 
     # Portfolio hard limits enforced by RiskStatisticalEngine.
     MAX_SINGLE_POSITION_PCT: float = SYSTEM.max_single_position_pct
@@ -243,9 +248,6 @@ class Settings(BaseSettings):
     MAX_PORTFOLIO_BETA: float = SYSTEM.max_portfolio_beta
 
     VIX_BLACKOUT_THRESHOLD: float = SYSTEM.vix_blackout_threshold
-
-    # Historical lookback window used in rolling indicator calculations.
-    LOOKBACK_DAYS: int = SYSTEM.lookback_days
 
     def data_path(self, name: str) -> Path:
         """Returns `name` under the current ARGUS_DATA_DIR.

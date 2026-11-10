@@ -311,7 +311,6 @@ Enforced by `RiskStatisticalEngine`; see `argus/params.py` for provenance.
 | `MAX_SECTOR_CONCENTRATION` | `0.40` | Ceiling on a single GICS sector's aggregate weight. |
 | `MAX_PORTFOLIO_BETA` | `1.50` | Ceiling on the portfolio's weighted beta. |
 | `VIX_BLACKOUT_THRESHOLD` | `35` | VIX level above which new positions are blocked. |
-| `LOOKBACK_DAYS` | `252` | Historical window used in rolling indicator calculations. |
 
 `TECHNICAL_INDICATOR_WEIGHTS` is also a config field, but it's a JSON object best edited directly
 in `argus/params.py` rather than overridden via `.env`.

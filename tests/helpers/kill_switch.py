@@ -30,7 +30,7 @@ def make_ks(risk_tolerance: str = "MODERATE", inception: float = 100_000.0) -> K
 def expire_vix_cache(ks: KillSwitch) -> None:
     """Forces the next _fetch_vix_cached() call to hit fetch_vix rather than the cache.
 
-    The VIX reading cache (TTL _VIX_CACHE_TTL_SECONDS) means back-to-back
+    The VIX reading cache (TTL KILL_SWITCH.vix_cache_ttl_seconds) means back-to-back
     _check() calls in a test would otherwise reuse the first mocked reading
     instead of observing the next one — call this between _check() calls
     that mock a different fetch_vix outcome.

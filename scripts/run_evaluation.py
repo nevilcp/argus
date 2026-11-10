@@ -29,7 +29,7 @@ from argus.backtesting.evaluation import (
 )
 from argus.backtesting.replay import replay_session
 from argus.infra.log import configure_logging
-from argus.params import RECONCILIATION
+from argus.params import EVALUATION, RECONCILIATION
 from argus.seams import LiveMarketDataProvider
 
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
@@ -118,9 +118,10 @@ def main() -> None:
     _print_evaluation("Open-loop", open_result)
     _print_evaluation("Closed-loop", closed_result)
 
-    if open_result.n < 6 or closed_result.n < 6:
+    min_n = EVALUATION.min_n_for_power
+    if open_result.n < min_n or closed_result.n < min_n:
         print(
-            "\nNOTE: n < 6 (fewer than the full fixture universe) — statistical "
+            f"\nNOTE: n < {min_n} (fewer than the full fixture universe) — statistical "
             "power is very low at this sample size."
         )
 

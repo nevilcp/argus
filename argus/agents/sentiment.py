@@ -27,16 +27,13 @@ from argus.config import settings
 from argus.data.cache import TTLCache
 from argus.infra.clock import now_local
 from argus.orchestration.governor import RateLimitExceeded, UnregisteredModel
-from argus.params import STRUCTURED_OUTPUT
+from argus.params import SENTIMENT, STRUCTURED_OUTPUT
 from argus.schemas.prompting import schema_block
 from argus.schemas.signals import SentimentSignal, SentimentVerdict
 from argus.seams import GroqLLMClient, LiveMarketDataProvider, LLMClient, MarketDataProvider
 from argus.structured_output import StructuredOutputError, decode
 
 logger = logging.getLogger(__name__)
-
-# Rough estimate of a fundamental_analysis Groq round-trip; not tuned against real latency.
-_FANOUT_PACE_SECONDS_PER_TICKER = 2.5
 
 # Company names for fetch_news's query term; short tickers like V need one to narrow the search.
 _TICKER_COMPANY_NAMES: dict[str, str] = {
@@ -114,12 +111,12 @@ def score_headlines_with_finbert(articles: list[dict]) -> list[dict]:
 
     finbert = get_finbert()
     results = []
-    for article in articles[:25]:
+    for article in articles[: SENTIMENT.max_articles_scored]:
         headline = article.get("title", "")
         if not headline:
             continue
         try:
-            out = finbert(headline[:512])[0]
+            out = finbert(headline[: SENTIMENT.headline_char_limit_for_model])[0]
             if out["label"] == "positive":
                 numeric = out["score"]
             elif out["label"] == "negative":
@@ -129,7 +126,7 @@ def score_headlines_with_finbert(articles: list[dict]) -> list[dict]:
 
             results.append(
                 {
-                    "headline": headline[:100],
+                    "headline": headline[: SENTIMENT.headline_char_limit_stored],
                     "published_at": article.get("published_at", ""),
                     "label": out["label"],
                     "raw_score": out["score"],
@@ -141,7 +138,9 @@ def score_headlines_with_finbert(articles: list[dict]) -> list[dict]:
     return results
 
 
-def aggregate_finbert_scores(scored: list[dict], decay_rate: float = 0.95) -> dict:
+def aggregate_finbert_scores(
+    scored: list[dict], decay_rate: float = SENTIMENT.news_decay_rate
+) -> dict:
     """Aggregates FinBERT headline scores using exponential recency decay.
 
     Exponential decay prioritizes recent context over stale news; articles
@@ -179,7 +178,7 @@ def aggregate_finbert_scores(scored: list[dict], decay_rate: float = 0.95) -> di
 
 
 def _check_earnings_calendar(ticker: str, market_data: MarketDataProvider) -> bool:
-    """Returns True if an earnings date falls within the next 14 days.
+    """Returns True if an earnings date falls within SENTIMENT.catalyst_window_days of now.
 
     Uses yfinance's calendar API via the MarketDataProvider seam (retried,
     rate-limit-classified) rather than calling yfinance directly. The response
@@ -191,7 +190,7 @@ def _check_earnings_calendar(ticker: str, market_data: MarketDataProvider) -> bo
         market_data: Provider for the ticker-calendar lookup.
 
     Returns:
-        True if an upcoming earnings event is within 14 days, False otherwise
+        True if an upcoming earnings event is within the catalyst window, False otherwise
         (including when the calendar can't be fetched at all).
     """
     try:
@@ -201,11 +200,11 @@ def _check_earnings_calendar(ticker: str, market_data: MarketDataProvider) -> bo
             earnings_dates = cal.loc["Earnings Date"]
             if not earnings_dates.empty:
                 dt = pd.to_datetime(earnings_dates.iloc[0])
-                if 0 <= (dt.tz_localize(None) - now_local()).days <= 14:
+                if 0 <= (dt.tz_localize(None) - now_local()).days <= SENTIMENT.catalyst_window_days:
                     return True
         elif isinstance(cal, dict) and "Earnings Date" in cal:
             dt = pd.to_datetime(cal["Earnings Date"][0])
-            if 0 <= (dt.tz_localize(None) - now_local()).days <= 14:
+            if 0 <= (dt.tz_localize(None) - now_local()).days <= SENTIMENT.catalyst_window_days:
                 return True
     except Exception as e:
         logger.debug("%s check failed: %s", ticker, e)
@@ -340,8 +339,7 @@ class SentimentAgent:
             llm_client = GroqLLMClient(
                 model=settings.ARGUS_SENTIMENT_MODEL,
                 temperature=STRUCTURED_OUTPUT.llm_temperature,
-                # gpt-oss-20b peaked at 417 completion tokens on fixture prompts; 550 leaves ~30% headroom.
-                max_tokens=550,
+                max_tokens=SENTIMENT.max_tokens,
                 api_key=api_key,
             )
         self.llm_client = llm_client
@@ -414,7 +412,7 @@ class SentimentAgent:
             signal=verdict.signal,
             conviction=verdict.conviction,
             sentiment_decay_risk=verdict.sentiment_decay_risk,
-            reasoning=verdict.reasoning[:400],
+            reasoning=verdict.reasoning[: SENTIMENT.reasoning_char_limit],
             timestamp=now_local(),
             api_calls_used=1,
         )
@@ -487,7 +485,7 @@ class SentimentAgent:
         errors: list[str] = []
         for i, ticker in enumerate(tickers):
             if pace and i > 0:
-                time.sleep(_FANOUT_PACE_SECONDS_PER_TICKER)
+                time.sleep(SENTIMENT.fanout_pace_seconds_per_ticker)
             company_name = _TICKER_COMPANY_NAMES.get(ticker, ticker)
             try:
                 res = self.analyze(ticker, company_name=company_name, errors=errors)
