@@ -74,7 +74,7 @@ class PairedOutcome:
         signed_conviction: Conviction magnitude signed by direction (see
             signed_conviction).
         forward_return: Realized forward return over the evaluation horizon,
-            as a percentage.
+            as a fraction (0.05 is +5%).
         holding_days: Actual number of calendar days held before exit.
     """
 
@@ -149,12 +149,13 @@ def rank_information_coefficient(
 def hit_rate_with_deadband(
     pairs: Sequence[PairedOutcome], deadband: float
 ) -> tuple[float | None, int]:
-    """Fraction of decisions outside the dead band where sign(conviction) == sign(return).
+    """Fraction of directional calls outside the dead band that called the return's sign.
 
     Decisions whose forward return falls within +/-deadband are excluded —
     mirroring cultural.store_trade_outcome's own dead band
     (RECONCILIATION.min_abs_return_for_storage), not a second invented
-    threshold.
+    threshold. NEUTRAL decisions (signed conviction 0.0) make no directional
+    call and are excluded too, rather than being scored as bearish.
 
     Args:
         pairs: Paired outcomes to score.
@@ -164,7 +165,7 @@ def hit_rate_with_deadband(
     Returns:
         (hit_rate, n_scored). hit_rate is None if n_scored == 0.
     """
-    scored = [p for p in pairs if abs(p.forward_return) > deadband]
+    scored = [p for p in pairs if p.signed_conviction != 0 and abs(p.forward_return) > deadband]
     if not scored:
         return None, 0
     hits = sum(1 for p in scored if (p.signed_conviction > 0) == (p.forward_return > 0))

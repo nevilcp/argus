@@ -104,9 +104,10 @@ def credit_primary_driver(
             is no state for two calls to share).
 
     Returns:
-        'technical', 'fundamental', or 'sentiment'; 'unknown' if fewer than
-        two agents contributed a signal (ablation needs something to compare
-        against) or the decision has no aggregated result to ablate from.
+        'technical', 'fundamental', or 'sentiment'. A sole present signal is
+        credited directly, with no ablation, even when the decision has no
+        aggregated result. 'unknown' if no agent contributed a signal, or if
+        two or more did but the decision has no aggregated result to ablate from.
     """
     present = [name for name in _ABLATABLE_AGENTS if getattr(decision, name) is not None]
 
