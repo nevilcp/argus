@@ -6,8 +6,8 @@ graph end to end, signal-schema serialization, and the shared Governor's
 rate limits.
 
 Three of TestEndToEnd's methods exercise live yfinance calls and are skipped
-with a visible reason, via the `requires_live_network` marker below, when
-that network is unreachable — see `_live_network_skip_reason`'s docstring.
+with a visible reason, via the `live_network` marker, when that network is
+unreachable — see `tests/conftest.py::_skip_without_live_network`.
 FRED is not a hard prerequisite: MacroStatisticalAgent.analyze() degrades to
 STABLE/0.0 defaults rather than raising when FRED_API_KEY is absent, so none
 of these tests need it to pass. The rest of the class, and every LLM boundary
@@ -15,7 +15,6 @@ any test crosses, run offline.
 """
 
 import asyncio
-import socket
 import time
 from datetime import date, datetime
 from unittest import mock
@@ -53,33 +52,10 @@ from argus.schemas.signals import (
 from argus.seams import LiveMarketDataProvider
 
 
-def _live_network_skip_reason() -> str | None:
-    """Returns why the live-network tests should skip, or None if the network is reachable.
-
-    Checked once at collection time rather than per-test so a run with no
-    network access pays the reachability probe's timeout only once.
-
-    Returns:
-        A human-readable skip reason, or None if Yahoo Finance is reachable.
-    """
-    try:
-        with socket.create_connection(("query1.finance.yahoo.com", 443), timeout=3.0):
-            return None
-    except OSError as exc:
-        return f"no live network access to Yahoo Finance ({exc})"
-
-
-_LIVE_NETWORK_SKIP_REASON = _live_network_skip_reason()
-
-requires_live_network = pytest.mark.skipif(
-    _LIVE_NETWORK_SKIP_REASON is not None, reason=_LIVE_NETWORK_SKIP_REASON or ""
-)
-
-
 class TestEndToEnd:
     """Integration tests exercising real agents, the orchestrator graph, and shared state."""
 
-    @requires_live_network
+    @pytest.mark.live_network
     def test_statistical_agents_pipeline(self):
         """TechnicalAgent -> MacroAgent -> RiskEngine chain runs with zero LLM calls."""
         pipeline = MFTDataPipeline(["AAPL"])
@@ -124,7 +100,7 @@ class TestEndToEnd:
         assert isinstance(r_sig, RiskAssessment)
         assert r_sig.api_calls_used == 0
 
-    @requires_live_network
+    @pytest.mark.live_network
     def test_reconcile_decision_resolves_a_matured_decision_against_live_prices(self):
         """A decision old enough to have matured reconciles end to end against real Yahoo prices.
 
@@ -182,7 +158,7 @@ class TestEndToEnd:
         assert kwargs["holding_days"] >= horizon_days
         assert f"{horizon_days}d" in kwargs["exit_reason"]
 
-    @requires_live_network
+    @pytest.mark.live_network
     @pytest.mark.asyncio
     @mock.patch("argus.agents.portfolio.PortfolioManagerAgent.allocate")
     @mock.patch("argus.orchestration.graph.get_cultural_memory")

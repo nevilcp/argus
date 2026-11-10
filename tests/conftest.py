@@ -4,6 +4,7 @@ tests/conftest.py
 Shared pytest fixtures.
 
 Responsibilities:
+  - Skip `live_network`-marked tests when Yahoo Finance is unreachable
   - Isolate every test from the production candle buffer
   - Restore the logger trees `configure_logging` mutates
   - Reset the kill-switch singleton, and (opt-in via `api_state`) api.main's
@@ -19,6 +20,7 @@ Not responsible for:
 from __future__ import annotations
 
 import logging
+import socket
 from collections.abc import Callable, Iterator
 
 import pytest
@@ -115,6 +117,31 @@ def api_state(monkeypatch: pytest.MonkeyPatch) -> None:
 def client() -> TestClient:
     """A TestClient over api.main.app without running its lifespan startup."""
     return TestClient(api_main.app)
+
+
+@pytest.fixture(scope="session")
+def live_network_skip_reason() -> str | None:
+    """Returns why live-network tests should skip, or None if Yahoo Finance is reachable.
+
+    Session-scoped and only built when a ``live_network`` test asks for it, so
+    one run pays the reachability probe's timeout at most once, and a run that
+    selects no such test opens no socket.
+    """
+    try:
+        with socket.create_connection(("query1.finance.yahoo.com", 443), timeout=3.0):
+            return None
+    except OSError as exc:
+        return f"no live network access to Yahoo Finance ({exc})"
+
+
+@pytest.fixture(autouse=True)
+def _skip_without_live_network(request: pytest.FixtureRequest) -> None:
+    """Skips a ``live_network``-marked test, with a visible reason, when the network is down."""
+    if request.node.get_closest_marker("live_network") is None:
+        return
+    reason = request.getfixturevalue("live_network_skip_reason")
+    if reason is not None:
+        pytest.skip(reason)
 
 
 @pytest.fixture(autouse=True)
