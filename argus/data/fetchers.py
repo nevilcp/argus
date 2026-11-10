@@ -36,7 +36,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any
 
 import pandas as pd
 import yfinance as yf
@@ -62,8 +62,6 @@ class YahooCrumbHandshakeError(DataFetchError):
     minted. See GH issue #93.
     """
 
-
-F = TypeVar("F", bound=Callable[..., Any])
 
 _RETRY_ATTEMPTS = 3
 # Full-jitter backoff base; doubles the ceiling each attempt (base, 2*base, 4*base)
@@ -180,11 +178,11 @@ def _retry_after_seconds(exc: Exception) -> float | None:
         return None
     try:
         return float(retry_after)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return None
 
 
-def _with_retry(fn: F) -> F:
+def _with_retry[F: Callable[..., Any]](fn: F) -> F:
     """Decorator implementing jittered back-off retries on retryable failures only.
 
     Wraps transient exceptions in DataFetchError after exhausting all attempts.
@@ -703,7 +701,7 @@ class _NewsApiBudget:
                 return int(raw["requests_today"])
         except FileNotFoundError:
             pass
-        except (KeyError, TypeError, ValueError):  # JSONDecodeError is a ValueError
+        except KeyError, TypeError, ValueError:  # JSONDecodeError is a ValueError
             return None
         return 0
 

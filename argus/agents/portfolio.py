@@ -313,7 +313,7 @@ class PortfolioManagerAgent:
         except StructuredOutputError as e:
             record(f"portfolio_allocation: {e}", "error")
             return None
-        except (RateLimitExceeded, UnregisteredModel):
+        except RateLimitExceeded, UnregisteredModel:
             # No per-ticker fallback here; propagate so the API layer surfaces a 429/503, not a generic 500.
             raise
         except Exception as e:

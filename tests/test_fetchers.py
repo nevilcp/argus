@@ -365,7 +365,7 @@ def test_newsapi_budget_survives_a_fresh_process():
 
 
 def _reserve_n_times(
-    data_dir: str, daily_limit: int, attempts: int, result_queue: "multiprocessing.Queue[int]"
+    data_dir: str, daily_limit: int, attempts: int, result_queue: multiprocessing.Queue[int]
 ) -> None:
     """Worker for test_newsapi_budget_enforces_cap_across_processes.
 
