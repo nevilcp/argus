@@ -8,7 +8,7 @@ from argus.agents.sentiment import (
     _check_earnings_calendar,
     aggregate_finbert_scores,
 )
-from argus.orchestration.governor import RateLimitExceeded
+from argus.governor import RateLimitExceeded
 from argus.schemas.prompting import UNTRUSTED_GUARD
 from tests.helpers.market_data import FakeMarketData
 

@@ -25,10 +25,11 @@ from uuid import uuid4
 import numpy as np
 
 from argus.config import settings
+from argus.governor import RateLimitExceeded, UnregisteredModel
 from argus.infra.clock import now_local
-from argus.orchestration.governor import RateLimitExceeded, UnregisteredModel
 from argus.orchestration.state import TickerSnapshot
 from argus.params import AGGREGATOR, PORTFOLIO
+from argus.ports import LLMClient
 from argus.schemas.prompting import UNTRUSTED_GUARD, schema_block, wrap_untrusted
 from argus.schemas.signals import (
     MacroContext,
@@ -36,7 +37,7 @@ from argus.schemas.signals import (
     PortfolioProposal,
     Signal,
 )
-from argus.seams import GroqLLMClient, LLMClient
+from argus.seams import GroqLLMClient
 from argus.structured_output import StructuredOutputError, decode
 
 logger = logging.getLogger(__name__)

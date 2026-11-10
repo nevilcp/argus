@@ -53,6 +53,7 @@ from argus.memory.cultural import get_cultural_memory
 from argus.orchestration.aggregator import SPECIALIST_AGENTS, HybridSignalAggregator
 from argus.orchestration.state import ARGUSState, build_ticker_snapshots
 from argus.params import AGGREGATOR, RISK, SYSTEM
+from argus.ports import LLMClient, MarketDataProvider
 from argus.schemas.signals import (
     AggregatedSignal,
     ARGUSDecision,
@@ -61,7 +62,7 @@ from argus.schemas.signals import (
     RiskVerdict,
     Signal,
 )
-from argus.seams import LiveMarketDataProvider, LLMClient, MarketDataProvider
+from argus.seams import LiveMarketDataProvider
 
 logger = logging.getLogger(__name__)
 

@@ -51,6 +51,12 @@ from argus.config import settings, web_concurrency
 from argus.data.live_session_cache import LiveSessionCache
 from argus.data.pipeline import MFTDataPipeline
 from argus.data.tickers import is_valid_ticker
+from argus.governor import (
+    REGISTERED_MODELS,
+    RateLimitExceeded,
+    UnregisteredModel,
+    governor,
+)
 from argus.infra.clock import now_local, now_market
 from argus.infra.log import configure_logging
 from argus.memory.cultural import get_cultural_memory
@@ -58,12 +64,6 @@ from argus.orchestration.collector import (
     CollectionResult,
     append_decisions_jsonl,
     run_collection_cycle,
-)
-from argus.orchestration.governor import (
-    REGISTERED_MODELS,
-    RateLimitExceeded,
-    UnregisteredModel,
-    governor,
 )
 from argus.orchestration.graph import build_graph
 from argus.orchestration.reconciliation import run_reconciliation_pass
@@ -277,7 +277,7 @@ def _assert_single_worker() -> None:
     """Fails fast on the argv/env spellings of "more than one worker" this can detect.
 
     The rate governor and kill switch are in-process singletons (see
-    argus/orchestration/governor.py). A second worker process would run its
+    argus/governor.py). A second worker process would run its
     own ignorant copy of both, silently doubling real Groq usage against the
     same account and gating risk independently rather than jointly — the
     Actions collector (scripts/reconcile_outcomes.py) is already a second,

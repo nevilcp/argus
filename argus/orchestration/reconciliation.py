@@ -61,8 +61,8 @@ from argus.memory.cultural import CulturalMemoryManager
 from argus.orchestration.aggregator import SPECIALIST_AGENTS, HybridSignalAggregator
 from argus.orchestration.graph import build_checkpoint_serde
 from argus.params import RECONCILIATION
+from argus.ports import MarketDataProvider
 from argus.schemas.signals import ARGUSDecision
-from argus.seams import MarketDataProvider
 
 logger = logging.getLogger(__name__)
 

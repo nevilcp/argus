@@ -185,7 +185,7 @@ class Settings(BaseSettings):
     )
 
     # Conservative free-tier bootstrap floor for the rate governor (see
-    # argus/orchestration/governor.py), applied uniformly to every registered
+    # argus/governor.py), applied uniformly to every registered
     # model until Groq's own response headers correct it per-model for the
     # account's actual tier.
     ARGUS_GROQ_RPM: int = Field(
@@ -211,7 +211,7 @@ class Settings(BaseSettings):
     )
 
     # Model IDs for the three LLM-backed agents. Must each be a member of
-    # argus.orchestration.governor.REGISTERED_MODELS — asserted at API startup
+    # argus.governor.REGISTERED_MODELS — asserted at API startup
     # so a typo or unsupported model fails at boot rather than at first call.
     ARGUS_FUNDAMENTAL_MODEL: str = Field(default="openai/gpt-oss-120b")
     ARGUS_SENTIMENT_MODEL: str = Field(default="openai/gpt-oss-20b")

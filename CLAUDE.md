@@ -32,7 +32,7 @@ The design principles the code actually enforces, in full in
 5. **One definition, shared by producer and consumer** — inter-agent contracts
    live in `argus/schemas/signals.py` and nowhere else.
 6. **Safety fails closed and is independent of the graph** —
-   `argus/risk/kill_switch.py` and `argus/orchestration/governor.py` gate the
+   `argus/risk/kill_switch.py` and `argus/governor.py` gate the
    graph from outside it.
 7. **Bound every store** — caches, buffers, and vaults all have an explicit cap.
 

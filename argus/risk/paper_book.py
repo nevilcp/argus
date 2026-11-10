@@ -44,8 +44,8 @@ from argus.config import settings
 from argus.infra.clock import now_local
 from argus.infra.files import atomic_write_text
 from argus.orchestration.reconciliation import _needs_reconciliation, compute_realized_return
+from argus.ports import MarketDataProvider
 from argus.schemas.signals import ARGUSDecision
-from argus.seams import MarketDataProvider
 
 logger = logging.getLogger(__name__)
 

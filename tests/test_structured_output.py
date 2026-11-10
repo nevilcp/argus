@@ -11,9 +11,10 @@ from unittest import mock
 import pytest
 from pydantic import BaseModel
 
-from argus.orchestration.governor import RateLimitExceeded, UnregisteredModel
+from argus.governor import RateLimitExceeded, UnregisteredModel
 from argus.params import STRUCTURED_OUTPUT
-from argus.seams import FixtureLLMClient, RetryableTransportError
+from argus.ports import RetryableTransportError
+from argus.seams import FixtureLLMClient
 from argus.structured_output import StructuredOutputError, _strip_markdown_fence, decode
 from tests.helpers.paths import FIXTURES_DIR
 

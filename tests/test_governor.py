@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from argus.orchestration.governor import (
+from argus.governor import (
     BOOTSTRAP_LIMITS,
     REGISTERED_MODELS,
     RateLimitExceeded,
@@ -81,7 +81,7 @@ def test_governor_admits_after_window_rolls_over(monkeypatch, governor):
     req_limit = BOOTSTRAP_LIMITS[MODEL]["requests_per_minute"]
 
     fake_now = [1_000.0]
-    monkeypatch.setattr("argus.orchestration.governor.time.monotonic", lambda: fake_now[0])
+    monkeypatch.setattr("argus.governor.time.monotonic", lambda: fake_now[0])
 
     for _ in range(req_limit):
         governor.wait_if_needed(MODEL, 100)
@@ -92,13 +92,13 @@ def test_governor_admits_after_window_rolls_over(monkeypatch, governor):
         sleep_calls.append(seconds)
         fake_now[0] += 61  # advance past the window so the oldest admission ages out
 
-    monkeypatch.setattr("argus.orchestration.governor.time.sleep", _fake_sleep)
+    monkeypatch.setattr("argus.governor.time.sleep", _fake_sleep)
 
     governor.wait_if_needed(MODEL, 100)
     assert len(sleep_calls) == 1
 
 
-@patch("argus.orchestration.governor.time.sleep")
+@patch("argus.governor.time.sleep")
 def test_governor_wait_gives_up_after_max_attempts(mock_sleep, governor):
     """A request too large to ever fit the per-minute budget raises rather than looping forever."""
     # estimated_tokens alone exceeds the per-minute budget, so no amount of
@@ -139,7 +139,7 @@ def test_governor_does_not_block_other_models_while_sleeping(governor):
 
     def _run_throttled():
         with (
-            patch("argus.orchestration.governor.time.sleep", side_effect=_blocking_sleep),
+            patch("argus.governor.time.sleep", side_effect=_blocking_sleep),
             contextlib.suppress(RateLimitExceeded),
         ):
             governor.wait_if_needed(throttled_model, 10)
@@ -255,7 +255,7 @@ def test_observe_headers_skips_incomplete_headers(governor):
     assert governor._get_usage(MODEL).limits_observed is False
 
 
-@patch("argus.orchestration.governor.time.sleep")
+@patch("argus.governor.time.sleep")
 def test_observed_tpm_governs_wait_if_needed(mock_sleep, governor):
     """Once headers are observed, tokens-per-minute admission uses the header-reported remaining."""
     governor.observe_headers(MODEL, _rate_limit_headers(limit_tokens=1_000, remaining_tokens=1_000))
@@ -273,7 +273,7 @@ def test_observed_daily_exhaustion_raises_immediately(governor):
     )
 
     with (
-        patch("argus.orchestration.governor.time.sleep") as mock_sleep,
+        patch("argus.governor.time.sleep") as mock_sleep,
         pytest.raises(RateLimitExceeded),
     ):
         governor.wait_if_needed(MODEL, 10)

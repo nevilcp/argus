@@ -29,8 +29,8 @@ from argus.agents.portfolio import half_kelly_weight
 from argus.agents.risk import RiskStatisticalEngine
 from argus.agents.technical import TechnicalStatisticalAgent
 from argus.data.pipeline import MFTDataPipeline
+from argus.governor import BOOTSTRAP_LIMITS, REGISTERED_MODELS, governor
 from argus.memory.cultural import CulturalMemoryManager
-from argus.orchestration.governor import BOOTSTRAP_LIMITS, REGISTERED_MODELS, governor
 from argus.orchestration.graph import build_graph
 from argus.orchestration.reconciliation import reconcile_decision
 from argus.orchestration.state import ARGUSState
@@ -352,9 +352,7 @@ class TestEndToEnd:
 
         # Reaching exactly the limit still succeeds without sleeping
         try:
-            with mock.patch(
-                "argus.orchestration.governor.time.sleep", side_effect=_advance_window
-            ) as mock_sleep:
+            with mock.patch("argus.governor.time.sleep", side_effect=_advance_window) as mock_sleep:
                 governor.wait_if_needed(model)
                 assert len(usage.requests_window) == limit
                 assert mock_sleep.call_count == 0

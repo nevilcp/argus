@@ -71,7 +71,7 @@ see the notes under each entry.
   ultimately recommends. What a proposal becomes once risk caps have been applied.
 
 - **Governor** — the per-process `RateLimitGovernor`
-  (`argus/orchestration/governor.py`) that enforces Groq's per-model rate-limit quotas
+  (`argus/governor.py`) that enforces Groq's per-model rate-limit quotas
   and provides cooperative back-pressure ahead of every LLM call.
 
 - **Kill switch** — the background daemon (`argus/risk/kill_switch.py`) with two

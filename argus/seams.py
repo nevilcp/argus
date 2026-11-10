@@ -1,25 +1,23 @@
 """
 argus/seams.py
 
-Dependency-injection seam between agent logic and two external boundaries.
-
-The two boundaries are network market-data fetches (argus/data/fetchers.py)
-and Groq LLM calls (inline `ChatGroq` construction previously duplicated in
-fundamental.py, sentiment.py, and portfolio.py). Each gets one Protocol and
-two implementations:
-  - `MarketDataProvider` / `LiveMarketDataProvider` (delegates to
-    argus/data/fetchers.py, unchanged behavior) / `FixtureMarketDataProvider`
-    (serves pre-captured JSON from tests/fixtures/market_data/).
-  - `LLMClient` / `GroqLLMClient` (wraps ChatGroq construction + invocation,
-    and is the sole choke point for governor rate-limiting and header-driven
-    limit observation; classifies which failures are worth retrying and
-    raises RetryableTransportError for those, but the retry loop itself
-    lives in argus/structured_output.py's decode() — see its own docstring;
-    also answers `remaining_capacity()` by delegating to the governor, so a
-    caller can back off before spending a call it would only lose)
-    / `FixtureLLMClient` (serves pre-captured response text from
-    tests/fixtures/llm_responses/, never touches the governor or the network,
-    and answers `remaining_capacity()` from a value fixed at construction).
+The adapters behind the two ports in argus/ports.py: network market-data
+fetches (argus/data/fetchers.py) and Groq LLM calls. Each port has a live
+implementation and a fixture implementation:
+  - `LiveMarketDataProvider` (delegates to argus/data/fetchers.py) /
+    `FixtureMarketDataProvider` (serves pre-captured JSON from
+    tests/fixtures/market_data/), implementing `MarketDataProvider`.
+  - `GroqLLMClient` (wraps ChatGroq construction + invocation, and is the
+    sole choke point for governor rate-limiting and header-driven limit
+    observation; classifies which failures are worth retrying and raises
+    RetryableTransportError for those, but the retry loop itself lives in
+    argus/structured_output.py's decode() — see its own docstring; also
+    answers `remaining_capacity()` by delegating to the governor, so a
+    caller can back off before spending a call it would only lose) /
+    `FixtureLLMClient` (serves pre-captured response text from
+    tests/fixtures/llm_responses/, never touches the governor or the
+    network, and answers `remaining_capacity()` from a value fixed at
+    construction), implementing `LLMClient`.
 
 Agents accept these via constructor injection with a real default, so
 production wiring (graph.py's `build_graph()`) is unchanged unless a
@@ -31,7 +29,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 import groq
 import httpx
@@ -40,8 +38,9 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
 
 from argus.data import fetchers
-from argus.orchestration.governor import estimate_tokens, governor
+from argus.governor import estimate_tokens, governor
 from argus.params import MACRO
+from argus.ports import RetryableTransportError
 
 logger = logging.getLogger(__name__)
 
@@ -51,50 +50,6 @@ FIXTURES_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
 # ---------------------------------------------------------------------------
 # Market data
 # ---------------------------------------------------------------------------
-
-
-class MarketDataProvider(Protocol):
-    """Everything an agent needs from external market/macro data sources.
-
-    Method names and signatures mirror the argus/data/fetchers.py functions
-    they wrap; see that module's docstrings for the semantics of each field.
-    """
-
-    def ohlcv_daily(self, ticker: str, period: str = "2y") -> pd.DataFrame:
-        """Returns daily OHLCV history for a ticker."""
-        ...
-
-    def multiple_daily(self, tickers: list[str], period: str = "1y") -> dict[str, pd.DataFrame]:
-        """Returns daily OHLCV history for multiple tickers, keyed by ticker."""
-        ...
-
-    def fundamentals(self, ticker: str) -> dict:
-        """Returns the fundamentals ratio payload for a ticker."""
-        ...
-
-    def fred_series(self, series_id: str, start: str = MACRO.fred_default_start) -> pd.Series:
-        """Returns a FRED economic time series."""
-        ...
-
-    def macro_bundle(self) -> dict:
-        """Returns the current macro indicator bundle."""
-        ...
-
-    def news(self, ticker: str, company_name: str, days_back: int = 7) -> list[dict] | None:
-        """Returns recent news articles for a ticker, or None if unavailable."""
-        ...
-
-    def vix(self) -> float:
-        """Returns the current CBOE VIX level."""
-        ...
-
-    def ticker_info(self, ticker: str) -> dict:
-        """Returns yfinance's raw ``.info`` dict for a ticker (e.g. GICS sector)."""
-        ...
-
-    def ticker_calendar(self, ticker: str) -> Any:
-        """Returns yfinance's raw ``.calendar`` object for a ticker (e.g. earnings date)."""
-        ...
 
 
 class LiveMarketDataProvider:
@@ -214,61 +169,6 @@ class FixtureMarketDataProvider:
 # ---------------------------------------------------------------------------
 
 
-class LLMClient(Protocol):
-    """A structured-text call plus the back-pressure a caller needs to schedule it.
-
-    Callers keep owning response parsing (JSON extraction, markdown-fence
-    stripping, schema validation) — this seam only replaces "how do I get an
-    LLM to answer this prompt," not "what does the answer mean." Back-pressure
-    is part of the same contract: an agent deciding whether a call is worth
-    making asks its own port, not a global.
-
-    An implementation makes exactly one invocation per call — it does not
-    loop. A transient failure worth a caller-side retry (see
-    argus/structured_output.py's decode()) must be raised as
-    RetryableTransportError; anything else propagates as-is and is treated
-    as terminal.
-    """
-
-    def complete(self, system_prompt: str, user_prompt: str) -> str:
-        """Sends a system + user prompt to the LLM and returns the raw response text."""
-        ...
-
-    def remaining_capacity(self) -> int:
-        """Returns how many more calls this client can make right now without waiting."""
-        ...
-
-
-class RetryableTransportError(Exception):
-    """An LLMClient.complete() attempt failed transiently and is worth retrying.
-
-    Raised by an LLMClient implementation, not by callers. A caller with its
-    own attempt budget (argus/structured_output.py's decode()) catches this
-    to retry the call, without needing to know which provider-specific
-    exceptions are retryable — that classification stays with the adapter
-    that raises this.
-
-    Attributes:
-        cause: The underlying transport exception.
-        retry_after: Seconds the provider explicitly said to wait before
-            retrying (e.g. a 429's Retry-After header), or None if the
-            provider gave no hint and the caller should decide its own
-            back-off.
-    """
-
-    def __init__(self, cause: Exception, retry_after: float | None = None) -> None:
-        """Wraps the underlying transport exception with an optional retry hint.
-
-        Args:
-            cause: The underlying transport exception.
-            retry_after: Seconds the provider explicitly said to wait before
-                retrying, or None if the provider gave no hint.
-        """
-        self.cause = cause
-        self.retry_after = retry_after
-        super().__init__(str(cause))
-
-
 # Retryable: transient conditions where a second attempt might succeed.
 _RETRYABLE_GROQ_ERRORS = (
     groq.RateLimitError,
@@ -301,7 +201,7 @@ def _groq_retry_delay(exc: Exception) -> float | None:
         Seconds to wait before retrying per the provider's hint, or None.
     """
     if isinstance(exc, groq.RateLimitError):
-        return fetchers._retry_after_seconds(exc)
+        return fetchers.retry_after_seconds(exc)
     return None
 
 

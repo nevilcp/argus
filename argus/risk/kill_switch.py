@@ -11,7 +11,7 @@ Responsibilities:
 Not responsible for:
   - Portfolio allocation (see agents/portfolio.py)
   - Signal aggregation (see orchestration/aggregator.py)
-  - RateLimitGovernor (see orchestration/governor.py)
+  - RateLimitGovernor (see argus/governor.py)
 """
 
 from __future__ import annotations
@@ -28,7 +28,8 @@ from typing import ClassVar
 from argus.config import settings
 from argus.infra.clock import now_local
 from argus.params import KILL_SWITCH
-from argus.seams import LiveMarketDataProvider, MarketDataProvider
+from argus.ports import MarketDataProvider
+from argus.seams import LiveMarketDataProvider
 
 logger = logging.getLogger(__name__)
 

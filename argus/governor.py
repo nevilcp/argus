@@ -1,5 +1,5 @@
 """
-argus/orchestration/governor.py
+argus/governor.py
 
 Centralized API rate-limit governance module across all LLM and data providers.
 

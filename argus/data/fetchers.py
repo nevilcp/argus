@@ -16,7 +16,7 @@ Responsibilities:
 Not responsible for:
   - Data compression or indicator calculation (see data/pipeline.py)
   - Rolling intraday SQLite buffering (see data/cache.py's OHLCVBuffer)
-  - Rate-limit governance for Groq LLM calls (see orchestration/governor.py)
+  - Rate-limit governance for Groq LLM calls (see argus/governor.py)
 
 Dependencies:
   - yfinance
@@ -161,7 +161,7 @@ def _reset_yfinance_session() -> None:
     yf.cache.get_cookie_cache().store("curlCffi", None)
 
 
-def _retry_after_seconds(exc: Exception) -> float | None:
+def retry_after_seconds(exc: Exception) -> float | None:
     """Reads a Retry-After response header off an exception, if one is attached.
 
     Args:
@@ -243,7 +243,7 @@ def _with_retry[F: Callable[..., Any]](fn: F) -> F:
                         f"{fn.__name__} failed with a non-retryable error: {exc}"
                     ) from exc
 
-                retry_after = _retry_after_seconds(exc)
+                retry_after = retry_after_seconds(exc)
                 delay = full_jitter_delay(
                     attempt - 1, _RETRY_BASE_DELAY, math.inf, retry_after=retry_after
                 )

@@ -9,7 +9,7 @@ from argus.agents.portfolio import (
     half_kelly_weight,
 )
 from argus.config import settings
-from argus.orchestration.governor import BOOTSTRAP_LIMITS, estimate_tokens
+from argus.governor import BOOTSTRAP_LIMITS, estimate_tokens
 from argus.orchestration.state import TickerSnapshot
 from argus.params import PORTFOLIO
 from argus.schemas.signals import (
