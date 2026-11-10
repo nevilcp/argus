@@ -294,6 +294,12 @@ class AggregatorParams:
     max_conviction: float = p(
         0.95, Provenance.ARBITRARY, "kept below 1.0 so no aggregate claims certainty"
     )
+    neutral_reliability: float = p(
+        0.5,
+        Provenance.CONVENTION,
+        "a coin-flip win rate: the prior for an agent with no outcome history, at which "
+        "its vote weight is left unscaled",
+    )
 
 
 @dataclass(frozen=True)

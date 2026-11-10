@@ -39,15 +39,13 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 from uuid import uuid4
-from zoneinfo import ZoneInfo
 
+from argus.infra.clock import MARKET_TZ
 from argus.orchestration.graph import build_graph
-from argus.orchestration.state import ARGUSState
+from argus.orchestration.state import initial_state
 from argus.seams import FixtureLLMClient, FixtureMarketDataProvider
 
 logger = logging.getLogger("argus.backtesting.replay")
-
-_ET = ZoneInfo("America/New_York")
 
 
 def _normalize_as_of(ts: datetime) -> datetime:
@@ -67,7 +65,7 @@ def _normalize_as_of(ts: datetime) -> datetime:
     """
     if ts.tzinfo is None:
         return ts
-    return ts.astimezone(_ET).replace(tzinfo=None)
+    return ts.astimezone(MARKET_TZ).replace(tzinfo=None)
 
 
 @dataclass
@@ -207,27 +205,13 @@ def replay_session(
     captured_at = next(iter(session_states.values()))["timestamp"]
     session_date = _normalize_as_of(datetime.fromisoformat(captured_at))
 
-    state = ARGUSState(
-        ticker=universe[0],
-        universe=universe,
+    state = initial_state(
+        universe,
+        session_states=session_states,
         total_wealth=total_wealth,
         invest_pct=invest_pct,
         risk_tolerance=risk_tolerance,
-        backtest_mode=False,
-        session_seed=None,
         as_of=session_date,
-        price_history={},
-        session_states=session_states,
-        macro_context=None,
-        technical_signals={},
-        fundamental_signals={},
-        sentiment_signals={},
-        cultural_memory={"wisdom": [], "warnings": []},
-        risk_assessments={},
-        aggregated_signals={},
-        portfolio_allocation=None,
-        decisions=[],
-        errors=[],
     )
     config = {"configurable": {"thread_id": str(uuid4())}}
 

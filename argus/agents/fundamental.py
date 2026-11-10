@@ -27,6 +27,7 @@ from pydantic import ValidationError
 
 from argus.config import settings
 from argus.data.cache import TTLCache
+from argus.infra.clock import now_local
 from argus.orchestration.governor import RateLimitExceeded, UnregisteredModel
 from argus.params import STRUCTURED_OUTPUT
 from argus.schemas.prompting import field_list
@@ -248,7 +249,7 @@ def _signal_payload(
     data: dict[str, Any] = verdict.model_dump()
     data["ticker"] = ticker
     data["data_as_of_date"] = pit_data["as_of_date"]
-    data["timestamp"] = datetime.now().isoformat()  # noqa: DTZ005
+    data["timestamp"] = now_local().isoformat()
     data["api_calls_used"] = 1
 
     # Measured ratios come from the fetched payload, never the LLM echo.

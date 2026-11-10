@@ -18,13 +18,14 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import numpy as np
 import pandas as pd
 
 from argus.config import settings
 from argus.data.cache import TTLCache
+from argus.infra.clock import now_local
 from argus.orchestration.governor import RateLimitExceeded, UnregisteredModel
 from argus.params import STRUCTURED_OUTPUT
 from argus.schemas.prompting import schema_block
@@ -200,11 +201,11 @@ def _check_earnings_calendar(ticker: str, market_data: MarketDataProvider) -> bo
             earnings_dates = cal.loc["Earnings Date"]
             if not earnings_dates.empty:
                 dt = pd.to_datetime(earnings_dates.iloc[0])
-                if 0 <= (dt.tz_localize(None) - datetime.now()).days <= 14:  # noqa: DTZ005
+                if 0 <= (dt.tz_localize(None) - now_local()).days <= 14:
                     return True
         elif isinstance(cal, dict) and "Earnings Date" in cal:
             dt = pd.to_datetime(cal["Earnings Date"][0])
-            if 0 <= (dt.tz_localize(None) - datetime.now()).days <= 14:  # noqa: DTZ005
+            if 0 <= (dt.tz_localize(None) - now_local()).days <= 14:
                 return True
     except Exception as e:
         logger.debug("[EarningsCalendar] %s check failed: %s", ticker, e)
@@ -416,7 +417,7 @@ class SentimentAgent:
             conviction=verdict.conviction,
             sentiment_decay_risk=verdict.sentiment_decay_risk,
             reasoning=verdict.reasoning[:400],
-            timestamp=datetime.now(),  # noqa: DTZ005
+            timestamp=now_local(),
             api_calls_used=1,
         )
         self.cache.set(ticker, signal)

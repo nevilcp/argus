@@ -20,15 +20,15 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from datetime import datetime
 from uuid import uuid4
 
 import numpy as np
 
 from argus.config import settings
+from argus.infra.clock import now_local
 from argus.orchestration.governor import RateLimitExceeded, UnregisteredModel
 from argus.orchestration.state import TickerSnapshot
-from argus.params import PORTFOLIO
+from argus.params import AGGREGATOR, PORTFOLIO
 from argus.schemas.prompting import schema_block
 from argus.schemas.signals import (
     MacroContext,
@@ -350,7 +350,7 @@ class PortfolioManagerAgent:
                 "portfolio": enforced_portfolio,
                 "cash_reserve_pct": cash_reserve_pct,
                 "rebalance_trigger": proposal.rebalance_trigger,
-                "timestamp": datetime.now().isoformat(),  # noqa: DTZ005
+                "timestamp": now_local().isoformat(),
             }
 
             stage = "schema_validation"
@@ -394,7 +394,7 @@ class PortfolioManagerAgent:
             if not agg or agg.signal == Signal.BEARISH or not agg.weighted_votes:
                 continue
             driver = max(agg.weighted_votes, key=lambda k: agg.weighted_votes[k])
-            win_prob = agg.reliability.get(driver, 0.5)
+            win_prob = agg.reliability.get(driver, AGGREGATOR.neutral_reliability)
             kelly_suggestions[ticker] = half_kelly_weight(
                 win_probability=win_prob, max_position=max_pos
             )
@@ -567,5 +567,5 @@ class PortfolioManagerAgent:
             portfolio=[],
             cash_reserve_pct=1.0,
             rebalance_trigger="MONTHLY",
-            timestamp=datetime.now(),  # noqa: DTZ005
+            timestamp=now_local(),
         )

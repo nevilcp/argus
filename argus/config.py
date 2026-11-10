@@ -20,6 +20,7 @@ Not responsible for:
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -243,6 +244,29 @@ class Settings(BaseSettings):
 
     # Historical lookback window used in rolling indicator calculations.
     LOOKBACK_DAYS: int = SYSTEM.lookback_days
+
+    def data_path(self, name: str) -> Path:
+        """Returns `name` under the current ARGUS_DATA_DIR.
+
+        Resolved on each call, not at import, so a per-test or per-deployment
+        override of ARGUS_DATA_DIR applies.
+
+        Args:
+            name: File or directory name relative to the data directory.
+
+        Returns:
+            The joined path; nothing is created.
+        """
+        return Path(self.ARGUS_DATA_DIR) / name
+
+
+def web_concurrency() -> str | None:
+    """Returns the WEB_CONCURRENCY environment value, or None when unset.
+
+    Read from the environment on every call, not captured at import, so a
+    process that sets it after startup (and tests that monkeypatch it) are seen.
+    """
+    return os.environ.get("WEB_CONCURRENCY")
 
 
 # Module-level singleton — import this everywhere rather than instantiating locally.

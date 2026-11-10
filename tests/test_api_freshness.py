@@ -18,7 +18,7 @@ directly on the api.main module instead.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 from unittest import mock
 
 import pytest
@@ -26,6 +26,7 @@ from fastapi.testclient import TestClient
 
 import api.main as api_main
 from argus.data.live_session_cache import AdmissionResult
+from argus.infra.clock import now_market
 
 _PAYLOAD = {"tickers": ["AAPL"], "total_wealth": 100_000, "invest_pct": 0.5}
 
@@ -53,7 +54,7 @@ def _pipeline(monkeypatch, *, market_hours: bool, interval_minutes: int = 1):
 def test_analyze_market_closed_outranks_bar_age(client, monkeypatch):
     """A hopelessly stale bar still surfaces as market-closed, not stale, outside session hours."""
     _pipeline(monkeypatch, market_hours=False)
-    now = datetime.now(api_main._ET) - timedelta(days=9)
+    now = now_market() - timedelta(days=9)
     api_main._live_cache.publish({"AAPL": {"timestamp": now.isoformat()}}, ["AAPL"], now=now)
 
     response = client.post("/analyze", json=_PAYLOAD)

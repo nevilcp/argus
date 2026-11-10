@@ -33,8 +33,6 @@ import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from datetime import time as dtime
-from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pandas_ta as ta
@@ -43,12 +41,12 @@ from argus.config import settings
 from argus.data.cache import OHLCVBuffer
 from argus.data.fetchers import fetch_ohlcv_intraday
 from argus.data.tickers import is_valid_ticker
+from argus.infra.clock import now_market
 from argus.params import SYSTEM
 from argus.schemas.signals import missing_session_state_keys
 
 logger = logging.getLogger("argus.pipeline")
 
-_ET = ZoneInfo("America/New_York")
 _MARKET_OPEN = dtime(9, 30)
 _MARKET_CLOSE = dtime(16, 0)
 
@@ -389,9 +387,9 @@ class MFTDataPipeline:
         self.interval_minutes = _parse_interval_minutes(self.interval)
         buffer_size = settings.CANDLE_BUFFER_SIZE or _derive_buffer_size(self.interval_minutes)
         if db_path is None:
-            data_dir = Path(settings.ARGUS_DATA_DIR)
-            data_dir.mkdir(parents=True, exist_ok=True)
-            db_path = str(data_dir / "ohlcv_buffer.db")
+            db_file = settings.data_path("ohlcv_buffer.db")
+            db_file.parent.mkdir(parents=True, exist_ok=True)
+            db_path = str(db_file)
         self.buffer = OHLCVBuffer(db_path=db_path, buffer_size=buffer_size, interval=self.interval)
         self.running = False
         self._stop_event = asyncio.Event()
@@ -484,7 +482,7 @@ class MFTDataPipeline:
         # Touches every already-tracked ticker too, not just newly-accepted
         # ones — a repeatedly-requested ticker must never look
         # unused to _evict_stale_tickers just because it was already tracked
-        now = datetime.now(_ET)
+        now = now_market()
         for ticker in valid:
             if ticker in self.tickers:
                 self.last_requested_at[ticker] = now
@@ -499,7 +497,7 @@ class MFTDataPipeline:
         universe — since the unattended collector never calls
         `register_tickers` to refresh their `last_requested_at`.
         """
-        cutoff = datetime.now(_ET) - timedelta(seconds=SYSTEM.tracked_ticker_ttl_seconds)
+        cutoff = now_market() - timedelta(seconds=SYSTEM.tracked_ticker_ttl_seconds)
         stale = [
             t
             for t in self.tickers
@@ -811,7 +809,7 @@ class MFTDataPipeline:
         Returns:
             True during weekday trading hours in America/New_York timezone.
         """
-        now_et = datetime.now(_ET)
+        now_et = now_market()
         if now_et.weekday() >= 5:
             return False
         current = now_et.time().replace(second=0, microsecond=0)

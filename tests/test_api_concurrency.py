@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient
 
 import api.main as api_main
 import argus.risk.kill_switch as kill_switch_module
+from argus.infra.clock import now_market
 from argus.risk.kill_switch import KillSwitch
 from argus.schemas.signals import ARGUSDecision
 
@@ -57,7 +58,7 @@ def _ready(monkeypatch):
     fake_pipeline.is_market_hours.return_value = True
     monkeypatch.setattr(api_main, "_mft_pipeline", fake_pipeline)
 
-    recent = datetime.now(api_main._ET) - timedelta(seconds=5)
+    recent = now_market() - timedelta(seconds=5)
     api_main._live_cache.publish({"AAPL": {"timestamp": recent.isoformat()}}, ["AAPL"], now=recent)
 
 
@@ -203,7 +204,7 @@ async def test_mft_session_callback_evicts_untracked_tickers(monkeypatch):
 
     await api_main._mft_session_callback({"AAPL": {"timestamp": "2024-01-02T09:30:00-05:00"}})
 
-    result = api_main._live_cache.admit(["MSFT", "AAPL"], datetime.now(api_main._ET))
+    result = api_main._live_cache.admit(["MSFT", "AAPL"], now_market())
     assert "MSFT" in result.absent
     assert "AAPL" not in result.absent
 

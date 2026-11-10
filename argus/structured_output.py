@@ -40,11 +40,11 @@ from __future__ import annotations
 
 import json
 import logging
-import random
 import time
 
 from pydantic import BaseModel, ValidationError
 
+from argus.infra.backoff import capped_backoff, full_jitter_delay
 from argus.params import STRUCTURED_OUTPUT
 from argus.seams import LLMClient, RetryableTransportError
 
@@ -209,17 +209,12 @@ def decode[T: BaseModel](
             assert last_error is not None
             raise StructuredOutputError(stage, attempt + 1, last_error)
 
-        capped_backoff = min(
-            STRUCTURED_OUTPUT.backoff_max_seconds,
-            STRUCTURED_OUTPUT.backoff_base_seconds * 2**attempt,
-        )
-        if retry_after is not None:
-            delay = retry_after
-        elif stage == "transport":
-            # Full jitter, so parallel agents don't thundering-herd a shared outage.
-            delay = random.uniform(0.0, capped_backoff)
+        base = STRUCTURED_OUTPUT.backoff_base_seconds
+        cap = STRUCTURED_OUTPUT.backoff_max_seconds
+        if stage == "transport":
+            delay = full_jitter_delay(attempt, base, cap, retry_after=retry_after)
         else:
-            delay = capped_backoff
+            delay = retry_after if retry_after is not None else capped_backoff(attempt, base, cap)
         logger.warning(
             "[StructuredOutput] Attempt %d %s failed: %s", attempt + 1, stage, last_error
         )

@@ -20,12 +20,12 @@ Dependencies:
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from typing import ClassVar
 
 import numpy as np
 
 from argus.config import settings
+from argus.infra.clock import now_local
 from argus.params import TECHNICAL
 from argus.schemas.signals import (
     SESSION_STATE_REQUIRED_KEYS,
@@ -344,7 +344,7 @@ class TechnicalStatisticalAgent:
             conviction=conviction,
             net_score=net_score,
             api_calls_used=0,
-            timestamp=datetime.now(),  # noqa: DTZ005
+            timestamp=now_local(),
         )
 
     def batch_analyze(
