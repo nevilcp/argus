@@ -14,13 +14,14 @@ jobs:
     # without leaving room for a truly hung run.
     timeout-minutes: 15
 
-    # pyproject.toml declares requires-python = ">=3.11", but only 3.11 was ever
-    # exercised — so a 3.12-only failure would reach a developer running 3.12
-    # locally before it ever reached CI. Both ends of the supported range now run.
+    # pyproject.toml declares requires-python = ">=3.14", the same version the
+    # shipped image (Dockerfile.api) runs, so a single leg covers the whole
+    # supported range. Kept as a matrix so a future floor bump or an added
+    # version is a one-line change.
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.14"]
 
     steps:
       - name: Checkout repository
@@ -36,18 +37,13 @@ jobs:
         run: |
           pip install -e ".[dev]"
 
-      # Lint and type-check are version-independent; running them once keeps the
-      # matrix from reporting the same finding twice
       - name: Lint (ruff)
-        if: matrix.python-version == '3.11'
         run: ruff check .
 
       - name: Format check (ruff)
-        if: matrix.python-version == '3.11'
         run: ruff format --check .
 
       - name: Type-check (mypy)
-        if: matrix.python-version == '3.11'
         run: mypy argus/
 
       - name: Run test suite
@@ -75,10 +71,10 @@ jobs:
       # mask a dependency resolution that only works because a stale wheel is
       # already sitting in the cache. This job resolves from pyproject.toml
       # alone, the same way a fresh clone or a Docker build does.
-      - name: Set up Python 3.11
+      - name: Set up Python 3.14
         uses: actions/setup-python@v7
         with:
-          python-version: "3.11"
+          python-version: "3.14"
 
       - name: Install package with test extras
         run: |

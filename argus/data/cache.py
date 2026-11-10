@@ -31,17 +31,13 @@ import threading
 from collections.abc import Callable, Hashable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Generic, TypeVar
 
 import pandas as pd
 
 logger = logging.getLogger("argus.cache")
 
-_K = TypeVar("_K", bound=Hashable)
-_V = TypeVar("_V")
 
-
-class TTLCache(Generic[_K, _V]):
+class TTLCache[K: Hashable, V]:
     """Generic in-memory cache whose entries expire after a fixed time window.
 
     Callers supply their own key type and expiry window at construction — the
@@ -78,10 +74,10 @@ class TTLCache(Generic[_K, _V]):
         self._ttl = ttl
         self._clock = clock
         self._max_entries = max_entries
-        self._entries: dict[_K, tuple[_V, datetime]] = {}
+        self._entries: dict[K, tuple[V, datetime]] = {}
         self._lock = threading.Lock()
 
-    def get(self, key: _K) -> _V | None:
+    def get(self, key: K) -> V | None:
         """Returns the cached value for key, or None if absent or expired.
 
         Args:
@@ -100,7 +96,7 @@ class TTLCache(Generic[_K, _V]):
                 return None
             return value
 
-    def set(self, key: _K, value: _V) -> None:
+    def set(self, key: K, value: V) -> None:
         """Stores value under key, timestamped at the current clock time.
 
         Evicts every expired entry first, then — if `max_entries` is set and

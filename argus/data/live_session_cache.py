@@ -94,7 +94,7 @@ def _bar_age_seconds(state: dict, now_et: datetime) -> float | None:
     """
     try:
         return (now_et - datetime.fromisoformat(state["timestamp"])).total_seconds()
-    except (KeyError, TypeError, ValueError):
+    except KeyError, TypeError, ValueError:
         return None
 
 

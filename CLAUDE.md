@@ -5,7 +5,7 @@ fundamental, sentiment, risk, portfolio) run as a LangGraph DAG behind a FastAPI
 gateway, producing a thesis and an allocation. Research project only — it never
 places a trade and its output is not advice.
 
-Python ≥3.11, one package. `argus/` is the system, `api/` is the HTTP gateway,
+Python ≥3.14, one package. `argus/` is the system, `api/` is the HTTP gateway,
 `scripts/` holds the CLI entry points declared in `pyproject.toml`, `tests/`
 mostly mirrors `argus/` one file per module — a few (e.g. `config.py`,
 `risk/paper_book.py`) have no dedicated test file and are exercised only
@@ -45,7 +45,7 @@ ruff check .          # ruff and mypy are pinned exactly; do not float them
 mypy argus/
 ```
 
-CI (`.github/workflows/ci.yml`) runs all three, plus the suite on 3.11 and 3.12
+CI (`.github/workflows/ci.yml`) runs all three, plus the suite on 3.14
 and a no-cache clean install. Match it before pushing.
 
 Every LLM boundary in tests is fixture-backed or mocked — never write a test that

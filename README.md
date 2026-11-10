@@ -3,7 +3,7 @@
 Multi-agent financial intelligence system orchestrating specialist LLMs and statistical models for quantitative equity research.
 
 ![CI](https://github.com/nevilcp/argus/actions/workflows/ci.yml/badge.svg)
-![Python Version](https://img.shields.io/badge/python-%E2%89%A53.11-blue)
+![Python Version](https://img.shields.io/badge/python-%E2%89%A53.14-blue)
 ![Tests](https://img.shields.io/badge/tests-551_passing-brightgreen)
 ![License](https://img.shields.io/badge/license-Proprietary-red)
 
@@ -187,7 +187,7 @@ At small sample sizes — inherent to a system that has only recently started cl
 
 ## Prerequisites
 
-- **Python**: ≥ 3.11
+- **Python**: ≥ 3.14
 - **Docker**: Optional, for containerized deployments (`Dockerfile.api`, one service). The built image is ~1–1.5GB — it bakes in CPU-only PyTorch plus the FinBERT and sentence-embedding models so no request pays a cold download.
 - **System Memory**: Minimum 4GB RAM only if installing the optional `models` extra locally (`pip install -e ".[models]"`), which pulls in local FinBERT inference. The default install and the test suite don't need it.
 
@@ -215,7 +215,7 @@ git clone https://github.com/nevilcp/argus.git
 cd argus
 
 # 2. Create virtual environment
-python3.11 -m venv .venv
+python3.14 -m venv .venv
 source .venv/bin/activate
 
 # 3. Install dependencies
@@ -491,7 +491,7 @@ pytest tests/ --cov=argus --cov-report=term-missing
 
 - **Categories**: Tests cover Pydantic validation boundaries, mathematical boundaries (e.g., Half-Kelly position sizing constraints), caching TTL expiration logic, and thread-safe rate limit assertions.
 - **Approximate Run Time**: ~150 seconds for 551 tests across 41 files. No Groq key is needed — LLM agents are always fixture-backed or mocked. `TestEndToEnd`'s live-network tests need network access and skip cleanly when it's absent; the rest of the suite needs none.
-- **CI gate**: `.github/workflows/ci.yml` additionally runs `ruff check .` and `mypy argus/` (pinned `ruff==0.16.2`, `mypy==2.3.0`) before the test step, and runs the suite on both Python 3.11 and 3.12 so the `requires-python = ">=3.11"` floor is actually exercised.
+- **CI gate**: `.github/workflows/ci.yml` additionally runs `ruff check .` and `mypy argus/` (pinned `ruff==0.16.2`, `mypy==2.3.0`) before the test step, and runs the suite on Python 3.14, the `requires-python = ">=3.14"` floor and the version the shipped image runs.
 
 ## Contributing
 

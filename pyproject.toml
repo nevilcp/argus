@@ -5,12 +5,12 @@ description = "Multi-agent financial intelligence system orchestrating specialis
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "nevilcp" }]
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 classifiers = [
     "Private :: Do Not Upload",
     "License :: Other/Proprietary License",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.14",
     "Operating System :: OS Independent",
 ]
 dependencies = [
@@ -100,7 +100,7 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py314"
 
 [tool.ruff.lint]
 # Stated explicitly rather than inherited from whatever the installed ruff
@@ -110,7 +110,7 @@ target-version = "py311"
 # resolution is date-keyed (DEP-10). Widened from the original E4/E7/E9/F/DTZ
 # to the full pycodestyle set, plus a handful of low-noise, high-signal groups
 # now that the tree is clean under them: I (import sorting), UP (PEP 604/585
-# annotations — no longer deferred, this is a >=3.11-only codebase), B
+# annotations — no longer deferred, this is a >=3.14-only codebase), B
 # (bugbear correctness patterns like exception chaining), SIM (simplify),
 # C4 (comprehensions), RUF (ruff-specific), PT (pytest style), PERF (perflint).
 # Deliberately left out: D (pydocstyle) fights this repo's prose-heavy
@@ -135,6 +135,6 @@ select = ["E", "W", "F", "I", "UP", "B", "SIM", "C4", "RUF", "PT", "DTZ", "PERF"
 "argus/agents/portfolio.py" = ["E501"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.14"
 ignore_missing_imports = true
 plugins = ["pydantic.mypy"]
