@@ -34,6 +34,9 @@ from pathlib import Path
 
 import pandas as pd
 
+from argus.config import settings
+from argus.infra.clock import MARKET_TZ, now_local
+
 logger = logging.getLogger("argus.cache")
 
 
@@ -56,7 +59,7 @@ class TTLCache[K: Hashable, V]:
     def __init__(
         self,
         ttl: timedelta,
-        clock: Callable[[], datetime] = datetime.now,
+        clock: Callable[[], datetime] = now_local,
         max_entries: int | None = None,
     ) -> None:
         """Initializes an empty cache.
@@ -126,8 +129,6 @@ class TTLCache[K: Hashable, V]:
             self._entries[key] = (value, now)
 
 
-_ET = "America/New_York"
-
 _CREATE_OHLCV = """
 CREATE TABLE IF NOT EXISTS ohlcv (
     ticker    TEXT NOT NULL,
@@ -191,7 +192,7 @@ def _canonical_timestamp(ts: object) -> str:
     """
     stamp = pd.Timestamp(ts)
     if stamp.tzinfo is None:
-        stamp = stamp.tz_localize(_ET)
+        stamp = stamp.tz_localize(MARKET_TZ.key)
     return stamp.tz_convert(UTC).isoformat()
 
 
@@ -349,7 +350,7 @@ class OHLCVBuffer:
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, format="ISO8601")
         df.set_index("timestamp", inplace=True)
         df.sort_index(inplace=True)
-        df = df.tz_convert(_ET)
+        df = df.tz_convert(MARKET_TZ.key)
         df = df.astype(float)
         logger.debug("OHLCVBuffer.get_candles: %s → %d rows", ticker, len(df))
         return df
@@ -463,17 +464,20 @@ class DailyBarCache:
     ThreadPoolExecutor workers in fetchers.fetch_multiple_daily.
     """
 
-    def __init__(self, db_path: str = "daily_bars_cache.db") -> None:
+    def __init__(self, db_path: str | None = None) -> None:
         """Opens (or creates) the SQLite-backed daily bar cache.
 
         Args:
-            db_path: SQLite connection path. Defaults to a process-relative
-                file so the cache survives process restarts within the same
-                UTC day; pass ':memory:' for an ephemeral cache in tests.
+            db_path: SQLite connection path. None uses ``daily_bars_cache.db``
+                under ARGUS_DATA_DIR so the cache survives process restarts
+                within the same UTC day; pass ':memory:' for an ephemeral
+                cache in tests.
         """
-        self._db_path = db_path
+        self._db_path = (
+            db_path if db_path is not None else str(settings.data_path("daily_bars_cache.db"))
+        )
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute(_CREATE_DAILY_OHLCV)
         self._conn.execute(_CREATE_DAILY_REFRESH)

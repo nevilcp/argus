@@ -41,6 +41,8 @@ from pathlib import Path
 import pandas as pd
 
 from argus.config import settings
+from argus.infra.clock import now_local
+from argus.infra.files import atomic_write_text
 from argus.orchestration.reconciliation import _needs_reconciliation, compute_realized_return
 from argus.schemas.signals import ARGUSDecision
 from argus.seams import MarketDataProvider
@@ -238,7 +240,7 @@ class PaperBook:
         """
         self.equity = max(0.0, new_inception_value)
         self.high_water_mark = self.equity
-        self.rebased_at = rebased_at or datetime.now()  # noqa: DTZ005
+        self.rebased_at = rebased_at or now_local()
 
     def prune_runs_applied(self, cutoff: datetime) -> int:
         """Drops runs_applied entries older than cutoff, so the set doesn't grow forever.
@@ -334,7 +336,4 @@ def save(book: PaperBook, path: str) -> None:
         "runs_applied": sorted(book.runs_applied),
         "rebased_at": book.rebased_at.isoformat() if book.rebased_at else None,
     }
-    tmp_path = file_path.with_suffix(file_path.suffix + ".tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
-    tmp_path.replace(file_path)
+    atomic_write_text(file_path, json.dumps(payload, indent=2))

@@ -35,6 +35,10 @@ from argus.schemas.signals import (
 
 logger = logging.getLogger("argus.aggregator")
 
+# The agents that cast a vote, in voting order. Reliability and ablation
+# iterate this; the weights and sources below are keyed by the same names.
+SPECIALIST_AGENTS = ("fundamental", "technical", "sentiment")
+
 
 class HybridSignalAggregator:
     """Arbitrates and fuses independent specialist signals into a consensus AggregatedSignal.
@@ -124,7 +128,10 @@ class HybridSignalAggregator:
                 weighted_votes[name] = 0.0
                 continue
 
-            reliability_mult = reliability_used.get(name, 0.5) / 0.5
+            reliability_mult = (
+                reliability_used.get(name, AGGREGATOR.neutral_reliability)
+                / AGGREGATOR.neutral_reliability
+            )
             vote = signal.conviction * w_eff[name] * reliability_mult
 
             if signal.signal == Signal.BULLISH:

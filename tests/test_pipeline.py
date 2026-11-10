@@ -5,7 +5,7 @@ import itertools
 import math
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -31,6 +31,7 @@ from argus.data.pipeline import (
     _return_since,
     _volume_ratio,
 )
+from argus.infra.clock import now_market
 from argus.params import SYSTEM
 from tests.helpers.candles import dst_straddling_candles, et_intraday_candles
 
@@ -163,7 +164,7 @@ def test_init_routes_initial_universe_through_register_tickers(monkeypatch):
 def test_register_tickers_refreshes_last_requested_at_for_already_tracked_tickers():
     """A repeat request for an already-tracked ticker still bumps its last_requested_at."""
     pipeline = MFTDataPipeline(["AAPL"])
-    stale = datetime.now(pipeline_module._ET) - timedelta(days=10)
+    stale = now_market() - timedelta(days=10)
     pipeline.last_requested_at["AAPL"] = stale
 
     pipeline.register_tickers(["AAPL"])
@@ -176,7 +177,7 @@ def test_evict_stale_tickers_drops_a_non_seed_ticker_unused_beyond_the_ttl(monke
     _override_system(monkeypatch, tracked_ticker_ttl_seconds=60)
     pipeline = MFTDataPipeline(["AAPL"])
     pipeline.register_tickers(["MSFT"])
-    pipeline.last_requested_at["MSFT"] = datetime.now(pipeline_module._ET) - timedelta(seconds=120)
+    pipeline.last_requested_at["MSFT"] = now_market() - timedelta(seconds=120)
 
     pipeline._evict_stale_tickers()
 
@@ -188,7 +189,7 @@ def test_evict_stale_tickers_exempts_the_seed_universe(monkeypatch):
     """The pipeline's own seed tickers survive the TTL even if never re-requested."""
     _override_system(monkeypatch, tracked_ticker_ttl_seconds=60)
     pipeline = MFTDataPipeline(["AAPL"])
-    pipeline.last_requested_at["AAPL"] = datetime.now(pipeline_module._ET) - timedelta(seconds=120)
+    pipeline.last_requested_at["AAPL"] = now_market() - timedelta(seconds=120)
 
     pipeline._evict_stale_tickers()
 

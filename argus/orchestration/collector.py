@@ -38,18 +38,18 @@ import asyncio
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 
 from argus.config import settings
 from argus.data.pipeline import MFTDataPipeline
+from argus.infra.clock import now_local
 from argus.orchestration.reconciliation import (
     decisions_log_lock,
     default_checkpoint_retention_cutoff,
     prune_checkpoints,
 )
-from argus.orchestration.state import ARGUSState
+from argus.orchestration.state import initial_state
 from argus.params import COLLECTOR
 from argus.risk.kill_switch import get_kill_switch
 from argus.schemas.signals import ARGUSDecision
@@ -112,7 +112,7 @@ class CollectionResult:
     degraded_inputs: dict[str, int] = field(default_factory=dict)
     macro_regime: str | None = None
     errors: list[str] = field(default_factory=list)
-    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())  # noqa: DTZ005
+    timestamp: str = field(default_factory=lambda: now_local().isoformat())
 
 
 def append_decisions_jsonl(decisions: list[ARGUSDecision], path: str) -> int:
@@ -274,33 +274,18 @@ async def run_collection_cycle(
         logger.info("run_collection_cycle: skipping graph invocation — %s", reason)
         return CollectionResult(ran=False, reason=reason)
 
-    state: ARGUSState = ARGUSState(
-        ticker=tickers_with_data[0],
-        universe=tickers_with_data,
+    state = initial_state(
+        tickers_with_data,
+        session_states=session_states,
         total_wealth=total_wealth,
         invest_pct=invest_pct,
         risk_tolerance=risk_tolerance,
-        backtest_mode=False,
-        session_seed=None,
-        as_of=None,
-        price_history={},
-        session_states=session_states,
-        macro_context=None,
-        technical_signals={},
-        fundamental_signals={},
-        sentiment_signals={},
-        cultural_memory={"wisdom": [], "warnings": []},
-        risk_assessments={},
-        aggregated_signals={},
-        portfolio_allocation=None,
-        decisions=[],
-        errors=[],
     )
 
     # A timestamp alone is only second-resolution: two cycles starting within the same
     # second would share a thread_id, and the in-process lock guarding against that
     # doesn't survive a restart mid-cycle. The uuid4 suffix makes it unique regardless.
-    thread_id = f"collector-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"  # noqa: DTZ005
+    thread_id = f"collector-{now_local().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
     config = {"configurable": {"thread_id": thread_id}}
 
     logger.info(
@@ -320,7 +305,7 @@ async def run_collection_cycle(
 
     decisions: list[ARGUSDecision] = final_state.get("decisions") or []
     if decisions_log_path is None:
-        decisions_log_path = str(Path(settings.ARGUS_DATA_DIR) / "decisions.jsonl")
+        decisions_log_path = str(settings.data_path("decisions.jsonl"))
     logged = append_decisions_jsonl(decisions, decisions_log_path)
     errors = final_state.get("errors") or []
 

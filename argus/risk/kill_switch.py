@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import ClassVar
 
 from argus.config import settings
+from argus.infra.clock import now_local
 from argus.params import KILL_SWITCH
 from argus.seams import LiveMarketDataProvider, MarketDataProvider
 
@@ -34,7 +35,7 @@ logger = logging.getLogger("argus.kill_switch")
 
 def _default_runs_dir() -> str:
     """Resolves the halt-dump directory: settings.ARGUS_RUNS_DIR, or <ARGUS_DATA_DIR>/runs."""
-    return settings.ARGUS_RUNS_DIR or f"{settings.ARGUS_DATA_DIR}/runs"
+    return settings.ARGUS_RUNS_DIR or str(settings.data_path("runs"))
 
 
 def _drawdown_fraction(high_water_mark: float, current_value: float) -> float:
@@ -346,7 +347,7 @@ class KillSwitch:
 
         if drawdown >= threshold and not self._halted.is_set():
             reason = f"Drawdown {drawdown:.1%} >= {threshold:.0%} limit ({self.risk_tolerance})"
-            halt_time = datetime.now()  # noqa: DTZ005
+            halt_time = now_local()
             self._engage_halt(reason, halt_time)
             logger.critical("KILL SWITCH TRIGGERED: %s", reason)
             self._persist_halt_event(reason, halt_time, drawdown, self._last_vix or 0.0)
@@ -443,7 +444,7 @@ class KillSwitch:
             path: Path to a halt-event JSON file written by ``_persist_halt_event``.
         """
         reason = f"Restored from unreadable halt dump {path.name}"
-        halt_time = datetime.now()  # noqa: DTZ005
+        halt_time = now_local()
         try:
             with open(path) as f:
                 dump = json.load(f)

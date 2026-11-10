@@ -36,11 +36,6 @@ from argus.orchestration.graph import build_graph
 logger = logging.getLogger("argus.collect_session")
 
 
-def _data_path(filename: str) -> str:
-    """Resolves a filename under the currently configured ARGUS_DATA_DIR."""
-    return f"{settings.ARGUS_DATA_DIR}/{filename}"
-
-
 def main() -> None:
     """Parses CLI args, runs one collection cycle, and prints the outcome."""
     logging.basicConfig(level=settings.ARGUS_LOG_LEVEL)
@@ -56,22 +51,22 @@ def main() -> None:
     parser.add_argument("--risk-tolerance", default=settings.ARGUS_RISK_TOLERANCE)
     parser.add_argument(
         "--buffer-db",
-        default=_data_path("ohlcv_buffer.db"),
+        default=str(settings.data_path("ohlcv_buffer.db")),
         help="Persistent intraday candle buffer path",
     )
     parser.add_argument(
         "--checkpoint-db",
-        default=_data_path("argus_graph.db"),
+        default=str(settings.data_path("argus_graph.db")),
         help="LangGraph checkpoint database path",
     )
     parser.add_argument(
         "--decisions-log",
-        default=_data_path("decisions.jsonl"),
+        default=str(settings.data_path("decisions.jsonl")),
         help="JSONL file each cycle's decisions are appended to",
     )
     parser.add_argument(
         "--result-out",
-        default=_data_path("collector_result.json"),
+        default=str(settings.data_path("collector_result.json")),
         help="Where to write this cycle's CollectionResult as JSON, for the "
         "scheduled workflow to fold into status.json",
     )

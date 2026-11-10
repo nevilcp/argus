@@ -18,7 +18,7 @@ Dependencies:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import numpy as np
 import pandas as pd
@@ -26,6 +26,7 @@ from scipy.optimize import minimize
 
 from argus.config import settings
 from argus.data.cache import TTLCache
+from argus.infra.clock import now_local
 from argus.params import RISK
 from argus.schemas.signals import RiskAssessment, RiskVerdict
 from argus.seams import LiveMarketDataProvider, MarketDataProvider
@@ -611,7 +612,7 @@ class RiskStatisticalEngine:
                 avg_correlation=None,
                 stop_loss=0.0,
                 api_calls_used=0,
-                timestamp=datetime.now(),  # noqa: DTZ005
+                timestamp=now_local(),
             )
 
         sector_weights: dict[str, float] = {}
@@ -672,7 +673,7 @@ class RiskStatisticalEngine:
                 avg_correlation=corr,
                 stop_loss=0.0,
                 api_calls_used=0,
-                timestamp=datetime.now(),  # noqa: DTZ005
+                timestamp=now_local(),
             )
 
         stops = close_to_close_stop_losses(proposed_positions, price_history)
@@ -701,5 +702,5 @@ class RiskStatisticalEngine:
             avg_correlation=corr,
             stop_loss=stop_val,
             api_calls_used=0,
-            timestamp=datetime.now(),  # noqa: DTZ005
+            timestamp=now_local(),
         )

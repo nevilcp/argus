@@ -30,7 +30,7 @@ import fcntl
 import functools
 import json
 import logging
-import random
+import math
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -43,6 +43,8 @@ import yfinance as yf
 
 from argus.config import settings
 from argus.data.cache import DailyBarCache, TTLCache
+from argus.infra.backoff import full_jitter_delay
+from argus.infra.files import atomic_write_text
 from argus.params import SYSTEM
 
 logger = logging.getLogger("argus.fetchers")
@@ -228,7 +230,7 @@ def _with_retry[F: Callable[..., Any]](fn: F) -> F:
                         _RETRY_ATTEMPTS,
                         exc,
                     )
-                    time.sleep(random.uniform(0.0, _RETRY_BASE_DELAY * (2 ** (attempt - 1))))
+                    time.sleep(full_jitter_delay(attempt - 1, _RETRY_BASE_DELAY, math.inf))
                     continue
                 if not _is_retryable(exc):
                     logger.warning(
@@ -242,10 +244,8 @@ def _with_retry[F: Callable[..., Any]](fn: F) -> F:
                     ) from exc
 
                 retry_after = _retry_after_seconds(exc)
-                delay = (
-                    retry_after
-                    if retry_after is not None
-                    else random.uniform(0.0, _RETRY_BASE_DELAY * (2 ** (attempt - 1)))
+                delay = full_jitter_delay(
+                    attempt - 1, _RETRY_BASE_DELAY, math.inf, retry_after=retry_after
                 )
                 logger.warning(
                     "%s attempt %d/%d failed (%s: %s); retrying in %.1fs",
@@ -391,9 +391,9 @@ def _daily_bar_cache() -> DailyBarCache:
     """
     global _DAILY_BAR_CACHE
     if _DAILY_BAR_CACHE is None:
-        data_dir = Path(settings.ARGUS_DATA_DIR)
-        data_dir.mkdir(parents=True, exist_ok=True)
-        _DAILY_BAR_CACHE = DailyBarCache(db_path=str(data_dir / "daily_bars_cache.db"))
+        db_file = settings.data_path("daily_bars_cache.db")
+        db_file.parent.mkdir(parents=True, exist_ok=True)
+        _DAILY_BAR_CACHE = DailyBarCache(db_path=str(db_file))
     return _DAILY_BAR_CACHE
 
 
@@ -684,7 +684,7 @@ class _NewsApiBudget:
 
     def _persist_path(self) -> Path:
         """Returns the counter's path, read lazily so it honors the current ARGUS_DATA_DIR."""
-        return Path(settings.ARGUS_DATA_DIR) / "newsapi_budget.json"
+        return settings.data_path("newsapi_budget.json")
 
     @staticmethod
     def _read_count(path: Path, today: date) -> int | None:
@@ -707,12 +707,10 @@ class _NewsApiBudget:
 
     @staticmethod
     def _write_count(path: Path, today: date, requests_today: int) -> None:
-        """Writes the count, tmp-file-then-replace for atomicity."""
-        tmp_path = path.with_suffix(path.suffix + ".tmp")
-        tmp_path.write_text(
-            json.dumps({"date": today.isoformat(), "requests_today": requests_today})
+        """Writes the count atomically."""
+        atomic_write_text(
+            path, json.dumps({"date": today.isoformat(), "requests_today": requests_today})
         )
-        tmp_path.replace(path)
 
     def _reserve_under_file_lock(self) -> bool:
         """Reads, checks, and (if room remains) increments the persisted count.

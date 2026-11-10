@@ -44,6 +44,7 @@ from sklearn.preprocessing import StandardScaler
 
 from argus.config import settings
 from argus.data.macro_features import build_macro_feature_frame
+from argus.infra.clock import now_local
 from argus.params import MACRO
 from argus.schemas.signals import MacroContext, Regime, SectorSignal, VixRegime, YieldCurve
 from argus.seams import LiveMarketDataProvider, MarketDataProvider
@@ -806,7 +807,7 @@ class MacroStatisticalAgent:
         """
         if self._cache:
             ctx, cached_at = self._cache
-            if (datetime.now() - cached_at).total_seconds() < self._cache_ttl_hours * 3600:  # noqa: DTZ005
+            if (now_local() - cached_at).total_seconds() < self._cache_ttl_hours * 3600:
                 logger.debug("MacroStatisticalAgent.analyze: Cache hit.")
                 return ctx
 
@@ -841,7 +842,7 @@ class MacroStatisticalAgent:
         else:
             try:
                 history_start = (
-                    datetime.now() - timedelta(days=365 * MACRO.inference_history_years)  # noqa: DTZ005
+                    now_local() - timedelta(days=365 * MACRO.inference_history_years)
                 ).strftime("%Y-%m-%d")
                 frame = build_macro_feature_frame(self.market_data, start=history_start)
                 window = frame.tail(MACRO.inference_window_months)
@@ -971,9 +972,9 @@ class MacroStatisticalAgent:
             sector_rotation_signal=sector_signal,
             agent_multipliers=multipliers,
             api_calls_used=0,
-            timestamp=datetime.now(),  # noqa: DTZ005
+            timestamp=now_local(),
         )
 
-        self._cache = (ctx, datetime.now())  # noqa: DTZ005
+        self._cache = (ctx, now_local())
         logger.debug("analyze: new MacroContext generated (Regime: %s)", regime.value)
         return ctx

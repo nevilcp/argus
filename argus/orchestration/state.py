@@ -36,8 +36,10 @@ from argus.schemas.signals import (
 class ARGUSState(TypedDict):
     """Complete shared state passed through every node in the ARGUS LangGraph pipeline.
 
-    Fields are organized by the node that populates them. All fields are optional
-    by default (None or empty container) until their producing node executes.
+    Fields are organized by the node that populates them. Build the starting
+    state with ``initial_state``, which fills every key: session parameters
+    come from the caller, and each node-produced field starts as None or an
+    empty container until its producing node executes.
     """
 
     # ── Session Parameters (provided by caller) ──────────────────────────────
@@ -126,6 +128,56 @@ class ARGUSState(TypedDict):
     in parallel off fetch_price_history and write this key concurrently, and
     LangGraph raises InvalidUpdateError on concurrent writes to a key
     without one."""
+
+
+def initial_state(
+    universe: list[str],
+    *,
+    session_states: dict[str, dict],
+    total_wealth: float,
+    invest_pct: float,
+    risk_tolerance: str,
+    as_of: datetime | None = None,
+    backtest_mode: bool = False,
+    session_seed: int | None = None,
+) -> ARGUSState:
+    """Builds the starting ARGUSState for one graph run.
+
+    Args:
+        universe: Tickers for this session; the first is the primary `ticker`.
+        session_states: Ticker -> compressed technical feature dict.
+        total_wealth: Total investable capital (USD).
+        invest_pct: Fraction of total_wealth to deploy.
+        risk_tolerance: 'CONSERVATIVE', 'MODERATE', or 'AGGRESSIVE'.
+        as_of: Point-in-time cutoff for cultural-memory reads; None means live.
+        backtest_mode: Whether fundamental prompts anonymize tickers.
+        session_seed: Seed for backtest anonymization.
+
+    Returns:
+        A state with every node-produced field empty.
+    """
+    return ARGUSState(
+        ticker=universe[0],
+        universe=universe,
+        total_wealth=total_wealth,
+        invest_pct=invest_pct,
+        risk_tolerance=risk_tolerance,
+        backtest_mode=backtest_mode,
+        session_seed=session_seed,
+        as_of=as_of,
+        price_history={},
+        session_states=session_states,
+        macro_context=None,
+        technical_signals={},
+        fundamental_signals={},
+        sentiment_signals={},
+        cultural_memory={"wisdom": [], "warnings": []},
+        risk_assessments={},
+        aggregated_signals={},
+        portfolio_allocation=None,
+        decisions=[],
+        errors=[],
+    )
 
 
 @dataclass(frozen=True)

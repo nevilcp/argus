@@ -48,10 +48,11 @@ from argus.agents.risk import RiskStatisticalEngine
 from argus.agents.sentiment import SentimentAgent
 from argus.agents.technical import TechnicalStatisticalAgent
 from argus.config import settings
+from argus.infra.clock import now_local
 from argus.memory.cultural import get_cultural_memory
-from argus.orchestration.aggregator import HybridSignalAggregator
+from argus.orchestration.aggregator import SPECIALIST_AGENTS, HybridSignalAggregator
 from argus.orchestration.state import ARGUSState, build_ticker_snapshots
-from argus.params import RISK
+from argus.params import AGGREGATOR, RISK
 from argus.schemas.signals import (
     AggregatedSignal,
     ARGUSDecision,
@@ -81,7 +82,6 @@ _CHECKPOINT_MODEL_CLASSES = (
 
 # The three specialists HybridSignalAggregator votes over, and so the three whose
 # per-regime reliability is looked up; macro scales their weights rather than voting
-_RELIABILITY_AGENTS = ("technical", "fundamental", "sentiment")
 
 # Signed conviction convention shared with risk.py: positive is long-side pressure
 _SIGNAL_SIGN = {Signal.BULLISH: 1.0, Signal.BEARISH: -1.0, Signal.NEUTRAL: 0.0}
@@ -203,8 +203,8 @@ def _session_reliability(
         or with cultural memory unavailable, every agent falls back to the 0.5
         neutral prior at a zero sample count; only the latter is unhealthy.
     """
-    neutral_reliability = dict.fromkeys(_RELIABILITY_AGENTS, 0.5)
-    neutral_counts = dict.fromkeys(_RELIABILITY_AGENTS, 0)
+    neutral_reliability = dict.fromkeys(SPECIALIST_AGENTS, AGGREGATOR.neutral_reliability)
+    neutral_counts = dict.fromkeys(SPECIALIST_AGENTS, 0)
     if macro is None:
         return neutral_reliability, neutral_counts, True
 
@@ -212,7 +212,7 @@ def _session_reliability(
         memory = get_cultural_memory()
         accuracy = {
             name: memory.get_agent_accuracy(name, regime=macro.macro_regime.value, as_of=as_of)
-            for name in _RELIABILITY_AGENTS
+            for name in SPECIALIST_AGENTS
         }
     except (ImportError, OSError, ChromaError) as exc:
         # Same guard as node_retrieve_cultural_memory; degrade every agent to the
@@ -330,7 +330,7 @@ def build_graph(
         connection into a single compiled graph — see _CheckpointedGraph.
     """
     if checkpoint_db_path is None:
-        checkpoint_db_path = str(Path(settings.ARGUS_DATA_DIR) / "argus_graph.db")
+        checkpoint_db_path = str(settings.data_path("argus_graph.db"))
 
     market_data = market_data or LiveMarketDataProvider()
 
@@ -675,7 +675,7 @@ def build_graph(
         positions = {pos.ticker: pos for pos in allocation.portfolio}
         # A replayed session's as_of is the fixture's own capture date; falling back
         # to wall-clock only applies to genuinely live sessions
-        now = state.get("as_of") or datetime.now()  # noqa: DTZ005
+        now = state.get("as_of") or now_local()
         decisions: list[ARGUSDecision] = []
         errors: list[str] = []
 

@@ -28,11 +28,12 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import UTC, datetime
+from datetime import datetime
 from threading import Lock
 from typing import Any
 
 from argus.config import settings
+from argus.infra.clock import as_naive_timestamp
 from argus.params import MEMORY, RECONCILIATION
 from argus.schemas.signals import ARGUSDecision, MacroContext
 
@@ -112,12 +113,15 @@ class CulturalMemoryManager:
         persist_dir: Absolute filesystem directory the collection persists to.
     """
 
-    def __init__(self, persist_dir: str = "./chroma_db"):
+    def __init__(self, persist_dir: str | None = None):
         """Opens (or creates) the persistent ChromaDB collection and embedding function.
 
         Args:
             persist_dir: Filesystem directory backing the ChromaDB PersistentClient.
+                None resolves to ``default_chroma_dir()``.
         """
+        if persist_dir is None:
+            persist_dir = default_chroma_dir()
         # Deferred to construction time: embedding_functions pulls in
         # sentence-transformers, an optional `models` extra (see pyproject.toml),
         # so importing this module must not require it
@@ -597,12 +601,8 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
             except ValueError:
                 continue
             # Comparing aware with the naive cutoff raises TypeError and would abort the
-            # whole pass; convert to UTC then drop tzinfo (as
-            # reconciliation._as_naive_timestamp does, which can't be imported here without
-            # a cycle).
-            if timestamp.tzinfo is not None:
-                timestamp = timestamp.astimezone(UTC).replace(tzinfo=None)
-            if timestamp < cutoff:
+            # whole pass.
+            if as_naive_timestamp(timestamp) < cutoff:
                 stale_ids.append(doc_id)
 
         if not stale_ids:
@@ -629,7 +629,7 @@ def default_chroma_dir() -> str:
         settings.ARGUS_CHROMA_DIR, or <ARGUS_DATA_DIR>/chroma_db if that's unset.
         Read at call time so a per-test or per-deployment settings override applies.
     """
-    return settings.ARGUS_CHROMA_DIR or f"{settings.ARGUS_DATA_DIR}/chroma_db"
+    return settings.ARGUS_CHROMA_DIR or str(settings.data_path("chroma_db"))
 
 
 def get_cultural_memory(persist_dir: str | None = None) -> CulturalMemoryManager:

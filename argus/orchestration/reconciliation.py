@@ -55,16 +55,16 @@ import pandas as pd
 from langgraph.checkpoint.base import Checkpoint
 from langgraph.checkpoint.sqlite import SqliteSaver
 
+from argus.infra.clock import as_naive_timestamp, now_local
+from argus.infra.files import atomic_write_text
 from argus.memory.cultural import CulturalMemoryManager
-from argus.orchestration.aggregator import HybridSignalAggregator
+from argus.orchestration.aggregator import SPECIALIST_AGENTS, HybridSignalAggregator
 from argus.orchestration.graph import build_checkpoint_serde
 from argus.params import RECONCILIATION
 from argus.schemas.signals import ARGUSDecision
 from argus.seams import MarketDataProvider
 
 logger = logging.getLogger("argus.reconciliation")
-
-_ABLATABLE_AGENTS = ("technical", "fundamental", "sentiment")
 
 
 def credit_primary_driver(
@@ -110,7 +110,7 @@ def credit_primary_driver(
         aggregated result. 'unknown' if no agent contributed a signal, or if
         two or more did but the decision has no aggregated result to ablate from.
     """
-    present = [name for name in _ABLATABLE_AGENTS if getattr(decision, name) is not None]
+    present = [name for name in SPECIALIST_AGENTS if getattr(decision, name) is not None]
 
     if decision.aggregated is None or len(present) < 2:
         return present[0] if len(present) == 1 else "unknown"
@@ -136,19 +136,6 @@ def credit_primary_driver(
             best_name = name
 
     return best_name
-
-
-def _as_naive_timestamp(value: datetime | pd.Timestamp) -> pd.Timestamp:
-    """Normalizes a datetime/Timestamp to tz-naive so entry/exit comparisons never raise.
-
-    A tz-aware value is converted to UTC before its tzinfo is dropped, rather than
-    simply discarding whatever offset it carries — the latter silently shifts the
-    value by that offset (e.g. prune_checkpoints' checkpoint `ts`, which LangGraph
-    stamps tz-aware) and produces a pruning decision that's early or late by the
-    offset's magnitude.
-    """
-    ts = pd.Timestamp(value)
-    return ts.tz_convert("UTC").tz_localize(None) if ts.tzinfo is not None else ts
 
 
 def _needs_reconciliation(decision: ARGUSDecision) -> bool:
@@ -179,11 +166,11 @@ def _realized_return_from_prices(
     """
     assert decision.technical is not None, "caller must confirm _needs_reconciliation(decision)"
     entry_price = decision.technical.current_price
-    entry_date = _as_naive_timestamp(decision.session_timestamp)
+    entry_date = as_naive_timestamp(decision.session_timestamp)
     target_exit_date = entry_date + timedelta(days=horizon_days)
 
     prices = prices.copy()
-    prices.index = pd.DatetimeIndex([_as_naive_timestamp(ts) for ts in prices.index])
+    prices.index = pd.DatetimeIndex([as_naive_timestamp(ts) for ts in prices.index])
 
     on_or_after = prices[prices.index >= target_exit_date].sort_index()
     if on_or_after.empty:
@@ -537,8 +524,8 @@ def compact_decisions_jsonl(
     if not file_path.exists():
         return CompactionResult(retained=0)
 
-    cutoff_naive = _as_naive_timestamp(cutoff)
-    unresolved_cutoff_naive = _as_naive_timestamp(unresolved_cutoff)
+    cutoff_naive = as_naive_timestamp(cutoff)
+    unresolved_cutoff_naive = as_naive_timestamp(unresolved_cutoff)
 
     # Read through replace under one lock: an append landing between the read and the
     # replace would otherwise be overwritten by the rewrite below.
@@ -548,7 +535,7 @@ def compact_decisions_jsonl(
         kept: list[ARGUSDecision] = []
         retired_unresolved = 0
         for decision in decisions:
-            session_ts = _as_naive_timestamp(decision.session_timestamp)
+            session_ts = as_naive_timestamp(decision.session_timestamp)
             if session_ts >= cutoff_naive:
                 kept.append(decision)
                 continue
@@ -571,13 +558,8 @@ def compact_decisions_jsonl(
 
         # Lines that failed to parse are carried over verbatim: dropping them would
         # silently and permanently delete records this code merely cannot read.
-        tmp_path = file_path.with_suffix(file_path.suffix + ".tmp")
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            for decision in kept:
-                f.write(decision.model_dump_json() + "\n")
-            for line in malformed:
-                f.write(line + "\n")
-        tmp_path.replace(file_path)
+        lines = [d.model_dump_json() for d in kept] + malformed
+        atomic_write_text(file_path, "".join(line + "\n" for line in lines))
 
     logger.info(
         "compact_decisions_jsonl: kept %d/%d decision(s) in %s (cutoff=%s, retired %d "
@@ -600,7 +582,7 @@ def default_checkpoint_retention_cutoff() -> datetime:
     run_reconciliation_pass (whenever its horizon_days is left at the default), so
     the two prune paths can't silently drift onto different windows.
     """
-    return datetime.now() - timedelta(  # noqa: DTZ005
+    return now_local() - timedelta(
         days=RECONCILIATION.horizon_days + RECONCILIATION.retention_margin_days
     )
 
@@ -628,14 +610,14 @@ def prune_checkpoints(db_path: str, cutoff: datetime) -> int:
     if not Path(db_path).exists():
         return 0
 
-    cutoff_naive = _as_naive_timestamp(cutoff)
+    cutoff_naive = as_naive_timestamp(cutoff)
     with _checkpoint_saver(db_path) as saver:
         stale_threads: list[str] = []
         for thread_id, checkpoint in _newest_checkpoint_per_thread(saver):
             ts_raw = checkpoint.get("ts")
             if ts_raw is None:
                 continue
-            if _as_naive_timestamp(datetime.fromisoformat(ts_raw)) < cutoff_naive:
+            if as_naive_timestamp(datetime.fromisoformat(ts_raw)) < cutoff_naive:
                 stale_threads.append(thread_id)
 
         if not stale_threads:
@@ -799,10 +781,8 @@ def run_reconciliation_pass(
         decisions, market_data=market_data, cultural=cultural, horizon_days=horizon_days
     )
 
-    cutoff = datetime.now() - timedelta(  # noqa: DTZ005
-        days=horizon_days + RECONCILIATION.retention_margin_days
-    )
-    unresolved_cutoff = datetime.now() - timedelta(  # noqa: DTZ005
+    cutoff = now_local() - timedelta(days=horizon_days + RECONCILIATION.retention_margin_days)
+    unresolved_cutoff = now_local() - timedelta(
         days=horizon_days + RECONCILIATION.unresolved_retirement_days
     )
 

@@ -35,15 +35,12 @@ Not responsible for:
 import asyncio
 import fcntl
 import logging
-import os
 import sys
 from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Literal
 from uuid import uuid4
-from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -51,10 +48,11 @@ from pydantic import BaseModel, Field, field_validator
 
 import argus
 from argus.agents.macro import MacroStatisticalAgent
-from argus.config import settings
+from argus.config import settings, web_concurrency
 from argus.data.live_session_cache import LiveSessionCache
 from argus.data.pipeline import MFTDataPipeline
 from argus.data.tickers import TICKER_PATTERN
+from argus.infra.clock import now_local, now_market
 from argus.memory.cultural import get_cultural_memory
 from argus.orchestration.collector import (
     CollectionResult,
@@ -69,15 +67,13 @@ from argus.orchestration.governor import (
 )
 from argus.orchestration.graph import build_graph
 from argus.orchestration.reconciliation import run_reconciliation_pass
-from argus.orchestration.state import ARGUSState
+from argus.orchestration.state import initial_state
 from argus.params import SYSTEM
 from argus.risk import paper_book
 from argus.risk.kill_switch import get_kill_switch, initialize_kill_switch
 from argus.seams import LiveMarketDataProvider
 
 logger = logging.getLogger("argus.api")
-
-_ET = ZoneInfo("America/New_York")
 
 _live_cache: LiveSessionCache | None = None
 
@@ -109,11 +105,6 @@ _graph = None
 # only loads a joblib file, unlike the old fit_on_history() network fetch this
 # replaced (see the deleted startup block below).
 _macro_status_agent: MacroStatisticalAgent | None = None
-
-
-def _data_path(filename: str) -> str:
-    """Resolves a filename under the currently configured ARGUS_DATA_DIR."""
-    return f"{settings.ARGUS_DATA_DIR}/{filename}"
 
 
 async def _mft_session_callback(session_states: dict) -> None:
@@ -191,8 +182,8 @@ async def _collector_loop(pipeline: MFTDataPipeline, compiled_graph) -> None:
                 risk_tolerance=settings.ARGUS_RISK_TOLERANCE,
                 pipeline=pipeline,
                 compiled_graph=compiled_graph,
-                decisions_log_path=_data_path("decisions.jsonl"),
-                checkpoint_db_path=_data_path("argus_graph.db"),
+                decisions_log_path=str(settings.data_path("decisions.jsonl")),
+                checkpoint_db_path=str(settings.data_path("argus_graph.db")),
                 analyze_lock=_analyze_semaphore,
             )
             logger.info("[Collector] cycle result: %s", _last_collection_result)
@@ -215,9 +206,9 @@ def _reconcile_once() -> None:
     report = run_reconciliation_pass(
         LiveMarketDataProvider(),
         get_cultural_memory(),
-        _data_path("paper_equity.json"),
-        decisions_log_path=_data_path("decisions.jsonl"),
-        checkpoint_db_path=_data_path("argus_graph.db"),
+        str(settings.data_path("paper_equity.json")),
+        decisions_log_path=str(settings.data_path("decisions.jsonl")),
+        checkpoint_db_path=str(settings.data_path("argus_graph.db")),
     )
     logger.info(
         "[Reconcile] stored %d/%d outcome(s)", report.outcomes_stored, report.decisions_loaded
@@ -273,7 +264,7 @@ def _seconds_until_next_reconcile(now_et: datetime, hour: int) -> float:
 async def _reconcile_loop() -> None:
     """Runs the reconciliation pass once a day at settings.ARGUS_RECONCILE_HOUR_ET."""
     while True:
-        now_et = datetime.now(_ET)
+        now_et = now_market()
         await asyncio.sleep(_seconds_until_next_reconcile(now_et, settings.ARGUS_RECONCILE_HOUR_ET))
 
         try:
@@ -332,9 +323,9 @@ def _assert_single_worker() -> None:
     requested.extend(
         (arg, arg.removeprefix("--workers=")) for arg in argv if arg.startswith("--workers=")
     )
-    web_concurrency = os.environ.get("WEB_CONCURRENCY")
-    if web_concurrency is not None:
-        requested.append((f"WEB_CONCURRENCY={web_concurrency}", web_concurrency))
+    concurrency = web_concurrency()
+    if concurrency is not None:
+        requested.append((f"WEB_CONCURRENCY={concurrency}", concurrency))
 
     for spelling, count in requested:
         if count != "1":
@@ -365,7 +356,7 @@ def _acquire_process_lock() -> None:
         RuntimeError: If another process already holds the lock.
     """
     global _process_lock_file
-    lock_path = Path(_data_path("argus.lock"))
+    lock_path = settings.data_path("argus.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_file = open(lock_path, "w")  # noqa: SIM115
     try:
@@ -439,7 +430,7 @@ async def lifespan(app: FastAPI):
     _assert_registered_models()
     _acquire_process_lock()
 
-    _graph = build_graph(checkpoint_db_path=_data_path("argus_graph.db"))
+    _graph = build_graph(checkpoint_db_path=str(settings.data_path("argus_graph.db")))
 
     _macro_status_agent = MacroStatisticalAgent()
     if _macro_status_agent.classifier.is_fitted:
@@ -481,7 +472,7 @@ async def lifespan(app: FastAPI):
     # ARGUS_TOTAL_WEALTH if none exists yet) so a process restart doesn't
     # silently forget an already-realized drawdown; /kill-switch/reset
     # re-bases if a real session base is known instead
-    book = paper_book.load(_data_path("paper_equity.json"))
+    book = paper_book.load(str(settings.data_path("paper_equity.json")))
     initialize_kill_switch(
         risk_tolerance=settings.ARGUS_RISK_TOLERANCE, portfolio_value=book.high_water_mark
     )
@@ -647,7 +638,7 @@ async def health():
 
     newest_cache_entry_age_seconds = None
     if _mft_pipeline is not None and _mft_pipeline.is_market_hours() and _live_cache is not None:
-        cache_age_seconds, _ = _live_cache.ages(datetime.now(_ET))
+        cache_age_seconds, _ = _live_cache.ages(now_market())
         if cache_age_seconds:
             newest_cache_entry_age_seconds = min(cache_age_seconds.values())
 
@@ -684,7 +675,7 @@ async def pipeline_status():
     buffer_depth = await asyncio.to_thread(_mft_pipeline.buffer.row_counts)
 
     cache_age_seconds, bar_age_seconds = (
-        _live_cache.ages(datetime.now(_ET)) if _live_cache is not None else ({}, {})
+        _live_cache.ages(now_market()) if _live_cache is not None else ({}, {})
     )
 
     return {
@@ -775,7 +766,7 @@ async def analyze(req: AnalysisRequest):
     # Admission answers only "how old is this" for each ticker; the ordering
     # against market hours above is what decides whether that age matters
     # right now
-    admission = _live_cache.admit(req.tickers, datetime.now(_ET))
+    admission = _live_cache.admit(req.tickers, now_market())
 
     if admission.absent:
         raise HTTPException(
@@ -799,27 +790,12 @@ async def analyze(req: AnalysisRequest):
     live_states = admission.admitted
     logger.info("[API] MFT cache hit for all %d tickers", len(live_states))
 
-    state = ARGUSState(
-        ticker=req.tickers[0],
-        universe=req.tickers,
+    state = initial_state(
+        req.tickers,
+        session_states=live_states,
         total_wealth=req.total_wealth,
         invest_pct=req.invest_pct,
         risk_tolerance=req.risk_tolerance,
-        backtest_mode=False,
-        session_seed=None,
-        as_of=None,
-        price_history={},
-        session_states=live_states,
-        macro_context=None,
-        technical_signals={},
-        fundamental_signals={},
-        sentiment_signals={},
-        cultural_memory={"wisdom": [], "warnings": []},
-        risk_assessments={},
-        aggregated_signals={},
-        portfolio_allocation=None,
-        decisions=[],
-        errors=[],
     )
 
     if _graph is None:
@@ -870,7 +846,9 @@ async def analyze(req: AnalysisRequest):
     # collector — without this, decisions.jsonl (the only source
     # reconcile_decisions reads) never sees a request served through this
     # endpoint, and an API-only deployment reconciles nothing
-    append_decisions_jsonl(final_state.get("decisions") or [], _data_path("decisions.jsonl"))
+    append_decisions_jsonl(
+        final_state.get("decisions") or [], str(settings.data_path("decisions.jsonl"))
+    )
 
     # Re-checked rather than trusted from before the (potentially many-second)
     # graph run: the kill switch is process-global and the reconcile loop can
@@ -899,7 +877,7 @@ async def analyze(req: AnalysisRequest):
         macro_regime=macro_regime,
         vix_level=vix_level,
         governor_report=governor.get_usage_report(),
-        timestamp=datetime.now().isoformat(),  # noqa: DTZ005
+        timestamp=now_local().isoformat(),
         errors=final_state.get("errors") or [],
     )
 
@@ -948,7 +926,7 @@ async def reset_kill_switch(new_inception_value: float = Query(gt=1000)):
     if ks is None:
         raise HTTPException(404, "Kill switch not initialized")
 
-    book_path = _data_path("paper_equity.json")
+    book_path = str(settings.data_path("paper_equity.json"))
     try:
         book = paper_book.load(book_path)
     except Exception as exc:

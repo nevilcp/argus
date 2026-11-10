@@ -37,11 +37,6 @@ from argus.seams import LiveMarketDataProvider
 logger = logging.getLogger("argus.reconcile_outcomes")
 
 
-def _data_path(filename: str) -> str:
-    """Resolves a filename under the currently configured ARGUS_DATA_DIR."""
-    return f"{settings.ARGUS_DATA_DIR}/{filename}"
-
-
 def main() -> None:
     """Parses CLI args, runs one reconciliation pass, and prints its report."""
     logging.basicConfig(level=settings.ARGUS_LOG_LEVEL)
@@ -49,7 +44,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--db",
-        default=_data_path("argus_graph.db"),
+        default=str(settings.data_path("argus_graph.db")),
         help="Path to the LangGraph checkpoint database",
     )
     parser.add_argument(
@@ -68,7 +63,7 @@ def main() -> None:
     report = run_reconciliation_pass(
         LiveMarketDataProvider(),
         get_cultural_memory(),
-        _data_path("paper_equity.json"),
+        str(settings.data_path("paper_equity.json")),
         decisions_log_path=args.decisions_log,
         checkpoint_db_path=args.db,
         horizon_days=args.horizon_days,

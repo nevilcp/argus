@@ -10,13 +10,14 @@ reconcile loop needs to start.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 from unittest import mock
 
 import pytest
 from fastapi.testclient import TestClient
 
 import api.main as api_main
+from argus.infra.clock import now_market
 
 
 def _payload(*tickers: str) -> dict:
@@ -46,7 +47,7 @@ def _pipeline(monkeypatch, *, market_hours: bool):
 
 def _seed_cache(ticker: str, *, bar_age_seconds: float, write_age_seconds: float = 0.0):
     """Populates `_live_cache` with a state whose bar and write times are both controlled."""
-    now = datetime.now(api_main._ET)
+    now = now_market()
     bar_ts = now - timedelta(seconds=bar_age_seconds)
     write_ts = now - timedelta(seconds=write_age_seconds)
     api_main._live_cache.publish(

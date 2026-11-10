@@ -44,12 +44,10 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
-from zoneinfo import ZoneInfo
 
 from argus.data.pipeline import _FETCH_INTERVAL
+from argus.infra.clock import now_market
 from argus.params import SYSTEM
-
-_ET = ZoneInfo("America/New_York")
 
 
 def session_state_ttl_seconds() -> int:
@@ -157,7 +155,7 @@ class LiveSessionCache:
                 measure against; tests pass an explicit value to control
                 write age without reaching into private state.
         """
-        published_at = now if now is not None else datetime.now(_ET)
+        published_at = now if now is not None else now_market()
         for ticker, state in session_states.items():
             self._states[ticker] = (state, published_at)
 
