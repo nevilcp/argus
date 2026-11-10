@@ -42,7 +42,6 @@ import json
 import logging
 import random
 import time
-from typing import TypeVar
 
 from pydantic import BaseModel, ValidationError
 
@@ -50,8 +49,6 @@ from argus.params import STRUCTURED_OUTPUT
 from argus.seams import LLMClient, RetryableTransportError
 
 logger = logging.getLogger("argus.structured_output")
-
-T = TypeVar("T", bound=BaseModel)
 
 
 class StructuredOutputError(Exception):
@@ -127,7 +124,7 @@ def _repair_prompt(user_prompt: str, last_error: str) -> str:
     )
 
 
-def decode(
+def decode[T: BaseModel](
     llm_client: LLMClient,
     system_prompt: str,
     user_prompt: str,
