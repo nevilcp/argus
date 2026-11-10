@@ -13,18 +13,11 @@ from __future__ import annotations
 from unittest import mock
 
 import pytest
-from fastapi.testclient import TestClient
 
 import api.main as api_main
 import argus.risk.kill_switch as kill_switch_module
 from argus.risk import paper_book
 from argus.risk.kill_switch import KillSwitch
-
-
-@pytest.fixture
-def client():
-    """A TestClient over api.main.app without running its lifespan startup."""
-    return TestClient(api_main.app)
 
 
 def test_analyze_rejects_without_api_key_when_configured(client, monkeypatch):

@@ -4,28 +4,25 @@ tests/conftest.py
 Shared pytest fixtures.
 
 Responsibilities:
-  - Provide an opt-in network guard a test can request to prove it never
-    falls through to a real socket call
   - Isolate every test from the production candle buffer
   - Restore the logger trees `configure_logging` mutates
-  - Reset the kill-switch singleton and api.main's live-session-cache /
-    API-key singletons that several api.main test modules each used to
-    reset independently
+  - Reset the kill-switch singleton, and (opt-in via `api_state`) api.main's
+    live-session-cache / API-key singletons
+  - Provide the lifespan-free API `client`
 
 Not responsible for:
   - Test data (see tests/fixtures/)
-  - Blocking network globally — tests/test_integration.py's TestEndToEnd
-    class intentionally exercises live yfinance/FRED calls, and CI relies
-    on that; this fixture is opt-in per test, not autouse
+  - Blocking network — tests/test_integration.py's TestEndToEnd class
+    intentionally exercises live yfinance/FRED calls, and CI relies on that
 """
 
 from __future__ import annotations
 
 import logging
-import socket
 from collections.abc import Callable, Iterator
 
 import pytest
+from fastapi.testclient import TestClient
 
 import api.main as api_main
 import argus.risk.kill_switch as kill_switch_module
@@ -104,15 +101,20 @@ def _reset_logging_trees() -> Iterator[None]:
 
 
 @pytest.fixture
-def _fresh_live_cache(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Installs a fresh LiveSessionCache as api.main's module-level singleton."""
+def api_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resets api.main's live-cache and API-key singletons for the duration of a test.
+
+    The kill switch is reset separately by the autouse fixture above. Request
+    this through ``pytestmark = pytest.mark.usefixtures("api_state")``.
+    """
     monkeypatch.setattr(api_main, "_live_cache", LiveSessionCache(interval_minutes=1))
+    monkeypatch.setattr(api_main.settings, "ARGUS_API_KEY", "")
 
 
 @pytest.fixture
-def _no_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Disables the ARGUS_API_KEY auth gate for the duration of a test."""
-    monkeypatch.setattr(api_main.settings, "ARGUS_API_KEY", "")
+def client() -> TestClient:
+    """A TestClient over api.main.app without running its lifespan startup."""
+    return TestClient(api_main.app)
 
 
 @pytest.fixture(autouse=True)
@@ -129,22 +131,3 @@ def _isolated_data_dir(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch: Pytest's monkeypatch fixture.
     """
     monkeypatch.setattr(settings, "ARGUS_DATA_DIR", str(tmp_path))
-
-
-@pytest.fixture
-def block_network(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Makes any outbound socket connection raise, for the duration of the requesting test.
-
-    Args:
-        monkeypatch: Pytest's monkeypatch fixture.
-
-    Yields:
-        None.
-    """
-
-    def _blocked(*args: object, **kwargs: object) -> None:
-        raise RuntimeError("Network access attempted in a test requesting block_network")
-
-    monkeypatch.setattr(socket.socket, "connect", _blocked)
-    monkeypatch.setattr(socket.socket, "connect_ex", _blocked)
-    return

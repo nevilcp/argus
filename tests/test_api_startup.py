@@ -24,7 +24,6 @@ from unittest import mock
 
 import pytest
 from fastapi import HTTPException
-from fastapi.testclient import TestClient
 
 import api.main as api_main
 import argus.risk.kill_switch as kill_switch_module
@@ -187,28 +186,18 @@ def test_no_warning_once_cors_and_api_key_are_configured(monkeypatch, caplog):
     assert caplog.records == []
 
 
-@pytest.fixture
-def health_client():
-    """A TestClient over api.main.app without running its lifespan startup."""
-    return TestClient(api_main.app)
-
-
 @pytest.fixture(autouse=True)
-def _reset_health_globals(monkeypatch):
+def _reset_health_globals(monkeypatch, api_state):
     """Clears the module-level state /health reads, so tests don't leak into each other."""
     monkeypatch.setattr(api_main, "_pipeline_task", None)
     monkeypatch.setattr(api_main, "_collector_task", None)
     monkeypatch.setattr(api_main, "_reconcile_task", None)
     monkeypatch.setattr(api_main, "_mft_pipeline", None)
-    monkeypatch.setattr(api_main, "_live_cache", LiveSessionCache(interval_minutes=1))
-    kill_switch_module._kill_switch = None
-    yield
-    kill_switch_module._kill_switch = None
 
 
-def test_health_reports_ok_when_no_background_tasks_are_configured(health_client):
+def test_health_reports_ok_when_no_background_tasks_are_configured(client):
     """Loops that were never started (e.g. collector/reconcile disabled) aren't a failure."""
-    response = health_client.get("/health")
+    response = client.get("/health")
 
     assert response.status_code == 200
     body = response.json()
@@ -262,7 +251,7 @@ async def test_health_returns_503_naming_a_cancelled_background_task(monkeypatch
     assert "collector" in exc_info.value.detail
 
 
-def test_health_reports_kill_switch_halted_state(health_client):
+def test_health_reports_kill_switch_halted_state(client):
     """kill_switch_halted mirrors the KillSwitch singleton's is_halted flag."""
     ks = KillSwitch("MODERATE")
     ks._portfolio_inception_value = 100_000.0
@@ -272,12 +261,12 @@ def test_health_reports_kill_switch_halted_state(health_client):
         ks._check()
     kill_switch_module._kill_switch = ks
 
-    response = health_client.get("/health")
+    response = client.get("/health")
 
     assert response.json()["kill_switch_halted"] is True
 
 
-def test_health_reports_newest_cache_entry_age_during_market_hours(monkeypatch, health_client):
+def test_health_reports_newest_cache_entry_age_during_market_hours(monkeypatch, client):
     """newest_cache_entry_age_seconds surfaces the freshest live-cache entry's age."""
     fake_pipeline = mock.Mock()
     fake_pipeline.is_market_hours.return_value = True
@@ -286,7 +275,7 @@ def test_health_reports_newest_cache_entry_age_during_market_hours(monkeypatch, 
     cache.publish({"AAPL": {}}, ["AAPL"])
     monkeypatch.setattr(api_main, "_live_cache", cache)
 
-    response = health_client.get("/health")
+    response = client.get("/health")
 
     age = response.json()["newest_cache_entry_age_seconds"]
     assert age is not None

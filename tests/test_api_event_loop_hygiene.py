@@ -16,22 +16,12 @@ from unittest import mock
 from zoneinfo import ZoneInfo
 
 import pytest
-from fastapi.testclient import TestClient
 
 import api.main as api_main
 
 _ET = ZoneInfo("America/New_York")
 
-
-@pytest.fixture(autouse=True)
-def _reset_singletons(_fresh_live_cache):
-    """Installs a fresh live session cache for each test (see conftest.py)."""
-
-
-@pytest.fixture
-def client():
-    """A TestClient over api.main.app without running its lifespan startup."""
-    return TestClient(api_main.app)
+pytestmark = pytest.mark.usefixtures("api_state")
 
 
 def test_pipeline_status_reports_buffer_depth_without_materializing_frames(monkeypatch, client):

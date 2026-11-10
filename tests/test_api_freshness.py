@@ -22,38 +22,20 @@ from datetime import timedelta
 from unittest import mock
 
 import pytest
-from fastapi.testclient import TestClient
 
 import api.main as api_main
 from argus.data.live_session_cache import AdmissionResult
 from argus.infra.clock import now_market
+from tests.helpers.api import api_pipeline
 
 _PAYLOAD = {"tickers": ["AAPL"], "total_wealth": 100_000, "invest_pct": 0.5}
 
-
-@pytest.fixture(autouse=True)
-def _reset_singletons(_fresh_live_cache, _no_api_key):
-    """Kill switch, live cache, and API key are all reset around each test via conftest fixtures."""
-
-
-@pytest.fixture
-def client():
-    """A TestClient over api.main.app without running its lifespan startup."""
-    return TestClient(api_main.app)
-
-
-def _pipeline(monkeypatch, *, market_hours: bool, interval_minutes: int = 1):
-    """Installs a fake MFTDataPipeline as the module-level `_mft_pipeline`."""
-    fake = mock.Mock()
-    fake.is_market_hours.return_value = market_hours
-    fake.interval_minutes = interval_minutes
-    monkeypatch.setattr(api_main, "_mft_pipeline", fake)
-    return fake
+pytestmark = pytest.mark.usefixtures("api_state")
 
 
 def test_analyze_market_closed_outranks_bar_age(client, monkeypatch):
     """A hopelessly stale bar still surfaces as market-closed, not stale, outside session hours."""
-    _pipeline(monkeypatch, market_hours=False)
+    api_pipeline(monkeypatch, market_hours=False)
     now = now_market() - timedelta(days=9)
     api_main._live_cache.publish({"AAPL": {"timestamp": now.isoformat()}}, ["AAPL"], now=now)
 
@@ -76,7 +58,7 @@ def test_analyze_maps_each_admission_group_to_its_own_response_text(
 ):
     """Each of LiveSessionCache.admit()'s three rejection groups produces distinct
     response wording."""
-    _pipeline(monkeypatch, market_hours=True)
+    api_pipeline(monkeypatch, market_hours=True)
     result = AdmissionResult(**{admission_field: ["AAPL"]})
     monkeypatch.setattr(api_main._live_cache, "admit", mock.Mock(return_value=result))
 
@@ -88,7 +70,7 @@ def test_analyze_maps_each_admission_group_to_its_own_response_text(
 
 def test_analyze_market_closed_skips_ticker_registration(client, monkeypatch):
     """A rejected-by-market-hours request must not mutate pipeline state."""
-    fake_pipeline = _pipeline(monkeypatch, market_hours=False)
+    fake_pipeline = api_pipeline(monkeypatch, market_hours=False)
 
     response = client.post("/analyze", json=_PAYLOAD)
 
