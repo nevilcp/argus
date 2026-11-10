@@ -21,7 +21,8 @@ Not responsible for:
 from __future__ import annotations
 
 import socket
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from pathlib import Path
 
 import pytest
 
@@ -29,6 +30,49 @@ import api.main as api_main
 import argus.risk.kill_switch as kill_switch_module
 from argus.config import settings
 from argus.data.live_session_cache import LiveSessionCache
+
+GOLDEN_DIR = Path(__file__).resolve().parent / "fixtures" / "golden"
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Registers --update-golden, which rewrites the committed behaviour snapshots.
+
+    Only a PR that deliberately changes behaviour may use it, and its
+    description must show the resulting snapshot diff.
+    """
+    parser.addoption(
+        "--update-golden",
+        action="store_true",
+        default=False,
+        help="Rewrite tests/fixtures/golden/* instead of asserting against them.",
+    )
+
+
+@pytest.fixture
+def assert_golden(request: pytest.FixtureRequest) -> Callable[[str, str], None]:
+    """Returns a checker that compares text to a committed snapshot, or rewrites it.
+
+    Args:
+        request: Pytest's request, used to read --update-golden.
+
+    Returns:
+        A function taking (snapshot file name under tests/fixtures/golden/, actual text).
+    """
+    update = request.config.getoption("--update-golden")
+
+    def _check(name: str, actual: str) -> None:
+        path = GOLDEN_DIR / name
+        if update:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(actual)
+            return
+        assert path.exists(), f"{path} missing; generate it with `pytest --update-golden`"
+        assert actual == path.read_text(), (
+            f"output differs from {path.name}; if the change is intended, "
+            "re-run with --update-golden and show the diff in the PR"
+        )
+
+    return _check
 
 
 @pytest.fixture(autouse=True)

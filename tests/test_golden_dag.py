@@ -386,3 +386,38 @@ def test_golden_dag_output_is_stable_across_runs(tmp_path):
 
     for key in ("aggregated_signals", "risk_assessments"):
         assert _strip_volatile_signals(first[key]) == _strip_volatile_signals(second[key])
+
+
+def _round_floats(obj, ndigits: int = 8):
+    """Rounds every float so the snapshot tolerates last-digit libm/numpy differences."""
+    if isinstance(obj, float):
+        return round(obj, ndigits)
+    if isinstance(obj, dict):
+        return {k: _round_floats(v, ndigits) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_round_floats(v, ndigits) for v in obj]
+    return obj
+
+
+def _snapshot_text(final_state: dict) -> str:
+    """Serializes the behaviour-relevant slice of a final state to stable JSON text."""
+    macro = final_state.get("macro_context")
+    payload = {
+        "portfolio_allocation": final_state["portfolio_allocation"].model_dump(mode="json"),
+        "aggregated_signals": {
+            t: s.model_dump(mode="json") for t, s in final_state["aggregated_signals"].items()
+        },
+        "risk_assessments": {
+            t: s.model_dump(mode="json") for t, s in final_state["risk_assessments"].items()
+        },
+        "macro_context": macro.model_dump(mode="json") if macro is not None else None,
+        "errors": final_state["errors"],
+    }
+    return json.dumps(_round_floats(_strip_volatile(payload)), indent=2, sort_keys=True) + "\n"
+
+
+def test_golden_dag_matches_snapshot(tmp_path, assert_golden):
+    """The fixture-backed DAG output equals the committed snapshot from before the cleanup."""
+    final_state = _invoke(_build_fixture_graph(tmp_path))
+
+    assert_golden("dag_snapshot.json", _snapshot_text(final_state))

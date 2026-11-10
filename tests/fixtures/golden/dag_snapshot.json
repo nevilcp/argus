@@ -1,0 +1,374 @@
+{
+  "aggregated_signals": {
+    "AAPL": {
+      "agents_present": [
+        "fundamental",
+        "technical",
+        "sentiment"
+      ],
+      "conviction": 0.31744186,
+      "model_healthy": true,
+      "reliability": {
+        "fundamental": 0.5,
+        "sentiment": 0.5,
+        "technical": 0.5
+      },
+      "reliability_n": {
+        "fundamental": 0,
+        "sentiment": 0,
+        "technical": 0
+      },
+      "signal": "BEARISH",
+      "ticker": "AAPL",
+      "weighted_votes": {
+        "fundamental": 0.34125,
+        "sentiment": 0.108,
+        "technical": 0.105
+      }
+    },
+    "GOOGL": {
+      "agents_present": [
+        "fundamental",
+        "technical",
+        "sentiment"
+      ],
+      "conviction": 0.40069767,
+      "model_healthy": true,
+      "reliability": {
+        "fundamental": 0.5,
+        "sentiment": 0.5,
+        "technical": 0.5
+      },
+      "reliability_n": {
+        "fundamental": 0,
+        "sentiment": 0,
+        "technical": 0
+      },
+      "signal": "NEUTRAL",
+      "ticker": "GOOGL",
+      "weighted_votes": {
+        "fundamental": 0.29575,
+        "sentiment": 0.135,
+        "technical": 0.18451574
+      }
+    },
+    "JPM": {
+      "agents_present": [
+        "fundamental",
+        "technical",
+        "sentiment"
+      ],
+      "conviction": 0.49804112,
+      "model_healthy": true,
+      "reliability": {
+        "fundamental": 0.5,
+        "sentiment": 0.5,
+        "technical": 0.5
+      },
+      "reliability_n": {
+        "fundamental": 0,
+        "sentiment": 0,
+        "technical": 0
+      },
+      "signal": "NEUTRAL",
+      "ticker": "JPM",
+      "weighted_votes": {
+        "fundamental": 0.273,
+        "sentiment": 0.135,
+        "technical": 0.1273942
+      }
+    },
+    "MSFT": {
+      "agents_present": [
+        "fundamental",
+        "technical",
+        "sentiment"
+      ],
+      "conviction": 0.27511628,
+      "model_healthy": true,
+      "reliability": {
+        "fundamental": 0.5,
+        "sentiment": 0.5,
+        "technical": 0.5
+      },
+      "reliability_n": {
+        "fundamental": 0,
+        "sentiment": 0,
+        "technical": 0
+      },
+      "signal": "NEUTRAL",
+      "ticker": "MSFT",
+      "weighted_votes": {
+        "fundamental": 0.29575,
+        "sentiment": 0.189,
+        "technical": 0.1642776
+      }
+    },
+    "NVDA": {
+      "agents_present": [
+        "fundamental",
+        "technical",
+        "sentiment"
+      ],
+      "conviction": 0.35976744,
+      "model_healthy": true,
+      "reliability": {
+        "fundamental": 0.5,
+        "sentiment": 0.5,
+        "technical": 0.5
+      },
+      "reliability_n": {
+        "fundamental": 0,
+        "sentiment": 0,
+        "technical": 0
+      },
+      "signal": "BULLISH",
+      "ticker": "NVDA",
+      "weighted_votes": {
+        "fundamental": 0.38675,
+        "sentiment": 0.108,
+        "technical": 0.18289959
+      }
+    },
+    "XOM": {
+      "agents_present": [
+        "fundamental",
+        "technical",
+        "sentiment"
+      ],
+      "conviction": 0.35976744,
+      "model_healthy": true,
+      "reliability": {
+        "fundamental": 0.5,
+        "sentiment": 0.5,
+        "technical": 0.5
+      },
+      "reliability_n": {
+        "fundamental": 0,
+        "sentiment": 0,
+        "technical": 0
+      },
+      "signal": "BEARISH",
+      "ticker": "XOM",
+      "weighted_votes": {
+        "fundamental": 0.38675,
+        "sentiment": 0.135,
+        "technical": 0.19465607
+      }
+    }
+  },
+  "errors": [
+    "portfolio_allocation: zeroed MSFT allocation (risk verdict VETO)",
+    "portfolio_allocation: zeroed JPM allocation (risk verdict VETO)",
+    "portfolio_allocation: zeroed GOOGL allocation (risk verdict VETO)",
+    "portfolio_allocation: cash_reserve_pct forced to residual 0.9250 (LLM proposed 0.5750)"
+  ],
+  "macro_context": {
+    "agent_multipliers": {
+      "fundamental": 1.3,
+      "sentiment": 0.9,
+      "technical": 1.0
+    },
+    "api_calls_used": 0,
+    "consumer_sentiment": 49.8,
+    "cpi_yoy": 3.94702691,
+    "fed_funds": 3.64,
+    "inflation_trajectory": "RISING",
+    "interest_rate_trend": "FALLING",
+    "macro_regime": "EXPANSION",
+    "model_healthy": false,
+    "regime_confidence": 0.6,
+    "sector_rotation_signal": "GROWTH_FAVORED",
+    "t10y2y": 0.43,
+    "unemployment": 4.3,
+    "vix_level": 16.79999924,
+    "vix_percentile": 19.12350598,
+    "vix_regime": "MEDIUM",
+    "yield_curve_shape": "NORMAL"
+  },
+  "portfolio_allocation": {
+    "api_calls_used": 1,
+    "cash_reserve_pct": 0.925,
+    "portfolio": [
+      {
+        "advisor_note": null,
+        "allocation_pct": 0.0,
+        "allocation_usd": 0.0,
+        "composite_conviction": 0.51,
+        "stop_loss": 0.0,
+        "target_price": null,
+        "thesis": "Skipped: bearish signal",
+        "ticker": "AAPL",
+        "time_horizon": "3-6 months"
+      },
+      {
+        "advisor_note": null,
+        "allocation_pct": 0.0,
+        "allocation_usd": 0.0,
+        "composite_conviction": 0.61,
+        "stop_loss": 0.0,
+        "target_price": null,
+        "thesis": "Sentiment is bullish",
+        "ticker": "MSFT",
+        "time_horizon": "3-6 months"
+      },
+      {
+        "advisor_note": null,
+        "allocation_pct": 0.075,
+        "allocation_usd": 7500.0,
+        "composite_conviction": 0.54,
+        "stop_loss": 0.0,
+        "target_price": null,
+        "thesis": "Fundamental is bullish",
+        "ticker": "NVDA",
+        "time_horizon": "3-6 months"
+      },
+      {
+        "advisor_note": null,
+        "allocation_pct": 0.0,
+        "allocation_usd": 0.0,
+        "composite_conviction": 0.92,
+        "stop_loss": 0.0,
+        "target_price": null,
+        "thesis": "Neutral with high conviction",
+        "ticker": "JPM",
+        "time_horizon": "3-6 months"
+      },
+      {
+        "advisor_note": null,
+        "allocation_pct": 0.0,
+        "allocation_usd": 0.0,
+        "composite_conviction": 0.5,
+        "stop_loss": 0.0,
+        "target_price": null,
+        "thesis": "Skipped: bearish signal",
+        "ticker": "XOM",
+        "time_horizon": "3-6 months"
+      },
+      {
+        "advisor_note": null,
+        "allocation_pct": 0.0,
+        "allocation_usd": 0.0,
+        "composite_conviction": 0.67,
+        "stop_loss": 0.0,
+        "target_price": null,
+        "thesis": "Neutral with moderate conviction",
+        "ticker": "GOOGL",
+        "time_horizon": "3-6 months"
+      }
+    ],
+    "rebalance_trigger": "MONTHLY",
+    "user_investable_capital": 100000.0
+  },
+  "risk_assessments": {
+    "AAPL": {
+      "api_calls_used": 0,
+      "approved_weight": 0.0,
+      "avg_correlation": 0.10624575,
+      "cvar": 0.03968648,
+      "marginal_var": 0.0,
+      "optimal_weights": {},
+      "optimizer_converged": null,
+      "portfolio_beta": 1.0,
+      "proposed_weight": 0.15,
+      "stop_loss": 0.0,
+      "var_99": 0.03341339,
+      "verdict": "VETO",
+      "veto_reasons": [
+        "VaR 99%: 3.34% > 3% limit",
+        "[Portfolio] SLSQP cap 0.00% below the 0.10% allocation floor"
+      ]
+    },
+    "GOOGL": {
+      "api_calls_used": 0,
+      "approved_weight": 0.0,
+      "avg_correlation": 0.10624575,
+      "cvar": 0.03713917,
+      "marginal_var": 0.0,
+      "optimal_weights": {},
+      "optimizer_converged": null,
+      "portfolio_beta": 1.0,
+      "proposed_weight": 0.15,
+      "stop_loss": 0.0,
+      "var_99": 0.03329105,
+      "verdict": "VETO",
+      "veto_reasons": [
+        "VaR 99%: 3.33% > 3% limit",
+        "[Portfolio] SLSQP cap 0.00% below the 0.10% allocation floor"
+      ]
+    },
+    "JPM": {
+      "api_calls_used": 0,
+      "approved_weight": 0.0,
+      "avg_correlation": 0.10624575,
+      "cvar": 0.0435772,
+      "marginal_var": 0.0,
+      "optimal_weights": {},
+      "optimizer_converged": null,
+      "portfolio_beta": 1.0,
+      "proposed_weight": 0.15,
+      "stop_loss": 0.0,
+      "var_99": 0.0380745,
+      "verdict": "VETO",
+      "veto_reasons": [
+        "VaR 99%: 3.81% > 3% limit",
+        "[Portfolio] SLSQP cap 0.00% below the 0.10% allocation floor"
+      ]
+    },
+    "MSFT": {
+      "api_calls_used": 0,
+      "approved_weight": 0.0,
+      "avg_correlation": 0.10624575,
+      "cvar": 0.06304497,
+      "marginal_var": 0.0,
+      "optimal_weights": {},
+      "optimizer_converged": null,
+      "portfolio_beta": 1.0,
+      "proposed_weight": 0.15,
+      "stop_loss": 0.0,
+      "var_99": 0.03948257,
+      "verdict": "VETO",
+      "veto_reasons": [
+        "VaR 99%: 3.95% > 3% limit",
+        "CVaR: 6.30% > 5% limit",
+        "[Portfolio] SLSQP cap 0.00% below the 0.10% allocation floor"
+      ]
+    },
+    "NVDA": {
+      "api_calls_used": 0,
+      "approved_weight": 0.075,
+      "avg_correlation": 0.10624575,
+      "cvar": 0.04989567,
+      "marginal_var": 0.0,
+      "optimal_weights": {},
+      "optimizer_converged": null,
+      "portfolio_beta": 1.0,
+      "proposed_weight": 0.15,
+      "stop_loss": 0.0,
+      "var_99": 0.04525142,
+      "verdict": "REDUCE",
+      "veto_reasons": [
+        "VaR 99%: 4.53% > 3% limit",
+        "[Portfolio] SLSQP cap: 15.0%"
+      ]
+    },
+    "XOM": {
+      "api_calls_used": 0,
+      "approved_weight": 0.0,
+      "avg_correlation": 0.10624575,
+      "cvar": 0.04640748,
+      "marginal_var": 0.0,
+      "optimal_weights": {},
+      "optimizer_converged": null,
+      "portfolio_beta": 1.0,
+      "proposed_weight": 0.15,
+      "stop_loss": 0.0,
+      "var_99": 0.03928354,
+      "verdict": "VETO",
+      "veto_reasons": [
+        "VaR 99%: 3.93% > 3% limit",
+        "[Portfolio] SLSQP cap 0.00% below the 0.10% allocation floor"
+      ]
+    }
+  }
+}

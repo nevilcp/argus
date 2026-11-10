@@ -1,0 +1,10 @@
+
+=== <FIXTURES> ===
+universe: ['AAPL', 'GOOGL', 'JPM', 'MSFT', 'NVDA', 'XOM']
+cash_reserve_pct: 0.925
+  AAPL   alloc=0.000 conviction=0.51  Skipped: bearish signal
+  MSFT   alloc=0.000 conviction=0.61  Sentiment is bullish
+  NVDA   alloc=0.075 conviction=0.54  Fundamental is bullish
+  JPM    alloc=0.000 conviction=0.92  Neutral with high conviction
+  XOM    alloc=0.000 conviction=0.50  Skipped: bearish signal
+  GOOGL  alloc=0.000 conviction=0.67  Neutral with moderate conviction
