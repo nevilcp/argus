@@ -478,9 +478,8 @@ def test_validation_failures_flags_missing_contraction_enrichment() -> None:
 def test_discrimination_scenarios_cover_all_feature_columns() -> None:
     """Every canned scenario supplies all FEATURE_COLUMNS.
 
-    A scenario missing a key would have predict() silently substitute
-    _FEATURE_DEFAULTS for it, weakening validation_failures()'s discrimination
-    check without failing loudly.
+    predict() raises on a missing feature column, so a scenario missing a key
+    would make validation_failures() fail loudly rather than be silently weakened.
     """
     for name, scenario in DISCRIMINATION_SCENARIOS.items():
         assert set(scenario.keys()) == set(FEATURE_COLUMNS), name
@@ -488,21 +487,32 @@ def test_discrimination_scenarios_cover_all_feature_columns() -> None:
 
 
 class _WindowAssemblyFailureMarketData(_StubMarketData):
-    """A MarketDataProvider whose FRED calls always fail, forcing window assembly to fail."""
+    """A MarketDataProvider whose FRED calls always fail, forcing window assembly to fail.
+
+    macro_bundle() carries the keys the real fetcher returns (raw levels, none of
+    the five model features), so a fallback that feeds the bundle straight to a
+    fitted model would be handed columns it does not have.
+    """
 
     def macro_bundle(self) -> dict:
-        """Returns the expansion cluster mean, the single-observation fallback's input."""
-        return dict(_EXPANSION_POINT)
+        """Returns a stressed raw-level bundle: VIX 35 and an inverted curve."""
+        return {
+            "vix": 35.0,
+            "fed_funds": 5.0,
+            "t10y2y": -0.6,
+            "cpi_yoy": 3.0,
+            "unemployment": 4.0,
+        }
 
     def fred_series(self, series_id: str, start: str = "2018-01-01") -> pd.Series:
         """Always raises, simulating a FRED outage during window assembly."""
         raise RuntimeError("FRED unavailable")
 
 
-def test_analyze_falls_back_to_single_observation_when_window_assembly_fails(
+def test_analyze_falls_back_to_rule_based_when_window_assembly_fails(
     caplog: pytest.LogCaptureFixture, tmp_path: Path
 ) -> None:
-    """A window-assembly failure degrades to single-observation inference, not a crash."""
+    """A window-assembly failure degrades to the rule-based regime and flags the model unhealthy."""
     agent = MacroStatisticalAgent(
         market_data=_WindowAssemblyFailureMarketData(),
         model_path=tmp_path / "no_artifact_here.joblib",
@@ -515,8 +525,48 @@ def test_analyze_falls_back_to_single_observation_when_window_assembly_fails(
     assert ctx is not None
     assert any("feature window assembly failed" in r.message for r in caplog.records)
 
-    expected_regime, expected_confidence = agent.classifier.predict(
+    expected_regime, expected_confidence = agent.classifier.rule_based(
         agent.market_data.macro_bundle()
     )
+    assert expected_regime == Regime.CONTRACTION.value
     assert ctx.macro_regime.value == expected_regime
     assert ctx.regime_confidence == pytest.approx(expected_confidence)
+    assert ctx.model_healthy is False
+
+
+def test_unfitted_agent_uses_raw_vix_for_rule_based_regime(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unfitted agent classifies from the bundle's raw VIX, not a percentile-only window row."""
+    # A window that assembles fine but, like the real one, carries vix_pctile and no raw vix
+    window = pd.DataFrame([_EXPANSION_POINT] * 6)
+    monkeypatch.setattr("argus.agents.macro.build_macro_feature_frame", lambda *a, **k: window)
+    agent = MacroStatisticalAgent(
+        market_data=_StubMarketData(vix=35.0),
+        model_path=tmp_path / "no_artifact_here.joblib",
+    )
+    assert not agent.classifier.is_fitted
+
+    ctx = agent.analyze()
+
+    assert ctx is not None
+    assert ctx.macro_regime == Regime.CONTRACTION
+    assert ctx.model_healthy is False
+
+
+def test_fitted_predict_rejects_dict_with_missing_feature() -> None:
+    """A fitted model refuses a dict lacking a feature column instead of imputing it."""
+    classifier = _fit_synthetic_classifier()
+    partial = {k: v for k, v in _EXPANSION_POINT.items() if k != "vix_pctile"}
+
+    with pytest.raises(ValueError, match="vix_pctile"):
+        classifier.predict(partial)
+
+    with pytest.raises(ValueError, match="d_unemp_12m"):
+        classifier.predict({**_EXPANSION_POINT, "d_unemp_12m": None})
+
+
+def test_unfitted_predict_rejects_dataframe() -> None:
+    """An unfitted classifier's rule-based path needs raw levels a feature window lacks."""
+    with pytest.raises(ValueError, match="not fitted"):
+        RegimeClassifier().predict(pd.DataFrame([_EXPANSION_POINT]))
