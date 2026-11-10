@@ -1,5 +1,5 @@
-from argus.orchestration.state import TickerSnapshot, build_ticker_snapshots
-from argus.schemas.signals import RiskVerdict
+from argus.orchestration.state import build_ticker_snapshots
+from argus.schemas.signals import RiskVerdict, TickerSnapshot
 from tests.helpers.builders import risk_assessment
 
 

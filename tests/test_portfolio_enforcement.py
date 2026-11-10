@@ -15,13 +15,13 @@ from pydantic import ValidationError
 
 from argus.agents.portfolio import PortfolioManagerAgent
 from argus.governor import RateLimitExceeded
-from argus.orchestration.state import TickerSnapshot
 from argus.params import PORTFOLIO, SYSTEM
 from argus.schemas.signals import (
     PortfolioAllocation,
     PositionAllocation,
     ProposedPosition,
     RiskVerdict,
+    TickerSnapshot,
 )
 from argus.seams import FixtureLLMClient
 from tests.helpers.builders import risk_assessment, user_profile

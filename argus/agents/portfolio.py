@@ -27,7 +27,6 @@ import numpy as np
 from argus.config import settings
 from argus.governor import RateLimitExceeded, UnregisteredModel
 from argus.infra.clock import now_local
-from argus.orchestration.state import TickerSnapshot
 from argus.params import AGGREGATOR, PORTFOLIO
 from argus.ports import LLMClient
 from argus.schemas.prompting import UNTRUSTED_GUARD, schema_block, wrap_untrusted
@@ -36,6 +35,7 @@ from argus.schemas.signals import (
     PortfolioAllocation,
     PortfolioProposal,
     Signal,
+    TickerSnapshot,
 )
 from argus.seams import GroqLLMClient
 from argus.structured_output import StructuredOutputError, decode
