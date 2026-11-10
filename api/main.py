@@ -574,7 +574,7 @@ class AnalysisRequest(BaseModel):
             ValueError: If any entry doesn't match TICKER_PATTERN after normalization.
         """
         normalized = [t.strip().upper() for t in tickers]
-        invalid = [t for t in normalized if not TICKER_PATTERN.match(t)]
+        invalid = [t for t in normalized if not TICKER_PATTERN.fullmatch(t)]
         if invalid:
             raise ValueError(f"Invalid ticker symbol(s): {invalid}")
         return list(dict.fromkeys(normalized))
