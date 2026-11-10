@@ -20,13 +20,12 @@ runs:
         mkdir -p data
         if [ -d state/data ]; then
           cp -r state/data/. ./data/
-        elif [ -d state ] && [ -n "$(ls -A state 2>/dev/null)" ]; then
-          # One-time migration: the argus-data branch predates this nested
-          # data/ layout and has decisions.jsonl etc. flat at its root.
-          # status.json isn't application state — publish-argus-state reads
-          # it straight from state/status.json — so it's excluded here.
-          find state -mindepth 1 -maxdepth 1 ! -name .git ! -name status.json \
-            -exec cp -r {} ./data/ \;
+        elif [ -d state ] && [ -n "$(find state -mindepth 1 -maxdepth 1 ! -name .git ! -name status.json -print -quit)" ]; then
+          # The argus-data branch is always laid out as data/ plus status.json.
+          # Anything else means the layout is wrong, and carrying on would let
+          # publish-argus-state overwrite the branch with an empty data/.
+          echo "::error::argus-data has files but no data/ directory; refusing to continue so the branch is not overwritten with empty state"
+          exit 1
         else
           echo "no prior state"
         fi
