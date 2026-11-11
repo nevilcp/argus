@@ -5,6 +5,8 @@ Shared point-in-time feature construction for the macro regime HMM's fit and
 predict paths.
 
 Responsibilities:
+  - Name each FRED series once (the *_SERIES constants) and derive year-over-year
+    CPI inflation once (cpi_yoy), for the fetchers and the macro agent alike
   - Fetch FEDFUNDS, UNRATE, CPIAUCSL, T10Y2Y, and ^VIX through the
     MarketDataProvider seam, so training and inference build features through
     one code path instead of two independently-drifting ones
@@ -14,7 +16,7 @@ Responsibilities:
 
 Not responsible for:
   - HMM fitting, state labelling, or the artifact validation gate (see
-    agents/macro.py)
+    agents/macro_hmm.py)
   - Publication-lag and window-length values themselves (see params.py's
     MacroParams)
 """
@@ -25,6 +27,27 @@ import pandas as pd
 
 from argus.params import MACRO
 from argus.ports import MarketDataProvider
+
+FED_FUNDS_SERIES = "FEDFUNDS"
+UNEMPLOYMENT_SERIES = "UNRATE"
+CPI_SERIES = "CPIAUCSL"
+T10Y2Y_SERIES = "T10Y2Y"
+T10YIE_SERIES = "T10YIE"
+CONSUMER_SENTIMENT_SERIES = "UMCSENT"
+RECESSION_SERIES = "USREC"
+
+
+def cpi_yoy(cpi: pd.Series) -> pd.Series:
+    """Converts a monthly CPI index into its year-over-year percent change.
+
+    Args:
+        cpi: The CPIAUCSL index level, one observation per month, oldest first.
+
+    Returns:
+        The 12-month percent change, in percent (so 3.0 means 3%). The first 12
+        observations are NaN.
+    """
+    return cpi.pct_change(12) * 100.0
 
 
 def _lagged_fred_series(
@@ -61,17 +84,17 @@ def build_macro_feature_frame(provider: MarketDataProvider, start: str) -> pd.Da
         Month-end DataFrame indexed by date, carrying both the raw levels
         (fed_funds, unemployment, t10y2y) and the five stationary features
         RegimeClassifier is fit/predicted on (d_fed_funds_6m, d_unemp_12m,
-        cpi_yoy, t10y2y, vix_pctile — see agents.macro.FEATURE_COLUMNS).
+        cpi_yoy, t10y2y, vix_pctile — see agents.macro_hmm.FEATURE_COLUMNS).
         Rows with any NaN after a bounded 2-month forward-fill are dropped.
     """
     fed_funds = _lagged_fred_series(
-        provider, "FEDFUNDS", start, MACRO.fed_funds_publication_lag_days
+        provider, FED_FUNDS_SERIES, start, MACRO.fed_funds_publication_lag_days
     )
     unemployment = _lagged_fred_series(
-        provider, "UNRATE", start, MACRO.unemployment_publication_lag_days
+        provider, UNEMPLOYMENT_SERIES, start, MACRO.unemployment_publication_lag_days
     )
-    cpi = _lagged_fred_series(provider, "CPIAUCSL", start, MACRO.cpi_publication_lag_days)
-    t10y2y = provider.fred_series("T10Y2Y", start=start)
+    cpi = _lagged_fred_series(provider, CPI_SERIES, start, MACRO.cpi_publication_lag_days)
+    t10y2y = provider.fred_series(T10Y2Y_SERIES, start=start)
     # "max", not a caller-supplied period, so training and inference always draw identical
     # VIX history — the 5-year percentile window needs ~1260 trading days of warmup
     vix = provider.ohlcv_daily("^VIX", period="max")["close"]
@@ -81,7 +104,7 @@ def build_macro_feature_frame(provider: MarketDataProvider, start: str) -> pd.Da
             "fed_funds": fed_funds,
             "unemployment": unemployment,
             "t10y2y": t10y2y,
-            "cpi_yoy": cpi.pct_change(12) * 100.0,
+            "cpi_yoy": cpi_yoy(cpi),
             "d_fed_funds_6m": fed_funds.diff(6),
             "d_unemp_12m": unemployment.diff(12),
             "vix_pctile": vix.rolling(

@@ -61,7 +61,7 @@ def test_build_macro_feature_frame_is_deterministic_across_call_sites() -> None:
     """Two calls against the same provider and start date produce identical frames.
 
     RegimeClassifier's fit path (fit_on_history) and predict path (analyze)
-    both delegate here (see argus/agents/macro.py), so train/serve skew is
+    both delegate here (see argus/agents/macro.py and macro_hmm.py), so train/serve skew is
     only ruled out if this is a pure function of (provider, start) with no
     hidden state.
     """
