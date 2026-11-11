@@ -42,6 +42,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from dataclasses import dataclass
 from typing import Literal
 
 from pydantic import BaseModel, ValidationError
@@ -128,6 +129,47 @@ def _repair_prompt(user_prompt: str, last_error: str) -> str:
     )
 
 
+@dataclass(frozen=True)
+class _Failure:
+    """One failed decode attempt: what failed, at which stage, and any server retry hint."""
+
+    error: Exception
+    stage: str
+    retry_after: float | None = None
+
+
+def _attempt_once[T: BaseModel](
+    llm_client: LLMClient, system_prompt: str, prompt: str, schema: type[T]
+) -> T | _Failure:
+    """Makes one send-parse-validate attempt, returning the instance or why it failed."""
+    try:
+        raw = llm_client.complete(system_prompt, prompt)
+    except RetryableTransportError as e:
+        return _Failure(e, "transport", e.retry_after)
+    try:
+        data = json.loads(_strip_markdown_fence(raw))
+    except json.JSONDecodeError as e:
+        return _Failure(e, "json_parse")
+    try:
+        return schema.model_validate(data)
+    except ValidationError as e:
+        return _Failure(e, "schema_validation")
+
+
+def _retry_delay(attempt: int, failure: _Failure) -> float:
+    """Returns how long to sleep before the next attempt.
+
+    A transport failure uses full jitter (honoring the server's hint) so parallel
+    agents don't thundering-herd a shared provider outage; a content failure uses
+    deterministic capped exponential backoff.
+    """
+    base = STRUCTURED_OUTPUT.backoff_base_seconds
+    cap = STRUCTURED_OUTPUT.backoff_max_seconds
+    if failure.stage == "transport":
+        return full_jitter_delay(attempt, base, cap, retry_after=failure.retry_after)
+    return capped_backoff(attempt, base, cap)
+
+
 def decode[T: BaseModel](
     llm_client: LLMClient,
     system_prompt: str,
@@ -176,51 +218,24 @@ def decode[T: BaseModel](
             (stage="json_parse"), schema-valid data (stage="schema_validation"),
             or a successful transport call (stage="transport").
     """
-    last_error: Exception | None = None
     last_content_error: Exception | None = None
-    stage = "json_parse"
-    retry_after: float | None = None
 
     for attempt in range(STRUCTURED_OUTPUT.max_attempts):
         prompt = user_prompt
         if repair and last_content_error is not None:
             prompt = _repair_prompt(user_prompt, str(last_content_error))
 
-        try:
-            raw = llm_client.complete(system_prompt, prompt)
-        except RetryableTransportError as e:
-            last_error = e
-            stage = "transport"
-            retry_after = e.retry_after
-        else:
-            retry_after = None
-            stripped = _strip_markdown_fence(raw)
-            try:
-                data = json.loads(stripped)
-            except json.JSONDecodeError as e:
-                last_error = e
-                last_content_error = e
-                stage = "json_parse"
-            else:
-                try:
-                    return schema.model_validate(data)
-                except ValidationError as e:
-                    last_error = e
-                    last_content_error = e
-                    stage = "schema_validation"
+        result = _attempt_once(llm_client, system_prompt, prompt, schema)
+        if not isinstance(result, _Failure):
+            return result
+        if result.stage != "transport":
+            last_content_error = result.error
 
         if attempt == STRUCTURED_OUTPUT.max_attempts - 1:
-            assert last_error is not None
-            raise StructuredOutputError(stage, attempt + 1, last_error)
+            raise StructuredOutputError(result.stage, attempt + 1, result.error)
 
-        base = STRUCTURED_OUTPUT.backoff_base_seconds
-        cap = STRUCTURED_OUTPUT.backoff_max_seconds
-        if stage == "transport":
-            delay = full_jitter_delay(attempt, base, cap, retry_after=retry_after)
-        else:
-            delay = retry_after if retry_after is not None else capped_backoff(attempt, base, cap)
-        logger.warning("Attempt %d %s failed: %s", attempt + 1, stage, last_error)
-        time.sleep(delay)
+        logger.warning("Attempt %d %s failed: %s", attempt + 1, result.stage, result.error)
+        time.sleep(_retry_delay(attempt, result))
 
     raise AssertionError("unreachable: loop always returns or raises")
 
