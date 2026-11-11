@@ -28,16 +28,12 @@ from argus.config import settings
 from argus.infra.clock import now_local
 from argus.params import TECHNICAL
 from argus.schemas.signals import (
-    SESSION_STATE_REQUIRED_KEYS,
     Signal,
     TechnicalSignal,
     missing_session_state_keys,
 )
 
 logger = logging.getLogger(__name__)
-
-# Alias for schemas/signals.py's contract; kept for existing refs (incl. tests).
-_REQUIRED_INDICATOR_KEYS = SESSION_STATE_REQUIRED_KEYS
 
 
 def _score_rsi(s: dict) -> float:
@@ -56,7 +52,7 @@ def _score_rsi(s: dict) -> float:
     Returns:
         Signed score where +1.0 = maximum bullish, -1.0 = maximum bearish.
     """
-    rsi = float(s.get("rsi_14", 50.0))
+    rsi = float(s["rsi_14"])
 
     oversold = TECHNICAL.rsi_oversold
     bullish_transition = TECHNICAL.rsi_bullish_transition
@@ -101,7 +97,7 @@ def _score_macd(s: dict) -> float:
     Returns:
         Clipped score in [-1.0, 1.0].
     """
-    hist = float(s.get("macd_histogram", 0.0))
+    hist = float(s["macd_histogram"])
     return float(np.clip(hist / TECHNICAL.macd_normalization_scale, -1.0, 1.0))
 
 
@@ -119,7 +115,7 @@ def _score_bollinger(s: dict) -> float:
     Returns:
         Signed score in [-1.0, 1.0].
     """
-    bb = float(s.get("bb_percent_b", 0.5))
+    bb = float(s["bb_percent_b"])
 
     if bb < 0.0:
         return min(
@@ -149,7 +145,7 @@ def _score_adx_amplified(s: dict, base_direction: float) -> float:
     Returns:
         Trend-strength-adjusted score clipped to [-1.0, 1.0].
     """
-    adx = float(s.get("adx_14", 25.0))
+    adx = float(s["adx_14"])
     dampen_threshold = TECHNICAL.adx_dampen_threshold
     dampen_multiplier = TECHNICAL.adx_dampen_multiplier
     amplify_threshold = TECHNICAL.adx_amplify_threshold
@@ -176,7 +172,7 @@ def _score_vwap(s: dict) -> float:
     Returns:
         Clipped score in [-1.0, 1.0].
     """
-    d = float(s.get("vwap_distance", 0.0))
+    d = float(s["vwap_distance"])
     return float(np.clip(d / TECHNICAL.vwap_spread_normalization, -1.0, 1.0))
 
 
@@ -193,8 +189,8 @@ def _score_momentum(s: dict) -> float:
     Returns:
         Signed score in [-1.0, 1.0], or 0.0 if timeframes conflict.
     """
-    m30 = float(s.get("momentum_30m", 0.0))
-    m1d = float(s.get("momentum_1d", 0.0))
+    m30 = float(s["momentum_30m"])
+    m1d = float(s["momentum_1d"])
 
     # Positive product means both values share the same sign (directional confluence).
     if m30 * m1d > 0.0:
@@ -277,7 +273,7 @@ class TechnicalStatisticalAgent:
         total_weight = sum(w.values())
         net_score = sum(scores[k] * w[k] for k in scores) / total_weight
 
-        vol_ratio = float(s.get("volume_ratio", 1.0))
+        vol_ratio = float(s["volume_ratio"])
         volume_modifier = min(
             max(vol_ratio / TECHNICAL.volume_ratio_divisor, TECHNICAL.volume_modifier_floor),
             TECHNICAL.volume_modifier_ceiling,
@@ -289,7 +285,7 @@ class TechnicalStatisticalAgent:
         )
 
         # RSI extremes override net_score to avoid contradictory signals (e.g. overbought bullish).
-        rsi_raw = float(s.get("rsi_14", 50.0))
+        rsi_raw = float(s["rsi_14"])
         if rsi_raw > TECHNICAL.rsi_overbought and net_score > 0.0:
             logger.debug(
                 "analyze[%s] RSI=%.2f >75 overbought — clamping net_score %.4f → 0.0",
@@ -330,16 +326,16 @@ class TechnicalStatisticalAgent:
 
         return TechnicalSignal(
             ticker=ticker,
-            current_price=float(s.get("close", 0.0)),
-            rsi_14=float(s.get("rsi_14", 50.0)),
-            macd_histogram=float(s.get("macd_histogram", 0.0)),
-            bb_percent_b=float(s.get("bb_percent_b", 0.5)),
-            atr_pct=float(s.get("atr_pct", 0.0)),
-            adx_14=float(s.get("adx_14", 25.0)),
-            vwap_distance=float(s.get("vwap_distance", 0.0)),
-            volume_ratio=float(s.get("volume_ratio", 1.0)),
-            momentum_30m=float(s.get("momentum_30m", 0.0)),
-            momentum_1d=float(s.get("momentum_1d", 0.0)),
+            current_price=float(s["close"]),
+            rsi_14=float(s["rsi_14"]),
+            macd_histogram=float(s["macd_histogram"]),
+            bb_percent_b=float(s["bb_percent_b"]),
+            atr_pct=float(s["atr_pct"]),
+            adx_14=float(s["adx_14"]),
+            vwap_distance=float(s["vwap_distance"]),
+            volume_ratio=float(s["volume_ratio"]),
+            momentum_30m=float(s["momentum_30m"]),
+            momentum_1d=float(s["momentum_1d"]),
             signal=signal,
             conviction=conviction,
             net_score=net_score,

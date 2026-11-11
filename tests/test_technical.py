@@ -3,9 +3,7 @@ import math
 import pytest
 from pydantic import ValidationError
 
-import argus.agents.technical as technical_module
 from argus.agents.technical import TechnicalStatisticalAgent
-from argus.schemas import signals as signals_module
 from argus.schemas.signals import Signal
 
 
@@ -32,11 +30,6 @@ def _complete_state(**overrides: float) -> dict:
     }
     base.update(overrides)
     return base
-
-
-def test_required_indicator_keys_is_the_shared_schema_contract():
-    """technical.py's frozenset is the same object as the schema's, not a copy that can drift."""
-    assert technical_module._REQUIRED_INDICATOR_KEYS is signals_module.SESSION_STATE_REQUIRED_KEYS
 
 
 def test_bullish_signal(agent: TechnicalStatisticalAgent) -> None:
