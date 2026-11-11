@@ -504,7 +504,7 @@ class AggregatedSignal(BaseModel):
         description=(
             "Agent name → weighted vote value used in aggregation. "
             "Keys include 'technical', 'fundamental', 'sentiment'. Consumed "
-            "by orchestration/reconciliation.py's leave-one-out credit assignment."
+            "by orchestration/attribution.py's leave-one-out credit assignment."
         ),
     )
     agents_present: list[str] = Field(
@@ -520,7 +520,7 @@ class AggregatedSignal(BaseModel):
         description=(
             "Agent name → per-regime historical win rate used to scale that agent's "
             "vote weight at aggregation time (see HybridSignalAggregator.aggregate's "
-            "reliability parameter). Persisted so orchestration/reconciliation.py's "
+            "reliability parameter). Persisted so orchestration/attribution.py's "
             "leave-one-out ablation can replay the same weighting the baseline used, "
             "instead of silently resetting every ablated rerun to the 1.0 unweighted default."
         ),

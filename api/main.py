@@ -60,13 +60,10 @@ from argus.governor import (
 from argus.infra.clock import now_local, now_market
 from argus.infra.log import configure_logging
 from argus.memory.cultural import get_cultural_memory
-from argus.orchestration.collector import (
-    CollectionResult,
-    append_decisions_jsonl,
-    run_collection_cycle,
-)
+from argus.orchestration.collector import CollectionResult, run_collection_cycle
+from argus.orchestration.decision_log import append_decisions_jsonl
 from argus.orchestration.graph import build_graph
-from argus.orchestration.reconciliation import run_reconciliation_pass
+from argus.orchestration.reconcile import run_reconciliation_pass
 from argus.orchestration.state import initial_state
 from argus.params import SYSTEM
 from argus.risk import paper_book
@@ -216,20 +213,8 @@ def _reconcile_once() -> None:
         decisions_log_path=str(settings.data_path("decisions.jsonl")),
         checkpoint_db_path=str(settings.data_path("argus_graph.db")),
     )
-    logger.info("stored %d/%d outcome(s)", report.outcomes_stored, report.decisions_loaded)
-    # Zeroed-out defaults rather than real values unless the paper-book step ran
-    if report.paper_book_updated:
-        logger.info("equity=$%.2f (drawdown=%.1f%%)", report.equity, report.drawdown * 100)
-    if report.decisions_compacted is not None:
-        logger.info("decisions.jsonl compacted: %d retained", report.decisions_compacted)
-    if report.decisions_retired_unresolved:
-        logger.info(
-            "retired %d decision(s) as permanently unresolved",
-            report.decisions_retired_unresolved,
-        )
-    if report.checkpoints_pruned is not None:
-        logger.info("checkpoint threads pruned: %d", report.checkpoints_pruned)
-    logger.info("PENDING snapshots expired: %d", report.pending_snapshots_expired)
+    for line in report.summary_lines():
+        logger.info("%s", line)
     for error in report.errors:
         logger.error("%s", error)
 

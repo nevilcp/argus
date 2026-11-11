@@ -117,7 +117,7 @@ class ARGUSState(TypedDict):
     """List of completed ARGUSDecision snapshots for this session, written once
     by log_decisions and persisted into the LangGraph checkpoint
     (argus_graph.db). Single writer, no reducer: readable later by
-    orchestration/reconciliation.py's load_decisions_from_checkpoints(), which
+    orchestration/decision_log.py's load_decisions_from_checkpoints(), which
     keeps each thread's own checkpointed list rather than expecting one to
     accumulate across nodes."""
 

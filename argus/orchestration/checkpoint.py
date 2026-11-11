@@ -10,10 +10,10 @@ Responsibilities:
   - CheckpointedGraph: compiles the DAG with a fresh connection on every invoke()
   - open_saver: a SqliteSaver over an existing database, closed on exit
   - newest_checkpoint_per_thread: each thread's most recent checkpoint
-  - prune_checkpoints / default_checkpoint_retention_cutoff: bound the database
+  - prune_checkpoints / retention_cutoff: bound the database
 
 Not responsible for:
-  - Reading decisions out of checkpoints (see orchestration/reconciliation.py)
+  - Reading decisions out of checkpoints (see orchestration/decision_log.py)
   - Building the DAG itself (see orchestration/graph.py)
 
 Dependencies:
@@ -151,16 +151,22 @@ def newest_checkpoint_per_thread(saver: SqliteSaver) -> Iterator[tuple[str, Chec
         yield thread_id, tup.checkpoint
 
 
-def default_checkpoint_retention_cutoff() -> datetime:
-    """The prune_checkpoints cutoff at RECONCILIATION's declared default horizon.
+def retention_cutoff(horizon_days: int = RECONCILIATION.horizon_days) -> datetime:
+    """The cutoff before which a reconciled decision, checkpoint or snapshot may be pruned.
 
-    Shared by collector.py's per-cycle pruning and reconciliation.py's
-    run_reconciliation_pass (whenever its horizon_days is left at the default), so
-    the two prune paths can't silently drift onto different windows.
+    One definition for every store that is bounded on the reconciliation window:
+    collector.py's per-cycle pruning calls it with the default horizon, and
+    reconcile.py's run_reconciliation_pass with the horizon it was given, so
+    the prune paths can't silently drift onto different windows.
+
+    Args:
+        horizon_days: Calendar days after a decision's session_timestamp at
+            which its outcome is scored.
+
+    Returns:
+        The naive local-time cutoff, ``horizon_days`` plus the retention margin ago.
     """
-    return now_local() - timedelta(
-        days=RECONCILIATION.horizon_days + RECONCILIATION.retention_margin_days
-    )
+    return now_local() - timedelta(days=horizon_days + RECONCILIATION.retention_margin_days)
 
 
 def prune_checkpoints(db_path: str, cutoff: datetime) -> int:

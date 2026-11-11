@@ -83,7 +83,7 @@ see the notes under each entry.
   (`argus/memory/cultural.py`) that stores trade outcomes and decision snapshots, and
   retrieves regime-scoped historical wisdom and warnings for the portfolio agent.
 
-- **Reconciliation** — the slow-clock pass (`argus/orchestration/reconciliation.py`,
+- **Reconciliation** — the slow-clock pass (`argus/orchestration/reconcile.py`,
   composed as `run_reconciliation_pass`) that closes the decision-to-outcome loop:
   computing realized returns, assigning per-agent credit via leave-one-out ablation,
   persisting trade outcomes into cultural memory, compounding matured runs onto the

@@ -85,7 +85,7 @@ def build_graph(
             Groq client.
         checkpoint_db_path: SQLite file each invocation checkpoints ARGUSState
             to. Exposed (rather than hardcoded) so tests — and
-            argus/orchestration/reconciliation.py's own tests — can point it
+            argus/orchestration/reconcile.py's own tests — can point it
             at a temp file instead of the real store production callers use.
             None (default) resolves to ``<ARGUS_DATA_DIR>/argus_graph.db`` at
             call time, so tests/conftest.py's per-test ARGUS_DATA_DIR override

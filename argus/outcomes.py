@@ -10,7 +10,7 @@ Responsibilities:
   - close_prices: a per-call memo so each ticker's price history is fetched once
 
 Not responsible for:
-  - Storing outcomes or crediting an agent (see orchestration/reconciliation.py)
+  - Storing outcomes or crediting an agent (see orchestration/reconcile.py)
   - The paper equity curve (see risk/paper_book.py)
   - Evaluation statistics (see backtesting/evaluation.py)
 

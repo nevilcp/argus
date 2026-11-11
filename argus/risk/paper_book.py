@@ -25,7 +25,7 @@ Responsibilities:
 
 Not responsible for:
   - Reconciling individual decisions into cultural memory (see
-    orchestration/reconciliation.py, which calls into this module)
+    orchestration/reconcile.py, which calls into this module)
   - Deciding when the kill switch halts (see risk/kill_switch.py)
 """
 

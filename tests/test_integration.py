@@ -32,7 +32,7 @@ from argus.data.pipeline import MFTDataPipeline
 from argus.governor import BOOTSTRAP_LIMITS, REGISTERED_MODELS, governor
 from argus.memory.cultural import CulturalMemoryManager
 from argus.orchestration.graph import build_graph
-from argus.orchestration.reconciliation import reconcile_decision
+from argus.orchestration.reconcile import reconcile_decision
 from argus.orchestration.state import ARGUSState
 from argus.schemas.signals import (
     ARGUSDecision,

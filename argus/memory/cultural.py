@@ -16,7 +16,7 @@ Responsibilities:
 Not responsible for:
   - Real-time signal generation (see agents/)
   - Credit assignment / primary_driver computation (see
-    orchestration/reconciliation.py)
+    orchestration/reconcile.py)
   - Portfolio allocation (see agents/portfolio.py)
 
 Dependencies:
@@ -172,7 +172,7 @@ class CulturalMemoryManager:
 
         A single batched ``get`` rather than one existence check per decision,
         so a caller reconciling a growing history of decisions (see
-        orchestration/reconciliation.py) can filter its work list down to
+        orchestration/reconcile.py) can filter its work list down to
         unreconciled decisions before touching market data at all.
 
         Args:
@@ -211,7 +211,7 @@ class CulturalMemoryManager:
             exit_reason: Free-text description of the exit trigger.
             primary_driver: Agent name ('technical'/'fundamental'/'sentiment'/'unknown')
                 credited via leave-one-out ablation
-                (see argus/orchestration/reconciliation.py:credit_primary_driver).
+                (see argus/orchestration/attribution.py:credit_primary_driver).
                 Signal arbitration is this method's caller's job, not this
                 module's — see its docstring's "Not responsible for" list.
         """
