@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from argus.agents.portfolio import PortfolioManagerAgent
 from argus.governor import RateLimitExceeded
+from argus.infra.diagnostics import Diagnostics
 from argus.params import PORTFOLIO, SYSTEM
 from argus.schemas.signals import (
     PortfolioAllocation,
@@ -121,7 +122,7 @@ def test_allocate_enforces_caps_vetoes_and_fabrications_in_code():
 
     The over-cap allocation is clamped, the VETO'd ticker is zeroed-not-dropped, and
     the fabricated ticker absent from snapshots is dropped — each producing an
-    adjustments entry rather than validating silently.
+    diagnostics entry rather than validating silently.
     """
     snapshots = _approved("OVER_CAP")
     snapshots["VETOED"] = TickerSnapshot(
@@ -137,12 +138,12 @@ def test_allocate_enforces_caps_vetoes_and_fabrications_in_code():
     )
 
     agent = PortfolioManagerAgent(llm_client=llm_client)
-    adjustments: list[str] = []
+    diagnostics = Diagnostics()
     alloc = agent.allocate(
         user_profile=user_profile(),
         snapshots=snapshots,
         macro=None,
-        adjustments=adjustments,
+        diagnostics=diagnostics,
     )
 
     assert alloc is not None
@@ -153,14 +154,16 @@ def test_allocate_enforces_caps_vetoes_and_fabrications_in_code():
     assert "FABRICATED" not in positions
 
     assert any(
-        "clamped OVER_CAP allocation from 0.1500 to risk cap 0.1000" in a for a in adjustments
+        "clamped OVER_CAP allocation from 0.1500 to risk cap 0.1000" in a
+        for a in diagnostics.messages
     )
-    assert any("zeroed VETOED allocation (risk verdict VETO)" in a for a in adjustments)
-    assert any("dropped FABRICATED" in a for a in adjustments)
+    assert any("zeroed VETOED allocation (risk verdict VETO)" in a for a in diagnostics.messages)
+    assert any("dropped FABRICATED" in a for a in diagnostics.messages)
     assert any(
-        "cash_reserve_pct forced to residual 0.9000 (LLM proposed 0.5000)" in a for a in adjustments
+        "cash_reserve_pct forced to residual 0.9000 (LLM proposed 0.5000)" in a
+        for a in diagnostics.messages
     )
-    assert len(adjustments) == 4
+    assert len(diagnostics.messages) == 4
 
 
 def test_allocate_names_the_json_parse_stage_on_exhausted_retries(monkeypatch):
@@ -169,16 +172,16 @@ def test_allocate_names_the_json_parse_stage_on_exhausted_retries(monkeypatch):
     llm_client = FixtureLLMClient({"only": "not valid json"}, key_fn=lambda _prompt: "only")
 
     agent = PortfolioManagerAgent(llm_client=llm_client)
-    adjustments: list[str] = []
+    diagnostics = Diagnostics()
     alloc = agent.allocate(
         user_profile=user_profile(),
         snapshots=_approved("OVER_CAP"),
         macro=None,
-        adjustments=adjustments,
+        diagnostics=diagnostics,
     )
 
     assert alloc is None
-    assert any("json_parse" in a for a in adjustments)
+    assert any("json_parse" in a for a in diagnostics.messages)
 
 
 def test_allocate_names_the_schema_validation_stage_on_exhausted_retries(monkeypatch):
@@ -193,16 +196,16 @@ def test_allocate_names_the_schema_validation_stage_on_exhausted_retries(monkeyp
     )
 
     agent = PortfolioManagerAgent(llm_client=llm_client)
-    adjustments: list[str] = []
+    diagnostics = Diagnostics()
     alloc = agent.allocate(
         user_profile=user_profile(),
         snapshots=_approved("OVER_CAP"),
         macro=None,
-        adjustments=adjustments,
+        diagnostics=diagnostics,
     )
 
     assert alloc is None
-    assert any("schema_validation" in a for a in adjustments)
+    assert any("schema_validation" in a for a in diagnostics.messages)
 
 
 def test_allocation_pct_cap_matches_system_max_single_position_pct():
@@ -314,17 +317,17 @@ def test_allocate_without_positive_total_wealth_returns_none_and_records_it(tota
     """
     llm = _CapturingLLMClient({})
     agent = PortfolioManagerAgent(llm_client=llm)
-    adjustments: list[str] = []
+    diagnostics = Diagnostics()
     profile = {**user_profile(), "total_wealth": total_wealth}
 
     for snapshots in (_approved("AAPL"), {}):
-        adjustments.clear()
+        diagnostics.messages.clear()
         alloc = agent.allocate(
-            user_profile=profile, snapshots=snapshots, macro=None, adjustments=adjustments
+            user_profile=profile, snapshots=snapshots, macro=None, diagnostics=diagnostics
         )
 
         assert alloc is None
-        assert len(adjustments) == 1
-        assert adjustments[0].startswith("portfolio_allocation:")
-        assert "total_wealth" in adjustments[0]
+        assert len(diagnostics.messages) == 1
+        assert diagnostics.messages[0].startswith("portfolio_allocation:")
+        assert "total_wealth" in diagnostics.messages[0]
     assert llm.last_prompt is None

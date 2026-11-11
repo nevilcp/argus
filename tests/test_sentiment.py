@@ -9,6 +9,7 @@ from argus.agents.sentiment import (
     aggregate_finbert_scores,
 )
 from argus.governor import RateLimitExceeded
+from argus.infra.diagnostics import Diagnostics
 from argus.schemas.prompting import UNTRUSTED_GUARD
 from tests.helpers.market_data import FakeMarketData
 
@@ -89,13 +90,13 @@ def test_analyze_degrades_the_ticker_on_governor_exhaustion_without_retrying(mon
     llm = _RateLimitedLLMClient()
     agent = SentimentAgent(llm_client=llm, market_data=market_data)
 
-    errors: list[str] = []
-    signal = agent.analyze("AAPL", errors=errors)
+    diagnostics = Diagnostics()
+    signal = agent.analyze("AAPL", diagnostics=diagnostics)
 
     assert signal is None
     assert llm.calls == 1
-    assert len(errors) == 1
-    assert "rate limited" in errors[0]
+    assert len(diagnostics.messages) == 1
+    assert "rate limited" in diagnostics.messages[0]
 
 
 def test_analyze_degrades_the_ticker_without_repairing_a_bad_response(monkeypatch):
@@ -107,11 +108,11 @@ def test_analyze_degrades_the_ticker_without_repairing_a_bad_response(monkeypatc
     llm = _RecordingLLMClient("not json")
     agent = SentimentAgent(llm_client=llm, market_data=market_data)
 
-    errors: list[str] = []
-    signal = agent.analyze("AAPL", errors=errors)
+    diagnostics = Diagnostics()
+    signal = agent.analyze("AAPL", diagnostics=diagnostics)
 
     assert signal is None
-    assert len(errors) == 1
+    assert len(diagnostics.messages) == 1
     assert "Your previous response was invalid" not in llm.last_user_prompt
 
 
@@ -255,10 +256,10 @@ def test_batch_analyze_tolerates_a_single_ticker_raising(monkeypatch):
     agent = SentimentAgent(llm_client=llm, market_data=market_data)
     original_analyze = agent.analyze
 
-    def flaky_analyze(ticker, company_name=None, errors=None):
+    def flaky_analyze(ticker, company_name=None, diagnostics=None):
         if ticker == "MSFT":
             raise RuntimeError("boom")
-        return original_analyze(ticker, company_name=company_name, errors=errors)
+        return original_analyze(ticker, company_name=company_name, diagnostics=diagnostics)
 
     monkeypatch.setattr(agent, "analyze", flaky_analyze)
 

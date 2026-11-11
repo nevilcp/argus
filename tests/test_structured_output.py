@@ -1,8 +1,9 @@
 """Tests argus/structured_output.py's decode() function.
 
-Covers fence-stripping, the retry/repair loop, and typed-error reporting.
-No agent is wired onto this decoder yet, so these tests exercise it
-directly against a mocked LLMClient rather than through any agent.
+Covers fence-stripping, the retry/repair loop, typed-error reporting, and
+decode_or_degrade()'s mapping of each failure to a diagnostics note. These
+tests exercise the decoder directly against a mocked LLMClient rather than
+through any agent.
 """
 
 import json
@@ -12,10 +13,16 @@ import pytest
 from pydantic import BaseModel
 
 from argus.governor import RateLimitExceeded, UnregisteredModel
+from argus.infra.diagnostics import Diagnostics
 from argus.params import STRUCTURED_OUTPUT
 from argus.ports import RetryableTransportError
 from argus.seams import FixtureLLMClient
-from argus.structured_output import StructuredOutputError, _strip_markdown_fence, decode
+from argus.structured_output import (
+    StructuredOutputError,
+    _strip_markdown_fence,
+    decode,
+    decode_or_degrade,
+)
 from tests.helpers.paths import FIXTURES_DIR
 
 VALID_JSON = '{"signal": "NEUTRAL", "conviction": 0.3}'
@@ -315,6 +322,101 @@ def test_decode_propagates_unregistered_model_without_retry():
         decode(llm, "system", "user", _Verdict, repair=False)
 
     assert llm.complete.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# decode_or_degrade(): every failure becomes a note and None
+# ---------------------------------------------------------------------------
+
+
+def test_decode_or_degrade_returns_the_decoded_object_and_records_nothing():
+    """A clean decode returns the model and leaves the diagnostics empty."""
+    diagnostics = Diagnostics()
+
+    result = decode_or_degrade(
+        _mock_llm(VALID_JSON),
+        "system",
+        "user",
+        _Verdict,
+        repair=False,
+        diagnostics=diagnostics,
+        label="x[T]",
+    )
+
+    assert result == _Verdict(signal="NEUTRAL", conviction=0.3)
+    assert diagnostics.messages == []
+
+
+def test_decode_or_degrade_notes_an_exhausted_decode():
+    """A StructuredOutputError becomes a "<label>: <error>" note at the requested level."""
+    diagnostics = Diagnostics()
+
+    with mock.patch("argus.structured_output.time.sleep"):
+        result = decode_or_degrade(
+            _mock_llm(*["not json"] * STRUCTURED_OUTPUT.max_attempts),
+            "system",
+            "user",
+            _Verdict,
+            repair=False,
+            diagnostics=diagnostics,
+            label="x[T]",
+        )
+
+    assert result is None
+    assert len(diagnostics.messages) == 1
+    assert diagnostics.messages[0].startswith("x[T]: json_parse failed after")
+
+
+def test_decode_or_degrade_notes_a_governor_rejection():
+    """RateLimitExceeded is noted as "rate limited" and not retried."""
+    diagnostics = Diagnostics()
+    llm = _mock_llm(RateLimitExceeded("budget gone"))
+
+    result = decode_or_degrade(
+        llm, "system", "user", _Verdict, repair=False, diagnostics=diagnostics, label="x[T]"
+    )
+
+    assert result is None
+    assert llm.complete.call_count == 1
+    assert diagnostics.messages == ["x[T]: rate limited: budget gone"]
+
+
+def test_decode_or_degrade_reraises_the_governor_when_asked():
+    """With reraise_governor, a governor rejection propagates and nothing is recorded."""
+    diagnostics = Diagnostics()
+
+    with pytest.raises(UnregisteredModel):
+        decode_or_degrade(
+            _mock_llm(UnregisteredModel("no profile")),
+            "system",
+            "user",
+            _Verdict,
+            repair=False,
+            diagnostics=diagnostics,
+            label="x",
+            reraise_governor=True,
+        )
+
+    assert diagnostics.messages == []
+
+
+def test_decode_or_degrade_notes_an_unclassified_error_with_the_given_wording():
+    """Any other exception becomes a note using api_error_text."""
+    diagnostics = Diagnostics()
+
+    result = decode_or_degrade(
+        _mock_llm(RuntimeError("boom")),
+        "system",
+        "user",
+        _Verdict,
+        repair=False,
+        diagnostics=diagnostics,
+        label="x",
+        api_error_text="Custom API error",
+    )
+
+    assert result is None
+    assert diagnostics.messages == ["x: Custom API error: boom"]
 
 
 # ---------------------------------------------------------------------------

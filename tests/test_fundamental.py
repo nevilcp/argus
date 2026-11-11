@@ -9,6 +9,8 @@ from argus.agents.fundamental import (
     anonymize_ticker,
     build_compact_prompt,
 )
+from argus.governor import RateLimitExceeded
+from argus.infra.diagnostics import Diagnostics
 from argus.seams import FixtureLLMClient
 from tests.helpers.market_data import FakeMarketData
 
@@ -185,18 +187,18 @@ def test_analyze_degrades_the_ticker_on_governor_exhaustion_without_retrying():
 
         def complete(self, system_prompt: str, user_prompt: str) -> str:
             self.calls += 1
-            raise fundamental_module.RateLimitExceeded("gpt-oss-120b quota exhausted")
+            raise RateLimitExceeded("gpt-oss-120b quota exhausted")
 
     llm = _RateLimitedLLMClient()
     agent = FundamentalAgent(llm_client=llm, market_data=market_data)
 
-    errors: list[str] = []
-    signal = agent.analyze("AAPL", errors=errors)
+    diagnostics = Diagnostics()
+    signal = agent.analyze("AAPL", diagnostics=diagnostics)
 
     assert signal is None
     assert llm.calls == 1
-    assert len(errors) == 1
-    assert "rate limited" in errors[0]
+    assert len(diagnostics.messages) == 1
+    assert "rate limited" in diagnostics.messages[0]
 
 
 def test_analyze_degrades_the_ticker_when_measured_data_fails_signal_validation():
@@ -210,12 +212,12 @@ def test_analyze_degrades_the_ticker_when_measured_data_fails_signal_validation(
     llm = _RecordingLLMClient(_VALID_LLM_RESPONSE)
     agent = FundamentalAgent(llm_client=llm, market_data=market_data)
 
-    errors: list[str] = []
-    signal = agent.analyze("AAPL", errors=errors)
+    diagnostics = Diagnostics()
+    signal = agent.analyze("AAPL", diagnostics=diagnostics)
 
     assert signal is None
-    assert len(errors) == 1
-    assert "failed validation" in errors[0]
+    assert len(diagnostics.messages) == 1
+    assert "failed validation" in diagnostics.messages[0]
 
 
 def test_analyze_does_not_skip_every_ticker_at_a_low_configured_rpm(monkeypatch):
@@ -230,11 +232,11 @@ def test_analyze_does_not_skip_every_ticker_at_a_low_configured_rpm(monkeypatch)
     llm = FixtureLLMClient({"only": _VALID_LLM_RESPONSE}, key_fn=lambda _p: "only", capacity=10)
     agent = FundamentalAgent(llm_client=llm, market_data=market_data)
 
-    errors: list[str] = []
-    signal = agent.analyze("AAPL", errors=errors)
+    diagnostics = Diagnostics()
+    signal = agent.analyze("AAPL", diagnostics=diagnostics)
 
     assert signal is not None
-    assert errors == []
+    assert diagnostics.messages == []
 
 
 def test_analyze_skips_the_ticker_and_makes_no_calls_when_capacity_is_low():
@@ -252,9 +254,9 @@ def test_analyze_skips_the_ticker_and_makes_no_calls_when_capacity_is_low():
     llm = FixtureLLMClient({}, capacity=0)
     agent = FundamentalAgent(llm_client=llm, market_data=_ExplodingMarketData())
 
-    errors: list[str] = []
-    signal = agent.analyze("AAPL", errors=errors)
+    diagnostics = Diagnostics()
+    signal = agent.analyze("AAPL", diagnostics=diagnostics)
 
     assert signal is None
-    assert len(errors) == 1
-    assert "capacity too low" in errors[0]
+    assert len(diagnostics.messages) == 1
+    assert "capacity too low" in diagnostics.messages[0]

@@ -248,7 +248,7 @@ class Settings(BaseSettings):
 
     TECHNICAL_INDICATOR_WEIGHTS: dict[str, float] = asdict(_TECHNICAL_WEIGHTS)
 
-    # Portfolio hard limits enforced by RiskStatisticalEngine.
+    # Portfolio hard limits enforced by RiskStatisticalAgent.
     MAX_SINGLE_POSITION_PCT: float = SYSTEM.max_single_position_pct
     MAX_SECTOR_CONCENTRATION: float = SYSTEM.max_sector_concentration
     MAX_PORTFOLIO_BETA: float = SYSTEM.max_portfolio_beta

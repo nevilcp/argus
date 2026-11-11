@@ -78,7 +78,7 @@ flowchart TD
         subgraph PARALLEL2["Parallel Fan-Out"]
             direction LR
             N5["node: retrieve_cultural_memory<br/>ChromaDB vault<br/>Runs after aggregation — queries on<br/>this session's own aggregated signals<br/>Retrieve past wisdom and warnings<br/>scoped by macro regime"]
-            N7["node: risk_evaluation<br/>RiskStatisticalEngine<br/>VaR · CVaR · Beta · SLSQP optimizer<br/>Portfolio covariance from daily price_history<br/>Half-Kelly sizing · VIX scaling"]
+            N7["node: risk_evaluation<br/>RiskStatisticalAgent<br/>VaR · CVaR · Beta · SLSQP optimizer<br/>Portfolio covariance from daily price_history<br/>Half-Kelly sizing · VIX scaling"]
         end
 
         N8["node: portfolio_allocation<br/>PortfolioManagerAgent<br/>gpt-oss-120b<br/>Half-Kelly sizing · Pydantic-validated output<br/>Cultural wisdom injected<br/>Degrades gracefully if macro unavailable"]
@@ -303,7 +303,7 @@ deployment reachable outside a trusted network must set both before going live.
 
 ### Risk Limits
 
-Enforced by `RiskStatisticalEngine`; see `argus/params.py` for provenance.
+Enforced by `RiskStatisticalAgent`; see `argus/params.py` for provenance.
 
 | Variable | Default | Description |
 |----------|---------|-------------|

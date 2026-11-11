@@ -19,14 +19,13 @@ Dependencies:
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
 from uuid import uuid4
 
 import numpy as np
 
 from argus.config import settings
-from argus.governor import RateLimitExceeded, UnregisteredModel
 from argus.infra.clock import now_local
+from argus.infra.diagnostics import Diagnostics
 from argus.params import AGGREGATOR, PORTFOLIO
 from argus.ports import LLMClient
 from argus.schemas.prompting import UNTRUSTED_GUARD, schema_block, wrap_untrusted
@@ -37,8 +36,8 @@ from argus.schemas.signals import (
     Signal,
     TickerSnapshot,
 )
-from argus.seams import GroqLLMClient
-from argus.structured_output import StructuredOutputError, decode
+from argus.seams import default_groq_client
+from argus.structured_output import decode_or_degrade
 
 logger = logging.getLogger(__name__)
 
@@ -200,17 +199,11 @@ class PortfolioManagerAgent:
         Args:
             llm_client: LLM backend; defaults to a Groq-backed client.
         """
-        if llm_client is None:
-            api_key = settings.groq_api_key
-            if not api_key:
-                logger.warning("GROQ_API_KEY is not set — LLM calls will fail at invocation time.")
-            llm_client = GroqLLMClient(
-                model=settings.ARGUS_PORTFOLIO_MODEL,
-                temperature=PORTFOLIO.llm_temperature,
-                max_tokens=PORTFOLIO.llm_max_tokens,
-                api_key=api_key,
-            )
-        self.llm_client = llm_client
+        self.llm_client = llm_client or default_groq_client(
+            settings.ARGUS_PORTFOLIO_MODEL,
+            PORTFOLIO.llm_temperature,
+            PORTFOLIO.llm_max_tokens,
+        )
         self._session_count = 0
         self.max_position_pct = settings.MAX_SINGLE_POSITION_PCT
 
@@ -221,7 +214,7 @@ class PortfolioManagerAgent:
         macro: MacroContext | None,
         cultural_wisdom: list[str] | None = None,
         cultural_warnings: list[str] | None = None,
-        adjustments: list[str] | None = None,
+        diagnostics: Diagnostics | None = None,
     ) -> PortfolioAllocation | None:
         """Aggregates all specialist agent verdicts to construct a consolidated PortfolioAllocation.
 
@@ -239,15 +232,16 @@ class PortfolioManagerAgent:
             cultural_wisdom: Optional list of historical wisdom strings from cultural memory.
             cultural_warnings: Optional list of failed-trade pattern strings from
                 cultural memory, scoped to the current macro regime.
-            adjustments: Optional list that receives one human-readable entry per
-                clamped, zeroed, or dropped position, and one when the cash
-                reserve was forced to its residual value — the caller's record of
-                where the LLM's proposal disagreed with risk enforcement. Also
-                receives one entry naming which stage failed if allocation
-                ultimately fails: the decoder's ``json_parse``/``schema_validation``
-                stage when the proposal itself never decoded, or the agent's own
+            diagnostics: Receives one human-readable entry per clamped, zeroed,
+                or dropped position, and one when the cash reserve was forced to
+                its residual value — the caller's record of where the LLM's
+                proposal disagreed with risk enforcement. Also receives one
+                entry naming which stage failed if allocation ultimately fails:
+                the decoder's ``json_parse``/``schema_validation`` stage when
+                the proposal itself never decoded, or the agent's own
                 ``response_enforcement``/``schema_validation`` stage when risk
                 enforcement or the final PortfolioAllocation build failed.
+                Defaults to a throwaway collector.
 
         Returns:
             A validated PortfolioAllocation, all-cash if no tickers are approved, or None
@@ -257,24 +251,11 @@ class PortfolioManagerAgent:
             RateLimitExceeded: If the governor's rate budget is exhausted for this
                 model. Unlike fundamental/sentiment, there is no per-ticker fallback
                 to degrade to, so this propagates to the caller rather than being
-                swallowed into ``adjustments``.
+                swallowed into ``diagnostics``.
             UnregisteredModel: If the configured model has no rate-limit profile.
         """
 
-        def record(msg: str, level: str = "warning") -> None:
-            """Logs one enforcement or failure note and mirrors it into ``adjustments``.
-
-            Args:
-                msg: Human-readable note, already prefixed with ``portfolio_allocation:``.
-                level: ``"warning"`` for enforcement adjustments, ``"error"`` for the
-                    failure paths that return None.
-            """
-            if level == "error":
-                logger.error("%s", msg)
-            else:
-                logger.warning(msg)
-            if adjustments is not None:
-                adjustments.append(msg)
+        diagnostics = diagnostics or Diagnostics()
 
         total_wealth = user_profile.get("total_wealth")
         # Capital base is total wealth; invest_pct (RULE 3) is applied once by the LLM, not pre-scaled here.
@@ -283,7 +264,7 @@ class PortfolioManagerAgent:
         if investable <= 0:
             # PortfolioAllocation requires positive capital, so even the all-cash
             # fallback would raise a ValidationError out of allocate() here.
-            record(
+            diagnostics.record(
                 "portfolio_allocation: total_wealth missing or not positive "
                 f"({total_wealth!r}); cannot build an allocation",
                 "error",
@@ -316,29 +297,31 @@ class PortfolioManagerAgent:
             cultural_warnings=cultural_warnings,
         )
 
-        try:
-            proposal = decode(
-                self.llm_client, SYSTEM_PROMPT, prompt, PortfolioProposal, repair=False
-            )
-        except StructuredOutputError as e:
-            record(f"portfolio_allocation: {e}", "error")
-            return None
-        except RateLimitExceeded, UnregisteredModel:
+        proposal = decode_or_degrade(
+            self.llm_client,
+            SYSTEM_PROMPT,
+            prompt,
+            PortfolioProposal,
+            repair=False,
+            diagnostics=diagnostics,
+            label="portfolio_allocation",
             # No per-ticker fallback here; propagate so the API layer surfaces a 429/503, not a generic 500.
-            raise
-        except Exception as e:
-            record(f"portfolio_allocation: PortfolioManagerAgent API error: {e}", "error")
+            reraise_governor=True,
+            decode_level="error",
+            api_error_text="PortfolioManagerAgent API error",
+        )
+        if proposal is None:
             return None
 
         stage = "response_enforcement"
         try:
-            enforced_portfolio = self._enforce_risk(proposal, snapshots, investable, record)
+            enforced_portfolio = self._enforce_risk(proposal, snapshots, investable, diagnostics)
 
             # Force residual exact and clamp to the schema floor (PA-4) rather than let model_validate 500.
             total_equity = sum(p["allocation_pct"] for p in enforced_portfolio)
             cash_reserve_pct = round(max(PORTFOLIO.cash_reserve_floor_pct, 1.0 - total_equity), 6)
             if abs(cash_reserve_pct - proposal.cash_reserve_pct) > 1e-6:
-                record(
+                diagnostics.record(
                     "portfolio_allocation: cash_reserve_pct forced to residual "
                     f"{cash_reserve_pct:.4f} (LLM proposed {proposal.cash_reserve_pct:.4f})"
                 )
@@ -355,7 +338,9 @@ class PortfolioManagerAgent:
             stage = "schema_validation"
             allocation = PortfolioAllocation.model_validate(data)
         except Exception as e:
-            record(f"portfolio_allocation: PortfolioManagerAgent failed at {stage}: {e}", "error")
+            diagnostics.record(
+                f"portfolio_allocation: PortfolioManagerAgent failed at {stage}: {e}", "error"
+            )
             return None
 
         self._session_count += 1
@@ -498,7 +483,7 @@ class PortfolioManagerAgent:
         proposal: PortfolioProposal,
         snapshots: dict[str, TickerSnapshot],
         investable: float,
-        record: Callable[[str], None],
+        diagnostics: Diagnostics,
     ) -> list[dict]:
         """Clamps, zeroes, or drops each proposed position against its risk verdict.
 
@@ -506,7 +491,7 @@ class PortfolioManagerAgent:
             proposal: The decoded LLM proposal.
             snapshots: Mapping of ticker → TickerSnapshot.
             investable: Total investable capital in USD, used to price each weight.
-            record: Callback logging one adjustment note per position it changed.
+            diagnostics: Receives one note per position it changed.
 
         Returns:
             One position dict per surviving proposed ticker, ready for
@@ -517,7 +502,7 @@ class PortfolioManagerAgent:
         for pos in proposal.portfolio:
             ticker = pos.ticker
             if ticker not in snapshots:
-                record(
+                diagnostics.record(
                     f"portfolio_allocation: dropped {ticker} "
                     "(not in this session's signal universe)"
                 )
@@ -530,7 +515,7 @@ class PortfolioManagerAgent:
             if not snap.risk_approved:
                 if proposed_pct:
                     verdict = risk.verdict.value if risk else "MISSING"
-                    record(
+                    diagnostics.record(
                         f"portfolio_allocation: zeroed {ticker} allocation (risk verdict {verdict})"
                     )
                 pos_data["allocation_pct"] = 0.0
@@ -538,7 +523,7 @@ class PortfolioManagerAgent:
                 assert risk is not None  # snap.risk_approved guarantees this
                 cap = risk.approved_weight
                 if proposed_pct > cap + 1e-9:
-                    record(
+                    diagnostics.record(
                         f"portfolio_allocation: clamped {ticker} allocation from "
                         f"{proposed_pct:.4f} to risk cap {cap:.4f}"
                     )

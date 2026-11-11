@@ -102,7 +102,7 @@ class ARGUSState(TypedDict):
 
     # ── Node 4: risk_evaluation ───────────────────────────────────────────────
     risk_assessments: dict[str, RiskAssessment]
-    """Mapping of ticker → RiskAssessment from RiskStatisticalEngine."""
+    """Mapping of ticker → RiskAssessment from RiskStatisticalAgent."""
 
     # ── Node 5: signal_aggregation ────────────────────────────────────────────
     aggregated_signals: dict[str, AggregatedSignal]

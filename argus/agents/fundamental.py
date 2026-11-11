@@ -27,14 +27,14 @@ from pydantic import ValidationError
 
 from argus.config import settings
 from argus.data.cache import TTLCache
-from argus.governor import RateLimitExceeded, UnregisteredModel
 from argus.infra.clock import now_local
+from argus.infra.diagnostics import Diagnostics
 from argus.params import FUNDAMENTAL, STRUCTURED_OUTPUT
 from argus.ports import LLMClient, MarketDataProvider
 from argus.schemas.prompting import UNTRUSTED_GUARD, field_list, wrap_untrusted
 from argus.schemas.signals import UNKNOWN_SECTOR, FundamentalSignal, FundamentalVerdict
-from argus.seams import GroqLLMClient, LiveMarketDataProvider
-from argus.structured_output import StructuredOutputError, decode
+from argus.seams import LiveMarketDataProvider, default_groq_client
+from argus.structured_output import decode_or_degrade
 
 logger = logging.getLogger(__name__)
 
@@ -286,17 +286,11 @@ class FundamentalAgent:
             llm_client: LLM backend; defaults to a Groq-backed client.
             market_data: Provider for fundamentals lookups; defaults to live fetches.
         """
-        if llm_client is None:
-            api_key = settings.groq_api_key
-            if not api_key:
-                logger.warning("GROQ_API_KEY is not set — LLM calls will fail at invocation time.")
-            llm_client = GroqLLMClient(
-                model=settings.ARGUS_FUNDAMENTAL_MODEL,
-                temperature=STRUCTURED_OUTPUT.llm_temperature,
-                max_tokens=FUNDAMENTAL.max_tokens,
-                api_key=api_key,
-            )
-        self.llm_client = llm_client
+        self.llm_client = llm_client or default_groq_client(
+            settings.ARGUS_FUNDAMENTAL_MODEL,
+            STRUCTURED_OUTPUT.llm_temperature,
+            FUNDAMENTAL.max_tokens,
+        )
         self.market_data = market_data or LiveMarketDataProvider()
         # Keyed on (ticker, session_seed) so backtest sessions and live calls never share a cached signal.
         self.cache: TTLCache[tuple[str, int | None], FundamentalSignal] = TTLCache(
@@ -308,7 +302,7 @@ class FundamentalAgent:
         ticker: str,
         backtest_mode: bool = False,
         session_seed: int | None = None,
-        errors: list[str] | None = None,
+        diagnostics: Diagnostics | None = None,
     ) -> FundamentalSignal | None:
         """Audits fundamentals for a single ticker and returns a validated Pydantic signal.
 
@@ -322,34 +316,28 @@ class FundamentalAgent:
             backtest_mode: When True, anonymizes the ticker to prevent LLM parametric recall.
             session_seed: Integer date seed for deterministic anonymization; required when
                 backtest_mode is True.
-            errors: If given, a reason is appended here on every path that
-                returns None, so callers can surface the failure instead of
-                only logging it.
+            diagnostics: Receives a reason on every path that returns None, so
+                callers can surface the failure instead of only logging it.
+                Defaults to a throwaway collector.
 
         Returns:
             A validated FundamentalSignal, or None if decoding ultimately fails.
         """
+        diagnostics = diagnostics or Diagnostics()
+        label = f"fundamental_analysis[{ticker}]"
         cached = self.cache.get((ticker, session_seed))
         if cached:
             logger.debug("Cache hit for %s", ticker)
             return cached
 
         if not self._has_spare_capacity():
-            logger.warning(
-                "Low capacity for %s, skipping %s",
-                settings.ARGUS_FUNDAMENTAL_MODEL,
-                ticker,
-            )
-            if errors is not None:
-                errors.append(f"fundamental_analysis[{ticker}]: LLM capacity too low, skipped")
+            diagnostics.record(f"{label}: LLM capacity too low, skipped")
             return None
 
         try:
             fundamentals = self.market_data.fundamentals(ticker)
         except Exception as e:
-            logger.warning("Failed to fetch fundamentals for %s: %s", ticker, e)
-            if errors is not None:
-                errors.append(f"fundamental_analysis[{ticker}]: failed to fetch fundamentals: {e}")
+            diagnostics.record(f"{label}: failed to fetch fundamentals: {e}")
             return None
 
         as_of_date = date.today()  # noqa: DTZ011
@@ -365,25 +353,16 @@ class FundamentalAgent:
         }
         prompt = build_compact_prompt(ticker, pit_data, anon_id)
 
-        try:
-            verdict = decode(
-                self.llm_client, SYSTEM_PROMPT, prompt, FundamentalVerdict, repair=True
-            )
-        except StructuredOutputError as e:
-            logger.warning("Decode failed for %s: %s", ticker, e)
-            if errors is not None:
-                errors.append(f"fundamental_analysis[{ticker}]: {e}")
-            return None
-        except (RateLimitExceeded, UnregisteredModel) as e:
-            # Governor already exhausted its bounded wait; degrade this ticker rather than retry into it.
-            logger.warning("Governor rejected call for %s: %s", ticker, e)
-            if errors is not None:
-                errors.append(f"fundamental_analysis[{ticker}]: rate limited: {e}")
-            return None
-        except Exception as e:
-            logger.error("API error for %s: %s", ticker, e)
-            if errors is not None:
-                errors.append(f"fundamental_analysis[{ticker}]: API error: {e}")
+        verdict = decode_or_degrade(
+            self.llm_client,
+            SYSTEM_PROMPT,
+            prompt,
+            FundamentalVerdict,
+            repair=True,
+            diagnostics=diagnostics,
+            label=label,
+        )
+        if verdict is None:
             return None
 
         data = _signal_payload(verdict, ticker, pit_data)
@@ -392,11 +371,7 @@ class FundamentalAgent:
             signal = FundamentalSignal.model_validate(data)
         except ValidationError as e:
             # Merged measured data (e.g. negative debt_to_equity) can fail schema even after a clean decode.
-            logger.warning("Measured data failed signal validation for %s: %s", ticker, e)
-            if errors is not None:
-                errors.append(
-                    f"fundamental_analysis[{ticker}]: measured data failed validation: {e}"
-                )
+            diagnostics.record(f"{label}: measured data failed validation: {e}")
             return None
 
         self.cache.set((ticker, session_seed), signal)
@@ -431,9 +406,9 @@ class FundamentalAgent:
             omitted and why.
         """
         results = {}
-        errors: list[str] = []
+        diagnostics = Diagnostics()
         for ticker in tickers:
-            res = self.analyze(ticker, backtest_mode, session_seed, errors=errors)
+            res = self.analyze(ticker, backtest_mode, session_seed, diagnostics=diagnostics)
             if res is not None:
                 results[ticker] = res
-        return results, errors
+        return results, diagnostics.messages

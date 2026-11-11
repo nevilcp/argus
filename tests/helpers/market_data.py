@@ -52,6 +52,8 @@ class FakeMarketData:
         calls: How many times each method was called, keyed by method name.
     """
 
+    is_live = False
+
     def __init__(self, **responses: Any) -> None:
         """Stores the per-method responses.
 

@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 
 from argus.agents.risk import (
-    RiskStatisticalEngine,
+    RiskStatisticalAgent,
     avg_pairwise_correlation,
     compute_asset_returns,
     compute_portfolio_returns,
@@ -50,11 +50,11 @@ def price_history():
 
 @pytest.fixture
 def risk_engine():
-    """A fresh RiskStatisticalEngine instance."""
-    return RiskStatisticalEngine()
+    """A fresh RiskStatisticalAgent instance."""
+    return RiskStatisticalAgent()
 
 
-def test_vix_blackout(risk_engine: RiskStatisticalEngine, price_history: dict) -> None:
+def test_vix_blackout(risk_engine: RiskStatisticalAgent, price_history: dict) -> None:
     """VIX above the 35 blackout threshold vetoes the whole portfolio."""
     positions = [{"ticker": "AAPL", "weight": 0.1} for _ in range(5)]
     result = risk_engine.evaluate(positions, price_history, current_vix=40.0)
@@ -66,7 +66,7 @@ def test_vix_blackout(risk_engine: RiskStatisticalEngine, price_history: dict) -
     assert result.avg_correlation is None
 
 
-def test_overweight_position(risk_engine: RiskStatisticalEngine, price_history: dict) -> None:
+def test_overweight_position(risk_engine: RiskStatisticalAgent, price_history: dict) -> None:
     """A position above the 0.15 weight limit vetoes the portfolio."""
     positions = [
         {"ticker": "AAPL", "weight": 0.20},  # exceeds the 0.15 limit
@@ -81,7 +81,7 @@ def test_overweight_position(risk_engine: RiskStatisticalEngine, price_history: 
     assert any("weight" in r.lower() for r in result.veto_reasons)
 
 
-def test_high_var_reduce(risk_engine: RiskStatisticalEngine) -> None:
+def test_high_var_reduce(risk_engine: RiskStatisticalAgent) -> None:
     """Extreme volatility pushes VaR high enough to trigger REDUCE rather than VETO."""
     np.random.seed(42)
     tickers = ["AAPL", "MSFT", "GOOGL", "META", "AMZN"]
@@ -98,7 +98,7 @@ def test_high_var_reduce(risk_engine: RiskStatisticalEngine) -> None:
     assert result.var_99 > 0.03
 
 
-def test_approve_healthy_portfolio(risk_engine: RiskStatisticalEngine, price_history: dict) -> None:
+def test_approve_healthy_portfolio(risk_engine: RiskStatisticalAgent, price_history: dict) -> None:
     """A diversified, normally-weighted portfolio with normal vol is approved outright."""
     positions = [
         {"ticker": "AAPL", "weight": 0.1},
@@ -145,7 +145,7 @@ def test_slsqp_covariance_uses_unweighted_returns(price_history: dict) -> None:
     assert fixed_variance / buggy_variance == pytest.approx(1.0 / (weight**2), rel=0.05)
 
 
-def test_zero_api_calls(risk_engine: RiskStatisticalEngine, price_history: dict) -> None:
+def test_zero_api_calls(risk_engine: RiskStatisticalAgent, price_history: dict) -> None:
     """The risk engine evaluates purely statistically, never calling an LLM."""
     positions = [{"ticker": "AAPL", "weight": 0.1} for _ in range(5)]
     result = risk_engine.evaluate(positions, price_history, current_vix=40.0)
@@ -154,7 +154,7 @@ def test_zero_api_calls(risk_engine: RiskStatisticalEngine, price_history: dict)
 
 
 def test_small_universe_is_noted_not_vetoed(
-    risk_engine: RiskStatisticalEngine, price_history: dict
+    risk_engine: RiskStatisticalAgent, price_history: dict
 ) -> None:
     """Regression: a 2-4 ticker universe is informational, not a hard VETO.
 
@@ -177,7 +177,7 @@ def test_per_ticker_var_normalized_to_full_weight() -> None:
     the portfolio call — a stock volatile enough to clearly breach the limit at full
     weight passed the per-ticker gate outright.
     """
-    engine = RiskStatisticalEngine()
+    engine = RiskStatisticalAgent()
     np.random.seed(3)
     hist = {
         "AAPL": _random_prices(_TRADING_YEAR, 0.0, 0.05),
@@ -253,7 +253,7 @@ def test_evaluate_excludes_short_history_ticker_from_covariance(monkeypatch) -> 
     degrading every other ticker's covariance.
     """
     monkeypatch.setattr("argus.agents.risk.get_sector", lambda ticker, market_data: "Diversified")
-    engine = RiskStatisticalEngine()
+    engine = RiskStatisticalAgent()
 
     np.random.seed(5)
     tickers = ["AAPL", "MSFT", "GOOGL", "META", "AMZN"]
@@ -299,7 +299,7 @@ def test_evaluate_completes_when_a_ticker_has_no_price_history_overlap(monkeypat
     zero-row intersection empties the portfolio return series too.
     """
     monkeypatch.setattr("argus.agents.risk.get_sector", lambda ticker, market_data: "Diversified")
-    engine = RiskStatisticalEngine()
+    engine = RiskStatisticalAgent()
 
     np.random.seed(9)
     disjoint_dates = pd.date_range(start="2010-01-01", periods=len(_TRADING_YEAR), freq="B")
@@ -326,7 +326,7 @@ def test_evaluate_skips_optimizer_on_non_finite_covariance(monkeypatch) -> None:
     dropna().
     """
     monkeypatch.setattr("argus.agents.risk.get_sector", lambda ticker, market_data: "Diversified")
-    engine = RiskStatisticalEngine()
+    engine = RiskStatisticalAgent()
 
     np.random.seed(11)
     aapl = _random_prices(_TRADING_YEAR, 0.0005, 0.01)

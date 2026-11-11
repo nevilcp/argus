@@ -37,6 +37,7 @@ import pandas as pd
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
 
+from argus.config import settings
 from argus.data import fetchers
 from argus.governor import estimate_tokens, governor
 from argus.params import MACRO
@@ -54,6 +55,8 @@ FIXTURES_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
 
 class LiveMarketDataProvider:
     """Thin delegating wrapper around argus/data/fetchers.py. No behavior change."""
+
+    is_live = True
 
     def ohlcv_daily(self, ticker: str, period: str = "2y") -> pd.DataFrame:
         """Delegates to fetchers.fetch_ohlcv_daily."""
@@ -101,6 +104,8 @@ class FixtureMarketDataProvider:
     exercising a ticker with no fixture should fail loudly, not pass on
     fabricated data.
     """
+
+    is_live = False
 
     def __init__(self, fixtures_dir: Path = FIXTURES_DIR / "market_data") -> None:
         """Initializes the provider against a fixtures directory.
@@ -342,6 +347,27 @@ class GroqLLMClient:
             )
 
         return _response_text(response.content)
+
+
+def default_groq_client(model: str, temperature: float, max_tokens: int) -> GroqLLMClient:
+    """Builds the Groq-backed client an LLM agent falls back to when none is injected.
+
+    Args:
+        model: Groq model identifier.
+        temperature: Sampling temperature.
+        max_tokens: Maximum completion length in tokens.
+
+    Returns:
+        A GroqLLMClient keyed with ``settings.groq_api_key``. A missing key is
+        logged, not raised, so an agent can still be constructed; the first
+        call fails instead.
+    """
+    api_key = settings.groq_api_key
+    if not api_key:
+        logger.warning("GROQ_API_KEY is not set — LLM calls will fail at invocation time.")
+    return GroqLLMClient(
+        model=model, temperature=temperature, max_tokens=max_tokens, api_key=api_key
+    )
 
 
 class FixtureLLMClient:

@@ -26,7 +26,7 @@ import yfinance as yf
 
 from argus.agents.macro import MacroStatisticalAgent
 from argus.agents.portfolio import half_kelly_weight
-from argus.agents.risk import RiskStatisticalEngine
+from argus.agents.risk import RiskStatisticalAgent
 from argus.agents.technical import TechnicalStatisticalAgent
 from argus.data.pipeline import MFTDataPipeline
 from argus.governor import BOOTSTRAP_LIMITS, REGISTERED_MODELS, governor
@@ -90,7 +90,7 @@ class TestEndToEnd:
         assert isinstance(m_ctx, MacroContext)
         assert m_ctx.api_calls_used == 0
 
-        risk = RiskStatisticalEngine()
+        risk = RiskStatisticalAgent()
         price_history = {
             "AAPL": pd.Series(
                 [150.0, 151.0, 149.0, 155.0, 160.0], index=pd.date_range("2023-01-01", periods=5)
@@ -188,7 +188,7 @@ class TestEndToEnd:
             store_decision_snapshot=mock.Mock(),
         )
 
-        def fund_side_effect(ticker, backtest_mode=False, session_seed=None, errors=None):
+        def fund_side_effect(ticker, backtest_mode=False, session_seed=None, diagnostics=None):
             """Returns a fixed BULLISH FundamentalSignal; the extra params match analyze()."""
             return FundamentalSignal(
                 ticker=ticker,
@@ -228,7 +228,7 @@ class TestEndToEnd:
             macro,
             cultural_wisdom=None,
             cultural_warnings=None,
-            adjustments=None,
+            diagnostics=None,
         ):
             """Returns a fixed all-cash PortfolioAllocation; the extra params match allocate()."""
             return PortfolioAllocation(

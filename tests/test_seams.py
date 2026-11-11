@@ -7,6 +7,7 @@ fail; nothing here is decorative.
 """
 
 import json
+import logging
 from unittest import mock
 
 import groq
@@ -21,7 +22,9 @@ from argus.seams import (
     FixtureLLMClient,
     FixtureMarketDataProvider,
     GroqLLMClient,
+    LiveMarketDataProvider,
     _groq_retry_delay,
+    default_groq_client,
 )
 from tests.helpers.paths import FIXTURES_DIR
 
@@ -295,3 +298,32 @@ def test_groq_llm_client_does_not_warn_on_normal_stop(caplog):
         client.complete("system", "user")
 
     assert "finish_reason=length" not in caplog.text
+
+
+def test_default_groq_client_uses_the_configured_key(monkeypatch):
+    """The key comes from settings, and the model parameters pass through."""
+    monkeypatch.setattr("argus.seams.settings.groq_api_key", "configured-key")
+
+    client = default_groq_client("openai/gpt-oss-20b", 0.1, 50)
+
+    assert isinstance(client, GroqLLMClient)
+    assert client._model == "openai/gpt-oss-20b"
+    assert client._max_tokens == 50
+    assert client._llm.groq_api_key.get_secret_value() == "configured-key"
+
+
+def test_default_groq_client_warns_but_builds_without_a_key(monkeypatch, caplog):
+    """A missing key is logged, not raised, so an agent can still be constructed."""
+    monkeypatch.setattr("argus.seams.settings.groq_api_key", "")
+
+    with caplog.at_level(logging.WARNING, logger="argus.seams"):
+        client = default_groq_client("openai/gpt-oss-20b", 0.1, 50)
+
+    assert isinstance(client, GroqLLMClient)
+    assert "GROQ_API_KEY is not set" in caplog.text
+
+
+def test_market_data_providers_report_whether_they_are_live():
+    """Only the network-backed provider is live."""
+    assert LiveMarketDataProvider.is_live is True
+    assert FixtureMarketDataProvider.is_live is False

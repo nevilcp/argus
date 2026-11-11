@@ -39,11 +39,12 @@ from langgraph.graph import END, StateGraph
 from argus.agents.fundamental import FundamentalAgent
 from argus.agents.macro import MacroStatisticalAgent
 from argus.agents.portfolio import PortfolioManagerAgent
-from argus.agents.risk import RiskStatisticalEngine
+from argus.agents.risk import RiskStatisticalAgent
 from argus.agents.sentiment import SentimentAgent
 from argus.agents.technical import TechnicalStatisticalAgent
 from argus.config import settings
 from argus.infra.clock import now_local
+from argus.infra.diagnostics import Diagnostics
 from argus.memory.cultural import get_cultural_memory
 from argus.orchestration.aggregator import SPECIALIST_AGENTS, HybridSignalAggregator
 from argus.orchestration.checkpoint import CheckpointedGraph
@@ -248,7 +249,7 @@ def build_graph(
     tech_agent = TechnicalStatisticalAgent()
     fund_agent = FundamentalAgent(llm_client=fundamental_llm, market_data=market_data)
     sent_agent = SentimentAgent(llm_client=sentiment_llm, market_data=market_data)
-    risk_engine = RiskStatisticalEngine(market_data=market_data)
+    risk_engine = RiskStatisticalAgent(market_data=market_data)
     aggregator = HybridSignalAggregator()
     portfolio_agent = PortfolioManagerAgent(llm_client=portfolio_llm)
 
@@ -547,9 +548,9 @@ def build_graph(
         }
 
         macro = state.get("macro_context")
-        errors: list[str] = []
+        diagnostics = Diagnostics()
         if macro is None:
-            errors.append(
+            diagnostics.record(
                 "portfolio_allocation: macro_context unavailable this session; "
                 "allocating on specialist signals alone"
             )
@@ -559,17 +560,17 @@ def build_graph(
         warnings = mem.get("warnings", [])
 
         alloc = portfolio_agent.allocate(
-            profile, snapshots, macro, wisdom, warnings, adjustments=errors
+            profile, snapshots, macro, wisdom, warnings, diagnostics=diagnostics
         )
         if alloc is None:
             # allocate() has already appended the specific failing stage (LLM call,
-            # JSON parse, response enforcement, or schema validation) to errors
+            # JSON parse, response enforcement, or schema validation) to diagnostics
             logger.error(
                 "PortfolioManagerAgent returned None. "
                 "Skipping portfolio_allocation to allow graceful exit."
             )
-            return {"errors": errors}
-        return {"portfolio_allocation": alloc, "errors": errors}
+            return {"errors": diagnostics.messages}
+        return {"portfolio_allocation": alloc, "errors": diagnostics.messages}
 
     def node_log_decisions(state: ARGUSState) -> dict:
         """Persists structural decision profiles to vector database collections.
