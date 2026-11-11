@@ -6,8 +6,9 @@ scheduled GitHub Actions runner.
 
 A single function, run_collection_cycle(), is the one place that knows how to
 turn "sweep the MFT pipeline once, then run the graph" into logged decisions.
-Both api/main.py's background collector loop and scripts/collect_session.py
-call it, so the two deployment paths can't drift apart from each other.
+Both the API's background collector loop (orchestration/scheduler.py) and
+scripts/collect_session.py call it (via run_collection_cycle_from_settings), so
+the two deployment paths can't drift apart from each other.
 
 Responsibilities:
   - Refuse to run while the process-local kill switch is halted
@@ -15,8 +16,8 @@ Responsibilities:
   - Invoke the caller-supplied compiled LangGraph DAG over whatever tickers
     the sweep actually populated
   - Append every resulting ARGUSDecision to a JSONL decision log
-    (decision_log.append_decisions_jsonl is also called directly by
-    api/main.py's /analyze, the loop's other entry point into the graph, so
+    (decision_log.append_decisions_jsonl is also called directly by the
+    API's /analyze route, the loop's other entry point into the graph, so
     the log reflects both)
   - Classify the cycle's outcome (CycleOutcome: no-op, success, or
     degraded) so a run that produced only unusable decisions is
@@ -27,7 +28,7 @@ Responsibilities:
     directory to argus-data every cycle — is already bounded (issue #99)
 
 Not responsible for:
-  - Scheduling (see api/main.py's collector loop and scripts/collect_session.py)
+  - Scheduling (see orchestration/scheduler.py and scripts/collect_session.py)
   - Reconciling logged decisions into outcomes (see orchestration/reconcile.py)
   - Market-hours/holiday awareness beyond what MFTDataPipeline already checks
 """
@@ -36,7 +37,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import uuid
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -44,6 +44,7 @@ from argus.config import settings
 from argus.data.pipeline import MFTDataPipeline
 from argus.infra.clock import now_local
 from argus.orchestration.checkpoint import (
+    new_run_config,
     prune_checkpoints,
     retention_cutoff,
 )
@@ -248,11 +249,7 @@ async def run_collection_cycle(
         risk_tolerance=risk_tolerance,
     )
 
-    # A timestamp alone is only second-resolution: two cycles starting within the same
-    # second would share a thread_id, and the in-process lock guarding against that
-    # doesn't survive a restart mid-cycle. The uuid4 suffix makes it unique regardless.
-    thread_id = f"collector-{now_local().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
-    config = {"configurable": {"thread_id": thread_id}}
+    config = new_run_config("collector")
 
     logger.info(
         "invoking graph for %d/%d ticker(s) with session data",
@@ -303,4 +300,50 @@ async def run_collection_cycle(
         degraded_inputs=degraded_inputs,
         macro_regime=macro_regime,
         errors=errors,
+    )
+
+
+async def run_collection_cycle_from_settings(
+    *,
+    pipeline: MFTDataPipeline,
+    compiled_graph,
+    universe: list[str] | None = None,
+    total_wealth: float | None = None,
+    invest_pct: float | None = None,
+    risk_tolerance: str | None = None,
+    decisions_log_path: str | None = None,
+    checkpoint_db_path: str | None = None,
+    analyze_lock: asyncio.Semaphore | None = None,
+) -> CollectionResult:
+    """Runs one cycle with every unspecified argument taken from the environment settings.
+
+    The always-on API loop passes only its shared pipeline, graph and lock;
+    scripts/collect_session.py passes whichever CLI overrides were given. Both
+    therefore resolve the universe, capital, risk tolerance and store paths the
+    same way, instead of each re-listing the settings.
+
+    Args:
+        pipeline: See run_collection_cycle.
+        compiled_graph: See run_collection_cycle.
+        universe: Tickers to analyze; defaults to ARGUS_UNIVERSE.
+        total_wealth: Defaults to ARGUS_TOTAL_WEALTH.
+        invest_pct: Defaults to ARGUS_INVEST_PCT.
+        risk_tolerance: Defaults to ARGUS_RISK_TOLERANCE.
+        decisions_log_path: Defaults to ``<ARGUS_DATA_DIR>/decisions.jsonl``.
+        checkpoint_db_path: Defaults to ``<ARGUS_DATA_DIR>/argus_graph.db``.
+        analyze_lock: See run_collection_cycle.
+
+    Returns:
+        A CollectionResult summarizing what happened.
+    """
+    return await run_collection_cycle(
+        universe=list(settings.ARGUS_UNIVERSE if universe is None else universe),
+        total_wealth=settings.ARGUS_TOTAL_WEALTH if total_wealth is None else total_wealth,
+        invest_pct=settings.ARGUS_INVEST_PCT if invest_pct is None else invest_pct,
+        risk_tolerance=settings.ARGUS_RISK_TOLERANCE if risk_tolerance is None else risk_tolerance,
+        pipeline=pipeline,
+        compiled_graph=compiled_graph,
+        decisions_log_path=decisions_log_path or str(settings.data_path("decisions.jsonl")),
+        checkpoint_db_path=checkpoint_db_path or str(settings.data_path("argus_graph.db")),
+        analyze_lock=analyze_lock,
     )

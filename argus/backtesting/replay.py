@@ -38,10 +38,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 from unittest import mock
-from uuid import uuid4
 
 from argus.infra.clock import MARKET_TZ
 from argus.memory.cultural import CulturalMemoryManager
+from argus.orchestration.checkpoint import new_run_config
 from argus.orchestration.graph import build_graph
 from argus.orchestration.state import initial_state
 from argus.params import EVALUATION
@@ -219,7 +219,7 @@ def replay_session(
         risk_tolerance=risk_tolerance,
         as_of=session_date,
     )
-    config = {"configurable": {"thread_id": str(uuid4())}}
+    config = new_run_config("replay")
 
     # A dedicated temp checkpoint db, never the production argus_graph.db: replay
     # is a read-only simulation over fixtures, and writing into the store

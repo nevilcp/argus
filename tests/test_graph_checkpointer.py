@@ -1,4 +1,4 @@
-"""Tests for orchestration/checkpoint.py's _open_checkpointer failure handling."""
+"""Tests for orchestration/checkpoint.py: checkpointer failure handling and run configs."""
 
 from __future__ import annotations
 
@@ -39,3 +39,11 @@ def test_open_checkpointer_failure_before_connecting_returns_none_and_logs(
 
     assert result is None
     assert any("disk is read-only" in (r.exc_text or "") for r in caplog.records)
+
+
+def test_new_run_config_gives_each_run_a_unique_prefixed_thread_id():
+    first = checkpoint_module.new_run_config("analyze")["configurable"]["thread_id"]
+    second = checkpoint_module.new_run_config("analyze")["configurable"]["thread_id"]
+
+    assert first.startswith("analyze-")
+    assert first != second
