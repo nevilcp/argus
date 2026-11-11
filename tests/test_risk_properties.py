@@ -1,4 +1,4 @@
-"""Property-based tests on RiskStatisticalEngine.evaluate().
+"""Property-based tests on RiskStatisticalAgent.evaluate().
 
 Regardless of the proposed position weight or VIX level, the engine must
 never approve more than it was asked to approve. RiskAssessment already
@@ -14,7 +14,7 @@ import pandas as pd
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from argus.agents.risk import RiskStatisticalEngine
+from argus.agents.risk import RiskStatisticalAgent
 from argus.orchestration.graph import _apply_portfolio_cap
 from argus.params import RISK
 from argus.schemas.signals import RiskVerdict
@@ -48,7 +48,7 @@ def _price_history(tickers: list[str], seed: int) -> dict[str, pd.Series]:
 )
 def test_approved_weight_never_exceeds_proposed(weight: float, vix: float) -> None:
     """Across the full weight/VIX input space, approved weight never exceeds proposed."""
-    engine = RiskStatisticalEngine()
+    engine = RiskStatisticalAgent()
     positions = [{"ticker": "AAPL", "weight": weight}]
 
     result = engine.evaluate(
@@ -75,7 +75,7 @@ def test_optimal_weights_never_exceed_total_deployment_budget(tickers: list[str]
     Before the fix, the optimizer had a sum(w) >= 0.50 floor and no upper bound,
     so a sufficiently bullish conviction vector could solve past 100% deployment.
     """
-    engine = RiskStatisticalEngine()
+    engine = RiskStatisticalAgent()
     # Mirrors graph.py's node_risk_evaluation: even split, capped at the single-position limit
     base_weight = min(0.15, 1.0 / len(tickers))
     positions = [{"ticker": t, "weight": base_weight} for t in tickers]
@@ -98,7 +98,7 @@ def test_all_negative_convictions_veto_not_reduce_at_zero() -> None:
     agent demanding invest_pct deployment against a cap with no room for it —
     this is the bug _apply_portfolio_cap closes.
     """
-    engine = RiskStatisticalEngine()
+    engine = RiskStatisticalAgent()
     history = _price_history(_UNIVERSE, seed=7)
     tickers = _UNIVERSE[:5]
     positions = [{"ticker": t, "weight": 0.15} for t in tickers]

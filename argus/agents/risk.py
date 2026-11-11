@@ -64,7 +64,7 @@ def get_sector(ticker: str, market_data: MarketDataProvider) -> str:
     Returns:
         GICS sector string (e.g. 'Technology'), or UNKNOWN_SECTOR on fetch failure.
     """
-    is_live = isinstance(market_data, LiveMarketDataProvider)
+    is_live = market_data.is_live
 
     if is_live:
         cached = _SECTOR_CACHE.get(ticker)
@@ -331,7 +331,7 @@ def component_var(returns_matrix: pd.DataFrame, portfolio_returns: pd.Series) ->
     return mvar
 
 
-class RiskStatisticalEngine:
+class RiskStatisticalAgent:
     """Core risk management gateway enforcing statistical allocation limits.
 
     Runs three sequential gates:

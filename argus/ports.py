@@ -29,7 +29,14 @@ class MarketDataProvider(Protocol):
 
     Method names and signatures mirror the argus/data/fetchers.py functions
     they wrap; see that module's docstrings for the semantics of each field.
+
+    Attributes:
+        is_live: True when calls reach the network. Callers use it to pace
+            requests and to decide whether a process-wide cache is safe to
+            share, since a fixture-backed provider is cheap and per-session.
     """
+
+    is_live: bool
 
     def ohlcv_daily(self, ticker: str, period: str = "2y") -> pd.DataFrame:
         """Returns daily OHLCV history for a ticker."""

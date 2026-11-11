@@ -25,14 +25,14 @@ import pandas as pd
 
 from argus.config import settings
 from argus.data.cache import TTLCache
-from argus.governor import RateLimitExceeded, UnregisteredModel
 from argus.infra.clock import now_local
+from argus.infra.diagnostics import Diagnostics
 from argus.params import SENTIMENT, STRUCTURED_OUTPUT
 from argus.ports import LLMClient, MarketDataProvider
 from argus.schemas.prompting import UNTRUSTED_GUARD, schema_block, wrap_untrusted
 from argus.schemas.signals import SentimentSignal, SentimentVerdict
-from argus.seams import GroqLLMClient, LiveMarketDataProvider
-from argus.structured_output import StructuredOutputError, decode
+from argus.seams import LiveMarketDataProvider, default_groq_client
+from argus.structured_output import decode_or_degrade
 
 logger = logging.getLogger(__name__)
 
@@ -332,17 +332,11 @@ class SentimentAgent:
             llm_client: LLM backend; defaults to a Groq-backed client.
             market_data: Provider for price lookups; defaults to live fetches.
         """
-        if llm_client is None:
-            api_key = settings.groq_api_key
-            if not api_key:
-                logger.warning("GROQ_API_KEY is not set — LLM calls will fail at invocation time.")
-            llm_client = GroqLLMClient(
-                model=settings.ARGUS_SENTIMENT_MODEL,
-                temperature=STRUCTURED_OUTPUT.llm_temperature,
-                max_tokens=SENTIMENT.max_tokens,
-                api_key=api_key,
-            )
-        self.llm_client = llm_client
+        self.llm_client = llm_client or default_groq_client(
+            settings.ARGUS_SENTIMENT_MODEL,
+            STRUCTURED_OUTPUT.llm_temperature,
+            SENTIMENT.max_tokens,
+        )
         self.market_data = market_data or LiveMarketDataProvider()
         self.cache: TTLCache[str, SentimentSignal] = TTLCache(ttl=timedelta(days=1))
 
@@ -350,7 +344,7 @@ class SentimentAgent:
         self,
         ticker: str,
         company_name: str | None = None,
-        errors: list[str] | None = None,
+        diagnostics: Diagnostics | None = None,
     ) -> SentimentSignal | None:
         """Generates a ticker's SentimentSignal via FinBERT and LLM synthesis.
 
@@ -364,9 +358,9 @@ class SentimentAgent:
         Args:
             ticker: Equity ticker symbol.
             company_name: Optional display name used in news queries (defaults to ticker).
-            errors: If given, a reason is appended here on every path that
-                returns None, so callers can surface the failure instead of
-                only logging it.
+            diagnostics: Receives a reason on every path that returns None, so
+                callers can surface the failure instead of only logging it.
+                Defaults to a throwaway collector.
 
         Returns:
             A validated SentimentSignal, or None if decoding ultimately fails.
@@ -378,23 +372,16 @@ class SentimentAgent:
         metrics = self._news_metrics(ticker, company_name)
         prompt = _build_synthesis_prompt(ticker, metrics)
 
-        try:
-            verdict = decode(self.llm_client, SYSTEM_PROMPT, prompt, SentimentVerdict, repair=False)
-        except StructuredOutputError as e:
-            logger.warning("Decode failed for %s: %s", ticker, e)
-            if errors is not None:
-                errors.append(f"sentiment_analysis[{ticker}]: {e}")
-            return None
-        except (RateLimitExceeded, UnregisteredModel) as e:
-            # Governor already exhausted its bounded wait; degrade this ticker rather than retry into it.
-            logger.warning("Governor rejected call for %s: %s", ticker, e)
-            if errors is not None:
-                errors.append(f"sentiment_analysis[{ticker}]: rate limited: {e}")
-            return None
-        except Exception as e:
-            logger.error("API error for %s: %s", ticker, e)
-            if errors is not None:
-                errors.append(f"sentiment_analysis[{ticker}]: API error: {e}")
+        verdict = decode_or_degrade(
+            self.llm_client,
+            SYSTEM_PROMPT,
+            prompt,
+            SentimentVerdict,
+            repair=False,
+            diagnostics=diagnostics or Diagnostics(),
+            label=f"sentiment_analysis[{ticker}]",
+        )
+        if verdict is None:
             return None
 
         signal = SentimentSignal(
@@ -480,19 +467,18 @@ class SentimentAgent:
             for each successfully analyzed ticker. ``errors`` names each ticker
             omitted and why.
         """
-        pace = isinstance(self.market_data, LiveMarketDataProvider)
+        pace = self.market_data.is_live
         results = {}
-        errors: list[str] = []
+        diagnostics = Diagnostics()
         for i, ticker in enumerate(tickers):
             if pace and i > 0:
                 time.sleep(SENTIMENT.fanout_pace_seconds_per_ticker)
             company_name = _TICKER_COMPANY_NAMES.get(ticker, ticker)
             try:
-                res = self.analyze(ticker, company_name=company_name, errors=errors)
+                res = self.analyze(ticker, company_name=company_name, diagnostics=diagnostics)
             except Exception as exc:
-                logger.warning("%s failed — %s: %s", ticker, type(exc).__name__, exc)
-                errors.append(f"sentiment_analysis[{ticker}]: {type(exc).__name__}: {exc}")
+                diagnostics.record(f"sentiment_analysis[{ticker}]: {type(exc).__name__}: {exc}")
                 continue
             if res is not None:
                 results[ticker] = res
-        return results, errors
+        return results, diagnostics.messages

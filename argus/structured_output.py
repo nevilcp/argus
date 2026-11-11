@@ -32,8 +32,9 @@ Not responsible for:
     — that stays with the LLMClient implementation (e.g. GroqLLMClient)
   - Defining what a valid response looks like for any particular agent —
     callers supply the target schema
-  - Deciding what to do when decoding ultimately fails — callers catch
-    StructuredOutputError and degrade however fits their context
+  - Deciding what a failed decode means for the caller — decode() raises
+    StructuredOutputError, and decode_or_degrade() turns it into a
+    diagnostics note and None for callers that degrade rather than abort
 """
 
 from __future__ import annotations
@@ -41,10 +42,13 @@ from __future__ import annotations
 import json
 import logging
 import time
+from typing import Literal
 
 from pydantic import BaseModel, ValidationError
 
+from argus.governor import RateLimitExceeded, UnregisteredModel
 from argus.infra.backoff import capped_backoff, full_jitter_delay
+from argus.infra.diagnostics import Diagnostics
 from argus.params import STRUCTURED_OUTPUT
 from argus.ports import LLMClient, RetryableTransportError
 
@@ -219,3 +223,60 @@ def decode[T: BaseModel](
         time.sleep(delay)
 
     raise AssertionError("unreachable: loop always returns or raises")
+
+
+def decode_or_degrade[T: BaseModel](
+    llm_client: LLMClient,
+    system_prompt: str,
+    user_prompt: str,
+    schema: type[T],
+    *,
+    repair: bool,
+    diagnostics: Diagnostics,
+    label: str,
+    reraise_governor: bool = False,
+    decode_level: Literal["warning", "error"] = "warning",
+    api_error_text: str = "API error",
+) -> T | None:
+    """Runs ``decode`` and turns every failure into a diagnostics note and ``None``.
+
+    Replaces the except ladder each LLM agent used to carry. The three failure
+    classes are noted differently so a reader can tell them apart:
+    ``StructuredOutputError`` (``"<label>: <error>"``), a governor rejection
+    (``"<label>: rate limited: <error>"``), and any other exception
+    (``"<label>: <api_error_text>: <error>"``, always at error level).
+
+    Args:
+        llm_client: Transport to send the prompt over.
+        system_prompt: The system message text.
+        user_prompt: The user message text.
+        schema: Pydantic model class the decoded response must validate against.
+        repair: Passed through to ``decode``.
+        diagnostics: Receives one note per failure.
+        label: Prefix of every note, e.g. ``"fundamental_analysis[AAPL]"``.
+        reraise_governor: When True, ``RateLimitExceeded`` and
+            ``UnregisteredModel`` propagate instead of being noted. For a
+            caller with no per-item fallback to degrade to.
+        decode_level: Log level for a ``StructuredOutputError`` note.
+        api_error_text: Wording between the label and the error for an
+            unclassified exception.
+
+    Returns:
+        A validated instance of ``schema``, or None if the call failed.
+
+    Raises:
+        RateLimitExceeded: Only when ``reraise_governor`` is True.
+        UnregisteredModel: Only when ``reraise_governor`` is True.
+    """
+    try:
+        return decode(llm_client, system_prompt, user_prompt, schema, repair=repair)
+    except StructuredOutputError as e:
+        diagnostics.record(f"{label}: {e}", decode_level)
+    except (RateLimitExceeded, UnregisteredModel) as e:
+        if reraise_governor:
+            raise
+        # Governor already exhausted its bounded wait; degrade rather than retry into it.
+        diagnostics.record(f"{label}: rate limited: {e}")
+    except Exception as e:
+        diagnostics.record(f"{label}: {api_error_text}: {e}", "error")
+    return None
