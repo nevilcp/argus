@@ -15,7 +15,7 @@ from unittest import mock
 
 import pytest
 
-import api.main as api_main
+from api.lifespan import runtime
 from argus.infra.clock import now_market
 from tests.helpers.api import api_pipeline
 
@@ -32,9 +32,7 @@ def _seed_cache(ticker: str, *, bar_age_seconds: float, write_age_seconds: float
     now = now_market()
     bar_ts = now - timedelta(seconds=bar_age_seconds)
     write_ts = now - timedelta(seconds=write_age_seconds)
-    api_main._live_cache.publish(
-        {ticker: {"timestamp": bar_ts.isoformat()}}, [ticker], now=write_ts
-    )
+    runtime.live_cache.publish({ticker: {"timestamp": bar_ts.isoformat()}}, [ticker], now=write_ts)
 
 
 @pytest.mark.parametrize(
@@ -84,7 +82,7 @@ def test_analyze_reports_a_missing_allocation_as_503_not_500(client, monkeypatch
     _seed_cache("AAPL", bar_age_seconds=5, write_age_seconds=5)
     fake_graph = mock.Mock()
     fake_graph.invoke.return_value = {"decisions": [], "portfolio_allocation": None}
-    monkeypatch.setattr(api_main, "_graph", fake_graph)
+    monkeypatch.setattr(runtime, "graph", fake_graph)
 
     response = client.post("/analyze", json=_payload("AAPL"))
 
@@ -98,7 +96,7 @@ def test_analyze_redacts_internal_exception_details(client, monkeypatch):
     _seed_cache("AAPL", bar_age_seconds=5, write_age_seconds=5)
     fake_graph = mock.Mock()
     fake_graph.invoke.side_effect = RuntimeError("api_key=sk-secret123 at /etc/passwd")
-    monkeypatch.setattr(api_main, "_graph", fake_graph)
+    monkeypatch.setattr(runtime, "graph", fake_graph)
 
     response = client.post("/analyze", json=_payload("AAPL"))
 

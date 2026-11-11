@@ -6,8 +6,8 @@ Tests for /analyze's concurrency and process-safety guarantees:
     when a run is already in progress, released even when the graph raises
   - the kill switch is re-checked after the graph returns, not just
     before it
-  - the graph-not-yet-initialized guard (`_graph is None` -> 503)
-  - `_mft_session_callback` evicts live-cache entries for tickers no
+  - the graph-not-yet-initialized guard (`runtime.graph is None` -> 503)
+  - `lifespan._mft_session_callback` evicts live-cache entries for tickers no
     longer tracked
 
 These exercise the route function and callback directly via FastAPI's
@@ -27,10 +27,13 @@ import pytest
 
 import api.main as api_main
 import argus.risk.kill_switch as kill_switch_module
+from api import lifespan
+from api.lifespan import runtime
 from argus.infra.clock import now_market
 from argus.risk.kill_switch import KillSwitch
 from argus.schemas.signals import ARGUSDecision
 from tests.helpers.api import api_pipeline
+from tests.helpers.builders import position_allocation
 
 pytestmark = pytest.mark.usefixtures("api_state")
 
@@ -40,7 +43,7 @@ _PAYLOAD = {"tickers": ["AAPL"], "total_wealth": 100_000, "invest_pct": 0.5}
 @pytest.fixture(autouse=True)
 def _reset_analyze_semaphore(monkeypatch):
     """Resets the analyze semaphore for each test."""
-    monkeypatch.setattr(api_main, "_analyze_semaphore", asyncio.Semaphore(1))
+    monkeypatch.setattr(runtime, "analyze_lock", asyncio.Semaphore(1))
 
 
 def _ready(monkeypatch):
@@ -52,11 +55,11 @@ def _ready(monkeypatch):
     api_pipeline(monkeypatch)
 
     recent = now_market() - timedelta(seconds=5)
-    api_main._live_cache.publish({"AAPL": {"timestamp": recent.isoformat()}}, ["AAPL"], now=recent)
+    runtime.live_cache.publish({"AAPL": {"timestamp": recent.isoformat()}}, ["AAPL"], now=recent)
 
 
 def _install_graph(monkeypatch, **invoke_behavior):
-    """Installs a fake graph as the module-level `_graph` and configures invoke().
+    """Installs a fake graph as `runtime.graph` and configures invoke().
 
     Args:
         invoke_behavior: Mock keyword arguments for `invoke` (`side_effect`, `return_value`).
@@ -66,7 +69,7 @@ def _install_graph(monkeypatch, **invoke_behavior):
     """
     fake_graph = mock.Mock()
     fake_graph.invoke.configure_mock(**invoke_behavior)
-    monkeypatch.setattr(api_main, "_graph", fake_graph)
+    monkeypatch.setattr(runtime, "graph", fake_graph)
     return fake_graph
 
 
@@ -98,7 +101,7 @@ def test_analyze_rejects_a_concurrent_run_with_429(client, monkeypatch):
 
     held = mock.Mock()
     held.locked.return_value = True
-    monkeypatch.setattr(api_main, "_analyze_semaphore", held)
+    monkeypatch.setattr(runtime, "analyze_lock", held)
 
     response = client.post("/analyze", json=_PAYLOAD)
 
@@ -119,7 +122,7 @@ def test_analyze_releases_the_semaphore_when_the_graph_raises(client, monkeypatc
     response = client.post("/analyze", json=_PAYLOAD)
 
     assert response.status_code == 500
-    assert not api_main._analyze_semaphore.locked()
+    assert not runtime.analyze_lock.locked()
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +143,7 @@ def test_analyze_returns_504_when_the_graph_exceeds_its_deadline(client, monkeyp
     response = client.post("/analyze", json=_PAYLOAD)
 
     assert response.status_code == 504
-    assert not api_main._analyze_semaphore.locked()
+    assert not runtime.analyze_lock.locked()
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +154,7 @@ def test_analyze_returns_504_when_the_graph_exceeds_its_deadline(client, monkeyp
 def test_analyze_rejects_when_graph_not_yet_initialized(client, monkeypatch):
     """A None _graph before lifespan startup finishes is a 503, not an AttributeError."""
     _ready(monkeypatch)
-    monkeypatch.setattr(api_main, "_graph", None)
+    monkeypatch.setattr(runtime, "graph", None)
 
     response = client.post("/analyze", json=_PAYLOAD)
 
@@ -191,12 +194,12 @@ async def test_mft_session_callback_evicts_untracked_tickers(monkeypatch):
     """A ticker dropped from the tracked universe is also dropped from the live cache."""
     fake_pipeline = mock.Mock()
     fake_pipeline.tickers = ["AAPL"]
-    monkeypatch.setattr(api_main, "_mft_pipeline", fake_pipeline)
-    api_main._live_cache.publish({"MSFT": {"timestamp": "stale"}}, ["MSFT"])
+    monkeypatch.setattr(runtime, "pipeline", fake_pipeline)
+    runtime.live_cache.publish({"MSFT": {"timestamp": "stale"}}, ["MSFT"])
 
-    await api_main._mft_session_callback({"AAPL": {"timestamp": "2024-01-02T09:30:00-05:00"}})
+    await lifespan._mft_session_callback({"AAPL": {"timestamp": "2024-01-02T09:30:00-05:00"}})
 
-    result = api_main._live_cache.admit(["MSFT", "AAPL"], now_market())
+    result = runtime.live_cache.admit(["MSFT", "AAPL"], now_market())
     assert "MSFT" in result.absent
     assert "AAPL" not in result.absent
 
@@ -236,3 +239,17 @@ def test_analyze_writes_nothing_when_the_graph_produces_no_decisions(client, mon
     assert response.status_code == 200
     log_path = Path(api_main.settings.ARGUS_DATA_DIR) / "decisions.jsonl"
     assert not log_path.exists()
+
+
+def test_analyze_returns_each_position_as_its_allocation_model(client, monkeypatch):
+    """The response's portfolio carries every PositionAllocation field, as JSON."""
+    _ready(monkeypatch)
+    position = position_allocation("AAPL", 0.1, advisor_note="Hold.")
+    result = _graph_result([])
+    result["portfolio_allocation"].portfolio = [position]
+    _install_graph(monkeypatch, return_value=result)
+
+    response = client.post("/analyze", json=_PAYLOAD)
+
+    assert response.status_code == 200
+    assert response.json()["portfolio"] == [position.model_dump(mode="json")]

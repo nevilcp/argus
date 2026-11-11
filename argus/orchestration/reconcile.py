@@ -3,7 +3,8 @@ argus/orchestration/reconcile.py
 
 Closes the decision -> outcome loop: realized-return computation against a
 MarketDataProvider, credit assignment, and the one reconciliation sequence
-that api/main.py and scripts/reconcile_outcomes.py both run.
+that the API's daily loop (orchestration/scheduler.py) and
+scripts/reconcile_outcomes.py both run.
 
 Decisions are read back from the decision log (or the LangGraph checkpoint),
 credit assignment uses leave-one-out ablation rather than exact Shapley, and
@@ -257,7 +258,7 @@ def run_reconciliation_pass(
     checkpoint_db_path: str | None = None,
     horizon_days: int = RECONCILIATION.horizon_days,
 ) -> ReconciliationReport:
-    """Runs the one reconciliation sequence shared by api/main.py and scripts/reconcile_outcomes.py.
+    """Runs the one reconciliation sequence shared by the API loop and the reconcile script.
 
     Loads decisions, reconciles the matured ones against market_data, updates
     the paper book, and bounds every growing store whose path was supplied.
@@ -269,7 +270,7 @@ def run_reconciliation_pass(
     The decisions log wins as the read source when decisions_log_path is
     given; the checkpoint database otherwise. Every store whose path is
     known is bounded regardless of which one was the read source, so a
-    caller supplying both (api/main.py) gets both bounded and a caller
+    caller supplying both (the API loop) gets both bounded and a caller
     supplying only one (a collector-only deployment) gets exactly that one.
 
     Args:

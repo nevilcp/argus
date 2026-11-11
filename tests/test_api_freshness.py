@@ -12,8 +12,8 @@ that is LiveSessionCache's to know about.
 
 These exercise the route function directly via FastAPI's TestClient rather
 than going through the app's lifespan, so no MFT pipeline, collector, or
-reconcile loop needs to start. `_mft_pipeline` and `_live_cache` are set
-directly on the api.main module instead.
+reconcile loop needs to start. `runtime.pipeline` and `runtime.live_cache` are
+set directly on api.lifespan.runtime instead.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from unittest import mock
 
 import pytest
 
-import api.main as api_main
+from api.lifespan import runtime
 from argus.data.live_session_cache import AdmissionResult
 from argus.infra.clock import now_market
 from tests.helpers.api import api_pipeline
@@ -37,7 +37,7 @@ def test_analyze_market_closed_outranks_bar_age(client, monkeypatch):
     """A hopelessly stale bar still surfaces as market-closed, not stale, outside session hours."""
     api_pipeline(monkeypatch, market_hours=False)
     now = now_market() - timedelta(days=9)
-    api_main._live_cache.publish({"AAPL": {"timestamp": now.isoformat()}}, ["AAPL"], now=now)
+    runtime.live_cache.publish({"AAPL": {"timestamp": now.isoformat()}}, ["AAPL"], now=now)
 
     response = client.post("/analyze", json=_PAYLOAD)
 
@@ -60,7 +60,7 @@ def test_analyze_maps_each_admission_group_to_its_own_response_text(
     response wording."""
     api_pipeline(monkeypatch, market_hours=True)
     result = AdmissionResult(**{admission_field: ["AAPL"]})
-    monkeypatch.setattr(api_main._live_cache, "admit", mock.Mock(return_value=result))
+    monkeypatch.setattr(runtime.live_cache, "admit", mock.Mock(return_value=result))
 
     response = client.post("/analyze", json=_PAYLOAD)
 

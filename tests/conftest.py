@@ -7,8 +7,8 @@ Responsibilities:
   - Skip `live_network`-marked tests when Yahoo Finance is unreachable
   - Isolate every test from the production candle buffer
   - Restore the logger trees `configure_logging` mutates
-  - Reset the kill-switch singleton, and (opt-in via `api_state`) api.main's
-    live-session-cache / API-key singletons
+  - Reset the kill-switch singleton, and (opt-in via `api_state`) the API
+    runtime's live cache and the API-key setting
   - Provide the lifespan-free API `client`
 
 Not responsible for:
@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient
 
 import api.main as api_main
 import argus.risk.kill_switch as kill_switch_module
+from api.lifespan import runtime
 from argus.config import settings
 from argus.data.live_session_cache import LiveSessionCache
 from argus.infra.log import LOG_ROOTS
@@ -104,12 +105,12 @@ def _reset_logging_trees() -> Iterator[None]:
 
 @pytest.fixture
 def api_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Resets api.main's live-cache and API-key singletons for the duration of a test.
+    """Resets the API runtime's live cache and the API-key setting for the duration of a test.
 
     The kill switch is reset separately by the autouse fixture above. Request
     this through ``pytestmark = pytest.mark.usefixtures("api_state")``.
     """
-    monkeypatch.setattr(api_main, "_live_cache", LiveSessionCache(interval_minutes=1))
+    monkeypatch.setattr(runtime, "live_cache", LiveSessionCache(interval_minutes=1))
     monkeypatch.setattr(api_main.settings, "ARGUS_API_KEY", "")
 
 
