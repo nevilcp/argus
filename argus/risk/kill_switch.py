@@ -39,7 +39,7 @@ def _default_runs_dir() -> str:
     return settings.ARGUS_RUNS_DIR or str(settings.data_path("runs"))
 
 
-def _drawdown_fraction(high_water_mark: float, current_value: float) -> float:
+def drawdown_fraction(high_water_mark: float, current_value: float) -> float:
     """Returns peak-to-trough drawdown as a fraction, or 0.0 when there is no positive peak."""
     if high_water_mark <= 0:
         return 0.0
@@ -306,7 +306,7 @@ class KillSwitch:
 
         current = self._marked_value()
         high_water_mark = self._advance_high_water_mark(current)
-        drawdown = _drawdown_fraction(high_water_mark, current)
+        drawdown = drawdown_fraction(high_water_mark, current)
         threshold = self.DRAWDOWN_THRESHOLDS[self.risk_tolerance]
 
         try:
@@ -408,7 +408,7 @@ class KillSwitch:
                 if self._high_water_mark > 0
                 else self._portfolio_inception_value
             )
-            drawdown = _drawdown_fraction(peak, self._marked_value())
+            drawdown = drawdown_fraction(peak, self._marked_value())
 
         with self._state_lock:
             reason = self._halt_reason

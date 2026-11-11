@@ -117,9 +117,9 @@ target-version = "py314"
 select = ["E", "W", "F", "I", "UP", "B", "SIM", "C4", "RUF", "PT", "DTZ", "PERF", "PLR0915"]
 
 [tool.ruff.lint.pylint]
-# Caps function length. Set to the current maximum (build_graph) so nothing
-# new can grow past it; the long-functions PR lowers it as functions shrink.
-max-statements = 154
+# Caps function length. Set to the current maximum (RegimeClassifier.fit) so
+# nothing new can grow past it.
+max-statements = 43
 
 [tool.ruff.lint.per-file-ignores]
 # Test fixtures deliberately construct the same naive local timestamps production
