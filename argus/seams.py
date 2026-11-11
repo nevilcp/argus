@@ -39,6 +39,7 @@ from langchain_groq import ChatGroq
 
 from argus.config import settings
 from argus.data import fetchers
+from argus.data.retry import retry_after_seconds
 from argus.governor import estimate_tokens, governor
 from argus.params import MACRO
 from argus.ports import RetryableTransportError
@@ -197,7 +198,7 @@ def _groq_retry_delay(exc: Exception) -> float | None:
     honored verbatim since Groq is telling us exactly how long its own limit
     takes to clear). Every other retryable error has no such hint, so the
     caller decides its own back-off. Header extraction itself is shared with
-    argus/data/fetchers.py's retry loop rather than reimplemented here.
+    argus/data/retry.py's retry loop rather than reimplemented here.
 
     Args:
         exc: The exception the failed attempt raised.
@@ -206,7 +207,7 @@ def _groq_retry_delay(exc: Exception) -> float | None:
         Seconds to wait before retrying per the provider's hint, or None.
     """
     if isinstance(exc, groq.RateLimitError):
-        return fetchers.retry_after_seconds(exc)
+        return retry_after_seconds(exc)
     return None
 
 

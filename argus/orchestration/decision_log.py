@@ -50,7 +50,7 @@ def decisions_log_lock(path: str | Path) -> Iterator[None]:
     the same file, from different threads and, with the scheduled collector,
     different processes. An append that landed between compaction's read and its
     replace would otherwise be overwritten. The lock is an flock on a sidecar
-    ``<path>.lock`` file, the same pattern as fetchers._NewsApiBudget; flock is
+    ``<path>.lock`` file, the same pattern as newsapi_budget.NewsApiBudget; flock is
     scoped to the open file description, so it serializes threads and processes alike.
     Released when the sidecar file is closed on exit.
 
