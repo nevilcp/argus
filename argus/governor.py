@@ -26,7 +26,7 @@ for the tier actually in use. It is a floor, not a claim about any particular
 account's tier.
 
 This is one governor per process, not per account: it only sees calls made
-by its own process. api/main.py enforces --workers 1 so the API never runs
+by its own process. api/guards.py enforces --workers 1 so the API never runs
 two ignorant copies of it (see Dockerfile.api's CMD), but
 scripts/reconcile_outcomes.py's Actions collector is a second, independent
 process making calls against the same Groq key — a second governor this

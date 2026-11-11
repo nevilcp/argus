@@ -2,7 +2,7 @@
 tests/test_live_session_cache.py
 
 Tests for LiveSessionCache, the freshness gate for MFT session states,
-extracted from api/main.py so each clause can be verified by calling a
+extracted from the API routes so each clause can be verified by calling a
 function with an explicit clock instead of standing up an HTTP client and
 monkeypatching two module globals.
 

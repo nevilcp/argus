@@ -219,7 +219,7 @@ def compact_decisions_jsonl(
     routine, resolved prune.
 
     Meant to run right after a reconcile_decisions() pass over the same log
-    (see api/main.py's _reconcile_once and scripts/reconcile_outcomes.py),
+    (see orchestration/scheduler.py's reconcile_once and scripts/reconcile_outcomes.py),
     with resolved_ids reflecting that same pass's outcome stores.
 
     Args:

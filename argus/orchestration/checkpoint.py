@@ -8,6 +8,7 @@ open the file, and one place that reaches into LangGraph's table layout.
 Responsibilities:
   - build_checkpoint_serde: the msgpack allowlist for ARGUSState's nested models
   - CheckpointedGraph: compiles the DAG with a fresh connection on every invoke()
+  - new_run_config: the run config (a fresh unique thread_id) every entry point invokes with
   - open_saver: a SqliteSaver over an existing database, closed on exit
   - newest_checkpoint_per_thread: each thread's most recent checkpoint
   - prune_checkpoints / retention_cutoff: bound the database
@@ -23,6 +24,7 @@ Dependencies:
 
 import logging
 import sqlite3
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -124,6 +126,24 @@ class CheckpointedGraph:
         finally:
             if checkpointer is not None:
                 checkpointer.conn.close()
+
+
+def new_run_config(prefix: str) -> RunnableConfig:
+    """Builds the run config for one graph invocation, under a fresh unique thread_id.
+
+    A timestamp alone is only second-resolution, so two runs starting within
+    the same second would share a thread_id; the uuid suffix makes it unique
+    regardless of process restarts.
+
+    Args:
+        prefix: Names the entry point (e.g. "analyze", "collector", "replay"),
+            so a checkpoint row can be traced back to what started it.
+
+    Returns:
+        ``{"configurable": {"thread_id": ...}}`` for ``graph.invoke``.
+    """
+    thread_id = f"{prefix}-{now_local():%Y%m%d%H%M%S}-{uuid.uuid4().hex[:8]}"
+    return {"configurable": {"thread_id": thread_id}}
 
 
 @contextmanager

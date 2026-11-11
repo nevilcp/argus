@@ -60,6 +60,10 @@ _TICKER_COMPANY_NAMES: dict[str, str] = {
     "CVX": "Chevron",
 }
 
+# HuggingFace model id of the FinBERT classifier; /health reports it as the
+# deployed sentiment model.
+FINBERT_MODEL = "ProsusAI/finbert"
+
 # Module-level singleton prevents repeated model initialization (~30s first load).
 _FINBERT_PIPELINE = None
 
@@ -77,11 +81,11 @@ def get_finbert():
     if _FINBERT_PIPELINE is None:
         from transformers import pipeline
 
-        logger.debug("Loading ProsusAI/finbert pipeline (first load may take ~30s)...")
+        logger.debug("Loading %s pipeline (first load may take ~30s)...", FINBERT_MODEL)
         _FINBERT_PIPELINE = pipeline(
             task="text-classification",
-            model="ProsusAI/finbert",
-            tokenizer="ProsusAI/finbert",
+            model=FINBERT_MODEL,
+            tokenizer=FINBERT_MODEL,
             # CPU forces broad compatibility; GPU acceleration requires explicit opt-in.
             device=-1,
             max_length=512,

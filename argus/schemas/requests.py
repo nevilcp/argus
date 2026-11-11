@@ -2,7 +2,7 @@
 argus/schemas/requests.py
 
 Input types and bounds shared by the environment settings (argus/config.py)
-and the HTTP request models (api/main.py), so a value one accepts is never
+and the HTTP request models (api/models.py), so a value one accepts is never
 rejected by the other.
 
 Responsibilities:

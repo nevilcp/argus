@@ -8,6 +8,7 @@ Responsibilities:
   - Pair each decision's signed conviction with its realized forward return
   - Rank information coefficient (Spearman) and hit-rate-with-dead-band,
     both with percentile bootstrap confidence intervals
+  - pre_registered_verdict: the fixed success rule applied to open- vs closed-loop
   - System-behavior metrics (schema validity, constraint enforcement,
     API calls/decision, replay determinism), reported separately and never
     blended into the predictive metrics above
@@ -300,6 +301,27 @@ _TRADE_LEVEL_KEYS = (
     "total_trades",
     "avg_holding_days",
 )
+
+
+def pre_registered_verdict(open_loop: EvaluationResult, closed_loop: EvaluationResult) -> bool:
+    """Applies the pre-registered success rule to the two replay conditions.
+
+    The bar, fixed before any output was observed: the closed-loop rank IC must
+    exceed the open-loop rank IC, and the closed-loop rank IC's bootstrap
+    confidence interval must exclude zero.
+
+    Args:
+        open_loop: Evaluation of the replay with reliability fixed at its prior.
+        closed_loop: Evaluation of the replay reading real outcome history.
+
+    Returns:
+        True if closed-loop cleared the bar; False if it did not, or if either
+        rank IC is undefined.
+    """
+    if open_loop.rank_ic is None or closed_loop.rank_ic is None:
+        return False
+    ci_lower = closed_loop.rank_ic_ci[0]
+    return ci_lower is not None and ci_lower > 0 and closed_loop.rank_ic > open_loop.rank_ic
 
 
 def trade_level_win_loss_stats(pairs: Sequence[PairedOutcome]) -> dict:

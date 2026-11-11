@@ -26,7 +26,7 @@ Agent wiring is a build_graph() parameter, not a module-level singleton:
 every agent that touches the network or an LLM accepts a
 MarketDataProvider/LLMClient, defaulting to the real implementation, so a
 test can build a fixture-backed graph without patching this module's
-internals. Callers — api/main.py, orchestration/collector.py — call
+internals. Callers — api/lifespan.py, scripts/collect_session.py — call
 build_graph() themselves rather than importing a shared instance.
 """
 

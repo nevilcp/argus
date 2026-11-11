@@ -17,7 +17,11 @@ from typing import Any
 from unittest import mock
 
 from argus.config import settings
-from argus.orchestration.collector import CycleOutcome, run_collection_cycle
+from argus.orchestration.collector import (
+    CycleOutcome,
+    run_collection_cycle,
+    run_collection_cycle_from_settings,
+)
 from argus.params import COLLECTOR, RECONCILIATION
 from argus.schemas.signals import ARGUSDecision
 from tests.helpers.builders import argus_decision, position_allocation
@@ -218,3 +222,41 @@ async def test_run_collection_cycle_survives_a_checkpoint_pruning_failure(tmp_pa
     result = await _run_cycle(graph, checkpoint_db_path=db_path)
 
     assert result.ran is True
+
+
+async def test_run_collection_cycle_from_settings_fills_unspecified_arguments_from_settings(
+    monkeypatch,
+):
+    """Omitted universe, capital, risk tolerance and paths come from the environment settings."""
+    monkeypatch.setattr(settings, "ARGUS_UNIVERSE", ["AAPL"])
+    monkeypatch.setattr(settings, "ARGUS_TOTAL_WEALTH", 50_000.0)
+    monkeypatch.setattr(settings, "ARGUS_INVEST_PCT", 0.25)
+    monkeypatch.setattr(settings, "ARGUS_RISK_TOLERANCE", "AGGRESSIVE")
+    pipeline = mock.Mock()
+    pipeline.run_once = mock.AsyncMock(return_value=_SESSION_STATES)
+    graph = _graph()
+    pruned = mock.Mock()
+    monkeypatch.setattr("argus.orchestration.collector._prune_stale_checkpoints", pruned)
+
+    result = await run_collection_cycle_from_settings(pipeline=pipeline, compiled_graph=graph)
+
+    assert result.tickers_with_session_data == ["AAPL"]
+    state = graph.invoke.call_args.args[0]
+    assert state["total_wealth"] == 50_000.0
+    assert state["invest_pct"] == 0.25
+    assert state["risk_tolerance"] == "AGGRESSIVE"
+    pruned.assert_called_once_with(str(settings.data_path("argus_graph.db")))
+
+
+async def test_run_collection_cycle_from_settings_prefers_explicit_arguments():
+    """An explicit argument (a CLI override) wins over the settings default."""
+    pipeline = mock.Mock()
+    pipeline.run_once = mock.AsyncMock(return_value={"MSFT": {"timestamp": "t"}})
+    graph = _graph()
+
+    result = await run_collection_cycle_from_settings(
+        pipeline=pipeline, compiled_graph=graph, universe=["MSFT"], total_wealth=1_234.0
+    )
+
+    assert result.tickers_with_session_data == ["MSFT"]
+    assert graph.invoke.call_args.args[0]["total_wealth"] == 1_234.0

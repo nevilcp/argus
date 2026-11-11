@@ -10,477 +10,49 @@ replays recorded fixtures through this same graph over the ~60-day window
 that is genuinely available.
 
 Responsibilities:
-  - Route analysis requests to the LangGraph execution pipeline
+  - Build the app and its routes
+  - Route analysis requests to the LangGraph execution pipeline, enforcing
+    the kill-switch, market-hours and live-cache admission gates first
   - Append every /analyze decision to the same decisions.jsonl log the
     unattended collector writes to (see argus/orchestration/collector.py),
     so reconciliation sees both entry points into the graph
-  - Enforce kill-switch and VIX blackout checks before every allocation request
   - Expose health, memory, governor, and kill-switch management endpoints
-  - Host the MFT pipeline as a background asyncio task and maintain a live
-    session state cache consumed by /analyze
-  - Optionally run the unattended collector and daily reconciliation loops
-    (ARGUS_COLLECTOR_ENABLED / ARGUS_RECONCILE_ENABLED) so the system keeps
-    accumulating decisions and outcomes without a human calling /analyze,
-    pruning every store the reconcile loop touches back to a bounded window
-    as part of the same daily pass
-  - Serialize graph invocations across /analyze and the collector loop, and
-    guard against a second process sharing this one's data directory
 
 Not responsible for:
+  - Request/response models (see api/models.py)
+  - Startup checks and the single-process lock (see api/guards.py)
+  - Startup/shutdown, the background loops' lifetimes and the shared runtime
+    state (see api/lifespan.py)
+  - The collector and reconcile loops themselves (see
+    argus/orchestration/scheduler.py)
   - Agent logic (see argus/agents/)
-  - Signal computation (see argus/orchestration/)
-  - Execution order routing
 """
 
 import asyncio
-import fcntl
 import logging
-import sys
-from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict
-from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, field_validator
 
 import argus
-from argus.agents.macro import MacroStatisticalAgent
-from argus.config import settings, web_concurrency
-from argus.data.live_session_cache import LiveSessionCache
-from argus.data.pipeline import MFTDataPipeline
-from argus.data.tickers import is_valid_ticker
-from argus.governor import (
-    REGISTERED_MODELS,
-    RateLimitExceeded,
-    UnregisteredModel,
-    governor,
-)
+from api.lifespan import lifespan, runtime
+from api.models import AnalysisRequest, AnalysisResponse
+from argus.agents.sentiment import FINBERT_MODEL
+from argus.config import settings
+from argus.governor import RateLimitExceeded, UnregisteredModel, governor
 from argus.infra.clock import now_local, now_market
-from argus.infra.log import configure_logging
 from argus.memory.cultural import get_cultural_memory
-from argus.orchestration.collector import CollectionResult, run_collection_cycle
+from argus.orchestration.checkpoint import new_run_config
 from argus.orchestration.decision_log import append_decisions_jsonl
-from argus.orchestration.graph import build_graph
-from argus.orchestration.reconcile import run_reconciliation_pass
-from argus.orchestration.state import initial_state
+from argus.orchestration.state import ARGUSState, initial_state
 from argus.params import SYSTEM
 from argus.risk import paper_book
-from argus.risk.kill_switch import get_kill_switch, initialize_kill_switch
-from argus.schemas.requests import (
-    MAX_INVEST_PCT,
-    MIN_INVEST_PCT,
-    MIN_TOTAL_WEALTH,
-    RiskTolerance,
-)
-from argus.seams import LiveMarketDataProvider
+from argus.risk.kill_switch import KillSwitch, get_kill_switch
+from argus.schemas.requests import MIN_TOTAL_WEALTH
 
 logger = logging.getLogger(__name__)
-
-_live_cache: LiveSessionCache | None = None
-
-# Initialized during lifespan startup; tickers are registered dynamically per
-# /analyze request in addition to the ARGUS_UNIVERSE seed
-_mft_pipeline: MFTDataPipeline | None = None
-_pipeline_task: asyncio.Task | None = None
-_collector_task: asyncio.Task | None = None
-_reconcile_task: asyncio.Task | None = None
-_last_collection_result: CollectionResult | None = None
-
-# Serializes graph invocations across /analyze and the unattended collector
-# loop — both call the same governor-gated graph, and a second concurrent
-# run only pushes both toward RateLimitExceeded rather than adding real
-# throughput. Held only around the graph invoke itself.
-_analyze_semaphore = asyncio.Semaphore(1)
-
-# Holds the open file object backing the process-exclusivity flock for as
-# long as this process runs; garbage-collecting it would release the lock
-_process_lock_file = None
-
-# Built once in lifespan startup, pointed at the same persistent checkpoint
-# path the collector loop uses, so /analyze and the unattended collector
-# share one decision history instead of two disjoint SQLite files
-_graph = None
-
-# A throwaway MacroStatisticalAgent constructed solely to surface whether the
-# committed HMM artifact loaded, for /pipeline/status. Cheap: the constructor
-# only loads a joblib file, unlike the old fit_on_history() network fetch this
-# replaced (see the deleted startup block below).
-_macro_status_agent: MacroStatisticalAgent | None = None
-
-
-async def _mft_session_callback(session_states: dict) -> None:
-    """Receives compressed technical feature dicts from the MFT pipeline on every sweep.
-
-    Publishes them into the module-level live cache so the next /analyze call
-    picks up fresh intraday indicators without re-fetching historical data.
-    Eviction of tickers no longer tracked happens inside
-    LiveSessionCache.publish, keyed off the pipeline's current tracked
-    universe.
-
-    Args:
-        session_states: Mapping of ticker → technical feature dict from MFTDataPipeline.
-    """
-    if _live_cache is not None and _mft_pipeline is not None:
-        _live_cache.publish(session_states, _mft_pipeline.tickers)
-
-    logger.info(
-        "Live session cache updated: %d ticker(s)",
-        len(_live_cache) if _live_cache is not None else 0,
-    )
-
-
-def _log_task_exception(task: asyncio.Task, name: str) -> None:
-    """Logs a background task's exception instead of letting it vanish silently.
-
-    An `asyncio.create_task()` result with no held reference can be garbage
-    collected mid-flight, and any exception it raises is otherwise only
-    reported (noisily, to stderr) once the loop shuts down. Every background
-    task here is submitted with this as a done-callback.
-
-    Args:
-        task: The finished task.
-        name: Label used in the log line, e.g. "MFTDataPipeline".
-    """
-    if task.cancelled():
-        return
-    exc = task.exception()
-    if exc is not None:
-        logger.error("[%s] background task crashed: %s", name, exc, exc_info=exc)
-
-
-def _start_background_task(coro, name: str) -> asyncio.Task:
-    """Schedules a coroutine as a background task that logs its own crash.
-
-    Args:
-        coro: The coroutine to run for the lifetime of the app.
-        name: Label used in the crash log line, e.g. "MFTDataPipeline".
-
-    Returns:
-        The created task, which the caller must keep a reference to.
-    """
-    task = asyncio.create_task(coro)
-    task.add_done_callback(lambda t: _log_task_exception(t, name))
-    return task
-
-
-async def _collector_loop(pipeline: MFTDataPipeline, compiled_graph) -> None:
-    """Runs run_collection_cycle on a fixed interval for as long as the app is alive.
-
-    Args:
-        pipeline: The shared MFT pipeline instance, so this loop reuses the
-            same warm buffer the live /analyze cache draws from.
-        compiled_graph: The shared, already-built graph (module-level
-            ``_graph``) — the same instance /analyze invokes, so this loop
-            reopens no extra SqliteSaver connection on every cycle.
-    """
-    global _last_collection_result
-    while True:
-        try:
-            _last_collection_result = await run_collection_cycle(
-                universe=list(settings.ARGUS_UNIVERSE),
-                total_wealth=settings.ARGUS_TOTAL_WEALTH,
-                invest_pct=settings.ARGUS_INVEST_PCT,
-                risk_tolerance=settings.ARGUS_RISK_TOLERANCE,
-                pipeline=pipeline,
-                compiled_graph=compiled_graph,
-                decisions_log_path=str(settings.data_path("decisions.jsonl")),
-                checkpoint_db_path=str(settings.data_path("argus_graph.db")),
-                analyze_lock=_analyze_semaphore,
-            )
-            logger.info("cycle result: %s", _last_collection_result)
-        except Exception:
-            logger.exception("cycle failed")
-        await asyncio.sleep(settings.ARGUS_COLLECTOR_INTERVAL_SECONDS)
-
-
-def _reconcile_once() -> None:
-    """Runs one reconciliation pass, then syncs the kill switch off its resulting equity.
-
-    Synchronous by design — `_reconcile_loop` runs this via `asyncio.to_thread`
-    since it performs per-ticker yfinance fetches directly, which would
-    otherwise block the event loop for the whole app for the duration of a run.
-    Kill-switch sync stays here rather than in run_reconciliation_pass: this is
-    the caller with a daemon to sync to, and it's skipped when the paper-book
-    step itself failed — syncing a fresh report's zeroed-out default equity
-    would read as a total portfolio loss.
-    """
-    report = run_reconciliation_pass(
-        LiveMarketDataProvider(),
-        get_cultural_memory(),
-        str(settings.data_path("paper_equity.json")),
-        decisions_log_path=str(settings.data_path("decisions.jsonl")),
-        checkpoint_db_path=str(settings.data_path("argus_graph.db")),
-    )
-    for line in report.summary_lines():
-        logger.info("%s", line)
-    for error in report.errors:
-        logger.error("%s", error)
-
-    if report.paper_book_updated:
-        ks = get_kill_switch()
-        if ks is not None:
-            ks.update_portfolio_value(report.equity)
-
-
-def _seconds_until_next_reconcile(now_et: datetime, hour: int) -> float:
-    """Computes seconds until the next `hour:00` ET, safe across DST transitions.
-
-    `target - now_et` alone is unsafe here: both are built from the same
-    ZoneInfo instance, and aware-datetime subtraction with a shared tzinfo
-    object compares wall-clock fields directly rather than each side's own
-    UTC offset, so the result silently drops or adds an hour across a DST
-    boundary. Converting both to UTC first sidesteps that.
-
-    Args:
-        now_et: Current time in America/New_York.
-        hour: Target hour (0-23) in America/New_York.
-
-    Returns:
-        Seconds until the next occurrence of that hour, today or tomorrow.
-    """
-    target = now_et.replace(hour=hour, minute=0, second=0, microsecond=0)
-    if target <= now_et:
-        target += timedelta(days=1)
-    return (target.astimezone(UTC) - now_et.astimezone(UTC)).total_seconds()
-
-
-async def _reconcile_loop() -> None:
-    """Runs the reconciliation pass once a day at settings.ARGUS_RECONCILE_HOUR_ET."""
-    while True:
-        now_et = now_market()
-        await asyncio.sleep(_seconds_until_next_reconcile(now_et, settings.ARGUS_RECONCILE_HOUR_ET))
-
-        try:
-            await asyncio.to_thread(_reconcile_once)
-        except Exception:
-            logger.exception("cycle failed")
-
-
-def _assert_single_worker() -> None:
-    """Fails fast on the argv/env spellings of "more than one worker" this can detect.
-
-    The rate governor and kill switch are in-process singletons (see
-    argus/governor.py). A second worker process would run its
-    own ignorant copy of both, silently doubling real Groq usage against the
-    same account and gating risk independently rather than jointly — the
-    Actions collector (scripts/reconcile_outcomes.py) is already a second,
-    independent governor against that same key, and this assertion exists so
-    a deployment doesn't add a third by accident. See Dockerfile.api's CMD.
-
-    This is a best-effort pre-flight only, not the real guard: it can't see
-    gunicorn's `-w`, a gunicorn config file, or a programmatic
-    `uvicorn.run(workers=N)`. `_acquire_process_lock` is what actually
-    catches those, and the case that costs real money — two containers on one
-    data volume — which no argv/env spelling of "workers" describes at all.
-
-    Raises:
-        RuntimeError: If ``--workers``/``--workers=N`` in argv, or
-            ``WEB_CONCURRENCY`` in the environment, requests a value other
-            than "1".
-    """
-    argv = sys.argv
-    requested: list[tuple[str, str]] = []
-
-    if "--workers" in argv:
-        idx = argv.index("--workers")
-        if idx + 1 < len(argv):
-            requested.append((f"--workers {argv[idx + 1]}", argv[idx + 1]))
-    requested.extend(
-        (arg, arg.removeprefix("--workers=")) for arg in argv if arg.startswith("--workers=")
-    )
-    concurrency = web_concurrency()
-    if concurrency is not None:
-        requested.append((f"WEB_CONCURRENCY={concurrency}", concurrency))
-
-    for spelling, count in requested:
-        if count != "1":
-            raise RuntimeError(
-                "ARGUS must run with a single worker (in-process governor/kill-switch "
-                f"singletons); got {spelling}. This is only a pre-flight check of argv/env — it "
-                "can't see a gunicorn config file or uvicorn.run(workers=N), and "
-                "_acquire_process_lock's flock is the real guard."
-            )
-
-
-def _acquire_process_lock() -> None:
-    """Takes an exclusive, non-blocking flock on ``${ARGUS_DATA_DIR}/argus.lock``.
-
-    This is the real single-process guard, unlike `_assert_single_worker`'s
-    argv/env pre-flight: it catches every way two ARGUS processes could end up
-    sharing one data directory — including two whole containers — not just
-    the worker-count spellings that pre-flight can parse. Note this only runs
-    during lifespan startup, so ``uvicorn --reload``'s parent process (which
-    doesn't run lifespan) is not itself protected; the reloaded child is.
-    Scoping the lock file to ``ARGUS_DATA_DIR`` also correctly leaves
-    ``scripts/collect_session.py``'s GitHub Actions runner unblocked — it
-    writes to its own runner-local directory, not this deployment's, and is
-    already an accepted second governor/kill-switch process (see
-    ``argus/orchestration/collector.py``'s module docstring).
-
-    Raises:
-        RuntimeError: If another process already holds the lock.
-    """
-    global _process_lock_file
-    lock_path = settings.data_path("argus.lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_file = open(lock_path, "w")  # noqa: SIM115
-    try:
-        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError as exc:
-        lock_file.close()
-        raise RuntimeError(
-            f"Another ARGUS process already holds {lock_path} — refusing to start a "
-            f"second process against the same data directory."
-        ) from exc
-    _process_lock_file = lock_file
-
-
-def _warn_on_permissive_security_defaults() -> None:
-    """Logs a WARNING for each security-relevant setting still at its permissive default.
-
-    ARGUS_CORS_ORIGINS defaulting to ``["*"]`` and a blank ARGUS_API_KEY are
-    both fine for local development behind a trusted network boundary, but
-    silent in a deployment actually exposed to the internet. Neither default
-    changes here — only whether the deployment says so out loud.
-    """
-    if settings.ARGUS_CORS_ORIGINS == ["*"]:
-        logger.warning(
-            '[Startup] ARGUS_CORS_ORIGINS is at its default ("*"): every origin is allowed. '
-            "Set it explicitly for a deployment reachable outside a trusted network."
-        )
-    if not settings.ARGUS_API_KEY:
-        logger.warning(
-            "ARGUS_API_KEY is unset: /analyze and /kill-switch/reset accept requests "
-            "with no X-API-Key check. Set it for a deployment reachable outside a trusted network."
-        )
-
-
-def _assert_registered_models() -> None:
-    """Fails fast if a configured agent model has no rate-limit profile.
-
-    Converts what would otherwise be a first-call UnregisteredModel deep inside
-    a request into a boot-time failure, so a typo'd or unsupported
-    ARGUS_*_MODEL setting is caught before the process ever serves traffic.
-
-    Raises:
-        UnregisteredModel: If any of ARGUS_FUNDAMENTAL_MODEL, ARGUS_SENTIMENT_MODEL,
-            or ARGUS_PORTFOLIO_MODEL is absent from REGISTERED_MODELS.
-    """
-    for model in (
-        settings.ARGUS_FUNDAMENTAL_MODEL,
-        settings.ARGUS_SENTIMENT_MODEL,
-        settings.ARGUS_PORTFOLIO_MODEL,
-    ):
-        if model not in REGISTERED_MODELS:
-            raise UnregisteredModel(
-                f"{model!r} is configured but has no registered rate-limit profile"
-            )
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Starts background tasks on startup and stops them cleanly on shutdown."""
-    global \
-        _mft_pipeline, \
-        _pipeline_task, \
-        _collector_task, \
-        _reconcile_task, \
-        _graph, \
-        _macro_status_agent, \
-        _live_cache
-
-    configure_logging()
-    _warn_on_permissive_security_defaults()
-    _assert_single_worker()
-    _assert_registered_models()
-    _acquire_process_lock()
-
-    _graph = build_graph(checkpoint_db_path=str(settings.data_path("argus_graph.db")))
-
-    _macro_status_agent = MacroStatisticalAgent()
-    if _macro_status_agent.classifier.is_fitted:
-        logger.info("Macro HMM artifact loaded: %s", settings.ARGUS_HMM_MODEL_PATH)
-    else:
-        logger.warning(
-            "Macro HMM artifact not loaded; classifier will use the rule-based fallback."
-        )
-
-    # Seeded from ARGUS_UNIVERSE so the pipeline starts collecting immediately
-    # rather than waiting for a first /analyze call to register any tickers
-    _mft_pipeline = MFTDataPipeline(tickers=list(settings.ARGUS_UNIVERSE))
-    _live_cache = LiveSessionCache(interval_minutes=_mft_pipeline.interval_minutes)
-    _pipeline_task = _start_background_task(
-        _mft_pipeline.start(on_session_ready=_mft_session_callback), "MFTDataPipeline"
-    )
-    logger.info(
-        "MFT pipeline background task launched: %d ticker(s).",
-        len(settings.ARGUS_UNIVERSE),
-    )
-
-    if settings.ARGUS_COLLECTOR_ENABLED:
-        _collector_task = _start_background_task(
-            _collector_loop(_mft_pipeline, _graph), "CollectorLoop"
-        )
-        logger.info(
-            "Unattended collector loop launched (interval=%ds).",
-            settings.ARGUS_COLLECTOR_INTERVAL_SECONDS,
-        )
-
-    if settings.ARGUS_RECONCILE_ENABLED:
-        _reconcile_task = _start_background_task(_reconcile_loop(), "ReconcileLoop")
-        logger.info(
-            "Daily reconciliation loop launched (hour=%d ET).",
-            settings.ARGUS_RECONCILE_HOUR_ET,
-        )
-
-    # Seeded from the persisted paper equity curve (falls back to
-    # ARGUS_TOTAL_WEALTH if none exists yet) so a process restart doesn't
-    # silently forget an already-realized drawdown; /kill-switch/reset
-    # re-bases if a real session base is known instead
-    book = paper_book.load(str(settings.data_path("paper_equity.json")))
-    initialize_kill_switch(
-        risk_tolerance=settings.ARGUS_RISK_TOLERANCE, portfolio_value=book.high_water_mark
-    )
-    ks = get_kill_switch()
-    if ks is not None:
-        ks.update_portfolio_value(book.equity)
-    logger.info(
-        "Kill switch initialized (paper equity=$%.2f, peak=$%.2f).",
-        book.equity,
-        book.high_water_mark,
-    )
-
-    logger.info("Governor initialized: %s", governor.get_usage_report())
-
-    yield
-
-    logger.info("Stopping background tasks...")
-    if _mft_pipeline is not None:
-        await _mft_pipeline.stop()
-
-    for task in (_pipeline_task, _collector_task, _reconcile_task):
-        if task is not None:
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
-
-    ks = get_kill_switch()
-    if ks is not None:
-        await asyncio.to_thread(ks.stop, 5.0)
-
-    if _mft_pipeline is not None:
-        # Pipeline-owned so it can wait out an orphaned buffer worker rather than
-        # racing it — cancelling the loops above can't stop one already mid-`to_thread`
-        await _mft_pipeline.close_buffer()
-
-    if _process_lock_file is not None:
-        fcntl.flock(_process_lock_file, fcntl.LOCK_UN)
-        _process_lock_file.close()
-
-    logger.info("Complete.")
-
 
 app = FastAPI(title="ARGUS API", version=argus.__version__, lifespan=lifespan)
 app.add_middleware(
@@ -507,48 +79,6 @@ async def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
     """
     if settings.ARGUS_API_KEY and x_api_key != settings.ARGUS_API_KEY:
         raise HTTPException(401, "Missing or invalid X-API-Key header.")
-
-
-class AnalysisRequest(BaseModel):
-    """Request payload defining parameters for stock universe valuation and rebalancing."""
-
-    tickers: list[str] = Field(min_length=1, max_length=20)
-    total_wealth: float = Field(gt=MIN_TOTAL_WEALTH)
-    invest_pct: float = Field(gt=MIN_INVEST_PCT, le=MAX_INVEST_PCT)
-    risk_tolerance: RiskTolerance = "MODERATE"
-
-    @field_validator("tickers")
-    @classmethod
-    def _normalize_tickers(cls, tickers: list[str]) -> list[str]:
-        """Strips whitespace, upper-cases, validates ticker shape, then dedupes.
-
-        Runs in that order deliberately: pydantic's StringConstraints checks
-        `pattern` against the raw, pre-transform string even when combined
-        with `to_upper`/`strip_whitespace`, so a case/whitespace-only field
-        constraint can't do this — the transform has to happen before the
-        pattern check runs.
-
-        Raises:
-            ValueError: If any entry isn't a valid ticker after normalization.
-        """
-        normalized = [t.strip().upper() for t in tickers]
-        invalid = [t for t in normalized if not is_valid_ticker(t)]
-        if invalid:
-            raise ValueError(f"Invalid ticker symbol(s): {invalid}")
-        return list(dict.fromkeys(normalized))
-
-
-class AnalysisResponse(BaseModel):
-    """Synthesized portfolio allocation recommendation and system diagnostics."""
-
-    session_id: str
-    portfolio: list[dict]
-    cash_reserve_pct: float
-    macro_regime: str
-    vix_level: float
-    governor_report: dict
-    timestamp: str
-    errors: list[str] = []
 
 
 def _background_task_status(task: asyncio.Task | None) -> dict:
@@ -593,9 +123,9 @@ async def health():
         can_make_calls = False
 
     background_tasks = {
-        "mft_pipeline": _background_task_status(_pipeline_task),
-        "collector": _background_task_status(_collector_task),
-        "reconcile": _background_task_status(_reconcile_task),
+        "mft_pipeline": _background_task_status(runtime.pipeline_task),
+        "collector": _background_task_status(runtime.collector_task),
+        "reconcile": _background_task_status(runtime.reconcile_task),
     }
     dead_tasks = [name for name, status in background_tasks.items() if not status["alive"]]
     if dead_tasks:
@@ -604,8 +134,9 @@ async def health():
     ks = get_kill_switch()
 
     newest_cache_entry_age_seconds = None
-    if _mft_pipeline is not None and _mft_pipeline.is_market_hours() and _live_cache is not None:
-        cache_age_seconds, _ = _live_cache.ages(now_market())
+    pipeline = runtime.pipeline
+    if pipeline is not None and pipeline.is_market_hours() and runtime.live_cache is not None:
+        cache_age_seconds, _ = runtime.live_cache.ages(now_market())
         if cache_age_seconds:
             newest_cache_entry_age_seconds = min(cache_age_seconds.values())
 
@@ -615,7 +146,7 @@ async def health():
             "synthesis": settings.ARGUS_PORTFOLIO_MODEL,
             "sentiment": settings.ARGUS_SENTIMENT_MODEL,
             "fundamental": settings.ARGUS_FUNDAMENTAL_MODEL,
-            "finbert": "ProsusAI/finbert",
+            "finbert": FINBERT_MODEL,
         },
         "can_make_calls": can_make_calls,
         "governor_report": governor.get_usage_report(),
@@ -636,72 +167,76 @@ async def pipeline_status():
     Raises:
         HTTPException 503: If the pipeline hasn't started yet.
     """
-    if _mft_pipeline is None:
+    pipeline = runtime.pipeline
+    if pipeline is None:
         raise HTTPException(503, "Pipeline not yet initialized.")
 
-    buffer_depth = await asyncio.to_thread(_mft_pipeline.buffer.row_counts)
+    buffer_depth = await asyncio.to_thread(pipeline.buffer.row_counts)
 
     cache_age_seconds, bar_age_seconds = (
-        _live_cache.ages(now_market()) if _live_cache is not None else ({}, {})
+        runtime.live_cache.ages(now_market()) if runtime.live_cache is not None else ({}, {})
     )
 
     return {
-        "tracked_tickers": list(_mft_pipeline.tickers),
+        "tracked_tickers": list(pipeline.tickers),
         "buffer_depth": buffer_depth,
         "cache_age_seconds": cache_age_seconds,
         "bar_age_seconds": bar_age_seconds,
-        "is_market_hours": _mft_pipeline.is_market_hours(),
+        "is_market_hours": pipeline.is_market_hours(),
         "collector_enabled": settings.ARGUS_COLLECTOR_ENABLED,
         "last_collection_result": (
-            None if _last_collection_result is None else asdict(_last_collection_result)
+            None
+            if runtime.last_collection_result is None
+            else asdict(runtime.last_collection_result)
         ),
         "reconcile_enabled": settings.ARGUS_RECONCILE_ENABLED,
         "reconcile_hour_et": settings.ARGUS_RECONCILE_HOUR_ET,
-        "macro_classifier_fitted": (
-            _macro_status_agent.classifier.is_fitted if _macro_status_agent else False
-        ),
+        "macro_classifier_fitted": runtime.macro_classifier_fitted,
     }
 
 
-@app.post("/analyze", response_model=AnalysisResponse, dependencies=[Depends(require_api_key)])
-async def analyze(req: AnalysisRequest):
-    """Executes a real-time portfolio analysis pipeline across a target ticker universe.
+def _raise_if_halted(phase: str = "") -> KillSwitch | None:
+    """Raises 503 if the kill switch has halted the system; otherwise returns the switch.
 
-    Checks system safety (kill switches), validates that the MFT live cache is fully
-    populated for all requested tickers, then runs LangGraph arbitrated orchestration
-    and returns target allocation distributions.
+    Args:
+        phase: Appended to the message to say when the halt was seen, e.g.
+            " during analysis" for the re-check after a graph run.
+
+    Returns:
+        The kill switch, or None if none has been initialized.
+
+    Raises:
+        HTTPException 503: If the kill switch is halted.
+    """
+    ks = get_kill_switch()
+    if ks and ks.is_halted:
+        raise HTTPException(
+            503, f"System halted{phase}. Kill switch triggered. Manual reset required."
+        )
+    return ks
+
+
+def _admit_live_session(req: AnalysisRequest) -> dict[str, dict]:
+    """Applies every pre-graph gate and returns the live feature dict per requested ticker.
 
     The kill switch's drawdown gate is process-global, fixed at startup from
     settings.ARGUS_RISK_TOLERANCE (see argus/risk/kill_switch.py's class
     docstring) — a request's own risk_tolerance does not change which
-    threshold guards it. A mismatch is logged, not rejected: this endpoint
-    still serves the request under the configured threshold.
+    threshold guards it. A mismatch is logged, not rejected.
 
     Args:
-        req: AnalysisRequest with tickers, total_wealth, invest_pct, and risk_tolerance.
+        req: The validated request.
+
+    Returns:
+        Ticker → live technical feature dict, one entry per requested ticker.
 
     Raises:
-        HTTPException 401: If ARGUS_API_KEY is set and the X-API-Key header doesn't match.
-        HTTPException 429: If the governor's rate budget is exhausted for a
-            configured model, or another analysis (a concurrent /analyze
-            call or the unattended collector) is already in progress —
-            retry after a short wait.
-        HTTPException 503: If the graph hasn't finished initializing, the kill switch
-            is triggered (before or after the graph run), VIX is above the blackout
-            threshold, the market is currently closed, the MFT cache has not yet
-            been populated for all requested tickers, the cache hasn't been
-            refreshed recently (pipeline stalled), the cached bars are older
-            than expected (stale data survived a restart), a configured model
-            has no rate-limit profile (a misconfiguration, not a transient
-            condition), or the portfolio agent's LLM call failed and correctly
-            degraded to no allocation rather than fabricating one.
-        HTTPException 500: If the LangGraph execution fails for a reason other
-            than the LLM call above.
+        HTTPException 503: If the system is halted or blocked on VIX, the market
+            is closed, or the live cache is missing, stalled or stale for any
+            requested ticker.
     """
-    ks = get_kill_switch()
+    ks = _raise_if_halted()
     if ks:
-        if ks.is_halted:
-            raise HTTPException(503, "System halted. Kill switch triggered. Manual reset required.")
         if not ks.new_positions_allowed:
             raise HTTPException(503, "New positions blocked. VIX above threshold.")
         if req.risk_tolerance != ks.risk_tolerance:
@@ -715,7 +250,8 @@ async def analyze(req: AnalysisRequest):
     # Daily bars would mismatch the resolution the technical agent expects, and
     # checking this first confines every age check below to a weekday
     # 09:30-16:00 ET window, eliminating the weekend/holiday false positive
-    if _mft_pipeline is None or not _mft_pipeline.is_market_hours():
+    pipeline = runtime.pipeline
+    if pipeline is None or not pipeline.is_market_hours():
         raise HTTPException(
             503,
             "US equity market is currently closed. MFT pipeline is idle. "
@@ -725,15 +261,15 @@ async def analyze(req: AnalysisRequest):
     # Registered only once every earlier gate has cleared — a rejected
     # request must not mutate pipeline state or spend a slot in the
     # tracked-universe cap
-    _mft_pipeline.register_tickers(req.tickers)
+    pipeline.register_tickers(req.tickers)
 
-    if _live_cache is None:
+    if runtime.live_cache is None:
         raise HTTPException(503, "Live session cache not yet initialized.")
 
     # Admission answers only "how old is this" for each ticker; the ordering
     # against market hours above is what decides whether that age matters
     # right now
-    admission = _live_cache.admit(req.tickers, now_market())
+    admission = runtime.live_cache.admit(req.tickers, now_market())
 
     if admission.absent:
         raise HTTPException(
@@ -754,26 +290,38 @@ async def analyze(req: AnalysisRequest):
             "The underlying candles are older than expected — check /pipeline/status.",
         )
 
-    live_states = admission.admitted
-    logger.info("MFT cache hit for all %d tickers", len(live_states))
+    logger.info("MFT cache hit for all %d tickers", len(admission.admitted))
+    return admission.admitted
 
-    state = initial_state(
-        req.tickers,
-        session_states=live_states,
-        total_wealth=req.total_wealth,
-        invest_pct=req.invest_pct,
-        risk_tolerance=req.risk_tolerance,
-    )
 
-    if _graph is None:
+async def _run_graph(state: ARGUSState) -> dict:
+    """Invokes the shared graph once, under the analyze lock and the request deadline.
+
+    Args:
+        state: Initial graph state for this request.
+
+    Returns:
+        The graph's final state.
+
+    Raises:
+        HTTPException 429: If another analysis holds the lock, or the governor's
+            rate budget is exhausted.
+        HTTPException 503: If the graph isn't built yet, or a configured model has
+            no rate-limit profile (a misconfiguration, not a transient condition).
+        HTTPException 504: If the run exceeds ARGUS_ANALYZE_DEADLINE_SECONDS.
+        HTTPException 500: For any other graph failure, with a correlation ref
+            instead of the internal exception text.
+    """
+    graph = runtime.graph
+    if graph is None:
         raise HTTPException(503, "Agent graph not yet initialized.")
 
-    config = {"configurable": {"thread_id": str(uuid4())}}
+    config = new_run_config("analyze")
 
     # No await between this check and the acquire below, so nothing can slip
     # in between them — Semaphore.acquire returns synchronously when
     # unlocked, and a later refactor that inserts an await here breaks that.
-    if _analyze_semaphore.locked():
+    if runtime.analyze_lock.locked():
         raise HTTPException(
             429,
             "Another analysis is already in progress. Retry shortly.",
@@ -781,9 +329,9 @@ async def analyze(req: AnalysisRequest):
         )
 
     try:
-        async with _analyze_semaphore:
-            final_state = await asyncio.wait_for(
-                asyncio.to_thread(_graph.invoke, state, config),
+        async with runtime.analyze_lock:
+            return await asyncio.wait_for(
+                asyncio.to_thread(graph.invoke, state, config),
                 timeout=settings.ARGUS_ANALYZE_DEADLINE_SECONDS,
             )
     except TimeoutError:
@@ -807,44 +355,97 @@ async def analyze(req: AnalysisRequest):
         logger.error("Graph error (ref %s): %s", ref, e, exc_info=True)
         raise HTTPException(500, f"Agent graph error (ref {ref})") from e
 
+
+def _build_response(final_state: dict) -> AnalysisResponse:
+    """Turns a finished graph state into the /analyze response.
+
+    Args:
+        final_state: The graph's final state.
+
+    Returns:
+        The allocation and diagnostics.
+
+    Raises:
+        HTTPException 503: If the portfolio agent produced no allocation. Refusing
+            to answer is correct here — see PortfolioManagerAgent.allocate's
+            degrade-not-fabricate contract — so this is an upstream LLM outage,
+            not a bug in this server; 503 says so rather than the generic 500.
+    """
+    allocation = final_state.get("portfolio_allocation")
+    if not allocation:
+        raise HTTPException(503, "Portfolio allocation failed.")
+
+    macro_context = final_state.get("macro_context")
+    return AnalysisResponse(
+        session_id=allocation.session_id,
+        portfolio=allocation.portfolio,
+        cash_reserve_pct=allocation.cash_reserve_pct,
+        macro_regime=macro_context.macro_regime.value if macro_context else "unknown",
+        vix_level=macro_context.vix_level if macro_context else 0.0,
+        governor_report=governor.get_usage_report(),
+        timestamp=now_local().isoformat(),
+        errors=final_state.get("errors") or [],
+    )
+
+
+@app.post("/analyze", response_model=AnalysisResponse, dependencies=[Depends(require_api_key)])
+async def analyze(req: AnalysisRequest):
+    """Executes a real-time portfolio analysis pipeline across a target ticker universe.
+
+    Checks system safety (kill switches), validates that the MFT live cache is fully
+    populated for all requested tickers, then runs LangGraph arbitrated orchestration
+    and returns target allocation distributions.
+
+    Args:
+        req: AnalysisRequest with tickers, total_wealth, invest_pct, and risk_tolerance.
+
+    Raises:
+        HTTPException 401: If ARGUS_API_KEY is set and the X-API-Key header doesn't match.
+        HTTPException 429: If the governor's rate budget is exhausted for a
+            configured model, or another analysis (a concurrent /analyze
+            call or the unattended collector) is already in progress —
+            retry after a short wait.
+        HTTPException 503: If the graph hasn't finished initializing, the kill switch
+            is triggered (before or after the graph run), VIX is above the blackout
+            threshold, the market is currently closed, the MFT cache has not yet
+            been populated for all requested tickers, the cache hasn't been
+            refreshed recently (pipeline stalled), the cached bars are older
+            than expected (stale data survived a restart), a configured model
+            has no rate-limit profile (a misconfiguration, not a transient
+            condition), or the portfolio agent's LLM call failed and correctly
+            degraded to no allocation rather than fabricating one.
+        HTTPException 504: If the graph run exceeds the analysis deadline.
+        HTTPException 500: If the LangGraph execution fails for a reason other
+            than the LLM call above.
+    """
+    live_states = _admit_live_session(req)
+    final_state = await _run_graph(
+        initial_state(
+            req.tickers,
+            session_states=live_states,
+            total_wealth=req.total_wealth,
+            invest_pct=req.invest_pct,
+            risk_tolerance=req.risk_tolerance,
+        )
+    )
+
     # /analyze is the other entry point into the graph besides the unattended
     # collector — without this, decisions.jsonl (the only source
     # reconcile_decisions reads) never sees a request served through this
-    # endpoint, and an API-only deployment reconciles nothing
-    append_decisions_jsonl(
-        final_state.get("decisions") or [], str(settings.data_path("decisions.jsonl"))
+    # endpoint, and an API-only deployment reconciles nothing. Off the event
+    # loop because it takes a file lock and fsyncs.
+    await asyncio.to_thread(
+        append_decisions_jsonl,
+        final_state.get("decisions") or [],
+        str(settings.data_path("decisions.jsonl")),
     )
 
     # Re-checked rather than trusted from before the (potentially many-second)
     # graph run: the kill switch is process-global and the reconcile loop can
     # trip it mid-run
-    ks = get_kill_switch()
-    if ks and ks.is_halted:
-        raise HTTPException(
-            503, "System halted during analysis. Kill switch triggered. Manual reset required."
-        )
+    _raise_if_halted(" during analysis")
 
-    allocation = final_state.get("portfolio_allocation")
-    if not allocation:
-        # Refusing to answer is correct here — see PortfolioManagerAgent.allocate's
-        # degrade-not-fabricate contract — so this is an upstream LLM outage, not
-        # a bug in this server; 503 says so rather than the generic 500.
-        raise HTTPException(503, "Portfolio allocation failed.")
-
-    macro_context = final_state.get("macro_context")
-    macro_regime = macro_context.macro_regime.value if macro_context else "unknown"
-    vix_level = macro_context.vix_level if macro_context else 0.0
-
-    return AnalysisResponse(
-        session_id=allocation.session_id,
-        portfolio=[p.model_dump() for p in allocation.portfolio],
-        cash_reserve_pct=allocation.cash_reserve_pct,
-        macro_regime=macro_regime,
-        vix_level=vix_level,
-        governor_report=governor.get_usage_report(),
-        timestamp=now_local().isoformat(),
-        errors=final_state.get("errors") or [],
-    )
+    return _build_response(final_state)
 
 
 @app.get("/memory/stats")

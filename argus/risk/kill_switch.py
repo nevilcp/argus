@@ -94,7 +94,7 @@ class KillSwitch:
          capital is put back to work.
 
     The drawdown threshold is fixed at construction from a single
-    ``risk_tolerance`` (see api/main.py's ``settings.ARGUS_RISK_TOLERANCE``).
+    ``risk_tolerance`` (see api/lifespan.py's ``settings.ARGUS_RISK_TOLERANCE``).
     ARGUS serves every /analyze request from the same process, so this gate
     is intentionally process-global rather than per-request: a request whose
     own ``risk_tolerance`` differs from the configured one is still governed

@@ -10,7 +10,7 @@ Responsibilities:
   - Validate a candidate ticker string against it
 
 Not responsible for:
-  - Case normalization or deduplication (see api/main.py's AnalysisRequest)
+  - Case normalization or deduplication (see api/models.py's AnalysisRequest)
   - Universe size limits (see argus/params.py's SYSTEM.max_tracked_tickers)
 """
 
