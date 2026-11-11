@@ -23,8 +23,7 @@ Not responsible for:
 
 Dependencies:
   - numpy, pandas, scipy (statistics)
-  - argus.backtesting.metrics (compute_all_metrics, reused for its
-    trade-level block rather than duplicated)
+  - argus.backtesting.metrics (trade_level_metrics, reused rather than duplicated)
   - argus.outcomes (compute_realized_return, reused rather than duplicated —
     this is the same function that feeds cultural.store_trade_outcome in
     production)
@@ -42,7 +41,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from argus.backtesting.metrics import compute_all_metrics
+from argus.backtesting.metrics import trade_level_metrics
 from argus.backtesting.replay import SessionResult, replay_session
 from argus.outcomes import compute_realized_return, needs_reconciliation
 from argus.params import EVALUATION
@@ -292,17 +291,6 @@ def evaluate_decisions(
     )
 
 
-_TRADE_LEVEL_KEYS = (
-    "win_rate",
-    "avg_win_pct",
-    "avg_loss_pct",
-    "win_loss_ratio",
-    "profit_factor",
-    "total_trades",
-    "avg_holding_days",
-)
-
-
 def pre_registered_verdict(open_loop: EvaluationResult, closed_loop: EvaluationResult) -> bool:
     """Applies the pre-registered success rule to the two replay conditions.
 
@@ -327,27 +315,22 @@ def pre_registered_verdict(open_loop: EvaluationResult, closed_loop: EvaluationR
 def trade_level_win_loss_stats(pairs: Sequence[PairedOutcome]) -> dict:
     """Win/loss/profit-factor statistics over a set of paired outcomes.
 
-    Reuses backtesting.metrics.compute_all_metrics' trade-level block rather
-    than duplicating it, keying it on each pair's forward_return/holding_days.
-    compute_all_metrics also returns return-series metrics (annualized_return,
-    sharpe_ratio, max_drawdown, alpha/beta, VaR/CVaR, ...) that assume a daily
-    equity curve; this replay only has discrete per-decision horizon returns,
-    not one, so those keys are intentionally dropped rather than reported
-    under a false premise.
+    Keys backtesting.metrics.trade_level_metrics on each pair's
+    forward_return/holding_days. No return-series metrics (Sharpe, drawdown, ...)
+    are reported: this replay only has discrete per-decision horizon returns, not
+    the daily equity curve they assume.
 
     Args:
         pairs: Paired outcomes, e.g. from EvaluationResult.pairs.
 
     Returns:
-        Empty dict if pairs is empty; otherwise the trade-level subset of
-        compute_all_metrics' output.
+        Empty dict if pairs is empty; otherwise the trade-level statistics.
     """
     if not pairs:
         return {}
-    strategy_returns = pd.Series([p.forward_return for p in pairs])
-    trade_log = [{"return_pct": p.forward_return, "holding_days": p.holding_days} for p in pairs]
-    all_metrics = compute_all_metrics(strategy_returns, pd.Series(dtype=float), trade_log=trade_log)
-    return {key: all_metrics[key] for key in _TRADE_LEVEL_KEYS}
+    return trade_level_metrics(
+        [{"return_pct": p.forward_return, "holding_days": p.holding_days} for p in pairs]
+    )
 
 
 @dataclass(frozen=True)

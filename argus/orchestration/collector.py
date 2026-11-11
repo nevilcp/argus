@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -260,15 +261,28 @@ async def run_collection_cycle(
     # invoke() blocks — run it off the event loop rather than stalling this coroutine.
     # No await between the locked() check above and this acquire, so a concurrent
     # /analyze can't slip in between the check and the hold.
-    if analyze_lock is not None:
-        async with analyze_lock:
-            final_state = await asyncio.to_thread(compiled_graph.invoke, state, config)
-    else:
+    async with analyze_lock if analyze_lock is not None else nullcontext():
         final_state = await asyncio.to_thread(compiled_graph.invoke, state, config)
 
-    decisions: list[ARGUSDecision] = final_state.get("decisions") or []
     if decisions_log_path is None:
         decisions_log_path = str(settings.data_path("decisions.jsonl"))
+    return _summarize_cycle(final_state, tickers_with_data, decisions_log_path)
+
+
+def _summarize_cycle(
+    final_state: dict, tickers_with_data: list[str], decisions_log_path: str
+) -> CollectionResult:
+    """Logs the cycle's decisions and summarizes the graph's final state.
+
+    Args:
+        final_state: The state returned by the compiled graph.
+        tickers_with_data: Tickers that had session data this cycle.
+        decisions_log_path: JSONL file the decisions are appended to.
+
+    Returns:
+        A CollectionResult with ``ran=True``.
+    """
+    decisions: list[ARGUSDecision] = final_state.get("decisions") or []
     logged = append_decisions_jsonl(decisions, decisions_log_path)
     errors = final_state.get("errors") or []
 

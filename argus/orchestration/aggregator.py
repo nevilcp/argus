@@ -97,15 +97,15 @@ class HybridSignalAggregator:
             or (sentiment.ticker if sentiment else None)
             or "UNKNOWN"
         )
-
-        macro_mults = macro.agent_multipliers if macro else {}
+        reliability_used: dict[str, float] = dict(reliability) if reliability else {}
+        reliability_n_used: dict[str, int] = dict(reliability_n) if reliability_n else {}
 
         sources = {
             "fundamental": fundamental,
             "technical": technical,
             "sentiment": sentiment,
         }
-
+        macro_mults = macro.agent_multipliers if macro else {}
         # Mass that could have been cast by all three agents, reliability excluded — the
         # denominator that makes conviction monotone in participation instead of saturating
         # whenever the agents who did vote happen to agree
@@ -115,49 +115,26 @@ class HybridSignalAggregator:
         }
         max_pool = sum(w_eff.values())
 
-        bull_pool: float = 0.0
-        bear_pool: float = 0.0
-        neutral_pool: float = 0.0
-        weighted_votes: dict[str, float] = {}
-        agents_present: list[str] = [name for name, signal in sources.items() if signal is not None]
-        reliability_used: dict[str, float] = dict(reliability) if reliability else {}
-        reliability_n_used: dict[str, int] = dict(reliability_n) if reliability_n else {}
+        pools, weighted_votes = _cast_votes(sources, w_eff, reliability_used)
 
-        for name, signal in sources.items():
-            if signal is None:
-                weighted_votes[name] = 0.0
-                continue
-
-            reliability_mult = (
-                reliability_used.get(name, AGGREGATOR.neutral_reliability)
-                / AGGREGATOR.neutral_reliability
-            )
-            vote = signal.conviction * w_eff[name] * reliability_mult
-
-            if signal.signal == Signal.BULLISH:
-                bull_pool += vote
-            elif signal.signal == Signal.BEARISH:
-                bear_pool += vote
-            else:
-                neutral_pool += vote
-
-            weighted_votes[name] = vote
-
-        if bull_pool + bear_pool + neutral_pool == 0.0:
-            logger.warning("No signal contributions for %s", ticker)
+        def build(signal: Signal, conviction: float) -> AggregatedSignal:
             return AggregatedSignal(
                 ticker=ticker,
-                signal=Signal.NEUTRAL,
-                conviction=0.0,
+                signal=signal,
+                conviction=conviction,
                 weighted_votes=weighted_votes,
-                agents_present=agents_present,
+                agents_present=[name for name, sig in sources.items() if sig is not None],
                 reliability=reliability_used,
                 reliability_n=reliability_n_used,
             )
 
-        bull_pct = bull_pool / max_pool
-        bear_pct = bear_pool / max_pool
-        neutral_pct = neutral_pool / max_pool
+        if sum(pools.values()) == 0.0:
+            logger.warning("No signal contributions for %s", ticker)
+            return build(Signal.NEUTRAL, 0.0)
+
+        bull_pct = pools[Signal.BULLISH] / max_pool
+        bear_pct = pools[Signal.BEARISH] / max_pool
+        neutral_pct = pools[Signal.NEUTRAL] / max_pool
 
         # A directional call needs a strict majority; an exact tie resolves NEUTRAL
         if bull_pct > bear_pct and bull_pct > neutral_pct:
@@ -196,13 +173,36 @@ class HybridSignalAggregator:
             bear_pct,
             neutral_pct,
         )
+        return build(consensus, conviction)
 
-        return AggregatedSignal(
-            ticker=ticker,
-            signal=consensus,
-            conviction=conviction,
-            weighted_votes=weighted_votes,
-            agents_present=agents_present,
-            reliability=reliability_used,
-            reliability_n=reliability_n_used,
+
+def _cast_votes(
+    sources: dict[str, TechnicalSignal | FundamentalSignal | SentimentSignal | None],
+    w_eff: dict[str, float],
+    reliability: dict[str, float],
+) -> tuple[dict[Signal, float], dict[str, float]]:
+    """Tallies each present agent's weighted vote into a per-direction pool.
+
+    Args:
+        sources: Agent name -> its signal, or None when the agent produced none.
+        w_eff: Agent name -> base weight after its macro multiplier.
+        reliability: Agent name -> historical win rate; a missing agent votes at
+            the neutral prior, i.e. unscaled.
+
+    Returns:
+        Tuple of (summed vote per direction, each agent's own weighted vote with
+        0.0 for an absent agent).
+    """
+    pools = {Signal.BULLISH: 0.0, Signal.BEARISH: 0.0, Signal.NEUTRAL: 0.0}
+    weighted_votes: dict[str, float] = {}
+    for name, signal in sources.items():
+        if signal is None:
+            weighted_votes[name] = 0.0
+            continue
+        reliability_mult = (
+            reliability.get(name, AGGREGATOR.neutral_reliability) / AGGREGATOR.neutral_reliability
         )
+        vote = signal.conviction * w_eff[name] * reliability_mult
+        pools[signal.signal] += vote
+        weighted_votes[name] = vote
+    return pools, weighted_votes

@@ -94,6 +94,45 @@ def _where(conditions: list[dict[str, Any]]) -> dict[str, Any]:
     return conditions[0] if len(conditions) == 1 else {"$and": conditions}
 
 
+def _outcome_for(actual_return_pct: float) -> Outcome:
+    """Classifies a realized return as successful, failed, or flat (within the storage band)."""
+    if actual_return_pct > RECONCILIATION.min_abs_return_for_storage:
+        return Outcome.SUCCESSFUL
+    if actual_return_pct < -RECONCILIATION.min_abs_return_for_storage:
+        return Outcome.FAILED
+    return Outcome.FLAT
+
+
+def _render_trade_document(
+    prefix: Outcome,
+    decision: ARGUSDecision,
+    actual_return_pct: float,
+    holding_days: int,
+    exit_reason: str,
+) -> str:
+    """Renders the text document stored (and embedded) for a settled trade."""
+    technical = decision.technical
+    macro_regime = decision.macro.macro_regime.value if decision.macro else "unknown"
+    vix_regime = decision.macro.vix_regime.value if decision.macro else "unknown"
+    tech_rsi = getattr(technical, "rsi_14", 0.0) if technical else 0.0
+    tech_macd = getattr(technical, "macd_histogram", 0.0) if technical else 0.0
+    fund_moat = decision.fundamental.moat_score if decision.fundamental else "N/A"
+    sent_finbert = decision.sentiment.finbert_net_score if decision.sentiment else None
+    agg_conv = decision.aggregated.conviction if decision.aggregated else "N/A"
+
+    return f"""{prefix.value} PATTERN:
+Macro regime: {macro_regime}
+VIX regime: {vix_regime}
+Technical signal: {_signal_or_na(technical)}
+  (RSI={tech_rsi:.0f}, MACD hist={tech_macd:.3f})
+Fundamental signal: {_signal_or_na(decision.fundamental)}
+  (Moat={fund_moat})
+Sentiment signal: {_signal_or_na(decision.sentiment)}
+  (FinBERT={"N/A" if sent_finbert is None else f"{sent_finbert:.2f}"})
+Aggregated conviction: {agg_conv}
+Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_reason}"""
+
+
 def _signal_or_na(agent_signal: Any) -> str:
     """Returns an agent signal block's enum value, or "N/A" when the agent didn't run."""
     return agent_signal.signal.value if agent_signal else "N/A"
@@ -215,36 +254,11 @@ class CulturalMemoryManager:
                 Signal arbitration is this method's caller's job, not this
                 module's — see its docstring's "Not responsible for" list.
         """
-        if actual_return_pct > RECONCILIATION.min_abs_return_for_storage:
-            prefix = Outcome.SUCCESSFUL
-        elif actual_return_pct < -RECONCILIATION.min_abs_return_for_storage:
-            prefix = Outcome.FAILED
-        else:
-            prefix = Outcome.FLAT
-
-        technical = decision.technical
+        prefix = _outcome_for(actual_return_pct)
         macro_regime = decision.macro.macro_regime.value if decision.macro else "unknown"
-        vix_regime = decision.macro.vix_regime.value if decision.macro else "unknown"
-        tech_sig = _signal_or_na(technical)
-        tech_rsi = getattr(technical, "rsi_14", 0.0) if technical else 0.0
-        tech_macd = getattr(technical, "macd_histogram", 0.0) if technical else 0.0
-        fund_sig = _signal_or_na(decision.fundamental)
-        fund_moat = decision.fundamental.moat_score if decision.fundamental else "N/A"
-        sent_sig = _signal_or_na(decision.sentiment)
-        sent_finbert = decision.sentiment.finbert_net_score if decision.sentiment else None
-        agg_conv = decision.aggregated.conviction if decision.aggregated else "N/A"
-
-        document = f"""{prefix.value} PATTERN:
-Macro regime: {macro_regime}
-VIX regime: {vix_regime}
-Technical signal: {tech_sig}
-  (RSI={tech_rsi:.0f}, MACD hist={tech_macd:.3f})
-Fundamental signal: {fund_sig}
-  (Moat={fund_moat})
-Sentiment signal: {sent_sig}
-  (FinBERT={"N/A" if sent_finbert is None else f"{sent_finbert:.2f}"})
-Aggregated conviction: {agg_conv}
-Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_reason}"""
+        document = _render_trade_document(
+            prefix, decision, actual_return_pct, holding_days, exit_reason
+        )
 
         doc_id = f"trade_{decision.decision_id}"
 

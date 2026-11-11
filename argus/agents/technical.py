@@ -200,6 +200,35 @@ def _score_momentum(s: dict) -> float:
     return 0.0
 
 
+def _clamp_rsi_extreme(ticker: str, rsi: float, net_score: float) -> float:
+    """Zeroes a net score that contradicts an RSI extreme, e.g. bullish while overbought."""
+    overbought = rsi > TECHNICAL.rsi_overbought and net_score > 0.0
+    oversold = rsi < TECHNICAL.rsi_oversold and net_score < 0.0
+    if not (overbought or oversold):
+        return net_score
+    logger.debug(
+        "analyze[%s] RSI=%.2f %s — clamping net_score %.4f → 0.0",
+        ticker,
+        rsi,
+        "overbought" if overbought else "oversold",
+        net_score,
+    )
+    return 0.0
+
+
+def _classify(net_score: float) -> tuple[Signal, float]:
+    """Maps a net score to a signal direction and its conviction."""
+    abs_score = abs(net_score)
+    if abs_score < TECHNICAL.net_score_neutral_threshold:
+        return Signal.NEUTRAL, TECHNICAL.neutral_conviction_floor + abs_score
+    # Direction splits BULLISH from BEARISH; conviction scales off the magnitude alone.
+    conviction = min(
+        TECHNICAL.conviction_base + abs_score * TECHNICAL.conviction_score_multiplier,
+        TECHNICAL.conviction_ceiling,
+    )
+    return (Signal.BULLISH if net_score > 0 else Signal.BEARISH), conviction
+
+
 class TechnicalStatisticalAgent:
     """Agent translating technical indicator matrices into validated trading signals.
 
@@ -240,81 +269,8 @@ class TechnicalStatisticalAgent:
             return None
 
         s = session_state
-
-        rsi_score = _score_rsi(s)
-        macd_score = _score_macd(s)
-        bb_score = _score_bollinger(s)
-        vwap_score = _score_vwap(s)
-        mom_score = _score_momentum(s)
-
-        # Base direction derived from primary indicators drives ADX amplification.
-        w = self.WEIGHTS
-        base_weight_sum = w["rsi"] + w["macd"] + w["bb"]
-        base_direction = (
-            rsi_score * w["rsi"] + macd_score * w["macd"] + bb_score * w["bb"]
-        ) / base_weight_sum
-        adx_score = _score_adx_amplified(s, base_direction)
-
-        scores: dict[str, float] = {
-            "rsi": rsi_score,
-            "macd": macd_score,
-            "bb": bb_score,
-            "adx": adx_score,
-            "vwap": vwap_score,
-            "momentum": mom_score,
-        }
-
-        logger.debug(
-            "analyze[%s] scores: %s",
-            ticker,
-            {k: round(v, 3) for k, v in scores.items()},
-        )
-
-        total_weight = sum(w.values())
-        net_score = sum(scores[k] * w[k] for k in scores) / total_weight
-
-        vol_ratio = float(s["volume_ratio"])
-        volume_modifier = min(
-            max(vol_ratio / TECHNICAL.volume_ratio_divisor, TECHNICAL.volume_modifier_floor),
-            TECHNICAL.volume_modifier_ceiling,
-        )
-        net_score = float(np.clip(net_score * volume_modifier, -1.0, 1.0))
-
-        logger.debug(
-            "analyze[%s] net_score=%.4f (vol_mod=%.2f)", ticker, net_score, volume_modifier
-        )
-
-        # RSI extremes override net_score to avoid contradictory signals (e.g. overbought bullish).
-        rsi_raw = float(s["rsi_14"])
-        if rsi_raw > TECHNICAL.rsi_overbought and net_score > 0.0:
-            logger.debug(
-                "analyze[%s] RSI=%.2f >75 overbought — clamping net_score %.4f → 0.0",
-                ticker,
-                rsi_raw,
-                net_score,
-            )
-            net_score = 0.0
-        elif rsi_raw < TECHNICAL.rsi_oversold and net_score < 0.0:
-            logger.debug(
-                "analyze[%s] RSI=%.2f <25 oversold — clamping net_score %.4f → 0.0",
-                ticker,
-                rsi_raw,
-                net_score,
-            )
-            net_score = 0.0
-
-        abs_score = abs(net_score)
-
-        if abs_score < TECHNICAL.net_score_neutral_threshold:
-            signal = Signal.NEUTRAL
-            conviction = TECHNICAL.neutral_conviction_floor + abs_score
-        else:
-            # Direction splits BULLISH from BEARISH; conviction scales off the magnitude alone.
-            signal = Signal.BULLISH if net_score > 0 else Signal.BEARISH
-            conviction = min(
-                TECHNICAL.conviction_base + abs_score * TECHNICAL.conviction_score_multiplier,
-                TECHNICAL.conviction_ceiling,
-            )
+        net_score = _clamp_rsi_extreme(ticker, float(s["rsi_14"]), self._net_score(ticker, s))
+        signal, conviction = _classify(net_score)
 
         logger.debug(
             "analyze[%s]: signal=%s conviction=%.3f net_score=%.4f",
@@ -342,6 +298,46 @@ class TechnicalStatisticalAgent:
             api_calls_used=0,
             timestamp=now_local(),
         )
+
+    def _net_score(self, ticker: str, s: dict) -> float:
+        """Combines the six indicator scores and the volume modifier into one net score."""
+        rsi_score = _score_rsi(s)
+        macd_score = _score_macd(s)
+        bb_score = _score_bollinger(s)
+
+        # Base direction derived from primary indicators drives ADX amplification.
+        w = self.WEIGHTS
+        base_weight_sum = w["rsi"] + w["macd"] + w["bb"]
+        base_direction = (
+            rsi_score * w["rsi"] + macd_score * w["macd"] + bb_score * w["bb"]
+        ) / base_weight_sum
+
+        scores: dict[str, float] = {
+            "rsi": rsi_score,
+            "macd": macd_score,
+            "bb": bb_score,
+            "adx": _score_adx_amplified(s, base_direction),
+            "vwap": _score_vwap(s),
+            "momentum": _score_momentum(s),
+        }
+        logger.debug(
+            "analyze[%s] scores: %s",
+            ticker,
+            {k: round(v, 3) for k, v in scores.items()},
+        )
+
+        net_score = sum(scores[k] * w[k] for k in scores) / sum(w.values())
+        volume_modifier = min(
+            max(
+                float(s["volume_ratio"]) / TECHNICAL.volume_ratio_divisor,
+                TECHNICAL.volume_modifier_floor,
+            ),
+            TECHNICAL.volume_modifier_ceiling,
+        )
+        logger.debug(
+            "analyze[%s] net_score=%.4f (vol_mod=%.2f)", ticker, net_score, volume_modifier
+        )
+        return float(np.clip(net_score * volume_modifier, -1.0, 1.0))
 
     def batch_analyze(
         self, session_states: dict[str, dict]

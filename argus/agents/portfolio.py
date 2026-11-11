@@ -279,12 +279,7 @@ class PortfolioManagerAgent:
 
         # PA-4: invest_pct can be unreachable for a small universe; state the achievable ceiling instead.
         invest_pct = float(user_profile.get("invest_pct", 1.0))
-        approved_cap_sum = 0.0
-        for t in approved_tickers:
-            risk = snapshots[t].risk
-            assert risk is not None  # approved_tickers is filtered by risk_approved
-            approved_cap_sum += risk.approved_weight
-        deployment_ceiling = min(invest_pct, approved_cap_sum)
+        deployment_ceiling = min(invest_pct, self._approved_cap_sum(approved_tickers, snapshots))
 
         prompt = self._build_allocation_prompt(
             investable=investable,
@@ -313,6 +308,38 @@ class PortfolioManagerAgent:
         if proposal is None:
             return None
 
+        allocation = self._build_allocation(proposal, snapshots, investable, diagnostics)
+        if allocation is None:
+            return None
+
+        self._session_count += 1
+        return allocation
+
+    @staticmethod
+    def _approved_cap_sum(
+        approved_tickers: list[str], snapshots: dict[str, TickerSnapshot]
+    ) -> float:
+        """Sums the risk-approved weight caps of the approved tickers."""
+        total = 0.0
+        for t in approved_tickers:
+            risk = snapshots[t].risk
+            assert risk is not None  # approved_tickers is filtered by risk_approved
+            total += risk.approved_weight
+        return total
+
+    def _build_allocation(
+        self,
+        proposal: PortfolioProposal,
+        snapshots: dict[str, TickerSnapshot],
+        investable: float,
+        diagnostics: Diagnostics,
+    ) -> PortfolioAllocation | None:
+        """Enforces risk limits on the LLM proposal and builds the validated allocation.
+
+        Returns:
+            The PortfolioAllocation, or None after recording the failing stage
+            (``response_enforcement`` or ``schema_validation``) in ``diagnostics``.
+        """
         stage = "response_enforcement"
         try:
             enforced_portfolio = self._enforce_risk(proposal, snapshots, investable, diagnostics)
@@ -336,15 +363,12 @@ class PortfolioManagerAgent:
             }
 
             stage = "schema_validation"
-            allocation = PortfolioAllocation.model_validate(data)
+            return PortfolioAllocation.model_validate(data)
         except Exception as e:
             diagnostics.record(
                 f"portfolio_allocation: PortfolioManagerAgent failed at {stage}: {e}", "error"
             )
             return None
-
-        self._session_count += 1
-        return allocation
 
     def _kelly_anchors(
         self, approved_tickers: list[str], snapshots: dict[str, TickerSnapshot]

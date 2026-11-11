@@ -189,19 +189,13 @@ class FixtureMarketDataProvider:
 # ---------------------------------------------------------------------------
 
 
-# Retryable: transient conditions where a second attempt might succeed.
+# Retryable: transient conditions where a second attempt might succeed. Everything
+# else (bad key, bad request, missing resource) is terminal and propagates as-is.
 _RETRYABLE_GROQ_ERRORS = (
     groq.RateLimitError,
     groq.APIConnectionError,
     groq.APITimeoutError,
     groq.InternalServerError,
-)
-# Terminal: a retry would fail identically (bad key, bad request, missing resource).
-_TERMINAL_GROQ_ERRORS = (
-    groq.AuthenticationError,
-    groq.PermissionDeniedError,
-    groq.BadRequestError,
-    groq.NotFoundError,
 )
 
 
@@ -330,19 +324,19 @@ class GroqLLMClient:
         estimated_tokens = estimate_tokens(system_prompt, user_prompt, self._max_tokens)
         governor.wait_if_needed(self._model, estimated_tokens)
 
+        invoked = False
         try:
             response = self._llm.invoke(
                 [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
             )
-        except _TERMINAL_GROQ_ERRORS:
-            governor.release_reservation(self._model, estimated_tokens)
-            raise
+            invoked = True
         except _RETRYABLE_GROQ_ERRORS as e:
-            governor.release_reservation(self._model, estimated_tokens)
             raise RetryableTransportError(e, retry_after=_groq_retry_delay(e)) from e
-        except Exception:
-            governor.release_reservation(self._model, estimated_tokens)
-            raise
+        finally:
+            # Any failure — retryable, terminal or unexpected —
+            # spent no tokens, so give the reservation back.
+            if not invoked:
+                governor.release_reservation(self._model, estimated_tokens)
 
         token_usage = response.response_metadata.get("token_usage") or {}
         governor.record_usage(

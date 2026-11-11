@@ -45,6 +45,7 @@ from argus.infra.clock import now_local
 from argus.infra.files import atomic_write_text
 from argus.outcomes import close_prices, compute_realized_return, needs_reconciliation
 from argus.ports import MarketDataProvider
+from argus.risk.kill_switch import drawdown_fraction
 from argus.schemas.signals import ARGUSDecision
 
 logger = logging.getLogger(__name__)
@@ -190,9 +191,7 @@ class PaperBook:
 
     def drawdown_from_peak(self) -> float:
         """Returns peak-to-trough drawdown as a non-negative fraction."""
-        if self.high_water_mark <= 0:
-            return 0.0
-        return max(0.0, (self.high_water_mark - self.equity) / self.high_water_mark)
+        return max(0.0, drawdown_fraction(self.high_water_mark, self.equity))
 
     def rebase(self, new_inception_value: float, rebased_at: datetime | None = None) -> None:
         """Rebases equity and high-water mark to a new inception value in place.

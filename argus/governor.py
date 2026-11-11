@@ -43,6 +43,7 @@ from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import TypedDict
 
 from argus.config import settings
 from argus.params import GOVERNOR
@@ -267,6 +268,25 @@ class ModelUsage:
     limits_observed: bool = False
 
 
+class ModelUsageReport(TypedDict):
+    """One model's entry in ``RateLimitGovernor.get_usage_report``."""
+
+    requests_today: int
+    tokens_today: int
+    requests_per_minute_limit: int
+    # Header-observed once known, else the bootstrap floor. None only when the
+    # provider reported headers without a token limit.
+    tokens_per_minute_limit: int | None
+    limits_observed: bool
+    remaining_requests_today: int | None
+    remaining_tokens_this_minute: int | None
+
+
+def _observed(usage: ModelUsage, remaining: int | None) -> int | None:
+    """Returns a provider-reported remaining figure, or None before any headers arrived."""
+    return remaining if usage.limits_observed else None
+
+
 class RateLimitGovernor:
     """Thread-safe governor enforcing Groq's real quotas, bootstrapped from a published floor.
 
@@ -367,8 +387,6 @@ class RateLimitGovernor:
         """
         _require_registered(model)
 
-        bootstrap = BOOTSTRAP_LIMITS[model]
-
         for attempt in range(GOVERNOR.max_wait_attempts):
             with self._lock:
                 usage = self._get_usage(model)
@@ -376,53 +394,9 @@ class RateLimitGovernor:
                 self._prune_window(usage)
                 self._refresh_observed_windows(usage)
 
-                rpm_ok = len(usage.requests_window) < bootstrap["requests_per_minute"]
-
-                tokens_this_window = sum(tok for _, tok in usage.tokens_window)
-                if usage.limits_observed and usage.remaining_tokens is not None:
-                    tpm_ok = usage.remaining_tokens - estimated_tokens >= 0
-                else:
-                    tpm_ok = tokens_this_window + estimated_tokens <= bootstrap["tokens_per_minute"]
-
-                if usage.limits_observed and usage.remaining_requests is not None:
-                    rpd_ok = usage.remaining_requests > 0
-                else:
-                    # No bootstrap figure exists for this axis (see BOOTSTRAP_LIMITS'
-                    # comment) — inventing one would fabricate a daily cap nothing
-                    # publishes. This is permissive only until the first response's
-                    # headers arrive; rpm_ok/tpm_ok above still gate every call in that
-                    # window, bounding it to roughly the process's first request.
-                    rpd_ok = True
-
-                if rpm_ok and tpm_ok and rpd_ok:
-                    now = time.monotonic()
-                    usage.requests_today += 1
-                    usage.tokens_today += estimated_tokens
-                    usage.requests_window.append(now)
-                    usage.tokens_window.append((now, estimated_tokens))
-                    if usage.limits_observed and usage.remaining_tokens is not None:
-                        usage.remaining_tokens = max(0, usage.remaining_tokens - estimated_tokens)
-                    if usage.limits_observed and usage.remaining_requests is not None:
-                        usage.remaining_requests = max(0, usage.remaining_requests - 1)
-                    logger.debug(
-                        "%s — today: %d req, %d tok | this window: %d req, %d tok",
-                        model,
-                        usage.requests_today,
-                        usage.tokens_today,
-                        len(usage.requests_window),
-                        tokens_this_window + estimated_tokens,
-                    )
+                wait_seconds = self._admit_or_wait_seconds(model, usage, estimated_tokens)
+                if wait_seconds is None:
                     return
-
-                if not rpd_ok:
-                    reset_in = max(0.0, (usage.reset_requests_at or 0.0) - time.monotonic())
-                    raise RateLimitExceeded(
-                        f"{model} has exhausted its Groq-reported daily request budget "
-                        f"({usage.limit_requests} req/day); resets in {reset_in:.0f}s"
-                    )
-
-                oldest = usage.requests_window[0] if usage.requests_window else time.monotonic()
-                wait_seconds = max(1.0, GOVERNOR.window_seconds - (time.monotonic() - oldest))
                 logger.warning(
                     "Window limit approached for %s (attempt %d/%d). Sleeping %.1fs.",
                     model,
@@ -438,6 +412,69 @@ class RateLimitGovernor:
             f"sleep(s); estimated_tokens={estimated_tokens} may itself exceed the "
             "model's tokens-per-minute budget"
         )
+
+    def _admit_or_wait_seconds(
+        self, model: str, usage: ModelUsage, estimated_tokens: int
+    ) -> float | None:
+        """Admits the request if all three axes allow it, else says how long to wait.
+
+        Must be called with ``self._lock`` held and the usage already refreshed.
+
+        Returns:
+            None when the request was admitted and recorded, otherwise the seconds
+            until the rolling window's oldest entry expires.
+
+        Raises:
+            RateLimitExceeded: If the provider-reported daily request budget is exhausted.
+        """
+        bootstrap = BOOTSTRAP_LIMITS[model]
+        remaining_tokens = _observed(usage, usage.remaining_tokens)
+        remaining_requests = _observed(usage, usage.remaining_requests)
+
+        rpm_ok = len(usage.requests_window) < bootstrap["requests_per_minute"]
+
+        tokens_this_window = sum(tok for _, tok in usage.tokens_window)
+        if remaining_tokens is not None:
+            tpm_ok = remaining_tokens - estimated_tokens >= 0
+        else:
+            tpm_ok = tokens_this_window + estimated_tokens <= bootstrap["tokens_per_minute"]
+
+        # No bootstrap figure exists for the daily axis (see BOOTSTRAP_LIMITS'
+        # comment) — inventing one would fabricate a daily cap nothing
+        # publishes. This is permissive only until the first response's
+        # headers arrive; rpm_ok/tpm_ok above still gate every call in that
+        # window, bounding it to roughly the process's first request.
+        rpd_ok = remaining_requests is None or remaining_requests > 0
+
+        if rpm_ok and tpm_ok and rpd_ok:
+            now = time.monotonic()
+            usage.requests_today += 1
+            usage.tokens_today += estimated_tokens
+            usage.requests_window.append(now)
+            usage.tokens_window.append((now, estimated_tokens))
+            if remaining_tokens is not None:
+                usage.remaining_tokens = max(0, remaining_tokens - estimated_tokens)
+            if remaining_requests is not None:
+                usage.remaining_requests = max(0, remaining_requests - 1)
+            logger.debug(
+                "%s — today: %d req, %d tok | this window: %d req, %d tok",
+                model,
+                usage.requests_today,
+                usage.tokens_today,
+                len(usage.requests_window),
+                tokens_this_window + estimated_tokens,
+            )
+            return None
+
+        if not rpd_ok:
+            reset_in = max(0.0, (usage.reset_requests_at or 0.0) - time.monotonic())
+            raise RateLimitExceeded(
+                f"{model} has exhausted its Groq-reported daily request budget "
+                f"({usage.limit_requests} req/day); resets in {reset_in:.0f}s"
+            )
+
+        oldest = usage.requests_window[0] if usage.requests_window else time.monotonic()
+        return max(1.0, GOVERNOR.window_seconds - (time.monotonic() - oldest))
 
     def observe_headers(self, model: str, headers: Mapping[str, str]) -> None:
         """Overwrites this model's provider-reported limits from a Groq response.
@@ -580,10 +617,12 @@ class RateLimitGovernor:
             model: Provider model identifier string.
 
         Returns:
-            Remaining requests allowed in the trailing window, or 0 if unregistered.
+            Remaining requests allowed in the trailing window.
+
+        Raises:
+            UnregisteredModel: If ``model`` has no known rate-limit profile.
         """
-        if model not in REGISTERED_MODELS:
-            return 0
+        _require_registered(model)
         with self._lock:
             usage = self._get_usage(model)
             self._prune_window(usage)
@@ -591,7 +630,7 @@ class RateLimitGovernor:
                 0, BOOTSTRAP_LIMITS[model]["requests_per_minute"] - len(usage.requests_window)
             )
 
-    def get_usage_report(self) -> dict:
+    def get_usage_report(self) -> dict[str, ModelUsageReport]:
         """Compiles a per-model usage snapshot for health check endpoints.
 
         Returns:
@@ -600,7 +639,7 @@ class RateLimitGovernor:
             floor), whether that limit is provider-observed or still a bootstrap guess,
             and the provider's own remaining counts where observed.
         """
-        report: dict[str, dict] = {}
+        report: dict[str, ModelUsageReport] = {}
         with self._lock:
             for model in REGISTERED_MODELS:
                 usage = self._get_usage(model)
@@ -608,19 +647,19 @@ class RateLimitGovernor:
                 self._prune_window(usage)
                 self._refresh_observed_windows(usage)
                 bootstrap = BOOTSTRAP_LIMITS[model]
-                report[model] = {
-                    "requests_today": usage.requests_today,
-                    "tokens_today": usage.tokens_today,
-                    "requests_per_minute_limit": bootstrap["requests_per_minute"],
-                    "tokens_per_minute_limit": (
+                report[model] = ModelUsageReport(
+                    requests_today=usage.requests_today,
+                    tokens_today=usage.tokens_today,
+                    requests_per_minute_limit=bootstrap["requests_per_minute"],
+                    tokens_per_minute_limit=(
                         usage.limit_tokens
                         if usage.limits_observed
                         else bootstrap["tokens_per_minute"]
                     ),
-                    "limits_observed": usage.limits_observed,
-                    "remaining_requests_today": usage.remaining_requests,
-                    "remaining_tokens_this_minute": usage.remaining_tokens,
-                }
+                    limits_observed=usage.limits_observed,
+                    remaining_requests_today=usage.remaining_requests,
+                    remaining_tokens_this_minute=usage.remaining_tokens,
+                )
         return report
 
 

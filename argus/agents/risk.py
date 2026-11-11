@@ -18,6 +18,7 @@ Dependencies:
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import timedelta
 
 import numpy as np
@@ -143,7 +144,21 @@ def compute_portfolio_returns(
     Returns:
         DataFrame of weighted daily returns per ticker, with NaN rows dropped.
     """
-    asset_returns = compute_asset_returns(positions, price_history, lookback)
+    return weight_asset_returns(
+        compute_asset_returns(positions, price_history, lookback), positions
+    )
+
+
+def weight_asset_returns(asset_returns: pd.DataFrame, positions: list[dict]) -> pd.DataFrame:
+    """Scales each asset's daily returns by its proposed weight.
+
+    Args:
+        asset_returns: Raw per-asset daily returns from ``compute_asset_returns``.
+        positions: List of dicts with keys ``ticker`` and ``weight``.
+
+    Returns:
+        DataFrame of weighted daily returns per ticker.
+    """
     # Reindexed to asset_returns' columns so a dropped ticker doesn't reappear as
     # all-NaN via .mul().
     weights = pd.Series({pos["ticker"]: pos["weight"] for pos in positions}).reindex(
@@ -336,6 +351,85 @@ def component_var(returns_matrix: pd.DataFrame, portfolio_returns: pd.Series) ->
     return mvar
 
 
+@dataclass(frozen=True)
+class _RiskStats:
+    """The measured statistics shared by the REDUCE and APPROVE assessments."""
+
+    var_99: float | None
+    cvar: float | None
+    beta: float
+    avg_correlation: float | None
+    optimal_weights: dict[str, float]
+    optimizer_converged: bool | None
+
+
+def _veto_assessment(total_weight: float, reasons: list[str]) -> RiskAssessment:
+    """Builds the VETO assessment: nothing approved and no statistics were computed."""
+    return RiskAssessment(
+        verdict=RiskVerdict.VETO,
+        approved_weight=0.0,
+        proposed_weight=total_weight,
+        veto_reasons=reasons,
+        optimal_weights={},
+        var_99=0.0,
+        cvar=0.0,
+        marginal_var=0.0,
+        portfolio_beta=0.0,
+        avg_correlation=None,
+        stop_loss=0.0,
+        api_calls_used=0,
+        timestamp=now_local(),
+    )
+
+
+def _reduce_assessment(
+    total_weight: float, reasons: list[str], stats: _RiskStats
+) -> RiskAssessment:
+    """Builds the REDUCE assessment: the book is scaled down and no stop or marginal VaR is set."""
+    return RiskAssessment(
+        verdict=RiskVerdict.REDUCE,
+        approved_weight=min(total_weight * RISK.reduce_weight_multiplier, total_weight),
+        proposed_weight=total_weight,
+        veto_reasons=reasons,
+        optimal_weights=stats.optimal_weights,
+        optimizer_converged=stats.optimizer_converged,
+        var_99=stats.var_99,
+        cvar=stats.cvar,
+        marginal_var=0.0,
+        portfolio_beta=stats.beta,
+        avg_correlation=stats.avg_correlation,
+        stop_loss=0.0,
+        api_calls_used=0,
+        timestamp=now_local(),
+    )
+
+
+def _approve_assessment(
+    total_weight: float,
+    notes: list[str],
+    stats: _RiskStats,
+    marginal_var: float,
+    stop_loss: float,
+) -> RiskAssessment:
+    """Builds the APPROVE assessment: the full proposed weight with the primary ticker's risk."""
+    return RiskAssessment(
+        verdict=RiskVerdict.APPROVE,
+        approved_weight=total_weight,
+        proposed_weight=total_weight,
+        veto_reasons=notes,
+        optimal_weights=stats.optimal_weights,
+        optimizer_converged=stats.optimizer_converged,
+        var_99=stats.var_99,
+        cvar=stats.cvar,
+        marginal_var=marginal_var,
+        portfolio_beta=stats.beta,
+        avg_correlation=stats.avg_correlation,
+        stop_loss=stop_loss,
+        api_calls_used=0,
+        timestamp=now_local(),
+    )
+
+
 class RiskStatisticalAgent:
     """Core risk management gateway enforcing statistical allocation limits.
 
@@ -425,7 +519,8 @@ class RiskStatisticalAgent:
     def _solve_optimal_weights(
         self,
         proposed_positions: list[dict],
-        price_history: dict[str, pd.Series],
+        returns_df: pd.DataFrame,
+        dropped_tickers: list[str],
         sector_to_tickers: dict[str, list],
         convictions: dict[str, float] | None,
     ) -> tuple[dict[str, float], bool | None, list[str]]:
@@ -433,7 +528,10 @@ class RiskStatisticalAgent:
 
         Args:
             proposed_positions: List of dicts with keys ``ticker`` and ``weight``.
-            price_history: Mapping of ticker → daily close price Series.
+            returns_df: Raw (unweighted) per-asset daily returns from
+                ``compute_asset_returns``; the covariance must not be pre-weighted or
+                w^T*cov*w double-applies the weights.
+            dropped_tickers: Tickers ``compute_asset_returns`` excluded for thin history.
             sector_to_tickers: Mapping of GICS sector → tickers proposed in it, one
                 inequality constraint per sector.
             convictions: Optional mapping of ticker → signed conviction score used by the
@@ -449,11 +547,6 @@ class RiskStatisticalAgent:
         if len(proposed_positions) <= 1:
             return {}, None, optimizer_notes
 
-        # Raw per-asset returns: cov must not be pre-weighted or w^T*cov*w double-applies it.
-        dropped_tickers: list[str] = []
-        returns_df = compute_asset_returns(
-            proposed_positions, price_history, dropped=dropped_tickers
-        )
         if dropped_tickers:
             optimizer_notes.append(
                 f"{COVARIANCE_NOTE_PREFIX} excluded {', '.join(dropped_tickers)} — fewer than "
@@ -607,21 +700,7 @@ class RiskStatisticalAgent:
 
         if violations:
             logger.debug("Risk evaluate: VETO due to %s", violations)
-            return RiskAssessment(
-                verdict=RiskVerdict.VETO,
-                approved_weight=0.0,
-                proposed_weight=total_weight,
-                veto_reasons=violations + diversification_notes,
-                optimal_weights={},
-                var_99=0.0,
-                cvar=0.0,
-                marginal_var=0.0,
-                portfolio_beta=0.0,
-                avg_correlation=None,
-                stop_loss=0.0,
-                api_calls_used=0,
-                timestamp=now_local(),
-            )
+            return _veto_assessment(total_weight, violations + diversification_notes)
 
         sector_weights: dict[str, float] = {}
         sector_to_tickers: dict[str, list] = {}
@@ -632,11 +711,15 @@ class RiskStatisticalAgent:
 
         has_sector_violation = any(w > self.max_sector_pct for w in sector_weights.values())
 
+        dropped_tickers: list[str] = []
+        asset_returns = compute_asset_returns(
+            proposed_positions, price_history, dropped=dropped_tickers
+        )
         optimal_weights, optimizer_converged, optimizer_notes = self._solve_optimal_weights(
-            proposed_positions, price_history, sector_to_tickers, convictions
+            proposed_positions, asset_returns, dropped_tickers, sector_to_tickers, convictions
         )
 
-        returns = compute_portfolio_returns(proposed_positions, price_history)
+        returns = weight_asset_returns(asset_returns, proposed_positions)
         port_returns = returns.sum(axis=1) if not returns.empty else pd.Series(dtype=float)
 
         # Normalize to a full book (w=1.0) before VaR/CVaR so per-ticker calls aren't diluted.
@@ -647,7 +730,7 @@ class RiskStatisticalAgent:
         corr = avg_pairwise_correlation(returns)
 
         # Informational, not a violation — an unmeasurable stat must not silently
-        # pass its threshold check by being fabricated as 0.0 (RE-102).
+        # pass its threshold check by being fabricated as 0.0.
         degraded_notes: list[str] = []
         if var99 is None or cvar is None:
             degraded_notes.append(
@@ -657,58 +740,25 @@ class RiskStatisticalAgent:
             degraded_notes.append(
                 "Average correlation not measurable — positions share no overlapping return history"
             )
+        notes = diversification_notes + optimizer_notes + degraded_notes
 
         stat_violations = self._statistical_violations(
             var99, cvar, beta, corr, sector_weights, has_sector_violation
         )
+        stats = _RiskStats(var99, cvar, beta, corr, optimal_weights, optimizer_converged)
 
         if stat_violations:
             logger.debug("Risk evaluate: REDUCE due to %s", stat_violations)
-            return RiskAssessment(
-                verdict=RiskVerdict.REDUCE,
-                approved_weight=min(total_weight * RISK.reduce_weight_multiplier, total_weight),
-                proposed_weight=total_weight,
-                veto_reasons=stat_violations
-                + diversification_notes
-                + optimizer_notes
-                + degraded_notes,
-                optimal_weights=optimal_weights,
-                optimizer_converged=optimizer_converged,
-                var_99=var99,
-                cvar=cvar,
-                marginal_var=0.0,
-                portfolio_beta=beta,
-                avg_correlation=corr,
-                stop_loss=0.0,
-                api_calls_used=0,
-                timestamp=now_local(),
-            )
-
-        stops = close_to_close_stop_losses(proposed_positions, price_history)
-        mvar = component_var(returns, port_returns)
-
-        primary_ticker = proposed_positions[0]["ticker"] if proposed_positions else ""
-        stop_val = stops.get(primary_ticker, 0.0)
-        mvar_val = mvar.get(primary_ticker, 0.0)
+            return _reduce_assessment(total_weight, stat_violations + notes, stats)
 
         logger.debug(
             "Risk evaluate: APPROVE (VaR99: %s, Beta: %.2f)",
             f"{var99:.2%}" if var99 is not None else "not measurable",
             beta,
         )
-        return RiskAssessment(
-            verdict=RiskVerdict.APPROVE,
-            approved_weight=total_weight,
-            proposed_weight=total_weight,
-            veto_reasons=diversification_notes + optimizer_notes + degraded_notes,
-            optimal_weights=optimal_weights,
-            optimizer_converged=optimizer_converged,
-            var_99=var99,
-            cvar=cvar,
-            marginal_var=mvar_val,
-            portfolio_beta=beta,
-            avg_correlation=corr,
-            stop_loss=stop_val,
-            api_calls_used=0,
-            timestamp=now_local(),
+        primary_ticker = proposed_positions[0]["ticker"] if proposed_positions else ""
+        stop_val = close_to_close_stop_losses(proposed_positions, price_history).get(
+            primary_ticker, 0.0
         )
+        mvar_val = component_var(returns, port_returns).get(primary_ticker, 0.0)
+        return _approve_assessment(total_weight, notes, stats, mvar_val, stop_val)
