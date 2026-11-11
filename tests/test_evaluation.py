@@ -14,12 +14,14 @@ import pandas as pd
 import pytest
 
 from argus.backtesting.evaluation import (
+    EvaluationResult,
     PairedOutcome,
     bootstrap_ci,
     check_replay_determinism,
     collect_paired_outcomes,
     evaluate_decisions,
     hit_rate_with_deadband,
+    pre_registered_verdict,
     rank_information_coefficient,
     signed_conviction,
     system_behavior_report,
@@ -305,3 +307,39 @@ def test_system_behavior_report_counts_reduce_verdicts():
 def test_replay_determinism_holds_for_the_real_fixture_session():
     """Replaying the same fixture session twice yields identical decisions."""
     assert check_replay_determinism(FIXTURES_DIR) is True
+
+
+# ---------------------------------------------------------------------------
+# pre_registered_verdict
+# ---------------------------------------------------------------------------
+
+
+def _result(rank_ic: float | None, ci_lower: float | None) -> EvaluationResult:
+    return EvaluationResult(
+        n=10,
+        rank_ic=rank_ic,
+        rank_ic_p_value=None,
+        rank_ic_ci=(ci_lower, None),
+        hit_rate=None,
+        hit_rate_n=0,
+        hit_rate_ci=(None, None),
+    )
+
+
+@pytest.mark.parametrize(
+    ("open_ic", "closed_ic", "closed_ci_lower", "cleared"),
+    [
+        (0.1, 0.3, 0.05, True),
+        (0.1, 0.3, -0.05, False),  # better, but the CI includes zero
+        (0.1, 0.3, 0.0, False),  # the CI must exclude zero, not just touch it
+        (0.3, 0.1, 0.05, False),  # CI excludes zero but closed-loop did not beat open-loop
+        (0.1, None, None, False),  # undefined closed-loop IC
+        (None, 0.3, 0.05, False),  # undefined open-loop IC
+        (0.1, 0.3, None, False),  # undefined CI
+    ],
+)
+def test_pre_registered_verdict(open_ic, closed_ic, closed_ci_lower, cleared):
+    """Closed-loop clears the bar only if it beats open-loop and its CI excludes zero."""
+    verdict = pre_registered_verdict(_result(open_ic, None), _result(closed_ic, closed_ci_lower))
+
+    assert verdict is cleared

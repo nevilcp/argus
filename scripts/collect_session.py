@@ -8,12 +8,12 @@ decisions to a JSONL log.
 
     .venv/bin/python -m scripts.collect_session [--universe AAPL,MSFT,...]
 
-This is the same cycle api/main.py's background collector loop runs on a
-timer; this script is what the scheduled GitHub Actions workflow invokes
-once per cron tick. Exits 0 for a no-op (market holiday, off-hours tick) or
-a successful cycle — neither is a failure. Exits 1 for a DEGRADED cycle: the
-graph ran but too few decisions came back with a real allocation to be worth
-reconciling (see argus.orchestration.collector.CycleOutcome and
+This is the same cycle the API's background collector loop
+(argus/orchestration/scheduler.py) runs on a timer; this script is what the
+scheduled GitHub Actions workflow invokes once per cron tick. Exits 0 for a no-op
+(market holiday, off-hours tick) or a successful cycle — neither is a failure.
+Exits 1 for a DEGRADED cycle: the graph ran but too few decisions came back
+with a real allocation to be worth reconciling (see argus.orchestration.collector.CycleOutcome and
 params.COLLECTOR), the same "ran but produced nothing" failure the secrets
 preflight in collector.yml catches upfront, caught here after the fact.
 """
@@ -26,12 +26,14 @@ import dataclasses
 import json
 import sys
 from pathlib import Path
+from typing import get_args
 
 from argus.config import settings
 from argus.data.pipeline import MFTDataPipeline
 from argus.infra.log import configure_logging
-from argus.orchestration.collector import CycleOutcome, run_collection_cycle
+from argus.orchestration.collector import CycleOutcome, run_collection_cycle_from_settings
 from argus.orchestration.graph import build_graph
+from argus.schemas.requests import RiskTolerance
 
 
 def main() -> None:
@@ -44,9 +46,16 @@ def main() -> None:
         default=None,
         help="Comma-separated tickers (default: ARGUS_UNIVERSE / Settings default)",
     )
-    parser.add_argument("--total-wealth", type=float, default=settings.ARGUS_TOTAL_WEALTH)
-    parser.add_argument("--invest-pct", type=float, default=settings.ARGUS_INVEST_PCT)
-    parser.add_argument("--risk-tolerance", default=settings.ARGUS_RISK_TOLERANCE)
+    parser.add_argument(
+        "--total-wealth", type=float, default=None, help="Default: ARGUS_TOTAL_WEALTH"
+    )
+    parser.add_argument("--invest-pct", type=float, default=None, help="Default: ARGUS_INVEST_PCT")
+    parser.add_argument(
+        "--risk-tolerance",
+        choices=get_args(RiskTolerance),
+        default=None,
+        help="Default: ARGUS_RISK_TOLERANCE",
+    )
     parser.add_argument(
         "--buffer-db",
         default=str(settings.data_path("ohlcv_buffer.db")),
@@ -70,21 +79,20 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if args.universe:
-        universe = [t.strip() for t in args.universe.split(",") if t.strip()]
-    else:
-        universe = settings.ARGUS_UNIVERSE
+    universe = [t.strip() for t in args.universe.split(",") if t.strip()] if args.universe else None
 
-    pipeline = MFTDataPipeline(tickers=list(universe), db_path=args.buffer_db)
+    pipeline = MFTDataPipeline(
+        tickers=list(universe or settings.ARGUS_UNIVERSE), db_path=args.buffer_db
+    )
     compiled_graph = build_graph(checkpoint_db_path=args.checkpoint_db)
     result = asyncio.run(
-        run_collection_cycle(
+        run_collection_cycle_from_settings(
+            pipeline=pipeline,
+            compiled_graph=compiled_graph,
             universe=universe,
             total_wealth=args.total_wealth,
             invest_pct=args.invest_pct,
             risk_tolerance=args.risk_tolerance,
-            pipeline=pipeline,
-            compiled_graph=compiled_graph,
             decisions_log_path=args.decisions_log,
             checkpoint_db_path=args.checkpoint_db,
         )

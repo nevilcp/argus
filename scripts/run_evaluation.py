@@ -24,12 +24,14 @@ from argus.backtesting.evaluation import (
     EvaluationResult,
     check_replay_determinism,
     evaluate_decisions,
+    pre_registered_verdict,
     system_behavior_report,
     trade_level_win_loss_stats,
 )
 from argus.backtesting.replay import replay_session
 from argus.infra.log import configure_logging
 from argus.params import EVALUATION, RECONCILIATION
+from argus.ports import MarketDataProvider
 from argus.seams import LiveMarketDataProvider
 
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
@@ -89,8 +91,13 @@ def _print_evaluation(label: str, result: EvaluationResult) -> None:
         )
 
 
-def main() -> None:
-    """Replays open-loop and closed-loop sessions and prints the evaluation report."""
+def main(*, market_data: MarketDataProvider | None = None) -> None:
+    """Replays open-loop and closed-loop sessions and prints the evaluation report.
+
+    Args:
+        market_data: Forward-price source; defaults to live fetches. Tests inject
+            a fixture-backed one.
+    """
     configure_logging()
 
     parser = argparse.ArgumentParser(description=__doc__)
@@ -99,7 +106,7 @@ def main() -> None:
     parser.add_argument("--deadband", type=float, default=RECONCILIATION.min_abs_return_for_storage)
     args = parser.parse_args()
 
-    market_data = LiveMarketDataProvider()
+    market_data = market_data or LiveMarketDataProvider()
 
     print("Replaying session open-loop (reliability fixed at 0.5 prior)...")
     open_loop = replay_session(args.fixtures_dir, closed_loop=False)
@@ -126,11 +133,7 @@ def main() -> None:
         )
 
     if closed_result.rank_ic is not None and open_result.rank_ic is not None:
-        ci_lo, _ci_hi = closed_result.rank_ic_ci
-        # Pre-registered bar: closed-loop must beat open-loop's rank IC, and the
-        # improvement's confidence interval must exclude zero.
-        helped = ci_lo is not None and ci_lo > 0 and closed_result.rank_ic > open_result.rank_ic
-        if helped:
+        if pre_registered_verdict(open_result, closed_result):
             print("\nVerdict: closed-loop cleared the pre-registered bar")
         else:
             print("\nVerdict: closed-loop did NOT clear the pre-registered bar")

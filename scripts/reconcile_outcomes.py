@@ -4,7 +4,7 @@ scripts/reconcile_outcomes.py
 CLI entry point for run_reconciliation_pass
 (argus/orchestration/reconcile.py) — the scheduled GitHub Actions
 runner's reconciliation pass for deployments with no long-lived API process
-to run api/main.py's own daily loop.
+to run the API's own daily loop (argus/orchestration/scheduler.py).
 
     .venv/bin/python scripts/reconcile_outcomes.py [--db PATH] [--horizon-days N]
     .venv/bin/python scripts/reconcile_outcomes.py --decisions-log PATH
@@ -19,7 +19,7 @@ Responsibilities:
 
 Not responsible for:
   - The reconciliation sequence itself, or which stores get bounded (see
-    argus/orchestration/reconcile.py, which api/main.py's own
+    argus/orchestration/reconcile.py, which the API's own
     reconciliation loop also calls)
 """
 
@@ -32,11 +32,16 @@ from argus.infra.log import configure_logging
 from argus.memory.cultural import get_cultural_memory
 from argus.orchestration.reconcile import run_reconciliation_pass
 from argus.params import RECONCILIATION
+from argus.ports import MarketDataProvider
 from argus.seams import LiveMarketDataProvider
 
 
-def main() -> None:
-    """Parses CLI args, runs one reconciliation pass, and prints its report."""
+def main(*, market_data: MarketDataProvider | None = None) -> None:
+    """Parses CLI args, runs one reconciliation pass, and prints its report.
+
+    Args:
+        market_data: Price source; defaults to live fetches. Tests inject a fixture-backed one.
+    """
     configure_logging()
 
     parser = argparse.ArgumentParser(description=__doc__)
@@ -59,7 +64,7 @@ def main() -> None:
     args = parser.parse_args()
 
     report = run_reconciliation_pass(
-        LiveMarketDataProvider(),
+        market_data or LiveMarketDataProvider(),
         get_cultural_memory(),
         str(settings.data_path("paper_equity.json")),
         decisions_log_path=args.decisions_log,

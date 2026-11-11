@@ -7,10 +7,10 @@ construction site loads.
 
     .venv/bin/python -m scripts.train_macro_hmm [--start-date 1990-01-01] [--output PATH]
 
-Offline-only: calls MacroStatisticalAgent.fit_on_history(), which does its own
-direct yf.download() for VIX history and fetch_fred_series() calls for FRED
-series — both real network calls, not fixture-backed. Not run by CI or any
-scheduled workflow; retraining is manual (see the README's Deployment section).
+Offline-only: calls MacroStatisticalAgent.fit_on_history(), which fetches VIX
+and FRED history through the agent's MarketDataProvider (live by default, so
+real network calls). Not run by CI or any scheduled workflow; retraining is
+manual (see the README's Deployment section).
 
 The artifact is only written if RegimeClassifier.validation_failures() comes
 back empty — a non-zero exit here means the fit produced a model that isn't a
@@ -23,11 +23,16 @@ from argus.agents.macro import MacroStatisticalAgent
 from argus.config import settings
 from argus.infra.log import configure_logging
 from argus.params import MACRO
+from argus.ports import MarketDataProvider
 from argus.schemas.signals import Regime
 
 
-def main() -> None:
-    """Parses CLI args, fits the HMM, and saves the artifact if it validates."""
+def main(*, market_data: MarketDataProvider | None = None) -> None:
+    """Parses CLI args, fits the HMM, and saves the artifact if it validates.
+
+    Args:
+        market_data: History source; defaults to live fetches. Tests inject a fixture-backed one.
+    """
     configure_logging()
 
     parser = argparse.ArgumentParser(description=__doc__)
@@ -43,7 +48,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    agent = MacroStatisticalAgent()
+    agent = MacroStatisticalAgent(market_data=market_data)
     if not agent.fit_on_history(start_date=args.start_date):
         print("Fit failed. Check the error logged above.")
         raise SystemExit(1)
