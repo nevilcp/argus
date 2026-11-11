@@ -5,10 +5,10 @@ See argus/backtesting/replay.py's own docstring for what a "session" is.
 
 import json
 from datetime import datetime
-from unittest import mock
 from zoneinfo import ZoneInfo
 
 from argus.backtesting.replay import _normalize_as_of, replay_session, replay_sessions
+from tests.helpers.builders import neutral_cultural_memory
 from tests.helpers.paths import FIXTURES_DIR
 
 
@@ -78,14 +78,8 @@ def test_replay_session_closed_loop_scopes_cultural_memory_to_the_session_date()
     Regression test: without it, replayed sessions could read outcomes that,
     relative to the fixture's point in time, haven't happened yet.
     """
-    mock_memory = mock.Mock(
-        retrieve_wisdom=mock.Mock(return_value=[]),
-        retrieve_warnings=mock.Mock(return_value=[]),
-        get_agent_accuracy=mock.Mock(return_value=(0.5, 0)),
-        store_decision_snapshot=mock.Mock(),
-    )
-    with mock.patch("argus.orchestration.graph.get_cultural_memory", return_value=mock_memory):
-        replay_session(FIXTURES_DIR, closed_loop=True)
+    mock_memory = neutral_cultural_memory()
+    replay_session(FIXTURES_DIR, closed_loop=True, cultural_memory_provider=lambda: mock_memory)
 
     expected_as_of = _fixture_capture_date()
 

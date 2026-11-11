@@ -18,8 +18,9 @@ two independent invocations of the same fixture-backed graph.
 """
 
 import json
+from collections.abc import Callable
 from pathlib import Path
-from unittest import mock
+from typing import Any
 from uuid import uuid4
 
 import numpy as np
@@ -28,6 +29,7 @@ import pandas as pd
 from argus.orchestration.graph import build_graph
 from argus.orchestration.state import ARGUSState
 from argus.seams import FixtureLLMClient, FixtureMarketDataProvider
+from tests.helpers.builders import neutral_cultural_memory
 from tests.helpers.paths import FIXTURES_DIR
 
 UNIVERSE = ["AAPL", "MSFT", "NVDA", "GOOGL", "JPM", "XOM"]
@@ -107,6 +109,7 @@ def _build_fixture_graph(
     tmp_path: Path,
     market_data: FixtureMarketDataProvider | None = None,
     portfolio_llm: FixtureLLMClient | None = None,
+    cultural_memory_provider: Callable[[], Any] | None = None,
 ):
     """Compiles the DAG with every seam fixture-backed.
 
@@ -117,21 +120,25 @@ def _build_fixture_graph(
             resolve against.
         market_data: Provider override, for tests that degrade one boundary.
         portfolio_llm: Allocator LLM override, for tests that capture its prompt.
+        cultural_memory_provider: Memory-store override; defaults to a neutral
+            double, so a test can degrade this boundary too.
 
     Returns:
         The compiled LangGraph.
     """
+    memory = neutral_cultural_memory()
     return build_graph(
         market_data=market_data or FixtureMarketDataProvider(),
         fundamental_llm=_per_ticker_llm("fundamental.json"),
         sentiment_llm=_per_ticker_llm("sentiment.json"),
         portfolio_llm=portfolio_llm or _portfolio_llm(),
         checkpoint_db_path=str(tmp_path / "argus_graph_test.db"),
+        cultural_memory_provider=cultural_memory_provider or (lambda: memory),
     )
 
 
 def _invoke(graph, state: ARGUSState | None = None) -> dict:
-    """Invokes the graph once on a fresh thread, with cultural memory mocked out.
+    """Invokes the graph once on a fresh thread.
 
     The governor needs no patch: every LLM call here is fixture-backed, and
     FixtureLLMClient never reaches it (only GroqLLMClient does).
@@ -145,14 +152,7 @@ def _invoke(graph, state: ARGUSState | None = None) -> dict:
     """
     config = {"configurable": {"thread_id": str(uuid4())}}
 
-    with mock.patch("argus.orchestration.graph.get_cultural_memory") as mock_get_cultural_memory:
-        mock_get_cultural_memory.return_value = mock.Mock(
-            retrieve_wisdom=mock.Mock(return_value=[]),
-            retrieve_warnings=mock.Mock(return_value=[]),
-            get_agent_accuracy=mock.Mock(return_value=(0.5, 0)),
-            store_decision_snapshot=mock.Mock(),
-        )
-        return graph.invoke(_initial_state() if state is None else state, config)
+    return graph.invoke(_initial_state() if state is None else state, config)
 
 
 class _NoneMacroMarketData(FixtureMarketDataProvider):
@@ -356,12 +356,14 @@ def test_cultural_memory_import_error_degrades_instead_of_crashing_the_run(tmp_p
     reliability lookup to the 0.5 prior, rather than crashing the whole
     graph run.
     """
-    graph = _build_fixture_graph(tmp_path)
+
+    def unavailable() -> Any:
+        raise ImportError("sentence-transformers not installed")
+
+    graph = _build_fixture_graph(tmp_path, cultural_memory_provider=unavailable)
     config = {"configurable": {"thread_id": str(uuid4())}}
 
-    with mock.patch("argus.orchestration.graph.get_cultural_memory") as mock_get_cultural_memory:
-        mock_get_cultural_memory.side_effect = ImportError("sentence-transformers not installed")
-        final_state = graph.invoke(_initial_state(), config)
+    final_state = graph.invoke(_initial_state(), config)
 
     assert final_state.get("cultural_memory") == {"wisdom": [], "warnings": []}
     assert final_state.get("portfolio_allocation") is not None
