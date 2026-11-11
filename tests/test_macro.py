@@ -9,13 +9,11 @@ import pandas as pd
 import pytest
 from hmmlearn.hmm import GaussianHMM
 
-from argus.agents.macro import (
-    DISCRIMINATION_SCENARIOS,
-    FEATURE_COLUMNS,
-    MacroStatisticalAgent,
-    RegimeClassifier,
-)
+from argus.agents.macro import MacroStatisticalAgent
+from argus.agents.macro_context import rule_based
+from argus.agents.macro_hmm import DISCRIMINATION_SCENARIOS, FEATURE_COLUMNS, RegimeClassifier
 from argus.config import settings
+from argus.params import MACRO
 from argus.schemas.signals import Regime, VixRegime
 from tests.helpers.market_data import FakeMarketData
 
@@ -289,7 +287,7 @@ def test_load_missing_file_returns_unfitted_and_logs_error(
     """A missing artifact path logs an ERROR and returns an unfitted classifier."""
     missing_path = tmp_path / "does_not_exist.joblib"
 
-    with caplog.at_level(logging.ERROR, logger="argus.agents.macro"):
+    with caplog.at_level(logging.ERROR, logger="argus.agents.macro_hmm"):
         classifier = RegimeClassifier.load(missing_path)
 
     assert not classifier.is_fitted
@@ -308,7 +306,7 @@ def test_load_corrupt_file_returns_unfitted_and_logs_error(
     corrupt_path = tmp_path / "corrupt.joblib"
     corrupt_path.write_bytes(b"this is not a valid joblib pickle")
 
-    with caplog.at_level(logging.ERROR, logger="argus.agents.macro"):
+    with caplog.at_level(logging.ERROR, logger="argus.agents.macro_hmm"):
         classifier = RegimeClassifier.load(corrupt_path)
 
     assert not classifier.is_fitted
@@ -328,7 +326,7 @@ def test_load_version_mismatch_returns_unfitted_and_logs_error(
     payload["metadata"]["hmmlearn_version"] = "0.0.0-incompatible"
     joblib.dump(payload, artifact_path)
 
-    with caplog.at_level(logging.ERROR, logger="argus.agents.macro"):
+    with caplog.at_level(logging.ERROR, logger="argus.agents.macro_hmm"):
         loaded = RegimeClassifier.load(artifact_path)
 
     assert not loaded.is_fitted
@@ -511,9 +509,7 @@ def test_analyze_falls_back_to_rule_based_when_window_assembly_fails(
     assert ctx is not None
     assert any("feature window assembly failed" in r.message for r in caplog.records)
 
-    expected_regime, expected_confidence = agent.classifier.rule_based(
-        agent.market_data.macro_bundle()
-    )
+    expected_regime, expected_confidence = rule_based(agent.market_data.macro_bundle())
     assert expected_regime == Regime.CONTRACTION.value
     assert ctx.macro_regime.value == expected_regime
     assert ctx.regime_confidence == pytest.approx(expected_confidence)
@@ -556,3 +552,58 @@ def test_unfitted_predict_rejects_dataframe() -> None:
     """An unfitted classifier's rule-based path needs raw levels a feature window lacks."""
     with pytest.raises(ValueError, match="not fitted"):
         RegimeClassifier().predict(pd.DataFrame([_EXPANSION_POINT]))
+
+
+# ---------------------------------------------------------------------------
+# fit_on_history, artifact hyperparameters, and the pure derivations
+# ---------------------------------------------------------------------------
+
+
+def test_fit_on_history_returns_false_when_fetching_fails() -> None:
+    """A failed fetch is reported through the return value and leaves the classifier alone."""
+    agent = MacroStatisticalAgent(
+        market_data=_market_data(fred_series=RuntimeError("FRED unavailable"))
+    )
+
+    observations_before = agent.classifier.n_train_observations
+
+    assert agent.fit_on_history() is False
+    assert agent.classifier.n_train_observations == observations_before
+
+
+def test_a_successful_refit_drops_the_cached_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cached MacroContext was classified by the previous model, so a refit invalidates it."""
+    agent = MacroStatisticalAgent(market_data=_market_data())
+    agent._cache = (object(), datetime.now())  # type: ignore[assignment]
+    monkeypatch.setattr(
+        "argus.agents.macro.build_macro_feature_frame", lambda *a, **k: pd.DataFrame()
+    )
+    monkeypatch.setattr(agent.classifier, "fit", lambda *a, **k: True)
+
+    assert agent.fit_on_history() is True
+    assert agent._cache is None
+
+
+def test_load_refuses_an_artifact_fit_with_different_hyperparameters(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    """A model fit with another EM iteration cap is not served; the loader degrades instead."""
+    classifier = _fit_synthetic_classifier()
+    classifier.hmm.n_iter = 50
+    artifact_path = tmp_path / "other_iterations.joblib"
+    classifier.save(artifact_path)
+
+    with caplog.at_level(logging.ERROR, logger="argus.agents.macro_hmm"):
+        loaded = RegimeClassifier.load(artifact_path)
+
+    assert not loaded.is_fitted
+    assert any("hyperparameter mismatch" in r.message for r in caplog.records)
+
+
+def test_the_shipped_artifact_matches_the_configured_hyperparameters() -> None:
+    """The committed artifact was fit with the covariance structure and iteration cap in MACRO."""
+    classifier = RegimeClassifier.load(settings.ARGUS_HMM_MODEL_PATH)
+
+    assert classifier.is_fitted
+    assert classifier.hmm.covariance_type == MACRO.hmm_covariance_type
+    assert classifier.hmm.n_iter == MACRO.hmm_n_iter

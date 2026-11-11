@@ -1,7 +1,7 @@
 """
 scripts/train_macro_hmm.py
 
-CLI entry point to fit RegimeClassifier (argus/agents/macro.py) on a long FRED +
+CLI entry point to fit RegimeClassifier (argus/agents/macro_hmm.py) on a long FRED +
 VIX history and persist the result as the artifact every MacroStatisticalAgent
 construction site loads.
 
@@ -44,12 +44,11 @@ def main() -> None:
     args = parser.parse_args()
 
     agent = MacroStatisticalAgent()
-    agent.fit_on_history(start_date=args.start_date)
+    if not agent.fit_on_history(start_date=args.start_date):
+        print("Fit failed. Check the error logged above.")
+        raise SystemExit(1)
 
     classifier = agent.classifier
-    if not classifier.is_fitted:
-        print("Fit failed — classifier.is_fitted is False. Check the error logged above.")
-        raise SystemExit(1)
 
     print("\nPer-state feature means and assigned regime label:")
     for state in sorted(classifier.state_means):

@@ -43,6 +43,15 @@ import yfinance as yf
 
 from argus.config import settings
 from argus.data.cache import DailyBarCache, TTLCache
+from argus.data.macro_features import (
+    CONSUMER_SENTIMENT_SERIES,
+    CPI_SERIES,
+    FED_FUNDS_SERIES,
+    T10Y2Y_SERIES,
+    T10YIE_SERIES,
+    UNEMPLOYMENT_SERIES,
+    cpi_yoy,
+)
 from argus.infra.backoff import full_jitter_delay
 from argus.infra.files import atomic_write_text
 from argus.params import MACRO, SYSTEM
@@ -589,11 +598,11 @@ def fetch_fred_series(series_id: str, start: str = MACRO.fred_default_start) -> 
 
 
 _MACRO_BUNDLE_SERIES = {
-    "fed_funds": "FEDFUNDS",
-    "unemployment": "UNRATE",
-    "t10y2y": "T10Y2Y",
-    "t10yie": "T10YIE",
-    "consumer_sentiment": "UMCSENT",
+    "fed_funds": FED_FUNDS_SERIES,
+    "unemployment": UNEMPLOYMENT_SERIES,
+    "t10y2y": T10Y2Y_SERIES,
+    "t10yie": T10YIE_SERIES,
+    "consumer_sentiment": CONSUMER_SENTIMENT_SERIES,
 }
 
 
@@ -633,7 +642,7 @@ def fetch_macro_bundle() -> dict:
     bundle: dict[str, float | None] = {
         key: _latest_fred_value(key, series_id) for key, series_id in _MACRO_BUNDLE_SERIES.items()
     }
-    bundle["cpi_yoy"] = _latest_fred_value("cpi_yoy", "CPIAUCSL", lambda s: s.pct_change(12) * 100)
+    bundle["cpi_yoy"] = _latest_fred_value("cpi_yoy", CPI_SERIES, cpi_yoy)
 
     try:
         bundle["vix"] = fetch_vix()

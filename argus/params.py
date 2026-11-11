@@ -465,7 +465,7 @@ class RiskParams:
 class MacroParams:
     """RegimeClassifier windowed-inference parameters.
 
-    See agents/macro.py and data/macro_features.py.
+    See agents/macro_hmm.py, agents/macro_context.py and data/macro_features.py.
     """
 
     inference_window_months: int = p(
@@ -494,6 +494,20 @@ class MacroParams:
         "random restarts of the fit, keeping the highest-likelihood non-degenerate "
         "one; 3 of 5 single-seed fits collapsed on the shipped data, so one seed "
         "is not enough — 20 is a guess at 'enough', not backtested",
+    )
+    hmm_covariance_type: str = p(
+        "full",
+        Provenance.CONVENTION,
+        "GaussianHMM covariance structure: each state gets its own full covariance, "
+        "because the five features are correlated (docs/macro_hmm.md section 2.4); "
+        "the artifact loader refuses a model fit with any other value",
+    )
+    hmm_n_iter: int = p(
+        300,
+        Provenance.ARBITRARY,
+        "EM iteration cap per fit; the shipped fit converges well inside it. The "
+        "artifact loader refuses a model fit with any other value, so changing it "
+        "forces a retrain",
     )
     hmm_min_state_separation: float = p(
         1.0,
