@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
+from unittest import mock
 
 from argus.schemas.signals import (
     ARGUSDecision,
@@ -174,3 +175,20 @@ def user_profile(invest_pct: float = 0.5, **fields: Any) -> dict[str, Any]:
         "risk_tolerance": "MODERATE",
     }
     return {**values, **fields}
+
+
+def neutral_cultural_memory() -> mock.Mock:
+    """Builds a cultural-memory double that retrieves nothing and reports the 0.5 prior.
+
+    Pass it to ``build_graph`` via ``cultural_memory_provider=lambda: memory`` so a
+    graph test never opens the real ChromaDB store.
+
+    Returns:
+        A Mock exposing the four memory methods the graph nodes call.
+    """
+    return mock.Mock(
+        retrieve_wisdom=mock.Mock(return_value=[]),
+        retrieve_warnings=mock.Mock(return_value=[]),
+        get_agent_accuracy=mock.Mock(return_value=(0.5, 0)),
+        store_decision_snapshot=mock.Mock(),
+    )

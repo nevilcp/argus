@@ -50,6 +50,7 @@ from argus.schemas.signals import (
     YieldCurve,
 )
 from argus.seams import LiveMarketDataProvider
+from tests.helpers.builders import neutral_cultural_memory
 
 
 class TestEndToEnd:
@@ -160,12 +161,9 @@ class TestEndToEnd:
 
     @pytest.mark.live_network
     @mock.patch("argus.agents.portfolio.PortfolioManagerAgent.allocate")
-    @mock.patch("argus.orchestration.graph.get_cultural_memory")
     @mock.patch("argus.agents.fundamental.FundamentalAgent.analyze")
     @mock.patch("argus.agents.sentiment.SentimentAgent.analyze")
-    async def test_full_graph_smoke(
-        self, mock_sent, mock_fund, mock_cultural_memory, mock_portfolio, tmp_path
-    ):
+    async def test_full_graph_smoke(self, mock_sent, mock_fund, mock_portfolio, tmp_path):
         """Runs the complete LangGraph graph for AAPL, MSFT using mocked LLMs.
 
         Cultural memory is mocked out (not just left real) because its embedding
@@ -181,12 +179,7 @@ class TestEndToEnd:
         The checkpoint is written under tmp_path so this run never lands in the
         production argus_graph.db.
         """
-        mock_cultural_memory.return_value = mock.Mock(
-            retrieve_wisdom=mock.Mock(return_value=[]),
-            retrieve_warnings=mock.Mock(return_value=[]),
-            get_agent_accuracy=mock.Mock(return_value=(0.5, 0)),
-            store_decision_snapshot=mock.Mock(),
-        )
+        memory = neutral_cultural_memory()
 
         def fund_side_effect(ticker, backtest_mode=False, session_seed=None, diagnostics=None):
             """Returns a fixed BULLISH FundamentalSignal; the extra params match analyze()."""
@@ -267,7 +260,10 @@ class TestEndToEnd:
         )
 
         config = {"configurable": {"thread_id": str(uuid4())}}
-        graph = build_graph(checkpoint_db_path=str(tmp_path / "argus_graph_test.db"))
+        graph = build_graph(
+            checkpoint_db_path=str(tmp_path / "argus_graph_test.db"),
+            cultural_memory_provider=lambda: memory,
+        )
 
         try:
             final_state = await asyncio.to_thread(graph.invoke, state, config)

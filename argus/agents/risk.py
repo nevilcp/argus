@@ -34,6 +34,11 @@ from argus.seams import LiveMarketDataProvider
 
 logger = logging.getLogger(__name__)
 
+# Leading text of the veto_reasons notes the graph's risk node re-surfaces in
+# ARGUSState["errors"]. Both sides use these, so the match cannot drift from the text.
+DIVERSIFICATION_FLOOR_PREFIX = "Below diversification floor:"
+COVARIANCE_NOTE_PREFIX = "Covariance:"
+
 # 24h TTL reflects M&A/spin-off reclassification; max_entries bounds the store
 # independently of TTL rather than relying incidentally on the ticker universe's size.
 _SECTOR_CACHE: TTLCache[str, str] = TTLCache(
@@ -398,7 +403,7 @@ class RiskStatisticalAgent:
             and total_weight > 0
         ):
             diversification_note = (
-                f"Below diversification floor: {len(proposed_positions)} positions "
+                f"{DIVERSIFICATION_FLOOR_PREFIX} {len(proposed_positions)} positions "
                 f"(min {RISK.min_positions_diversification})"
             )
 
@@ -451,7 +456,7 @@ class RiskStatisticalAgent:
         )
         if dropped_tickers:
             optimizer_notes.append(
-                f"Covariance: excluded {', '.join(dropped_tickers)} — fewer than "
+                f"{COVARIANCE_NOTE_PREFIX} excluded {', '.join(dropped_tickers)} — fewer than "
                 f"{RISK.min_beta_overlap_points} overlapping return observations"
             )
         if returns_df.empty:
@@ -462,7 +467,7 @@ class RiskStatisticalAgent:
             # Thin overlap can still leave a non-finite matrix even after the drop;
             # SLSQP can't recover.
             optimizer_notes.append(
-                "Covariance: non-finite values in the covariance matrix — "
+                f"{COVARIANCE_NOTE_PREFIX} non-finite values in the covariance matrix — "
                 "SLSQP optimization skipped"
             )
             return {}, None, optimizer_notes

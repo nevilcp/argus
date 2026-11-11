@@ -15,7 +15,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from argus.agents.risk import RiskStatisticalAgent
-from argus.orchestration.graph import _apply_portfolio_cap
+from argus.orchestration.nodes import _apply_portfolio_cap
 from argus.params import RISK
 from argus.schemas.signals import RiskVerdict
 

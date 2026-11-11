@@ -50,6 +50,7 @@ from argus.seams import FixtureLLMClient, FixtureMarketDataProvider
 from tests.helpers.builders import (
     fundamental_signal,
     macro_context,
+    neutral_cultural_memory,
     position_allocation,
     sentiment_signal,
     technical_signal,
@@ -403,12 +404,14 @@ def test_load_decisions_from_checkpoints_round_trips_a_real_graph_run(tmp_path):
         session_states = json.load(f)
 
     db_path = str(tmp_path / "argus_graph_test.db")
+    memory = neutral_cultural_memory()
     graph = build_graph(
         market_data=FixtureMarketDataProvider(fixtures_dir=FIXTURES_DIR / "market_data"),
         fundamental_llm=per_ticker_llm("fundamental.json"),
         sentiment_llm=per_ticker_llm("sentiment.json"),
         portfolio_llm=portfolio_llm(),
         checkpoint_db_path=db_path,
+        cultural_memory_provider=lambda: memory,
     )
 
     state = ARGUSState(
@@ -434,14 +437,7 @@ def test_load_decisions_from_checkpoints_round_trips_a_real_graph_run(tmp_path):
         errors=[],
     )
 
-    with mock.patch("argus.orchestration.graph.get_cultural_memory") as mock_get_cultural_memory:
-        mock_get_cultural_memory.return_value = mock.Mock(
-            retrieve_wisdom=mock.Mock(return_value=[]),
-            retrieve_warnings=mock.Mock(return_value=[]),
-            get_agent_accuracy=mock.Mock(return_value=(0.5, 0)),
-            store_decision_snapshot=mock.Mock(),
-        )
-        graph.invoke({**state}, {"configurable": {"thread_id": "test-thread"}})
+    graph.invoke({**state}, {"configurable": {"thread_id": "test-thread"}})
 
     decisions = load_decisions_from_checkpoints(db_path)
 

@@ -29,10 +29,10 @@ reusable, not to fabricate a backlog of sessions that were never recorded.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -41,6 +41,7 @@ from unittest import mock
 from uuid import uuid4
 
 from argus.infra.clock import MARKET_TZ
+from argus.memory.cultural import CulturalMemoryManager
 from argus.orchestration.graph import build_graph
 from argus.orchestration.state import initial_state
 from argus.params import EVALUATION
@@ -170,6 +171,7 @@ def replay_session(
     invest_pct: float = EVALUATION.replay_invest_pct,
     risk_tolerance: str = "MODERATE",
     closed_loop: bool = False,
+    cultural_memory_provider: Callable[[], CulturalMemoryManager] | None = None,
 ) -> SessionResult:
     """Runs the real graph once against a single captured fixture session.
 
@@ -198,6 +200,9 @@ def replay_session(
             stamps each decision's session_timestamp with, so a replayed
             decision's date is always the fixture's capture date, never
             replay wall-clock time.
+        cultural_memory_provider: Overrides where the graph reads cultural
+            memory from, for a caller that wants a specific store in either
+            mode. None keeps the mode's default above.
 
     Returns:
         SessionResult with the session's universe and the graph's final state.
@@ -220,6 +225,12 @@ def replay_session(
     # is a read-only simulation over fixtures, and writing into the store
     # reconciliation.py's load_decisions_from_checkpoints() reads would make
     # fabricated replay sessions indistinguishable from genuine live ones.
+    if cultural_memory_provider is None and not closed_loop:
+        neutral_memory = _neutral_cultural_memory()
+
+        def cultural_memory_provider() -> CulturalMemoryManager:
+            return neutral_memory  # type: ignore[return-value]  # a Mock standing in
+
     with tempfile.TemporaryDirectory() as tmp_dir:
         graph = build_graph(
             market_data=FixtureMarketDataProvider(fixtures_dir=session_dir / "market_data"),
@@ -227,17 +238,9 @@ def replay_session(
             sentiment_llm=_per_ticker_llm(session_dir, "sentiment.json", universe),
             portfolio_llm=_portfolio_llm(session_dir),
             checkpoint_db_path=str(Path(tmp_dir) / "replay_checkpoint.db"),
+            cultural_memory_provider=cultural_memory_provider,
         )
-
-        with contextlib.ExitStack() as stack:
-            if not closed_loop:
-                stack.enter_context(
-                    mock.patch(
-                        "argus.orchestration.graph.get_cultural_memory",
-                        return_value=_neutral_cultural_memory(),
-                    )
-                )
-            final_state = graph.invoke(state, config)
+        final_state = graph.invoke(state, config)
 
     return SessionResult(session_dir=session_dir, universe=universe, final_state=final_state)
 
