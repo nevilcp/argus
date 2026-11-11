@@ -40,6 +40,7 @@ from argus.orchestration.graph import build_graph
 from argus.orchestration.scheduler import collector_loop, reconcile_loop
 from argus.risk import paper_book
 from argus.risk.kill_switch import get_kill_switch, initialize_kill_switch
+from argus.seams import LiveMarketDataProvider
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +145,9 @@ def _start_background_loops() -> None:
     """Creates the live cache and MFT pipeline, then launches the enabled loops."""
     # Seeded from ARGUS_UNIVERSE so the pipeline starts collecting immediately
     # rather than waiting for a first /analyze call to register any tickers
-    pipeline = MFTDataPipeline(tickers=list(settings.ARGUS_UNIVERSE))
+    pipeline = MFTDataPipeline(
+        tickers=list(settings.ARGUS_UNIVERSE), market_data=LiveMarketDataProvider()
+    )
     runtime.pipeline = pipeline
     runtime.live_cache = LiveSessionCache(interval_minutes=pipeline.interval_minutes)
     runtime.pipeline_task = _start_background_task(

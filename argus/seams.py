@@ -63,6 +63,10 @@ class LiveMarketDataProvider:
         """Delegates to fetchers.fetch_ohlcv_daily."""
         return fetchers.fetch_ohlcv_daily(ticker, period=period)
 
+    def ohlcv_intraday(self, ticker: str, interval: str = "5m", period: str = "5d") -> pd.DataFrame:
+        """Delegates to fetchers.fetch_ohlcv_intraday."""
+        return fetchers.fetch_ohlcv_intraday(ticker, interval=interval, period=period)
+
     def multiple_daily(self, tickers: list[str], period: str = "1y") -> dict[str, pd.DataFrame]:
         """Delegates to fetchers.fetch_multiple_daily."""
         return fetchers.fetch_multiple_daily(tickers, period=period)
@@ -131,6 +135,16 @@ class FixtureMarketDataProvider:
             {"close": record["prices"]},
             index=pd.to_datetime(record["dates"]),
         )
+
+    def ohlcv_intraday(self, ticker: str, interval: str = "5m", period: str = "5d") -> pd.DataFrame:
+        """Raises: no intraday candles are captured under tests/fixtures/market_data/.
+
+        Raises:
+            NotImplementedError: Always. Intraday candles feed only the live
+                MFT pipeline, which no fixture-backed run exercises, so there
+                is nothing to serve and nothing to fabricate.
+        """
+        raise NotImplementedError("FixtureMarketDataProvider has no intraday candles")
 
     def multiple_daily(self, tickers: list[str], period: str = "1y") -> dict[str, pd.DataFrame]:
         """Returns cached OHLCV history for each ticker present in the price_history fixture."""

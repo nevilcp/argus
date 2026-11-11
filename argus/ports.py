@@ -42,6 +42,10 @@ class MarketDataProvider(Protocol):
         """Returns daily OHLCV history for a ticker."""
         ...
 
+    def ohlcv_intraday(self, ticker: str, interval: str = "5m", period: str = "5d") -> pd.DataFrame:
+        """Returns intraday OHLCV candles at ``interval`` over ``period`` for a ticker."""
+        ...
+
     def multiple_daily(self, tickers: list[str], period: str = "1y") -> dict[str, pd.DataFrame]:
         """Returns daily OHLCV history for multiple tickers, keyed by ticker."""
         ...

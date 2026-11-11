@@ -59,7 +59,7 @@ class TestEndToEnd:
     @pytest.mark.live_network
     def test_statistical_agents_pipeline(self):
         """TechnicalAgent -> MacroAgent -> RiskEngine chain runs with zero LLM calls."""
-        pipeline = MFTDataPipeline(["AAPL"])
+        pipeline = MFTDataPipeline(["AAPL"], LiveMarketDataProvider())
         df = yf.download("AAPL", period="60d", interval="5m", progress=False, threads=False)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)

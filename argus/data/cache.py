@@ -175,6 +175,10 @@ _SELECT_ROW_COUNTS = """
 SELECT ticker, COUNT(*) FROM ohlcv WHERE interval = ? GROUP BY ticker
 """
 
+_SELECT_ROW_COUNT = """
+SELECT COUNT(*) FROM ohlcv WHERE ticker = ? AND interval = ?
+"""
+
 # Most indicators need at least this many periods before they produce a meaningful value
 _MIN_CANDLE_ROWS = 14
 
@@ -412,6 +416,20 @@ class OHLCVBuffer:
         with self._lock:
             rows = self._conn.execute(_SELECT_ROW_COUNTS, (self._interval,)).fetchall()
         return dict(rows)
+
+    def row_count(self, ticker: str) -> int:
+        """Returns one ticker's row count, without counting every other ticker's rows.
+
+        Args:
+            ticker: Equity ticker symbol.
+
+        Returns:
+            The number of rows held for this buffer's configured interval; 0 for a
+            ticker never inserted.
+        """
+        with self._lock:
+            row = self._conn.execute(_SELECT_ROW_COUNT, (ticker.upper(), self._interval)).fetchone()
+        return int(row[0])
 
     def close(self) -> None:
         """Closes the underlying database connection."""
