@@ -39,6 +39,7 @@ from langchain_groq import ChatGroq
 
 from argus.config import settings
 from argus.data import fetchers
+from argus.data.retry import retry_after_seconds
 from argus.governor import estimate_tokens, governor
 from argus.params import MACRO
 from argus.ports import RetryableTransportError
@@ -61,6 +62,10 @@ class LiveMarketDataProvider:
     def ohlcv_daily(self, ticker: str, period: str = "2y") -> pd.DataFrame:
         """Delegates to fetchers.fetch_ohlcv_daily."""
         return fetchers.fetch_ohlcv_daily(ticker, period=period)
+
+    def ohlcv_intraday(self, ticker: str, interval: str = "5m", period: str = "5d") -> pd.DataFrame:
+        """Delegates to fetchers.fetch_ohlcv_intraday."""
+        return fetchers.fetch_ohlcv_intraday(ticker, interval=interval, period=period)
 
     def multiple_daily(self, tickers: list[str], period: str = "1y") -> dict[str, pd.DataFrame]:
         """Delegates to fetchers.fetch_multiple_daily."""
@@ -131,6 +136,16 @@ class FixtureMarketDataProvider:
             index=pd.to_datetime(record["dates"]),
         )
 
+    def ohlcv_intraday(self, ticker: str, interval: str = "5m", period: str = "5d") -> pd.DataFrame:
+        """Raises: no intraday candles are captured under tests/fixtures/market_data/.
+
+        Raises:
+            NotImplementedError: Always. Intraday candles feed only the live
+                MFT pipeline, which no fixture-backed run exercises, so there
+                is nothing to serve and nothing to fabricate.
+        """
+        raise NotImplementedError("FixtureMarketDataProvider has no intraday candles")
+
     def multiple_daily(self, tickers: list[str], period: str = "1y") -> dict[str, pd.DataFrame]:
         """Returns cached OHLCV history for each ticker present in the price_history fixture."""
         return {
@@ -197,7 +212,7 @@ def _groq_retry_delay(exc: Exception) -> float | None:
     honored verbatim since Groq is telling us exactly how long its own limit
     takes to clear). Every other retryable error has no such hint, so the
     caller decides its own back-off. Header extraction itself is shared with
-    argus/data/fetchers.py's retry loop rather than reimplemented here.
+    argus/data/retry.py's retry loop rather than reimplemented here.
 
     Args:
         exc: The exception the failed attempt raised.
@@ -206,7 +221,7 @@ def _groq_retry_delay(exc: Exception) -> float | None:
         Seconds to wait before retrying per the provider's hint, or None.
     """
     if isinstance(exc, groq.RateLimitError):
-        return fetchers.retry_after_seconds(exc)
+        return retry_after_seconds(exc)
     return None
 
 

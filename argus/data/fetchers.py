@@ -4,17 +4,17 @@ argus/data/fetchers.py
 Centralized data access layer for fetching pricing, fundamentals, and macro series.
 
 Responsibilities:
-  - Provide retried access to Yahoo Finance OHLCV and fundamentals, retrying
-    only failures a second attempt could plausibly fix
+  - Provide retried access to Yahoo Finance OHLCV and fundamentals
   - Fetch and cache macroeconomic FRED series with a 6-hour TTL
   - Cache daily OHLCV bars per (ticker, trading day) so a sweep only pays for
     the first fetch of each trading day
-  - Aggregate news headlines from free-tier APIs, enforcing NewsAPI's 100
-    request/day budget and returning None — never a fabricated empty result —
-    when a source can't be reached
+  - Aggregate news headlines from free-tier APIs, returning None — never a
+    fabricated empty result — when a source can't be reached
 
 Not responsible for:
-  - Data compression or indicator calculation (see data/pipeline.py)
+  - Retry classification and back-off (see data/retry.py)
+  - NewsAPI's 100 request/day budget (see data/newsapi_budget.py)
+  - Data compression or indicator calculation (see data/indicators.py)
   - Rolling intraday SQLite buffering (see data/cache.py's OHLCVBuffer)
   - Rate-limit governance for Groq LLM calls (see argus/governor.py)
 
@@ -26,16 +26,10 @@ Dependencies:
 
 from __future__ import annotations
 
-import fcntl
-import functools
-import json
 import logging
-import math
-import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, date, datetime, timedelta
-from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -52,226 +46,11 @@ from argus.data.macro_features import (
     UNEMPLOYMENT_SERIES,
     cpi_yoy,
 )
-from argus.infra.backoff import full_jitter_delay
-from argus.infra.files import atomic_write_text
+from argus.data.newsapi_budget import NEWSAPI_DAILY_LIMIT, NewsApiBudget
+from argus.data.retry import DataFetchError, with_retry
 from argus.params import MACRO, SYSTEM
 
 logger = logging.getLogger(__name__)
-
-
-class DataFetchError(Exception):
-    """Raised when a data fetch fails after all retry attempts."""
-
-
-class YahooCrumbHandshakeError(DataFetchError):
-    """Yahoo Finance rejected every attempt with an invalid/expired crumb.
-
-    yfinance mints an anonymous session cookie + crumb per process and caches
-    it for reuse; this is not a credential problem (there is no API key to be
-    wrong), it is Yahoo's anti-bot layer invalidating that handshake — which
-    then poisons every subsequent call in the process until a fresh crumb is
-    minted. See GH issue #93.
-    """
-
-
-_RETRY_ATTEMPTS = 3
-# Full-jitter backoff base; doubles the ceiling each attempt (base, 2*base, 4*base)
-_RETRY_BASE_DELAY = 1.5
-
-
-def _status_code_of(exc: Exception) -> int | None:
-    """Extracts an HTTP status code from an exception's attached response, if any.
-
-    Args:
-        exc: An exception potentially carrying a ``requests``/``httpx``-style
-            ``.response`` attribute.
-
-    Returns:
-        The response's status code, or None if the exception carries none.
-    """
-    response = getattr(exc, "response", None)
-    return getattr(response, "status_code", None)
-
-
-def _is_retryable(exc: Exception) -> bool:
-    """Classifies whether a second attempt at the same call could plausibly succeed.
-
-    An invalid API key or a missing resource fails identically on every retry, so
-    retrying it only burns time; a rate limit or a transient 5xx often clears within
-    seconds. Unrecognized exceptions default to retryable, matching this module's
-    prior blanket-retry behavior for anything not explicitly known to be terminal.
-
-    Args:
-        exc: The exception a fetch attempt raised.
-
-    Returns:
-        True if retrying is worthwhile; False for 401/403/404 and their
-        provider-specific equivalents.
-    """
-    import yfinance.exceptions as yf_exceptions
-
-    if isinstance(exc, yf_exceptions.YFRateLimitError):
-        return True
-
-    try:
-        from newsapi.newsapi_exception import NewsAPIException
-
-        if isinstance(exc, NewsAPIException):
-            return exc.get_code() == "rateLimited"
-    except ImportError:
-        pass
-
-    import requests
-
-    if isinstance(exc, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)):
-        return True
-
-    status_code = _status_code_of(exc)
-    if status_code is None:
-        return True
-    if status_code in (401, 403, 404):
-        return False
-    return status_code in (429, 423) or status_code >= 500
-
-
-def _is_crumb_handshake_failure(exc: Exception) -> bool:
-    """Distinguishes Yahoo's "Invalid Crumb" 401 from a genuine credential 401.
-
-    FRED and NewsAPI 401s mean a bad/missing API key and retrying is pointless
-    (see _is_retryable). A yfinance 401 is different: yfinance has no key at
-    all, so a 401 there means Yahoo rejected the anonymous crumb it minted —
-    a session handshake a fresh mint can often fix, not a permanent failure.
-
-    Args:
-        exc: The exception a fetch attempt raised.
-
-    Returns:
-        True if this looks like Yahoo's crumb rejection specifically.
-    """
-    return _status_code_of(exc) == 401 and "crumb" in str(exc).lower()
-
-
-def _reset_yfinance_session() -> None:
-    """Forces yfinance's singleton client to mint a fresh cookie and crumb next call.
-
-    yfinance caches the crumb it mints for the life of the process; once Yahoo
-    invalidates it, every subsequent call reuses the same broken crumb and
-    fails identically. Clearing only the in-memory _cookie/_crumb isn't
-    enough: yfinance also persists the cookie to an on-disk cache keyed
-    'curlCffi' (see its data.py's _load_cookie_curlCffi), and reloads it
-    before ever attempting a new network handshake — so a stale, Yahoo-
-    rejected cookie would otherwise survive the reset and get reused
-    immediately. Clearing both is what lets a retry attempt an actual new
-    handshake instead of repeating the failed one.
-    """
-    data_client = yf.data.YfData()
-    data_client._cookie = None
-    data_client._crumb = None
-    yf.cache.get_cookie_cache().store("curlCffi", None)
-
-
-def retry_after_seconds(exc: Exception) -> float | None:
-    """Reads a Retry-After response header off an exception, if one is attached.
-
-    Args:
-        exc: The exception a fetch attempt raised.
-
-    Returns:
-        Seconds to wait before retrying, taken verbatim from the provider's own
-        Retry-After header, or None if no such header is present.
-    """
-    response = getattr(exc, "response", None)
-    headers = getattr(response, "headers", None)
-    if not headers:
-        return None
-    retry_after = headers.get("Retry-After") or headers.get("retry-after")
-    if retry_after is None:
-        return None
-    try:
-        return float(retry_after)
-    except ValueError, TypeError:
-        return None
-
-
-def _with_retry[F: Callable[..., Any]](fn: F) -> F:
-    """Decorator implementing jittered back-off retries on retryable failures only.
-
-    Wraps transient exceptions in DataFetchError after exhausting all attempts.
-    Re-raises DataFetchError immediately without re-wrapping to avoid stacking.
-    A terminal (non-retryable) failure raises DataFetchError on the first
-    attempt rather than burning the full retry budget on a call that would
-    fail identically every time. A Yahoo crumb/cookie handshake failure (see
-    _is_crumb_handshake_failure) is retried with the yfinance session reset
-    first, since retrying without a reset would just repeat the same failure;
-    exhausting the budget there raises YahooCrumbHandshakeError instead.
-
-    Args:
-        fn: The function to wrap.
-
-    Returns:
-        Wrapped function with retry semantics.
-    """
-
-    @functools.wraps(fn)
-    def wrapper(*args: Any, **kwargs: Any) -> Any:
-        """Calls fn, retrying retryable failures and re-raising as DataFetchError once exhausted."""
-        last_exc: Exception = RuntimeError("unreachable")
-        for attempt in range(1, _RETRY_ATTEMPTS + 1):
-            try:
-                return fn(*args, **kwargs)
-            except DataFetchError:
-                raise
-            except Exception as exc:
-                last_exc = exc
-                if _is_crumb_handshake_failure(exc):
-                    if attempt >= _RETRY_ATTEMPTS:
-                        raise YahooCrumbHandshakeError(
-                            f"{fn.__name__}: Yahoo Finance rejected every crumb/cookie "
-                            f"handshake attempt ({_RETRY_ATTEMPTS}); price data "
-                            f"unavailable. Last error: {exc}"
-                        ) from exc
-                    _reset_yfinance_session()
-                    logger.warning(
-                        "%s attempt %d/%d failed with a crumb/cookie handshake error; "
-                        "resetting the yfinance session and retrying: %s",
-                        fn.__name__,
-                        attempt,
-                        _RETRY_ATTEMPTS,
-                        exc,
-                    )
-                    time.sleep(full_jitter_delay(attempt - 1, _RETRY_BASE_DELAY, math.inf))
-                    continue
-                if not _is_retryable(exc):
-                    logger.warning(
-                        "%s failed with a non-retryable error (%s: %s); not retrying",
-                        fn.__name__,
-                        type(exc).__name__,
-                        exc,
-                    )
-                    raise DataFetchError(
-                        f"{fn.__name__} failed with a non-retryable error: {exc}"
-                    ) from exc
-
-                retry_after = retry_after_seconds(exc)
-                delay = full_jitter_delay(
-                    attempt - 1, _RETRY_BASE_DELAY, math.inf, retry_after=retry_after
-                )
-                logger.warning(
-                    "%s attempt %d/%d failed (%s: %s); retrying in %.1fs",
-                    fn.__name__,
-                    attempt,
-                    _RETRY_ATTEMPTS,
-                    type(exc).__name__,
-                    exc,
-                    delay,
-                )
-                if attempt < _RETRY_ATTEMPTS:
-                    time.sleep(delay)
-        raise DataFetchError(
-            f"{fn.__name__} failed after {_RETRY_ATTEMPTS} attempts: {last_exc}"
-        ) from last_exc
-
-    return wrapper  # type: ignore[return-value]
 
 
 _OHLCV_COLUMNS = ["open", "high", "low", "close", "volume"]
@@ -291,23 +70,61 @@ def _normalise_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
         Filtered, sorted DataFrame with lowercase OHLCV columns and datetime index.
 
     Raises:
-        DataFetchError: If no recognized OHLCV columns are present after normalization.
+        DataFetchError: If no close column is present after normalization. Every
+            consumer reads ``close``, and guessing another column in its place
+            would hand back a number that is not a price.
     """
     if isinstance(df.columns, pd.MultiIndex):
         df = df.droplevel(1, axis=1)
 
     df.columns = [str(c).lower() for c in df.columns]
 
+    if "close" not in df.columns:
+        raise DataFetchError(f"DataFrame has no close column; found: {list(df.columns)}")
     available = [c for c in _OHLCV_COLUMNS if c in df.columns]
-    if not available:
-        raise DataFetchError(f"DataFrame has no OHLCV columns; found: {list(df.columns)}")
     df = df[available].copy()
     df.index = pd.to_datetime(df.index)
     df.dropna(subset=["close"], inplace=True)
     return df
 
 
-@_with_retry
+def _download_ohlcv(ticker: str, *, period: str, interval: str) -> pd.DataFrame:
+    """Downloads one ticker's candles from Yahoo Finance as a normalized, sorted frame.
+
+    The one place the daily and intraday fetchers call ``yf.download``. Not
+    retried itself; the public fetchers wrap it.
+
+    Args:
+        ticker: Equity ticker symbol.
+        period: yfinance period string (e.g. '2y', '5d').
+        interval: yfinance interval string (e.g. '1d', '5m').
+
+    Returns:
+        Sorted DataFrame with lowercase OHLCV columns and a datetime index.
+
+    Raises:
+        DataFetchError: If yfinance returns nothing, or no usable OHLCV columns.
+    """
+    raw = yf.download(
+        ticker,
+        period=period,
+        interval=interval,
+        auto_adjust=True,
+        progress=False,
+        threads=False,
+    )
+    if raw.empty:
+        raise DataFetchError(
+            f"yfinance returned empty DataFrame for ticker={ticker!r} "
+            f"interval={interval!r} period={period!r}"
+        )
+    df = _normalise_ohlcv(raw)
+    df.sort_index(inplace=True)
+    logger.info("%s [%s] → %d rows", ticker, interval, len(df))
+    return df
+
+
+@with_retry
 def fetch_ohlcv_daily(ticker: str, period: str = "2y") -> pd.DataFrame:
     """Fetches historical daily OHLCV candlestick data from Yahoo Finance.
 
@@ -321,26 +138,10 @@ def fetch_ohlcv_daily(ticker: str, period: str = "2y") -> pd.DataFrame:
     Raises:
         DataFetchError: If the returned DataFrame is empty after all retries.
     """
-    logger.debug("ticker=%s period=%s", ticker, period)
-    raw = yf.download(
-        ticker,
-        period=period,
-        interval="1d",
-        auto_adjust=True,
-        progress=False,
-        threads=False,
-    )
-    if raw.empty:
-        raise DataFetchError(
-            f"yfinance returned empty DataFrame for ticker={ticker!r} period={period!r}"
-        )
-    df = _normalise_ohlcv(raw)
-    df.sort_index(inplace=True)
-    logger.info("%s → %d rows", ticker, len(df))
-    return df
+    return _download_ohlcv(ticker, period=period, interval="1d")
 
 
-@_with_retry
+@with_retry
 def fetch_ohlcv_intraday(ticker: str, interval: str = "5m", period: str = "5d") -> pd.DataFrame:
     """Fetches intraday OHLCV candlestick intervals from Yahoo Finance.
 
@@ -355,29 +156,7 @@ def fetch_ohlcv_intraday(ticker: str, interval: str = "5m", period: str = "5d") 
     Raises:
         DataFetchError: If the returned DataFrame is empty.
     """
-    logger.debug(
-        "ticker=%s interval=%s period=%s",
-        ticker,
-        interval,
-        period,
-    )
-    raw = yf.download(
-        ticker,
-        period=period,
-        interval=interval,
-        auto_adjust=True,
-        progress=False,
-        threads=False,
-    )
-    if raw.empty:
-        raise DataFetchError(
-            f"yfinance returned empty intraday DataFrame for "
-            f"ticker={ticker!r} interval={interval!r} period={period!r}"
-        )
-    df = _normalise_ohlcv(raw)
-    df.sort_index(inplace=True)
-    logger.info("%s [%s] → %d rows", ticker, interval, len(df))
-    return df
+    return _download_ohlcv(ticker, period=period, interval=interval)
 
 
 _MULTI_DAILY_MAX_WORKERS = 5
@@ -459,9 +238,12 @@ def fetch_multiple_daily(tickers: list[str], period: str = "1y") -> dict[str, pd
     return results
 
 
-@_with_retry
 def fetch_fundamentals(ticker: str) -> dict:
     """Retrieves fundamental balance sheet and income statements from Yahoo Finance.
+
+    Not decorated with ``with_retry`` itself: ``fetch_ticker_info`` already
+    retries the one network call, and a second layer would multiply the
+    attempts.
 
     Note: ``returnOnAssets`` is used as a ROIC proxy because yfinance does not
     expose an invested-capital figure. This understates ROIC for capital-light
@@ -474,9 +256,11 @@ def fetch_fundamentals(ticker: str) -> dict:
         Dict of fundamental metrics with keys: pe_ttm, revenue_growth_yoy,
         operating_margin, net_margin, fcf_yield, debt_to_equity, current_ratio,
         roe, roic, sector, industry, marketCap, p_fcf, as_of_date.
+
+    Raises:
+        DataFetchError: If the info lookup fails after all retries.
     """
-    logger.debug("ticker=%s", ticker)
-    info: dict = yf.Ticker(ticker).info
+    info = fetch_ticker_info(ticker)
 
     fcf = info.get("freeCashflow")
     mktcap = info.get("marketCap")
@@ -511,7 +295,7 @@ def fetch_fundamentals(ticker: str) -> dict:
     return result
 
 
-@_with_retry
+@with_retry
 def fetch_ticker_info(ticker: str) -> dict:
     """Fetches yfinance's raw ``.info`` dict for a ticker.
 
@@ -529,7 +313,7 @@ def fetch_ticker_info(ticker: str) -> dict:
     return yf.Ticker(ticker).info
 
 
-@_with_retry
+@with_retry
 def fetch_ticker_calendar(ticker: str) -> Any:
     """Fetches yfinance's raw ``.calendar`` object for a ticker.
 
@@ -554,7 +338,7 @@ _FRED_CACHE: TTLCache[str, pd.Series] = TTLCache(
 )
 
 
-@_with_retry
+@with_retry
 def fetch_fred_series(series_id: str, start: str = MACRO.fred_default_start) -> pd.Series:
     """Fetches a macroeconomic timeline from the Federal Reserve Economic Database (FRED).
 
@@ -658,121 +442,14 @@ def fetch_macro_bundle() -> dict:
     return bundle
 
 
-_NEWSAPI_DAILY_LIMIT = 100
 # NewsAPI's maximum page size; larger than the default 20, so each of the
 # scarce daily requests returns as many articles as the tier allows.
 _NEWSAPI_PAGE_SIZE = 100
 
-
-class _NewsApiBudget:
-    """Tracks NewsAPI's free-tier 100 request/day budget with UTC-day rollover.
-
-    A 20-ticker sweep spends 20 of the 100 — a 5-run/day ceiling, tighter than
-    anything Groq imposes — so this is checked before every request rather
-    than discovered from a 426/429 response.
-
-    Persisted under ARGUS_DATA_DIR and read fresh on every reservation rather
-    than cached in memory: the long-lived API server and the Actions
-    collector's once-per-tick container both read-modify-write the same
-    file, so a process-local cache of "today's count" would go stale the
-    moment the other process wrote. An flock on a sidecar lock file
-    serializes that read-modify-write cycle across processes (tmp-then-replace
-    alone only makes each individual write atomic, not the cycle around it).
-    Any disk error during that cycle is treated as a failed reservation
-    rather than raised, so a full or read-only volume degrades the caller
-    instead of crashing it.
-    """
-
-    def __init__(self, daily_limit: int = _NEWSAPI_DAILY_LIMIT) -> None:
-        """Initializes a budget tracker backed by ARGUS_DATA_DIR.
-
-        Args:
-            daily_limit: Maximum requests permitted per UTC day.
-        """
-        self._daily_limit = daily_limit
-
-    def _persist_path(self) -> Path:
-        """Returns the counter's path, read lazily so it honors the current ARGUS_DATA_DIR."""
-        return settings.data_path("newsapi_budget.json")
-
-    @staticmethod
-    def _read_count(path: Path, today: date) -> int | None:
-        """Returns today's persisted request count.
-
-        Returns:
-            The count; 0 if the file is absent or holds a previous day's count;
-            None if its content is corrupt, which the caller must not mistake for
-            an empty budget.
-        """
-        try:
-            raw = json.loads(path.read_text())
-            if date.fromisoformat(raw["date"]) == today:
-                return int(raw["requests_today"])
-        except FileNotFoundError:
-            pass
-        except KeyError, TypeError, ValueError:  # JSONDecodeError is a ValueError
-            return None
-        return 0
-
-    @staticmethod
-    def _write_count(path: Path, today: date, requests_today: int) -> None:
-        """Writes the count atomically."""
-        atomic_write_text(
-            path, json.dumps({"date": today.isoformat(), "requests_today": requests_today})
-        )
-
-    def _reserve_under_file_lock(self) -> bool:
-        """Reads, checks, and (if room remains) increments the persisted count.
-
-        Holds an flock on a sidecar file for the whole read-modify-write
-        cycle, so a concurrent thread or process can't interleave its own
-        cycle in between — the source of the undercounting a Python-level
-        Lock alone can't stop, since flock is scoped to the open file
-        description and so already serializes both. The lock is released by
-        closing `lock_file` on the `with` block's exit; no explicit unlock,
-        since one that raised after a successful write would discard the
-        `True` below and report a reservation that had, in fact, persisted.
-        """
-        path = self._persist_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        lock_path = path.with_suffix(path.suffix + ".lock")
-        with open(lock_path, "w") as lock_file:
-            fcntl.flock(lock_file, fcntl.LOCK_EX)
-            today = datetime.now(UTC).date()
-            requests_today = self._read_count(path, today)
-            if requests_today is None:
-                # Treating corrupt content as an empty budget would let a bad write
-                # reset the day's count. Mark today as spent instead; tomorrow's date
-                # makes the file stale, so the budget heals on its own.
-                logger.error(
-                    "%s is corrupt; blocking NewsAPI requests for the rest of the UTC day",
-                    path,
-                )
-                self._write_count(path, today, self._daily_limit)
-                return False
-            if requests_today >= self._daily_limit:
-                return False
-            self._write_count(path, today, requests_today + 1)
-            return True
-
-    def try_reserve(self) -> bool:
-        """Reserves one request against today's UTC budget if any remains.
-
-        Returns:
-            True if a request was reserved, False if today's budget is
-            spent or the reservation could not be safely persisted.
-        """
-        try:
-            return self._reserve_under_file_lock()
-        except OSError as exc:
-            logger.warning("disk error — %s", exc)
-            return False
+_NEWSAPI_BUDGET = NewsApiBudget()
 
 
-_NEWSAPI_BUDGET = _NewsApiBudget()
-
-
-@_with_retry
+@with_retry
 def _fetch_news_page(client: Any, query: str, from_date: str) -> list[dict]:
     """Fetches and normalizes one page of NewsAPI articles.
 
@@ -793,7 +470,7 @@ def _fetch_news_page(client: Any, query: str, from_date: str) -> list[dict]:
         # Exhaustion and a disk error both come back as False; try_reserve already
         # logged the specific cause for a disk error, so this stays cause-agnostic.
         raise DataFetchError(
-            f"no NewsAPI budget slot available (daily cap of {_NEWSAPI_DAILY_LIMIT} reached, "
+            f"no NewsAPI budget slot available (daily cap of {NEWSAPI_DAILY_LIMIT} reached, "
             "or the reservation failed)"
         )
 
@@ -859,26 +536,19 @@ def fetch_news(
         return None
 
 
-@_with_retry
 def fetch_vix() -> float:
     """Fetches the current CBOE Volatility Index (VIX) level.
 
+    Reads the same ``^VIX`` daily history the macro agent does, through the
+    same retried download, so a missing ``Close`` column is an error here
+    rather than a silent fallback to whichever column comes first.
+
     Returns:
-        Most recent VIX close price as a float.
+        Most recent VIX close as a float.
 
     Raises:
-        DataFetchError: If yfinance returns an empty DataFrame for ^VIX.
+        DataFetchError: If yfinance returns no ``^VIX`` history or no close column.
     """
-    logger.debug("downloading ^VIX")
-    raw = yf.download("^VIX", period="5d", interval="1d", progress=False, threads=False)
-    if raw.empty:
-        raise DataFetchError("yfinance returned empty DataFrame for ^VIX")
-
-    # yfinance MultiIndex schema varies across minor versions; flatten for safety
-    if isinstance(raw.columns, pd.MultiIndex):
-        raw.columns = raw.columns.get_level_values(0)
-
-    col = "Close" if "Close" in raw.columns else raw.columns[0]
-    vix = float(raw[col].dropna().iloc[-1])
+    vix = float(fetch_ohlcv_daily("^VIX", period="5d")["close"].iloc[-1])
     logger.info("current VIX = %.2f", vix)
     return vix

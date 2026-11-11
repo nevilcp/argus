@@ -288,7 +288,7 @@ def save(book: PaperBook, path: str) -> None:
 
     Writes tmp-file-then-replace so a crash mid-write can never leave a
     reader observing a partially written file — the same durability standard
-    argus/data/fetchers.py's NewsAPI ledger already uses, now applied to
+    argus/data/newsapi_budget.py's NewsAPI ledger already uses, now applied to
     ARGUS's most safety-critical persisted file.
 
     Args:

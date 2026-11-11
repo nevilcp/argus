@@ -24,7 +24,7 @@ on:
     #
     # This is a candidate trigger list, not a budget throttle: NewsAPI's
     # 100 request/day free-tier cap is enforced by the persisted ledger in
-    # argus/data/fetchers.py (_NewsApiBudget), which counts actual requests
+    # argus/data/newsapi_budget.py (NewsApiBudget), which counts actual requests
     # across process restarts, so dropped or extra ticks can't breach it.
     - cron: "5 13-21/2 * 3-10 1-5"
     - cron: "5 14-22/2 * 11,12,1,2 1-5"

@@ -262,6 +262,19 @@ def test_row_counts_returns_per_ticker_counts_without_the_get_candles_floor():
     assert buffer.row_counts() == {"AAPL": 5, "MSFT": 20}
 
 
+def test_row_count_counts_one_ticker_and_is_zero_for_an_unknown_one():
+    """row_count() reports one ticker's real count, below get_candles' floor, case-insensitively."""
+    buffer = _buffer(50)
+    for i in range(5):
+        buffer.insert_candle("AAPL", {"timestamp": f"2024-01-02T09:{i:02d}:00", "close": float(i)})
+    for i in range(20):
+        buffer.insert_candle("MSFT", {"timestamp": f"2024-01-02T09:{i:02d}:00", "close": float(i)})
+
+    assert buffer.row_count("AAPL") == 5
+    assert buffer.row_count("msft") == 20
+    assert buffer.row_count("NVDA") == 0
+
+
 def test_prune_untracked_deletes_rows_outside_the_given_set():
     """prune_untracked removes every row for a ticker not in the tracked set."""
     buffer = _buffer(50)

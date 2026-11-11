@@ -1,38 +1,33 @@
 import asyncio
 import dataclasses
-import importlib
 import itertools
-import math
-import sys
 import time
 from datetime import timedelta
 from pathlib import Path
 
 import pandas as pd
 import pytest
-from hypothesis import given
-from hypothesis import strategies as st
 
 import argus.data.pipeline as pipeline_module
 from argus.config import settings
 from argus.data.cache import OHLCVBuffer
+from argus.data.indicators import bars_per_day, required_raw_bars
 from argus.data.pipeline import (
     _FETCH_PERIOD,
     _STEADY_STATE_FETCH_PERIOD,
     MFTDataPipeline,
-    _bars_per_day,
     _derive_buffer_size,
-    _finite_or_none,
     _parse_interval_minutes,
-    _required_indicator_bars,
-    _required_raw_bars,
-    _resample_ohlcv,
-    _return_since,
-    _volume_ratio,
 )
 from argus.infra.clock import now_market
 from argus.params import SYSTEM
 from tests.helpers.candles import ET, dst_straddling_candles, ohlcv_frame
+from tests.helpers.market_data import FakeMarketData
+
+
+def _new_pipeline(tickers: list[str], market_data=None, **kwargs) -> MFTDataPipeline:
+    """Builds a pipeline over a FakeMarketData that has no intraday response configured."""
+    return MFTDataPipeline(tickers, market_data or FakeMarketData(), **kwargs)
 
 
 def _override_system(monkeypatch, **fields) -> None:
@@ -43,7 +38,7 @@ def _override_system(monkeypatch, **fields) -> None:
 def _insert_warm_candles(pipeline: MFTDataPipeline, ticker: str, df: pd.DataFrame) -> None:
     """Inserts every bar of `df` into `pipeline`'s buffer, with prices shifted off zero.
 
-    et_intraday_candles' raw closes start at 0, which _compress_candles would
+    et_intraday_candles' raw closes start at 0, which compress_candles would
     divide by whenever a momentum lookback lands on the earliest bar.
     """
     df[["open", "high", "low", "close"]] += 100
@@ -62,7 +57,7 @@ def _seed_two_session_buffer(
     """Inserts two calendar days of warm 1m candles for `ticker`.
 
     Clears both the raw-bar readiness pre-filter and momentum_1d's
-    cross-session lookback (see argus/data/pipeline.py's `_return_since`),
+    cross-session lookback (see argus/data/pipeline.py's `_return_since` in data/indicators.py),
     unlike `_seed_buffer`'s single-day fixture.
     """
     day1 = ohlcv_frame(day1_bars, start="2024-01-02 09:30", tz=ET)
@@ -83,11 +78,11 @@ def _break_get_candles_for_bad(monkeypatch, pipeline: MFTDataPipeline) -> None:
     monkeypatch.setattr(pipeline.buffer, "get_candles", flaky_get_candles)
 
 
-def _capture_fetch_period(monkeypatch) -> dict:
-    """Stubs out fetch_ohlcv_intraday, recording the `period` it is called with.
+def _capture_fetch_period() -> tuple[FakeMarketData, dict]:
+    """Builds a provider whose ohlcv_intraday records the `period` it is called with.
 
     Returns:
-        A dict that gains a "period" key once the stub has been called.
+        The provider, and a dict that gains a "period" key once it has been called.
     """
     captured: dict = {}
 
@@ -95,8 +90,7 @@ def _capture_fetch_period(monkeypatch) -> dict:
         captured["period"] = period
         return ohlcv_frame(5, tz=ET)
 
-    monkeypatch.setattr(pipeline_module, "fetch_ohlcv_intraday", fake_fetch)
-    return captured
+    return FakeMarketData(ohlcv_intraday=fake_fetch), captured
 
 
 async def _noop_callback(states: dict) -> None:
@@ -105,7 +99,7 @@ async def _noop_callback(states: dict) -> None:
 
 def test_register_tickers():
     """Registering tickers already present in the pipeline is a no-op for those tickers."""
-    pipeline = MFTDataPipeline([])
+    pipeline = _new_pipeline([])
     pipeline.register_tickers(["AAPL", "MSFT"])
     assert "AAPL" in pipeline.tickers
     assert "MSFT" in pipeline.tickers
@@ -118,7 +112,7 @@ def test_register_tickers():
 
 def test_register_tickers_rejects_malformed_symbols():
     """A malformed ticker is dropped; well-formed siblings in the same call still register."""
-    pipeline = MFTDataPipeline([])
+    pipeline = _new_pipeline([])
     pipeline.register_tickers(["AAPL", "", "'; DROP TABLE ohlcv; --", "../../etc/passwd", "aapl"])
     assert pipeline.tickers == ["AAPL"]
 
@@ -126,7 +120,7 @@ def test_register_tickers_rejects_malformed_symbols():
 def test_register_tickers_caps_the_tracked_universe(monkeypatch):
     """Registrations beyond SYSTEM.max_tracked_tickers are dropped, not appended."""
     _override_system(monkeypatch, max_tracked_tickers=3)
-    pipeline = MFTDataPipeline([])
+    pipeline = _new_pipeline([])
     pipeline.register_tickers(["AAPL", "MSFT", "TSLA", "NVDA", "GOOGL"])
     assert pipeline.tickers == ["AAPL", "MSFT", "TSLA"]
 
@@ -137,13 +131,13 @@ def test_register_tickers_caps_the_tracked_universe(monkeypatch):
 def test_init_routes_initial_universe_through_register_tickers(monkeypatch):
     """A malformed ticker in the constructor's initial universe is dropped, not stored raw."""
     _override_system(monkeypatch, max_tracked_tickers=2)
-    pipeline = MFTDataPipeline(["AAPL", "not-a-ticker!", "MSFT", "TSLA"])
+    pipeline = _new_pipeline(["AAPL", "not-a-ticker!", "MSFT", "TSLA"])
     assert pipeline.tickers == ["AAPL", "MSFT"]
 
 
 def test_register_tickers_refreshes_last_requested_at_for_already_tracked_tickers():
     """A repeat request for an already-tracked ticker still bumps its last_requested_at."""
-    pipeline = MFTDataPipeline(["AAPL"])
+    pipeline = _new_pipeline(["AAPL"])
     stale = now_market() - timedelta(days=10)
     pipeline.last_requested_at["AAPL"] = stale
 
@@ -155,7 +149,7 @@ def test_register_tickers_refreshes_last_requested_at_for_already_tracked_ticker
 def test_evict_stale_tickers_drops_a_non_seed_ticker_unused_beyond_the_ttl(monkeypatch):
     """A ticker registered outside the pipeline's seed universe expires after the TTL."""
     _override_system(monkeypatch, tracked_ticker_ttl_seconds=60)
-    pipeline = MFTDataPipeline(["AAPL"])
+    pipeline = _new_pipeline(["AAPL"])
     pipeline.register_tickers(["MSFT"])
     pipeline.last_requested_at["MSFT"] = now_market() - timedelta(seconds=120)
 
@@ -168,7 +162,7 @@ def test_evict_stale_tickers_drops_a_non_seed_ticker_unused_beyond_the_ttl(monke
 def test_evict_stale_tickers_exempts_the_seed_universe(monkeypatch):
     """The pipeline's own seed tickers survive the TTL even if never re-requested."""
     _override_system(monkeypatch, tracked_ticker_ttl_seconds=60)
-    pipeline = MFTDataPipeline(["AAPL"])
+    pipeline = _new_pipeline(["AAPL"])
     pipeline.last_requested_at["AAPL"] = now_market() - timedelta(seconds=120)
 
     pipeline._evict_stale_tickers()
@@ -179,39 +173,12 @@ def test_evict_stale_tickers_exempts_the_seed_universe(monkeypatch):
 def test_evict_stale_tickers_keeps_a_recently_requested_ticker(monkeypatch):
     """A ticker requested within the TTL window is not evicted."""
     _override_system(monkeypatch, tracked_ticker_ttl_seconds=3600)
-    pipeline = MFTDataPipeline(["AAPL"])
+    pipeline = _new_pipeline(["AAPL"])
     pipeline.register_tickers(["MSFT"])
 
     pipeline._evict_stale_tickers()
 
     assert pipeline.tickers == ["AAPL", "MSFT"]
-
-
-def test_compress_candles():
-    """Compressing candles returns the full set of pandas-ta derived indicator keys."""
-    pipeline = MFTDataPipeline([])
-
-    # 400 minutes covers the 390-bar (1 trading day) momentum lookback at 1m resolution,
-    # and the monotonic close series gives RSI a known, deterministic value to assert on
-    result = pipeline._compress_candles(ohlcv_frame(400))
-
-    assert "rsi_14" in result
-    assert "macd_histogram" in result
-    assert "bb_percent_b" in result
-    assert "atr_pct" in result
-    assert "adx_14" in result
-    assert "vwap_distance" in result
-    assert "volume_ratio" in result
-    assert "momentum_30m" in result
-    assert "momentum_1d" in result
-    assert "close" in result
-    assert "timestamp" in result
-
-    assert result["close"] == 399.0
-    # A monotonically rising close series saturates RSI at 100
-    assert result["rsi_14"] == 100.0
-    # 400 1m bars resample to ~80 5m bars, well clear of the 34-bar MACD warmup floor
-    assert result["macd_histogram"] is not None
 
 
 def test_ohlcv_buffer_insertion():
@@ -249,152 +216,19 @@ def test_parse_interval_minutes_rejects_unsupported_shape():
 
 def test_derive_buffer_size_matches_fetch_period():
     """Buffer size holds a full fetch period's candles at the interval, plus a day and bar."""
-    assert _bars_per_day(1) == 390
-    assert _bars_per_day(5) == 78
+    assert bars_per_day(1) == 390
+    assert bars_per_day(5) == 78
     assert _derive_buffer_size(1) == 1173
     assert _derive_buffer_size(5) == 237
 
 
 def test_pipeline_derives_buffer_size_from_interval():
     """MFTDataPipeline sizes its buffer from the interval when not overridden."""
-    pipeline_1m = MFTDataPipeline([], interval="1m")
+    pipeline_1m = _new_pipeline([], interval="1m")
     assert pipeline_1m.buffer._buffer_size == 1173
 
-    pipeline_5m = MFTDataPipeline([], interval="5m")
+    pipeline_5m = _new_pipeline([], interval="5m")
     assert pipeline_5m.buffer._buffer_size == 237
-
-
-def test_resample_ohlcv_aggregates_correctly():
-    """Resampling combines OHLCV bars with the standard first/max/min/last/sum rules."""
-    df = ohlcv_frame(10, volume=100)
-
-    resampled = _resample_ohlcv(df, interval_minutes=1, target_minutes=5)
-
-    assert len(resampled) == 2
-    assert resampled["open"].iloc[0] == 0
-    assert resampled["close"].iloc[0] == 4
-    assert resampled["high"].iloc[0] == 5
-    assert resampled["low"].iloc[0] == 0
-    assert resampled["volume"].iloc[0] == 500
-
-
-def test_resample_ohlcv_is_a_noop_when_target_not_coarser():
-    """Resampling to a resolution no coarser than the input returns the input unchanged."""
-    df = ohlcv_frame(5, freq="5min")
-
-    result = _resample_ohlcv(df, interval_minutes=5, target_minutes=5)
-
-    pd.testing.assert_frame_equal(result, df)
-
-
-def test_momentum_windows_scale_with_interval():
-    """momentum_30m locates the bar exactly 30 minutes back at both 1m and 5m resolution."""
-    result_1m = MFTDataPipeline([], interval="1m")._compress_candles(ohlcv_frame(400))
-    # Last bar is 09:30 + 399min = 16:09; 30 minutes back lands exactly on bar 369
-    assert result_1m["momentum_30m"] == pytest.approx((399 / 369) - 1.0, abs=1e-6)
-    # Every bar falls on 2024-01-01, so momentum_1d has no strictly-earlier session to reach
-    assert result_1m["momentum_1d"] is None
-
-    result_5m = MFTDataPipeline([], interval="5m")._compress_candles(ohlcv_frame(100, freq="5min"))
-    # Last bar is 09:30 + 99*5min = 17:45; 30 minutes back lands exactly on bar 93
-    assert result_5m["momentum_30m"] == pytest.approx((99 / 93) - 1.0, abs=1e-6)
-    assert result_5m["momentum_1d"] is None
-
-
-def test_finite_or_none():
-    """Passes a finite value through unchanged; collapses None/NaN/inf to None."""
-    assert _finite_or_none(1.5) == 1.5
-    assert _finite_or_none(None) is None
-    assert _finite_or_none(float("nan")) is None
-    assert _finite_or_none(float("inf")) is None
-    assert _finite_or_none(float("-inf")) is None
-
-
-def test_volume_ratio_computes_latest_over_rolling_mean():
-    """A normal volume series returns the latest bar over its 20-bar rolling mean."""
-    volume_s = pd.Series([100.0] * 19 + [200.0])
-    assert _volume_ratio(volume_s) == pytest.approx(200.0 / 105.0)
-
-
-def test_volume_ratio_returns_none_for_an_exactly_zero_mean():
-    """An all-zero volume series has nothing to compute a ratio against."""
-    assert _volume_ratio(pd.Series([0.0] * 20)) is None
-
-
-def test_volume_ratio_returns_none_for_a_near_zero_mean_instead_of_an_outlier():
-    """A near-zero (but not exactly zero) mean is rejected rather than divided by.
-
-    A bare falsy check only catches an exact 0.0; a rolling mean of 1e-9 is
-    truthy and would otherwise produce a ratio computed against a statistically
-    meaningless divisor.
-    """
-    volume_s = pd.Series([1e-9] * 20)
-    assert _volume_ratio(volume_s) is None
-
-
-def test_required_indicator_bars_is_pinned_to_macd_warmup():
-    """The resampled-bar readiness floor is pinned to MACD(12,26,9)'s measured warmup."""
-    assert _required_indicator_bars() == 34
-
-
-def test_required_raw_bars_matches_the_issue_table():
-    """Raw-bar pre-filter is larger of indicator-resample floor or daily momentum lookback."""
-    assert _required_raw_bars(1) == 391
-    assert _required_raw_bars(5) == 79
-    assert _required_raw_bars(15) == 34
-
-
-def test_compress_candles_readiness_cliff_at_macd_warmup_floor():
-    """33 resampled bars publish nothing; 34 publishes a real (non-None) MACD histogram."""
-    pipeline = MFTDataPipeline([], interval="5m")
-
-    assert pipeline._compress_candles(ohlcv_frame(33, freq="5min")) is None
-
-    result_34 = pipeline._compress_candles(ohlcv_frame(34, freq="5min"))
-    assert result_34 is not None
-    assert result_34["macd_histogram"] is not None
-
-
-def test_compress_candles_never_emits_nan():
-    """Every float field in a compressed dict is a real number or None, never NaN."""
-    pipeline = MFTDataPipeline([], interval="1m")
-    result = pipeline._compress_candles(ohlcv_frame(400))
-    assert result is not None
-    for value in result.values():
-        if isinstance(value, float):
-            assert not math.isnan(value)
-
-
-def test_return_since_momentum_1d_none_without_a_prior_session():
-    """momentum_1d's lookup returns None when the series holds only one calendar day."""
-    close_s = ohlcv_frame(50, tz=ET)["close"]
-    assert _return_since(close_s, pd.Timedelta(days=1), same_session=False) is None
-
-
-def test_return_since_momentum_30m_does_not_reach_into_the_prior_session():
-    """30-minute lookup at 09:34 with 5 bars doesn't fall back to prior session."""
-    day1 = ohlcv_frame(390, start="2024-01-02 09:30", tz=ET)
-    day2 = ohlcv_frame(5, start="2024-01-03 09:30", tz=ET)
-    combined_close = pd.concat([day1["close"], day2["close"]])
-    assert _return_since(combined_close, pd.Timedelta(minutes=30), same_session=True) is None
-
-
-@given(drop=st.integers(min_value=0, max_value=10))
-def test_momentum_1d_is_stable_under_dropping_up_to_10_oldest_bars(drop: int):
-    """Locating momentum_1d by time is unaffected by pruning the buffer's oldest rows.
-
-    Args:
-        drop: Number of oldest bars removed from the series before re-checking.
-    """
-    day1 = ohlcv_frame(390, start="2024-01-02 09:30", tz=ET)
-    day2 = ohlcv_frame(50, start="2024-01-03 09:30", tz=ET)
-    close_s = pd.concat([day1["close"], day2["close"]])
-
-    baseline = _return_since(close_s, pd.Timedelta(days=1), same_session=False)
-    trimmed = _return_since(close_s.iloc[drop:], pd.Timedelta(days=1), same_session=False)
-
-    assert baseline is not None
-    assert trimmed == baseline
 
 
 async def test_sweep_uses_a_constant_inter_request_gap_independent_of_universe_size(monkeypatch):
@@ -403,13 +237,13 @@ async def test_sweep_uses_a_constant_inter_request_gap_independent_of_universe_s
     async def fake_fetch_one(_ticker):
         return None
 
-    small = MFTDataPipeline(["A", "B", "C"], interval="1m")
+    small = _new_pipeline(["A", "B", "C"], interval="1m")
     monkeypatch.setattr(small, "_fetch_one_ticker", fake_fetch_one)
     small_start = time.monotonic()
     await small._sweep_once()
     small_elapsed = time.monotonic() - small_start
 
-    big = MFTDataPipeline([f"T{chr(65 + i)}" for i in range(20)], interval="1m")
+    big = _new_pipeline([f"T{chr(65 + i)}" for i in range(20)], interval="1m")
     monkeypatch.setattr(big, "_fetch_one_ticker", fake_fetch_one)
     big_start = time.monotonic()
     await big._sweep_once()
@@ -423,7 +257,7 @@ async def test_sweep_uses_a_constant_inter_request_gap_independent_of_universe_s
 
 async def test_fetch_loop_sleeps_the_remainder_of_the_interval_not_a_full_one(monkeypatch):
     """A fetch_loop iteration's wait is shortened by however long the sweep itself took."""
-    pipeline = MFTDataPipeline([], interval="1m")
+    pipeline = _new_pipeline([], interval="1m")
     waits = []
 
     async def fake_sweep():
@@ -449,7 +283,7 @@ async def test_fetch_loop_sleeps_the_remainder_of_the_interval_not_a_full_one(mo
 async def test_fetch_loop_cadence_holds_across_a_slow_sweep(monkeypatch):
     """Sweep start gap tracks mft_fetch_interval_seconds, not sweep duration plus interval."""
     _override_system(monkeypatch, mft_fetch_interval_seconds=0.2)
-    pipeline = MFTDataPipeline([], interval="1m")
+    pipeline = _new_pipeline([], interval="1m")
     monkeypatch.setattr(pipeline, "_is_market_hours", lambda: True)
     monkeypatch.setattr(pipeline, "compress_all", lambda: {})
 
@@ -474,7 +308,7 @@ async def test_fetch_loop_cadence_holds_across_a_slow_sweep(monkeypatch):
 
 async def test_fetch_loop_publishes_compressed_state_after_each_sweep():
     """Publication is merged into the fetch loop: one sweep, one compress, one callback."""
-    pipeline = MFTDataPipeline(["AAPL"], interval="1m")
+    pipeline = _new_pipeline(["AAPL"], interval="1m")
     _seed_two_session_buffer(pipeline, "AAPL")
     pipeline._is_market_hours = lambda: True
     received = []
@@ -497,20 +331,9 @@ async def test_fetch_loop_publishes_compressed_state_after_each_sweep():
 
 def test_default_db_path_uses_isolated_data_dir(tmp_path):
     """A pipeline built without an explicit db_path never reaches the production buffer."""
-    pipeline = MFTDataPipeline(["AAPL"])
+    pipeline = _new_pipeline(["AAPL"])
     assert Path(pipeline.buffer._db_path).parent == tmp_path
     assert Path(pipeline.buffer._db_path).parent == Path(settings.ARGUS_DATA_DIR)
-
-
-def test_pandas_ta_import_failure_is_a_boot_failure(monkeypatch):
-    """A broken pandas_ta install fails at module import time, not silently inside compress_all."""
-    monkeypatch.setitem(sys.modules, "pandas_ta", None)
-    try:
-        with pytest.raises(ImportError):
-            importlib.reload(pipeline_module)
-    finally:
-        monkeypatch.undo()
-        importlib.reload(pipeline_module)
 
 
 def test_et_intraday_candles_are_tz_aware_and_monotonic():
@@ -533,7 +356,7 @@ def test_dst_straddling_candles_are_monotonic_in_utc_despite_repeated_wall_clock
 
 def test_compress_all_skips_a_ticker_whose_get_candles_raises(monkeypatch):
     """compress_all catches a get_candles failure for one ticker and still returns the rest."""
-    pipeline = MFTDataPipeline(["BAD", "GOOD"], interval="1m")
+    pipeline = _new_pipeline(["BAD", "GOOD"], interval="1m")
     _seed_two_session_buffer(pipeline, "GOOD")
     _break_get_candles_for_bad(monkeypatch, pipeline)
 
@@ -545,7 +368,7 @@ def test_compress_all_skips_a_ticker_whose_get_candles_raises(monkeypatch):
 
 def test_compress_all_ignores_an_untracked_ticker(monkeypatch):
     """compress_all only considers tickers still in self.tickers."""
-    pipeline = MFTDataPipeline(["GOOD"], interval="1m")
+    pipeline = _new_pipeline(["GOOD"], interval="1m")
     _seed_two_session_buffer(pipeline, "GOOD")
     _seed_two_session_buffer(pipeline, "ORPHAN")
 
@@ -557,7 +380,7 @@ def test_compress_all_ignores_an_untracked_ticker(monkeypatch):
 
 def test_compress_all_prunes_untracked_buffer_rows():
     """compress_all deletes buffered rows for a ticker no longer in self.tickers."""
-    pipeline = MFTDataPipeline(["GOOD"], interval="1m")
+    pipeline = _new_pipeline(["GOOD"], interval="1m")
     _seed_two_session_buffer(pipeline, "GOOD")
     _seed_two_session_buffer(pipeline, "ORPHAN")
 
@@ -569,9 +392,9 @@ def test_compress_all_prunes_untracked_buffer_rows():
 
 def test_compress_all_skips_a_ticker_below_the_readiness_floor():
     """compress_all omits a ticker whose bars don't clear MACD warmup floor."""
-    pipeline = MFTDataPipeline(["COLD"], interval="1m")
+    pipeline = _new_pipeline(["COLD"], interval="1m")
     # 20 raw bars clear OHLCVBuffer's own 14-row floor but fall far short of
-    # _required_raw_bars(1) == 391
+    # required_raw_bars(1) == 391
     _seed_buffer(pipeline, "COLD", n=20)
 
     states = pipeline.compress_all()
@@ -579,18 +402,9 @@ def test_compress_all_skips_a_ticker_below_the_readiness_floor():
     assert "COLD" not in states
 
 
-def test_buffer_warm_skips_a_ticker_whose_get_candles_raises(monkeypatch):
-    """_buffer_warm doesn't let one ticker's get_candles failure hide a genuinely warm ticker."""
-    pipeline = MFTDataPipeline([], interval="1m")
-    _seed_buffer(pipeline, "GOOD")
-    _break_get_candles_for_bad(monkeypatch, pipeline)
-
-    assert pipeline._buffer_warm() is True
-
-
 async def test_start_propagates_a_fetch_loop_exception(monkeypatch):
     """start() surfaces _fetch_loop's exception rather than swallowing it (single loop now)."""
-    pipeline = MFTDataPipeline([], interval="1m")
+    pipeline = _new_pipeline([], interval="1m")
 
     async def dying_fetch_loop(on_session_ready):
         raise RuntimeError("simulated crash")
@@ -603,7 +417,7 @@ async def test_start_propagates_a_fetch_loop_exception(monkeypatch):
 
 async def test_stop_ends_the_loop_promptly(monkeypatch):
     """stop() wakes the loop immediately rather than waiting out its full interval."""
-    pipeline = MFTDataPipeline([], interval="1m")
+    pipeline = _new_pipeline([], interval="1m")
     monkeypatch.setattr(pipeline, "_is_market_hours", lambda: False)
     task = asyncio.create_task(pipeline.start(on_session_ready=_noop_callback))
     await asyncio.sleep(0.05)
@@ -617,7 +431,7 @@ async def test_stop_ends_the_loop_promptly(monkeypatch):
 
 async def test_start_after_stop_clears_the_stop_event(monkeypatch):
     """A restarted pipeline paces its sweeps again instead of inheriting the old stop signal."""
-    pipeline = MFTDataPipeline([], interval="1m")
+    pipeline = _new_pipeline([], interval="1m")
     await pipeline.stop()
     assert pipeline._stop_event.is_set()
     seen: list[bool] = []
@@ -634,7 +448,7 @@ async def test_start_after_stop_clears_the_stop_event(monkeypatch):
 
 async def test_close_buffer_waits_out_an_in_flight_buffer_worker():
     """close_buffer blocks until a worker holding _buffer_op_lock releases it."""
-    pipeline = MFTDataPipeline([], interval="1m")
+    pipeline = _new_pipeline([], interval="1m")
     pipeline._buffer_op_lock.acquire()
 
     close_task = asyncio.create_task(pipeline.close_buffer())
@@ -647,12 +461,10 @@ async def test_close_buffer_waits_out_an_in_flight_buffer_worker():
 
 def test_fetch_and_insert_bulk_inserts_in_one_call(monkeypatch):
     """`_fetch_and_insert` passes the frame to insert_candles in one call."""
-    pipeline = MFTDataPipeline([], interval="1m")
     df = ohlcv_frame(5, tz=ET)
     df[["open", "high", "low", "close"]] += 100
-
-    monkeypatch.setattr(
-        pipeline_module, "fetch_ohlcv_intraday", lambda ticker, interval, period: df
+    pipeline = _new_pipeline(
+        [], FakeMarketData(ohlcv_intraday=lambda ticker, interval, period: df), interval="1m"
     )
     calls = []
     monkeypatch.setattr(
@@ -668,13 +480,12 @@ def test_fetch_and_insert_bulk_inserts_in_one_call(monkeypatch):
     assert len(calls[0][1]) == 5
 
 
-def test_fetch_and_insert_returns_zero_on_an_empty_fetch(monkeypatch):
+def test_fetch_and_insert_returns_zero_on_an_empty_fetch():
     """An empty fetch result reports zero candles rather than raising."""
-    pipeline = MFTDataPipeline([], interval="1m")
-    monkeypatch.setattr(
-        pipeline_module,
-        "fetch_ohlcv_intraday",
-        lambda ticker, interval, period: pd.DataFrame(),
+    pipeline = _new_pipeline(
+        [],
+        FakeMarketData(ohlcv_intraday=lambda ticker, interval, period: pd.DataFrame()),
+        interval="1m",
     )
 
     n_candles, latest_close = pipeline._fetch_and_insert("AAPL")
@@ -682,11 +493,10 @@ def test_fetch_and_insert_returns_zero_on_an_empty_fetch(monkeypatch):
     assert (n_candles, latest_close) == (0, 0.0)
 
 
-def test_fetch_and_insert_uses_the_full_period_for_a_cold_buffer(monkeypatch):
+def test_fetch_and_insert_uses_the_full_period_for_a_cold_buffer():
     """A ticker with no buffered rows yet gets the full `_FETCH_PERIOD` fetch."""
-    pipeline = MFTDataPipeline([], interval="1m")
-    captured = _capture_fetch_period(monkeypatch)
-    monkeypatch.setattr(pipeline.buffer, "row_counts", lambda: {})
+    market_data, captured = _capture_fetch_period()
+    pipeline = _new_pipeline([], market_data, interval="1m")
 
     pipeline._fetch_and_insert("AAPL")
 
@@ -695,9 +505,9 @@ def test_fetch_and_insert_uses_the_full_period_for_a_cold_buffer(monkeypatch):
 
 def test_fetch_and_insert_uses_the_steady_state_period_for_a_warm_buffer(monkeypatch):
     """A ticker already holding an indicator-ready depth gets the short trailing fetch."""
-    pipeline = MFTDataPipeline([], interval="1m")
-    captured = _capture_fetch_period(monkeypatch)
-    monkeypatch.setattr(pipeline.buffer, "row_counts", lambda: {"AAPL": _required_raw_bars(1)})
+    market_data, captured = _capture_fetch_period()
+    pipeline = _new_pipeline([], market_data, interval="1m")
+    monkeypatch.setattr(pipeline.buffer, "row_count", lambda ticker: required_raw_bars(1))
 
     pipeline._fetch_and_insert("AAPL")
 

@@ -34,6 +34,7 @@ from argus.infra.log import configure_logging
 from argus.orchestration.collector import CycleOutcome, run_collection_cycle_from_settings
 from argus.orchestration.graph import build_graph
 from argus.schemas.requests import RiskTolerance
+from argus.seams import LiveMarketDataProvider
 
 
 def main() -> None:
@@ -82,7 +83,9 @@ def main() -> None:
     universe = [t.strip() for t in args.universe.split(",") if t.strip()] if args.universe else None
 
     pipeline = MFTDataPipeline(
-        tickers=list(universe or settings.ARGUS_UNIVERSE), db_path=args.buffer_db
+        tickers=list(universe or settings.ARGUS_UNIVERSE),
+        market_data=LiveMarketDataProvider(),
+        db_path=args.buffer_db,
     )
     compiled_graph = build_graph(checkpoint_db_path=args.checkpoint_db)
     result = asyncio.run(

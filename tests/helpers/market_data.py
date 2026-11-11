@@ -26,6 +26,7 @@ import pandas as pd
 _METHODS = frozenset(
     {
         "ohlcv_daily",
+        "ohlcv_intraday",
         "multiple_daily",
         "fundamentals",
         "fred_series",
@@ -95,6 +96,10 @@ class FakeMarketData:
     def ohlcv_daily(self, ticker: str, period: str = "2y") -> pd.DataFrame:
         """Returns the configured daily OHLCV frame."""
         return self._respond("ohlcv_daily", ticker, period)
+
+    def ohlcv_intraday(self, ticker: str, interval: str = "5m", period: str = "5d") -> pd.DataFrame:
+        """Returns the configured intraday OHLCV frame."""
+        return self._respond("ohlcv_intraday", ticker, interval, period)
 
     def multiple_daily(self, tickers: list[str], period: str = "1y") -> dict[str, pd.DataFrame]:
         """Returns the configured per-ticker daily frames."""
