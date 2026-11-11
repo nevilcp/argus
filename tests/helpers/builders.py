@@ -18,6 +18,7 @@ from datetime import datetime
 from typing import Any
 from unittest import mock
 
+from argus.orchestration.aggregator import HybridSignalAggregator
 from argus.schemas.signals import (
     ARGUSDecision,
     FundamentalSignal,
@@ -191,4 +192,40 @@ def neutral_cultural_memory() -> mock.Mock:
         retrieve_warnings=mock.Mock(return_value=[]),
         get_agent_accuracy=mock.Mock(return_value=(0.5, 0)),
         store_decision_snapshot=mock.Mock(),
+    )
+
+
+def aggregated_decision(
+    technical: TechnicalSignal,
+    macro: MacroContext,
+    fundamental: FundamentalSignal | None = None,
+    sentiment: SentimentSignal | None = None,
+    *,
+    reliability: dict[str, float] | None = None,
+    session_timestamp: datetime | None = None,
+    allocation: PositionAllocation | None = None,
+) -> ARGUSDecision:
+    """Builds a TEST decision whose aggregated signal is the real aggregator's output."""
+    aggregated = HybridSignalAggregator().aggregate(
+        technical, macro, fundamental, sentiment, reliability=reliability
+    )
+    return ARGUSDecision(
+        ticker="TEST",
+        session_timestamp=datetime.now() if session_timestamp is None else session_timestamp,
+        technical=technical,
+        fundamental=fundamental,
+        sentiment=sentiment,
+        macro=macro,
+        aggregated=aggregated,
+        allocation=allocation,
+    )
+
+
+def matured_decision(ticker: str, start: datetime, price: float = 100.0) -> ARGUSDecision:
+    """A decision with a position that has cleared a 5-day horizon by `start` + 5 days."""
+    return ARGUSDecision(
+        ticker=ticker,
+        session_timestamp=start,
+        technical=technical_signal(Signal.BULLISH, 0.8, ticker=ticker, current_price=price),
+        allocation=position_allocation(ticker=ticker),
     )

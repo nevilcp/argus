@@ -15,9 +15,9 @@ Responsibilities:
   - Invoke the caller-supplied compiled LangGraph DAG over whatever tickers
     the sweep actually populated
   - Append every resulting ARGUSDecision to a JSONL decision log
-    (append_decisions_jsonl is also called directly by api/main.py's
-    /analyze, the loop's other entry point into the graph, so the log
-    reflects both)
+    (decision_log.append_decisions_jsonl is also called directly by
+    api/main.py's /analyze, the loop's other entry point into the graph, so
+    the log reflects both)
   - Classify the cycle's outcome (CycleOutcome: no-op, success, or
     degraded) so a run that produced only unusable decisions is
     distinguishable from one that produced real ones
@@ -28,7 +28,7 @@ Responsibilities:
 
 Not responsible for:
   - Scheduling (see api/main.py's collector loop and scripts/collect_session.py)
-  - Reconciling logged decisions into outcomes (see orchestration/reconciliation.py)
+  - Reconciling logged decisions into outcomes (see orchestration/reconcile.py)
   - Market-hours/holiday awareness beyond what MFTDataPipeline already checks
 """
 
@@ -39,16 +39,15 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from enum import StrEnum
-from pathlib import Path
 
 from argus.config import settings
 from argus.data.pipeline import MFTDataPipeline
 from argus.infra.clock import now_local
 from argus.orchestration.checkpoint import (
-    default_checkpoint_retention_cutoff,
     prune_checkpoints,
+    retention_cutoff,
 )
-from argus.orchestration.reconciliation import decisions_log_lock
+from argus.orchestration.decision_log import append_decisions_jsonl
 from argus.orchestration.state import initial_state
 from argus.params import COLLECTOR
 from argus.risk.kill_switch import get_kill_switch
@@ -115,39 +114,6 @@ class CollectionResult:
     timestamp: str = field(default_factory=lambda: now_local().isoformat())
 
 
-def append_decisions_jsonl(decisions: list[ARGUSDecision], path: str) -> int:
-    """Appends each decision to a JSONL log, one compact JSON object per line.
-
-    Shared by run_collection_cycle and api/main.py's /analyze — the two
-    entry points into the graph — so decisions.jsonl (the source
-    reconciliation reads, see orchestration/reconciliation.py) reflects
-    both instead of only the unattended collector's.
-
-    Each decision is stamped with the running process's image tag (issue #95)
-    before it's written, so a logged decision can be traced back to the build
-    that produced it regardless of which docker tag was pulled to run it.
-
-    Args:
-        decisions: Decisions produced by this cycle's graph invocation.
-        path: Destination file; parent directories are created if missing.
-
-    Returns:
-        Count of decisions written.
-    """
-    if not decisions:
-        return 0
-
-    log_path = Path(path)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    # Held so a concurrent compaction (reconciliation.compact_decisions_jsonl) can't
-    # read the log, then replace it over this append.
-    with decisions_log_lock(log_path), open(log_path, "a", encoding="utf-8") as f:
-        for decision in decisions:
-            stamped = decision.model_copy(update={"image_tag": settings.ARGUS_IMAGE_TAG})
-            f.write(stamped.model_dump_json() + "\n")
-    return len(decisions)
-
-
 def _summarize_degraded_inputs(decisions: list[ARGUSDecision]) -> dict[str, int]:
     """Counts, per signal name, how many of this cycle's decisions came back without it.
 
@@ -167,8 +133,8 @@ def _summarize_degraded_inputs(decisions: list[ARGUSDecision]) -> dict[str, int]
 def _prune_stale_checkpoints(checkpoint_db_path: str) -> None:
     """Best-effort prunes checkpoint threads older than the reconciliation retention window.
 
-    Uses default_checkpoint_retention_cutoff() — the same window
-    reconciliation.py's own daily pass prunes to — so a checkpoint thread
+    Uses retention_cutoff() — the same window
+    reconcile.py's own daily pass prunes to — so a checkpoint thread
     survives exactly as long under either path. Called on every collector
     cycle (issue #99) so the state each cycle publishes to argus-data is
     already bounded, rather than relying solely on the once-daily reconcile
@@ -179,7 +145,7 @@ def _prune_stale_checkpoints(checkpoint_db_path: str) -> None:
     into a failed one.
     """
     try:
-        pruned = prune_checkpoints(checkpoint_db_path, default_checkpoint_retention_cutoff())
+        pruned = prune_checkpoints(checkpoint_db_path, retention_cutoff())
         if pruned:
             logger.info("pruned %d stale checkpoint thread(s)", pruned)
     except Exception:

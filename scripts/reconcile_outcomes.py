@@ -2,7 +2,7 @@
 scripts/reconcile_outcomes.py
 
 CLI entry point for run_reconciliation_pass
-(argus/orchestration/reconciliation.py) — the scheduled GitHub Actions
+(argus/orchestration/reconcile.py) — the scheduled GitHub Actions
 runner's reconciliation pass for deployments with no long-lived API process
 to run api/main.py's own daily loop.
 
@@ -19,7 +19,7 @@ Responsibilities:
 
 Not responsible for:
   - The reconciliation sequence itself, or which stores get bounded (see
-    argus/orchestration/reconciliation.py, which api/main.py's own
+    argus/orchestration/reconcile.py, which api/main.py's own
     reconciliation loop also calls)
 """
 
@@ -30,7 +30,7 @@ import argparse
 from argus.config import settings
 from argus.infra.log import configure_logging
 from argus.memory.cultural import get_cultural_memory
-from argus.orchestration.reconciliation import run_reconciliation_pass
+from argus.orchestration.reconcile import run_reconciliation_pass
 from argus.params import RECONCILIATION
 from argus.seams import LiveMarketDataProvider
 
@@ -68,22 +68,11 @@ def main() -> None:
     )
 
     source = args.decisions_log or args.db
-    print(f"Loaded {report.decisions_loaded} decision(s) from {source}")
     print(
-        f"Reconciled {report.outcomes_stored}/{report.decisions_loaded} decision(s) "
-        f"(horizon={args.horizon_days}d)"
+        f"Loaded {report.decisions_loaded} decision(s) from {source} (horizon={args.horizon_days}d)"
     )
-    if report.paper_book_updated:
-        print(f"Paper equity: ${report.equity:,.2f} (drawdown={report.drawdown:.1%} from peak)")
-    if report.decisions_compacted is not None:
-        print(f"Compacted {args.decisions_log}: {report.decisions_compacted} decision(s) retained")
-    if report.decisions_retired_unresolved:
-        print(
-            f"Retired {report.decisions_retired_unresolved} decision(s) as permanently unresolved"
-        )
-    if report.checkpoints_pruned is not None:
-        print(f"Pruned {report.checkpoints_pruned} stale checkpoint thread(s) from {args.db}")
-    print(f"Expired {report.pending_snapshots_expired} stale PENDING snapshot(s)")
+    for line in report.summary_lines():
+        print(line)
     for error in report.errors:
         print(f"WARNING: {error}")
 

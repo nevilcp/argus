@@ -223,7 +223,7 @@ def replay_session(
 
     # A dedicated temp checkpoint db, never the production argus_graph.db: replay
     # is a read-only simulation over fixtures, and writing into the store
-    # reconciliation.py's load_decisions_from_checkpoints() reads would make
+    # decision_log.py's load_decisions_from_checkpoints() reads would make
     # fabricated replay sessions indistinguishable from genuine live ones.
     if cultural_memory_provider is None and not closed_loop:
         neutral_memory = _neutral_cultural_memory()

@@ -16,37 +16,12 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from langchain_core.runnables import RunnableConfig
-from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata
-from langgraph.checkpoint.sqlite import SqliteSaver
-
 from argus.config import settings
-from argus.orchestration.checkpoint import build_checkpoint_serde
-from argus.orchestration.collector import CycleOutcome, append_decisions_jsonl, run_collection_cycle
+from argus.orchestration.collector import CycleOutcome, run_collection_cycle
 from argus.params import COLLECTOR, RECONCILIATION
 from argus.schemas.signals import ARGUSDecision
 from tests.helpers.builders import argus_decision, position_allocation
-
-
-def _put_checkpoint(db_path: str, thread_id: str, ts: datetime) -> None:
-    """Writes one empty checkpoint for `thread_id` stamped with `ts`."""
-    config: RunnableConfig = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
-    checkpoint: Checkpoint = {
-        "v": 1,
-        "ts": ts.isoformat(),
-        "id": thread_id,
-        "channel_values": {},
-        "channel_versions": {},
-        "versions_seen": {},
-        "updated_channels": None,
-    }
-    metadata: CheckpointMetadata = {"source": "input", "step": 1}
-
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    try:
-        SqliteSaver(conn, serde=build_checkpoint_serde()).put(config, checkpoint, metadata, {})
-    finally:
-        conn.close()
+from tests.helpers.decision_store import put_checkpoint
 
 
 def _checkpoint_thread_ids(db_path: str) -> set[str]:
@@ -205,8 +180,8 @@ async def test_run_collection_cycle_prunes_stale_checkpoints_even_when_the_cycle
     """
     db_path = str(tmp_path / "argus_graph.db")
     retention_days = RECONCILIATION.horizon_days + RECONCILIATION.retention_margin_days
-    _put_checkpoint(db_path, "stale-thread", datetime.now() - timedelta(days=retention_days + 1))
-    _put_checkpoint(db_path, "fresh-thread", datetime.now() - timedelta(days=1))
+    put_checkpoint(db_path, "stale-thread", datetime.now() - timedelta(days=retention_days + 1))
+    put_checkpoint(db_path, "fresh-thread", datetime.now() - timedelta(days=1))
 
     lock = asyncio.Semaphore(1)
     await lock.acquire()
@@ -243,17 +218,3 @@ async def test_run_collection_cycle_survives_a_checkpoint_pruning_failure(tmp_pa
     result = await _run_cycle(graph, checkpoint_db_path=db_path)
 
     assert result.ran is True
-
-
-def test_append_decisions_jsonl_stamps_running_image_tag(tmp_path, monkeypatch):
-    """Issue #95: every logged decision carries the tag of the image that produced it."""
-    monkeypatch.setattr(settings, "ARGUS_IMAGE_TAG", "sha-abc123def456")
-    log_path = tmp_path / "decisions.jsonl"
-    decision = _decision()
-    assert decision.image_tag is None
-
-    append_decisions_jsonl([decision], str(log_path))
-
-    logged = [ARGUSDecision.model_validate_json(line) for line in log_path.read_text().splitlines()]
-    assert logged[0].image_tag == "sha-abc123def456"
-    assert decision.image_tag is None  # the caller's own object is left untouched

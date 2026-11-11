@@ -44,7 +44,7 @@ def test_replay_session_never_touches_the_production_checkpoint_db(tmp_path, mon
     build_graph()'s checkpoint_db_path defaults to the production store; replay
     previously omitted the argument, so replayed sessions (with their rebased,
     fake-looking-genuine timestamps) landed in the same store
-    reconciliation.load_decisions_from_checkpoints() reads.
+    decision_log.load_decisions_from_checkpoints() reads.
     """
     monkeypatch.chdir(tmp_path)
 

@@ -602,7 +602,7 @@ class MacroParams:
 
 @dataclass(frozen=True)
 class ReconciliationParams:
-    """Outcome-reconciliation horizon (orchestration/reconciliation.py)."""
+    """Outcome-reconciliation horizon (orchestration/reconcile.py)."""
 
     horizon_days: int = p(
         5,
