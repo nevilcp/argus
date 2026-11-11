@@ -102,8 +102,6 @@ def _per_ticker_llm(session_dir: Path, fixture_file: str, universe: list[str]) -
         A FixtureLLMClient that replies with the fixture response keyed to
         whichever universe ticker the prompt names.
     """
-    with open(session_dir / "llm_responses" / fixture_file) as f:
-        responses = json.load(f)
 
     def key_fn(user_prompt: str) -> str:
         for ticker in universe:
@@ -111,7 +109,9 @@ def _per_ticker_llm(session_dir: Path, fixture_file: str, universe: list[str]) -
                 return ticker
         raise KeyError(f"no known ticker found in prompt: {user_prompt[:200]!r}")
 
-    return FixtureLLMClient(responses, key_fn=key_fn)
+    return FixtureLLMClient.from_fixture_file(
+        session_dir / "llm_responses" / fixture_file, key_fn=key_fn
+    )
 
 
 def _portfolio_llm(session_dir: Path) -> FixtureLLMClient:

@@ -163,9 +163,10 @@ def test_governor_unregistered_model_raises(governor):
         governor.wait_if_needed("some-typo-d-model-id", 100)
 
 
-def test_governor_get_capacity_unregistered_model(governor):
-    """Remaining capacity for an unregistered model is 0, not a silent pass-through."""
-    assert governor.get_remaining_capacity("some-typo-d-model-id") == 0
+def test_governor_get_capacity_unregistered_model_raises(governor):
+    """Remaining capacity for an unregistered model raises rather than reading as exhausted."""
+    with pytest.raises(UnregisteredModel):
+        governor.get_remaining_capacity("some-typo-d-model-id")
 
 
 def test_governor_get_capacity(governor):
