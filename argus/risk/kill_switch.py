@@ -57,7 +57,7 @@ class KillSwitchStatus:
         reason: Human-readable halt reason, or None if not halted.
         triggered_at: When the halt was triggered, or None if not halted.
         realized_drawdown: Current peak-to-trough drawdown as a fraction.
-        current_vix: Most recently observed VIX level, or 0.0 if none has
+        current_vix: Most recently observed VIX level, or None if none has
             been fetched yet.
         halt_persisted: False when a halt engaged but its crash dump could not
             be written, so a process restart would resume trading. True
@@ -69,7 +69,7 @@ class KillSwitchStatus:
     reason: str | None
     triggered_at: datetime | None
     realized_drawdown: float
-    current_vix: float
+    current_vix: float | None
     halt_persisted: bool = True
 
 
@@ -420,7 +420,7 @@ class KillSwitch:
             reason=reason,
             triggered_at=triggered_at,
             realized_drawdown=drawdown,
-            current_vix=self._last_vix or 0.0,
+            current_vix=self._last_vix,
             halt_persisted=self._halt_persisted,
         )
 

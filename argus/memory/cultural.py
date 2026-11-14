@@ -113,9 +113,13 @@ def _render_trade_document(
     """Renders the text document stored (and embedded) for a settled trade."""
     technical = decision.technical
     macro_regime = decision.macro.macro_regime.value if decision.macro else "unknown"
-    vix_regime = decision.macro.vix_regime.value if decision.macro else "unknown"
-    tech_rsi = getattr(technical, "rsi_14", 0.0) if technical else 0.0
-    tech_macd = getattr(technical, "macd_histogram", 0.0) if technical else 0.0
+    vix_regime = (
+        decision.macro.vix_regime.value
+        if decision.macro and decision.macro.vix_regime
+        else "unknown"
+    )
+    tech_rsi = f"{technical.rsi_14:.0f}" if technical else "N/A"
+    tech_macd = f"{technical.macd_histogram:.3f}" if technical else "N/A"
     fund_moat = decision.fundamental.moat_score if decision.fundamental else "N/A"
     sent_finbert = decision.sentiment.finbert_net_score if decision.sentiment else None
     agg_conv = decision.aggregated.conviction if decision.aggregated else "N/A"
@@ -124,7 +128,7 @@ def _render_trade_document(
 Macro regime: {macro_regime}
 VIX regime: {vix_regime}
 Technical signal: {_signal_or_na(technical)}
-  (RSI={tech_rsi:.0f}, MACD hist={tech_macd:.3f})
+  (RSI={tech_rsi}, MACD hist={tech_macd})
 Fundamental signal: {_signal_or_na(decision.fundamental)}
   (Moat={fund_moat})
 Sentiment signal: {_signal_or_na(decision.sentiment)}
@@ -362,7 +366,7 @@ class CulturalMemoryManager:
             List of matching document strings from the SUCCESSFUL outcome filter.
         """
         regime = current_macro.macro_regime.value
-        vix_regime = current_macro.vix_regime.value
+        vix_regime = current_macro.vix_regime.value if current_macro.vix_regime else "unknown"
         return self._retrieve_by_outcome(
             query=(f"Macro regime {regime}, VIX {vix_regime}, {current_technical_summary}"),
             outcome=Outcome.SUCCESSFUL,
@@ -533,7 +537,11 @@ class CulturalMemoryManager:
         """
         try:
             macro_regime = decision.macro.macro_regime.value if decision.macro else "unknown"
-            vix_regime = decision.macro.vix_regime.value if decision.macro else "unknown"
+            vix_regime = (
+                decision.macro.vix_regime.value
+                if decision.macro and decision.macro.vix_regime
+                else "unknown"
+            )
             agg_signal = _signal_or_na(decision.aggregated)
             agg_conv = decision.aggregated.conviction if decision.aggregated else 0.0
             fund_sig = _signal_or_na(decision.fundamental)

@@ -179,7 +179,7 @@ def _session_reliability(
 
 def _resolve_vix(
     macro_ctx: MacroContext | None, market_data: MarketDataProvider
-) -> tuple[float, str | None]:
+) -> tuple[float | None, str | None]:
     """Resolves the VIX level the risk engine's blackout gate reads.
 
     Args:
@@ -190,7 +190,7 @@ def _resolve_vix(
         ``(vix, error)``, where ``error`` is an ARGUSState["errors"] entry naming
         the fallback that was used, or None when a real level was resolved.
     """
-    if macro_ctx is not None:
+    if macro_ctx is not None and macro_ctx.vix_level is not None:
         return macro_ctx.vix_level, None
 
     # A FRED outage only takes out the macro bundle; the VIX blackout gate needs
@@ -199,10 +199,10 @@ def _resolve_vix(
         return market_data.vix(), None
     except Exception as exc:
         logger.warning(
-            "VIX fetch failed with no macro_context; falling back to vix=20.0: %s",
+            "VIX unavailable; risk blackout check will fail closed: %s",
             exc,
         )
-        return 20.0, f"risk_evaluation: VIX fetch failed, used fallback vix=20.0 ({exc})"
+        return None, f"risk_evaluation: VIX unavailable ({exc})"
 
 
 def _apply_portfolio_cap(single: RiskAssessment, cap: float) -> dict:

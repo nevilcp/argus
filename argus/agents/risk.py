@@ -215,7 +215,7 @@ def ols_portfolio_beta(
     benchmark_ticker: str = "SPY",
     market_data: MarketDataProvider | None = None,
     lookback: int = RISK.returns_lookback_days,
-) -> float:
+) -> float | None:
     """Computes weighted Ordinary Least Squares (OLS) portfolio beta against a benchmark index.
 
     Args:
@@ -230,7 +230,7 @@ def ols_portfolio_beta(
             accumulated history across restarts (RE-14).
 
     Returns:
-        Dollar-weighted portfolio beta. Returns 1.0 if the benchmark cannot be fetched or
+        Dollar-weighted portfolio beta. Returns None if the benchmark cannot be fetched or
         if fewer than 10 overlapping data points exist for any constituent.
     """
     if not positions:
@@ -243,14 +243,14 @@ def ols_portfolio_beta(
             )
             spy_returns = spy_df["close"].tail(lookback + 1).pct_change().dropna()
         except Exception:
-            logger.warning("benchmark fetch failed, returning 1.0")
-            return 1.0
+            logger.warning("benchmark fetch failed, beta unavailable")
+            return None
     else:
         spy_returns = price_history[benchmark_ticker].tail(lookback + 1).pct_change().dropna()
 
     spy_var = spy_returns.var()
     if spy_var == 0 or pd.isna(spy_var):
-        return 1.0
+        return None
 
     betas = []
     weights = []
@@ -267,8 +267,8 @@ def ols_portfolio_beta(
                 betas.append(beta)
                 weights.append(w)
 
-    if not betas:
-        return 1.0
+    if len(betas) != len(positions):
+        return None
 
     return float(np.average(betas, weights=weights))
 
@@ -357,7 +357,7 @@ class _RiskStats:
 
     var_99: float | None
     cvar: float | None
-    beta: float
+    beta: float | None
     avg_correlation: float | None
     optimal_weights: dict[str, float]
     optimizer_converged: bool | None
@@ -371,12 +371,12 @@ def _veto_assessment(total_weight: float, reasons: list[str]) -> RiskAssessment:
         proposed_weight=total_weight,
         veto_reasons=reasons,
         optimal_weights={},
-        var_99=0.0,
-        cvar=0.0,
-        marginal_var=0.0,
-        portfolio_beta=0.0,
+        var_99=None,
+        cvar=None,
+        marginal_var=None,
+        portfolio_beta=None,
         avg_correlation=None,
-        stop_loss=0.0,
+        stop_loss=None,
         api_calls_used=0,
         timestamp=now_local(),
     )
@@ -395,10 +395,10 @@ def _reduce_assessment(
         optimizer_converged=stats.optimizer_converged,
         var_99=stats.var_99,
         cvar=stats.cvar,
-        marginal_var=0.0,
+        marginal_var=None,
         portfolio_beta=stats.beta,
         avg_correlation=stats.avg_correlation,
-        stop_loss=0.0,
+        stop_loss=None,
         api_calls_used=0,
         timestamp=now_local(),
     )
@@ -408,8 +408,8 @@ def _approve_assessment(
     total_weight: float,
     notes: list[str],
     stats: _RiskStats,
-    marginal_var: float,
-    stop_loss: float,
+    marginal_var: float | None,
+    stop_loss: float | None,
 ) -> RiskAssessment:
     """Builds the APPROVE assessment: the full proposed weight with the primary ticker's risk."""
     return RiskAssessment(
@@ -467,7 +467,7 @@ class RiskStatisticalAgent:
     def _structural_violations(
         self,
         proposed_positions: list[dict],
-        current_vix: float,
+        current_vix: float | None,
         total_weight: float,
     ) -> tuple[list[str], str | None]:
         """Runs gate 1: per-position caps, book size, and the VIX blackout.
@@ -509,7 +509,9 @@ class RiskStatisticalAgent:
                 f"(max {RISK.max_positions})"
             )
 
-        if current_vix >= self.vix_blackout:
+        if current_vix is None:
+            violations.append("VIX unavailable — blackout check cannot be performed")
+        elif current_vix >= self.vix_blackout:
             violations.append(
                 f"VIX {current_vix:.1f} >= blackout threshold {self.vix_blackout:.1f}"
             )
@@ -626,7 +628,7 @@ class RiskStatisticalAgent:
         self,
         var99: float | None,
         cvar: float | None,
-        beta: float,
+        beta: float | None,
         corr: float | None,
         sector_weights: dict[str, float],
         has_sector_violation: bool,
@@ -654,7 +656,7 @@ class RiskStatisticalAgent:
             stat_violations.append(f"VaR 99%: {var99:.2%} > {RISK.var_limit:.0%} limit")
         if cvar is not None and cvar > RISK.cvar_limit:
             stat_violations.append(f"CVaR: {cvar:.2%} > {RISK.cvar_limit:.0%} limit")
-        if beta > self.max_port_beta:
+        if beta is not None and beta > self.max_port_beta:
             stat_violations.append(f"Beta {beta:.2f} > {self.max_port_beta:.2f}")
         if corr is not None and corr > RISK.correlation_limit:
             stat_violations.append(f"Avg correlation > {RISK.correlation_limit} — reduce overlap")
@@ -672,7 +674,7 @@ class RiskStatisticalAgent:
         self,
         proposed_positions: list[dict],
         price_history: dict[str, pd.Series],
-        current_vix: float,
+        current_vix: float | None,
         convictions: dict[str, float] | None = None,
     ) -> RiskAssessment:
         """Evaluates a proposed portfolio posture against structural, statistical, and sector caps.
@@ -736,6 +738,8 @@ class RiskStatisticalAgent:
             degraded_notes.append(
                 "VaR/CVaR not measurable — insufficient return history for this book"
             )
+        if beta is None:
+            degraded_notes.append("Portfolio beta not measurable — insufficient benchmark overlap")
         if corr is None:
             degraded_notes.append(
                 "Average correlation not measurable — positions share no overlapping return history"
@@ -752,13 +756,11 @@ class RiskStatisticalAgent:
             return _reduce_assessment(total_weight, stat_violations + notes, stats)
 
         logger.debug(
-            "Risk evaluate: APPROVE (VaR99: %s, Beta: %.2f)",
+            "Risk evaluate: APPROVE (VaR99: %s, Beta: %s)",
             f"{var99:.2%}" if var99 is not None else "not measurable",
             beta,
         )
         primary_ticker = proposed_positions[0]["ticker"] if proposed_positions else ""
-        stop_val = close_to_close_stop_losses(proposed_positions, price_history).get(
-            primary_ticker, 0.0
-        )
-        mvar_val = component_var(returns, port_returns).get(primary_ticker, 0.0)
+        stop_val = close_to_close_stop_losses(proposed_positions, price_history).get(primary_ticker)
+        mvar_val = component_var(returns, port_returns).get(primary_ticker)
         return _approve_assessment(total_weight, notes, stats, mvar_val, stop_val)

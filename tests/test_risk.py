@@ -15,7 +15,7 @@ from argus.agents.risk import (
 from argus.data.cache import TTLCache
 from argus.params import RISK
 from argus.schemas.signals import RiskVerdict
-from argus.seams import LiveMarketDataProvider
+from argus.seams import FixtureMarketDataProvider, LiveMarketDataProvider
 from tests.helpers.market_data import FakeMarketData
 
 _TRADING_YEAR = pd.date_range(start="2023-01-01", periods=253, freq="B")
@@ -51,7 +51,7 @@ def price_history():
 @pytest.fixture
 def risk_engine():
     """A fresh RiskStatisticalAgent instance."""
-    return RiskStatisticalAgent()
+    return RiskStatisticalAgent(market_data=FixtureMarketDataProvider())
 
 
 def test_vix_blackout(risk_engine: RiskStatisticalAgent, price_history: dict) -> None:
@@ -177,7 +177,7 @@ def test_per_ticker_var_normalized_to_full_weight() -> None:
     the portfolio call — a stock volatile enough to clearly breach the limit at full
     weight passed the per-ticker gate outright.
     """
-    engine = RiskStatisticalAgent()
+    engine = RiskStatisticalAgent(market_data=FixtureMarketDataProvider())
     np.random.seed(3)
     hist = {
         "AAPL": _random_prices(_TRADING_YEAR, 0.0, 0.05),
@@ -253,7 +253,7 @@ def test_evaluate_excludes_short_history_ticker_from_covariance(monkeypatch) -> 
     degrading every other ticker's covariance.
     """
     monkeypatch.setattr("argus.agents.risk.get_sector", lambda ticker, market_data: "Diversified")
-    engine = RiskStatisticalAgent()
+    engine = RiskStatisticalAgent(market_data=FixtureMarketDataProvider())
 
     np.random.seed(5)
     tickers = ["AAPL", "MSFT", "GOOGL", "META", "AMZN"]
@@ -299,7 +299,7 @@ def test_evaluate_completes_when_a_ticker_has_no_price_history_overlap(monkeypat
     zero-row intersection empties the portfolio return series too.
     """
     monkeypatch.setattr("argus.agents.risk.get_sector", lambda ticker, market_data: "Diversified")
-    engine = RiskStatisticalAgent()
+    engine = RiskStatisticalAgent(market_data=FixtureMarketDataProvider())
 
     np.random.seed(9)
     disjoint_dates = pd.date_range(start="2010-01-01", periods=len(_TRADING_YEAR), freq="B")
@@ -326,7 +326,7 @@ def test_evaluate_skips_optimizer_on_non_finite_covariance(monkeypatch) -> None:
     dropna().
     """
     monkeypatch.setattr("argus.agents.risk.get_sector", lambda ticker, market_data: "Diversified")
-    engine = RiskStatisticalAgent()
+    engine = RiskStatisticalAgent(market_data=FixtureMarketDataProvider())
 
     np.random.seed(11)
     aapl = _random_prices(_TRADING_YEAR, 0.0005, 0.01)
@@ -446,3 +446,27 @@ def test_get_sector_cache_evicts_the_oldest_entry_at_capacity(monkeypatch) -> No
 
     get_sector("GOOG", market_data)
     assert market_data.calls == 4, "GOOG is still cached"
+
+
+def test_unmeasured_veto_statistics_are_null(risk_engine, price_history):
+    result = risk_engine.evaluate([{"ticker": "AAPL", "weight": 0.1}], price_history, None)
+    assert result.verdict == RiskVerdict.VETO
+    for name in ("var_99", "cvar", "marginal_var", "portfolio_beta", "stop_loss"):
+        assert getattr(result, name) is None
+
+
+def test_missing_benchmark_skips_beta_gate_with_a_note(price_history):
+    engine = RiskStatisticalAgent(
+        market_data=FakeMarketData(ohlcv_daily=OSError(), ticker_info={"sector": "Technology"})
+    )
+    history = {"AAPL": price_history["AAPL"]}
+    assert (
+        ols_portfolio_beta(
+            [{"ticker": "AAPL", "weight": 0.1}], history, market_data=engine.market_data
+        )
+        is None
+    )
+    result = engine.evaluate([{"ticker": "AAPL", "weight": 0.1}], history, 20.0)
+    assert result.portfolio_beta is None
+    assert any("beta not measurable" in note for note in result.veto_reasons)
+    assert not any(note.startswith("Beta ") for note in result.veto_reasons)

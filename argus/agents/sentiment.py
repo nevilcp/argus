@@ -182,7 +182,7 @@ def aggregate_finbert_scores(
     }
 
 
-def _check_earnings_calendar(ticker: str, market_data: MarketDataProvider) -> bool:
+def _check_earnings_calendar(ticker: str, market_data: MarketDataProvider) -> bool | None:
     """Returns True if an earnings date falls within SENTIMENT.catalyst_window_days of now.
 
     Uses yfinance's calendar API via the MarketDataProvider seam (retried,
@@ -196,10 +196,12 @@ def _check_earnings_calendar(ticker: str, market_data: MarketDataProvider) -> bo
 
     Returns:
         True if an upcoming earnings event is within the catalyst window, False otherwise
-        (including when the calendar can't be fetched at all).
+        or None when the calendar cannot be fetched.
     """
     try:
         cal = market_data.ticker_calendar(ticker)
+        if not isinstance(cal, (dict, pd.DataFrame)):
+            return None
 
         if isinstance(cal, pd.DataFrame) and not cal.empty and "Earnings Date" in cal.index:
             earnings_dates = cal.loc["Earnings Date"]
@@ -212,7 +214,8 @@ def _check_earnings_calendar(ticker: str, market_data: MarketDataProvider) -> bo
             if 0 <= (dt.tz_localize(None) - now_local()).days <= SENTIMENT.catalyst_window_days:
                 return True
     except Exception as e:
-        logger.debug("%s check failed: %s", ticker, e)
+        logger.warning("%s earnings calendar unavailable: %s", ticker, e)
+        return None
     return False
 
 
@@ -231,6 +234,7 @@ _SENTIMENT_METRIC_LABELS: dict[str, str] = {
     "(<=25) — the denominator behind pct_positive/pct_negative",
     "news_data_available": "[bool]           False means the news fetch failed or hit its daily "
     "quota — news_volume_7d is a placeholder 0, not a real zero",
+    "catalyst_data_available": "[bool] False means the earnings calendar is unavailable; upcoming_catalyst is a placeholder",
     "upcoming_catalyst": "[bool]           True if earnings are expected within 14 days",
 }
 
@@ -400,6 +404,7 @@ class SentimentAgent:
             news_scored_count=metrics["news_scored_count"],
             news_data_available=metrics["news_data_available"],
             upcoming_catalyst=metrics["upcoming_catalyst"],
+            catalyst_data_available=metrics["catalyst_data_available"],
             signal=verdict.signal,
             conviction=verdict.conviction,
             sentiment_decay_risk=verdict.sentiment_decay_risk,
@@ -437,6 +442,7 @@ class SentimentAgent:
         scored.sort(key=lambda s: s["published_at"] or "")
         agg = aggregate_finbert_scores(scored)
 
+        catalyst = _check_earnings_calendar(ticker, self.market_data)
         return {
             "net_finbert_score": agg["net"],
             "pct_positive": agg["pct_pos"],
@@ -445,7 +451,8 @@ class SentimentAgent:
             "news_volume_7d": len(news_list),
             "news_scored_count": len(scored),
             "news_data_available": news is not None,
-            "upcoming_catalyst": _check_earnings_calendar(ticker, self.market_data),
+            "upcoming_catalyst": catalyst is True,
+            "catalyst_data_available": catalyst is not None,
         }
 
     def batch_analyze(self, tickers: list[str]) -> tuple[dict[str, SentimentSignal], list[str]]:

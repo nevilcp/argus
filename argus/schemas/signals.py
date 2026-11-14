@@ -204,9 +204,9 @@ class MacroContext(BaseModel):
     fed_funds: float = Field(..., description="Effective Federal Funds Rate (%)")
     cpi_yoy: float = Field(..., description="Consumer Price Index YoY (%)")
     unemployment: float = Field(..., description="Unemployment Rate (%)")
-    t10y2y: float = Field(..., description="10-Year minus 2-Year Treasury spread (%)")
+    t10y2y: float | None = Field(..., description="10-Year minus 2-Year Treasury spread (%)")
     consumer_sentiment: float = Field(..., description="UMich Consumer Sentiment Index")
-    vix_level: float = Field(..., ge=0.0, description="CBOE VIX spot level")
+    vix_level: float | None = Field(..., ge=0.0, description="CBOE VIX spot level")
 
     macro_regime: Regime = Field(..., description="HMM-detected economic regime")
     regime_confidence: float = Field(
@@ -223,8 +223,8 @@ class MacroContext(BaseModel):
         ),
     )
     interest_rate_trend: Trend = Field(..., description="Direction of short-term interest rates")
-    yield_curve_shape: YieldCurve = Field(..., description="10Y-2Y Treasury spread shape")
-    vix_regime: VixRegime = Field(..., description="Categorical VIX bucket")
+    yield_curve_shape: YieldCurve | None = Field(..., description="10Y-2Y Treasury spread shape")
+    vix_regime: VixRegime | None = Field(..., description="Categorical VIX bucket")
     vix_percentile: float = Field(
         ..., ge=0.0, le=100.0, description="VIX vs. trailing 252-day distribution"
     )
@@ -400,6 +400,9 @@ class SentimentSignal(BaseModel):
     )
     news_data_available: bool = Field(
         True, description="False means the news fetch failed; news metrics are placeholders"
+    )
+    catalyst_data_available: bool = Field(
+        False, description="Whether the earnings calendar was fetched successfully"
     )
     upcoming_catalyst: bool = Field(..., description="True if earnings / FDA / FOMC within 14 days")
 
@@ -612,7 +615,7 @@ class PositionAllocation(BaseModel):
         description="Target portfolio weight [0, SYSTEM.max_single_position_pct]",
     )
     allocation_usd: float = Field(..., ge=0.0, description="Dollar value of the position")
-    stop_loss: float = Field(..., description="Stop-loss price level")
+    stop_loss: float | None = Field(..., description="Stop-loss price level")
     target_price: float | None = Field(None, description="12-month price target (optional)")
     thesis: str = Field(
         ...,

@@ -85,3 +85,13 @@ def test_cpi_yoy_is_the_twelve_month_percent_change():
 
     assert result.iloc[:12].isna().all()
     assert result.iloc[12] == pytest.approx((1.02**12 - 1) * 100.0)
+
+
+def test_missing_macro_readings_remain_unknown():
+    from argus.agents.macro_context import rule_based
+
+    assert vix_regime(None) is None
+    assert yield_curve_shape(None) is None
+    assert rule_based({"t10y2y": 1.5}) == (Regime.TRANSITIONAL.value, 0.5)
+    assert rule_based({"t10y2y": -1.0}) == (Regime.CONTRACTION.value, 0.6)
+    assert rule_based({}) == (Regime.TRANSITIONAL.value, 0.5)

@@ -423,3 +423,31 @@ def test_golden_dag_matches_snapshot(tmp_path, assert_golden):
     final_state = _invoke(_build_fixture_graph(tmp_path))
 
     assert_golden("dag_snapshot.json", _snapshot_text(final_state))
+
+
+class _MissingReadingsMarketData(FixtureMarketDataProvider):
+    def macro_bundle(self):
+        bundle = super().macro_bundle()
+        return {**bundle, "vix": None, "t10y2y": None}
+
+    def ticker_calendar(self, ticker):
+        raise OSError("calendar unavailable")
+
+    def vix(self):
+        raise OSError("VIX unavailable")
+
+
+def test_golden_dag_preserves_unavailable_measurements(tmp_path):
+    state = _invoke(_build_fixture_graph(tmp_path, market_data=_MissingReadingsMarketData()))
+    macro = state["macro_context"]
+    assert macro.vix_level is None
+    assert macro.vix_regime is None
+    assert macro.yield_curve_shape is None
+    for risk in state["risk_assessments"].values():
+        assert risk.var_99 is None
+        assert risk.cvar is None
+        assert risk.marginal_var is None
+        assert risk.portfolio_beta is None
+        assert risk.stop_loss is None
+    for sentiment in state["sentiment_signals"].values():
+        assert sentiment.catalyst_data_available is False
