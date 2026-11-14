@@ -235,7 +235,7 @@ async def test_health_returns_503_naming_a_crashed_background_task(monkeypatch):
     assert "mft_pipeline" in exc_info.value.detail
 
 
-async def test_health_returns_503_naming_a_cancelled_background_task(monkeypatch):
+async def test_health_returns_503_naming_a_canceled_background_task(monkeypatch):
     """A task that stopped via cancellation (not just an exception) is also reported dead."""
 
     async def _spin():

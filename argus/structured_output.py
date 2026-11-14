@@ -3,11 +3,9 @@ argus/structured_output.py
 
 Decodes and validates an LLM's raw JSON response against a Pydantic schema.
 
-Replaces the three near-identical fence-strip/parse/validate/retry blocks
-that used to live in agents/fundamental.py, agents/sentiment.py, and
-agents/portfolio.py, which now all call in here instead. Composed over the
-existing LLMClient transport port rather than widening it — see
-argus/ports.py's LLMClient docstring.
+The fundamental, sentiment and portfolio agents share this decoder over the
+LLMClient transport port. Transport and response validation have independent
+responsibilities; see argus/ports.py's LLMClient docstring.
 
 Responsibilities:
   - Strip a markdown code fence from a raw LLM response, in any of its four
@@ -255,8 +253,7 @@ def decode_or_degrade[T: BaseModel](
 ) -> T | None:
     """Runs ``decode`` and turns every failure into a diagnostics note and ``None``.
 
-    Replaces the except ladder each LLM agent used to carry. The three failure
-    classes are noted differently so a reader can tell them apart:
+    The three failure classes have distinct notes so a reader can tell them apart:
     ``StructuredOutputError`` (``"<label>: <error>"``), a governor rejection
     (``"<label>: rate limited: <error>"``), and any other exception
     (``"<label>: <api_error_text>: <error>"``, always at error level).

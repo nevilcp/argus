@@ -343,7 +343,8 @@ class FundamentalAgent:
         as_of_date = date.today()  # noqa: DTZ011
         anon_id = None
         if _use_backtest_seed(backtest_mode, session_seed):
-            assert session_seed is not None
+            if session_seed is None:
+                raise ValueError("Required session seed is missing")
             as_of_date = _session_seed_to_date(session_seed)
             anon_id = anonymize_ticker(ticker, session_seed)
 

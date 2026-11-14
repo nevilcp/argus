@@ -144,7 +144,7 @@ def trend_from_lag(series: pd.Series, current_value: float, lag: int, threshold:
 
     Returns:
         RISING or FALLING when the move exceeds `threshold`; STABLE when it does
-        not, and also when the series is no longer than `lag`.
+        not, and also when the series has at most `lag` observations.
     """
     if len(series) > lag:
         lagged = series.iloc[-(lag + 1)]

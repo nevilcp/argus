@@ -72,13 +72,13 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    groq_api_key: str = Field(default="", description="Groq LLM API key")
+    GROQ_API_KEY: str = Field(default="", description="Groq LLM API key")
 
-    fred_api_key: str = Field(default="", description="FRED (Federal Reserve) API key")
+    FRED_API_KEY: str = Field(default="", description="FRED (Federal Reserve) API key")
 
-    newsapi_key: str = Field(default="", description="NewsAPI.org key")
+    NEWSAPI_KEY: str = Field(default="", description="NewsAPI.org key")
 
-    # Broadened to 20 tickers across 7 GICS sectors to reduce sector concentration risk.
+    # Twenty tickers across seven GICS sectors reduce sector concentration risk.
     ARGUS_UNIVERSE: Annotated[list[str], NoDecode] = Field(
         default=[
             "AAPL",
@@ -202,7 +202,7 @@ class Settings(BaseSettings):
         default=SYSTEM.analyze_deadline_seconds,
         gt=0,
         description=(
-            "Server-side deadline for a single /analyze graph run (GOV-12). At the "
+            "Server-side deadline for a single /analyze graph run. At the "
             "6,000 TPM bootstrap floor, a cold 20-ticker sweep spends ~256s in "
             "governor sleeps plus ~50s of sentiment pacing; a proxy that times out "
             "well before this would otherwise leave the server burning quota on a "

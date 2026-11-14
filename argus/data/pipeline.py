@@ -122,8 +122,7 @@ class MFTDataPipeline:
 
     Runs a single asyncio loop that periodically fetches intraday candles for
     all tracked tickers, then republishes compressed session state from the
-    same pass — publication used to sit on its own, much longer
-    timer, so a live-cache entry was fresh for only a fraction of each cycle.
+    same pass so a completed fetch refreshes the live cache immediately.
     The loop only runs during US equity market hours.
     """
 
@@ -160,7 +159,7 @@ class MFTDataPipeline:
         self._stop_event = asyncio.Event()
         # Held for the full body of every to_thread-run, buffer-touching worker
         # (_fetch_and_insert, compress_all) so close_buffer can wait out one that's
-        # still running after its owning task was cancelled rather than joined
+        # still running after its owning task was canceled rather than joined
         self._buffer_op_lock = threading.Lock()
         # Routed through register_tickers rather than a bare assignment, so the
         # ticker-shape and universe-cap invariants apply uniformly here, to
@@ -175,7 +174,7 @@ class MFTDataPipeline:
         # universe it exists to track
         self._pinned_tickers: frozenset[str] = frozenset(self.tickers)
         logger.info(
-            "MFTDataPipeline initialised: %d tickers, interval=%s, buffer_size=%d, buffer=%s",
+            "MFTDataPipeline initialized: %d tickers, interval=%s, buffer_size=%d, buffer=%s",
             len(self.tickers),
             self.interval,
             buffer_size,
@@ -453,7 +452,7 @@ class MFTDataPipeline:
         Only iterates tickers still in `self.tickers` — the buffer
         can otherwise hold rows for a ticker fetched once by a past `/analyze`
         request and never tracked again. Also prunes the buffer of any such
-        untracked rows (API-9's underlying leak), at this method's cadence.
+        untracked rows (including buffered bars for evicted tickers), at this method's cadence.
 
         Returns:
             Mapping of ticker → technical feature dict (rsi_14, macd_histogram, etc.).
@@ -496,7 +495,7 @@ class MFTDataPipeline:
         """Checks whether current Eastern Time is within regular US market hours (09:30-16:00 ET).
 
         Returns:
-            True during weekday trading hours in America/New_York timezone.
+            True during weekday trading hours in MARKET_TZ.
         """
         now_et = now_market()
         if now_et.weekday() >= 5:

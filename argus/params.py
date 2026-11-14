@@ -120,7 +120,7 @@ class SystemParams:
         100,
         Provenance.ARBITRARY,
         "ceiling on MFTDataPipeline.tickers enforced in register_tickers; stops "
-        "unbounded universe growth from repeated /analyze requests (API-1) — not "
+        "unbounded universe growth from repeated /analyze requests — not "
         "evaluated against alternatives",
     )
     tracked_ticker_ttl_seconds: int = p(
@@ -128,7 +128,7 @@ class SystemParams:
         Provenance.ARBITRARY,
         "how long a non-seed ticker (one registered by an /analyze request rather "
         "than the pipeline's initial universe) stays tracked without being "
-        "re-requested before register_tickers evicts it (API-12) — not evaluated "
+        "re-requested before register_tickers evicts it — not evaluated "
         "against alternatives",
     )
     analyze_retry_after_seconds: int = p(
@@ -177,11 +177,8 @@ SYSTEM = SystemParams()
 class KillSwitchParams:
     """Drawdown circuit-breaker tiers and halt-dump retention.
 
-    Used by risk/kill_switch.py. The three tiers previously lived as a
-    hardcoded dict there, alongside an unrelated, unused
-    SystemParams.max_drawdown_halt = 0.15 that silently contradicted the
-    AGGRESSIVE tier's 0.18 — this group is now the single source of truth
-    for all three.
+    Used by risk/kill_switch.py. Each risk-tolerance tier has its own drawdown
+    limit, independent of the market-wide VIX gate.
     """
 
     conservative_drawdown_halt: float = p(
@@ -722,7 +719,7 @@ class CollectorParams:
     See orchestration/collector.py's CycleOutcome: a cycle that ran but produced
     too few usable allocations is DEGRADED, not SUCCESS, even though nothing
     raised — the LLM agents' "degrade, never fabricate" behavior means a dead
-    upstream (issue #90's missing-secret case, or any other) shows up as null
+    upstream, including missing credentials, shows up as null
     fields on every decision rather than an exception.
     """
 

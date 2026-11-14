@@ -223,9 +223,9 @@ def _check_earnings_calendar(ticker: str, market_data: MarketDataProvider) -> bo
 _SENTIMENT_METRIC_LABELS: dict[str, str] = {
     "net_finbert_score": "[-1.0 to +1.0]  weighted average FinBERT score across headlines "
     "(+1.0 = fully positive, -1.0 = fully negative, 0.0 = neutral)",
-    "pct_positive": "[0.0 to 1.0]    fraction of headlines labelled positive "
+    "pct_positive": "[0.0 to 1.0]    fraction of headlines labeled positive "
     "(e.g. 0.60 = 60% positive)",
-    "pct_negative": "[0.0 to 1.0]    fraction of headlines labelled negative "
+    "pct_negative": "[0.0 to 1.0]    fraction of headlines labeled negative "
     "(e.g. 0.25 = 25% negative)",
     "finbert_confidence": "[0.0 to 1.0]    confidence proxy based on article volume "
     "(caps at 1.0 when ≥10 articles)",
@@ -326,7 +326,7 @@ class SentimentAgent:
     Attributes:
         llm_client: LLM backend used for verdict synthesis.
         market_data: Provider used for news and earnings-calendar lookups.
-        cache: Per-ticker TTL cache of previously computed signals.
+        cache: Per-ticker TTL cache of computed signals.
     """
 
     def __init__(
@@ -363,7 +363,7 @@ class SentimentAgent:
         re-prompting with the failure appended, since repair would roughly double
         token spend for a ticker whose measured completion peak already sits close
         to its budget, against a governor that is the binding constraint on the
-        whole system (see #71).
+        whole system when provider credentials or data are unavailable.
 
         Args:
             ticker: Equity ticker symbol.

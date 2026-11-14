@@ -195,9 +195,7 @@ def estimate_tokens(system_prompt: str, user_prompt: str, max_tokens: int) -> in
     Word count * GOVERNOR.word_to_token_ratio plus a fixed chat-template overhead
     approximates prompt-side tokenization; max_tokens stands in for the
     completion side since actual completion length is unknown pre-flight.
-    Single estimator shared by every GroqLLMClient call site, replacing three
-    divergent per-agent estimates that used to disagree on whether the system
-    prompt or the configured max_tokens counted at all.
+    Every GroqLLMClient reserves both prompt and completion tokens with this estimator.
 
     Args:
         system_prompt: The system message text.
@@ -304,7 +302,7 @@ class RateLimitGovernor:
         logger.info("RateLimitGovernor initialized with %d model profiles", len(REGISTERED_MODELS))
 
     def _get_usage(self, model: str) -> ModelUsage:
-        """Retrieves or initialises the ModelUsage tracker for a given model.
+        """Retrieves or initializes the ModelUsage tracker for a given model.
 
         Args:
             model: Provider model identifier string.

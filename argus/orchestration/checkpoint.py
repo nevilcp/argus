@@ -198,7 +198,7 @@ def prune_checkpoints(db_path: str, cutoff: datetime) -> int:
     read path — a fallback now that decisions.jsonl is the durable
     record both /analyze and the collector write to. Retention, not removal:
     the checkpoint DB stays available as that fallback for anything within the
-    reconciliation window, it just no longer grows without bound.
+    reconciliation window, with older threads pruned to bound the store.
 
     The DELETEs name LangGraph's ``checkpoints`` and ``writes`` tables
     directly: SqliteSaver has no public API for removing a thread, so this

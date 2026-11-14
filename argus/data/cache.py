@@ -199,7 +199,7 @@ class OHLCVBuffer:
     """Rolling in-memory candle cache backed by SQLite to support real-time indicators.
 
     WAL mode is enabled to allow concurrent readers while the buffer is being written
-    by the async fetch loop. Thread safety is enforced by a single module-level lock.
+    by the async fetch loop. Each buffer instance protects its connection with its own lock.
     """
 
     def __init__(
@@ -230,7 +230,7 @@ class OHLCVBuffer:
         self._migrate_schema()
         self._purge_stale_interval()
         logger.info(
-            "OHLCVBuffer initialised (db=%s, buffer_size=%d, interval=%s)",
+            "OHLCVBuffer initialized (db=%s, buffer_size=%d, interval=%s)",
             db_path,
             buffer_size,
             interval,
@@ -372,9 +372,8 @@ class OHLCVBuffer:
     def prune_untracked(self, tracked_tickers: set[str]) -> int:
         """Deletes every row for a ticker outside the given tracked set.
 
-        Without this, a ticker fetched once (e.g. a one-off `/analyze` request)
-        keeps being swept and compressed forever, since `compress_all` used to
-        iterate every ticker ever inserted rather than the tracked universe.
+        Evicted tickers must leave persistent storage as well as the in-memory
+        universe, so one-off requests cannot retain candles indefinitely.
 
         Args:
             tracked_tickers: Tickers that should be retained; empty is treated
@@ -507,7 +506,7 @@ class DailyBarCache:
         self._conn.execute(_CREATE_DAILY_OHLCV)
         self._conn.execute(_CREATE_DAILY_REFRESH)
         self._conn.commit()
-        logger.info("DailyBarCache initialised (db=%s)", db_path)
+        logger.info("DailyBarCache initialized (db=%s)", db_path)
 
     def get(self, ticker: str) -> pd.DataFrame | None:
         """Returns a ticker's cached daily bars if refreshed today (UTC), else None.

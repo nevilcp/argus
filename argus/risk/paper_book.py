@@ -20,7 +20,7 @@ Responsibilities:
     compounding return
   - PaperBook: equity/high-water-mark/applied-runs state, with idempotent
     run application, manual rebasing (see rebase(), used by
-    KillSwitch.reset()), and bounded runs_applied retention (prune_runs_applied)
+    api.main.reset_kill_switch()), and bounded runs_applied retention (prune_runs_applied)
   - load / save: JSON round trip at a caller-supplied path
 
 Not responsible for:
@@ -82,7 +82,8 @@ def _weighted_run_return(
             continue
 
         actual_return_pct, _, _ = outcome
-        assert decision.allocation is not None, "needs_reconciliation already confirmed this"
+        if decision.allocation is None:
+            raise RuntimeError("needs_reconciliation already confirmed this")
         weight = decision.allocation.allocation_pct
         weighted_sum += actual_return_pct * weight
         weight_total += weight
@@ -115,7 +116,7 @@ def compute_run_returns(
         matured, priceable decision, sorted by run_timestamp. A run with no
         matured decisions yet, or whose tickers all failed to fetch, is
         omitted rather than reported as a 0.0 return. Runs falling inside a
-        previously kept run's horizon window are also omitted (not zeroed) so
+        preceding kept run's horizon window are also omitted (not zeroed) so
         overlapping runs are never compounded together.
     """
     by_run: dict[datetime, list[ARGUSDecision]] = defaultdict(list)

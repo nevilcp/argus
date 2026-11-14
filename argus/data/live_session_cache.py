@@ -9,7 +9,7 @@ state can be used.
 
 Responsibilities:
   - Publish a sweep's compressed session states, evicting entries for
-    tickers no longer in the caller's tracked universe
+    tickers outside the caller's tracked universe
   - Admit a requested set of tickers against an explicit clock, sorting
     rejections into absent / stalled / stale so a caller can report each
     distinctly

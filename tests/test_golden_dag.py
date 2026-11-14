@@ -402,7 +402,7 @@ def _round_floats(obj, ndigits: int = 8):
 
 
 def _snapshot_text(final_state: dict) -> str:
-    """Serializes the behaviour-relevant slice of a final state to stable JSON text."""
+    """Serializes the behavior-relevant slice of a final state to stable JSON text."""
     macro = final_state.get("macro_context")
     payload = {
         "portfolio_allocation": final_state["portfolio_allocation"].model_dump(mode="json"),

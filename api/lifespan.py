@@ -92,7 +92,7 @@ async def _mft_session_callback(session_states: dict) -> None:
 
     Publishes them into the live cache so the next /analyze call picks up fresh
     intraday indicators without re-fetching historical data. Eviction of
-    tickers no longer tracked happens inside LiveSessionCache.publish, keyed
+    untracked tickers happens inside LiveSessionCache.publish, keyed
     off the pipeline's current tracked universe.
 
     Args:

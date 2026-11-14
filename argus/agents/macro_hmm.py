@@ -99,7 +99,7 @@ def _new_hmm(n_components: int, random_state: int | None = None) -> GaussianHMM:
 
     Args:
         n_components: Number of latent states.
-        random_state: Seed for the EM initialisation; None leaves it unseeded.
+        random_state: Seed for the EM initialization; None leaves it unseeded.
 
     Returns:
         The unfitted model.
@@ -216,8 +216,8 @@ class RegimeClassifier:
     """Gaussian Hidden Markov Model mapping macro features to hidden economic states.
 
     Trained on a long FRED history (1990+), then applied to current macro observations
-    to infer the latent regime. CONTRACTION is labelled by NBER (USREC) recession
-    enrichment; EXPANSION and TRANSITIONAL are labelled heuristically from per-state
+    to infer the latent regime. CONTRACTION is labeled by NBER (USREC) recession
+    enrichment; EXPANSION and TRANSITIONAL are labeled heuristically from per-state
     feature means. See fit() and _map_states().
     """
 
@@ -254,7 +254,7 @@ class RegimeClassifier:
             recession_series: Optional NBER USREC series (1.0 during a recession
                 month, else 0.0), indexed to overlap macro_history. Used by
                 _map_states to label the CONTRACTION state by recession
-                enrichment; if None, no state is labelled CONTRACTION.
+                enrichment; if None, no state is labeled CONTRACTION.
 
         Returns:
             True once the classifier is fitted; False, leaving it unchanged, when
@@ -378,7 +378,7 @@ class RegimeClassifier:
 
         CONTRACTION = the state with the highest NBER (USREC) recession
             frequency, provided it clears MACRO.contraction_enrichment_min
-            against the sample's base rate; otherwise no state is labelled
+            against the sample's base rate; otherwise no state is labeled
             CONTRACTION. This replaces a VIX-percentile heuristic that always
             assigned CONTRACTION to *some* state whether or not a
             contractionary state actually existed — which is how the ZIRP era
@@ -624,7 +624,7 @@ class RegimeClassifier:
         """Loads a persisted classifier artifact, never raising to the caller.
 
         Args:
-            path: Path to a joblib artifact previously written by save().
+            path: Path to a joblib artifact written by save().
 
         Returns:
             A fitted RegimeClassifier on success. On any failure (missing file,

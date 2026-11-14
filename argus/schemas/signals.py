@@ -226,7 +226,7 @@ class MacroContext(BaseModel):
     yield_curve_shape: YieldCurve | None = Field(..., description="10Y-2Y Treasury spread shape")
     vix_regime: VixRegime | None = Field(..., description="Categorical VIX bucket")
     vix_percentile: float = Field(
-        ..., ge=0.0, le=100.0, description="VIX vs. trailing 252-day distribution"
+        ..., ge=0.0, le=100.0, description="VIX vs. trailing historical distribution"
     )
     inflation_trajectory: Trend = Field(..., description="Direction of CPI year-over-year rate")
     sector_rotation_signal: SectorSignal = Field(..., description="Macro-implied sector preference")
@@ -284,7 +284,7 @@ class TechnicalSignal(BaseModel):
 
     signal: Signal = Field(..., description="Directional label derived from net_score")
     conviction: _Conviction = Field(
-        ..., description="Normalised confidence in the signal [0, 0.95]"
+        ..., description="Normalized confidence in the signal [0, 0.95]"
     )
     net_score: float = Field(
         ...,
@@ -298,7 +298,7 @@ class TechnicalSignal(BaseModel):
 
 
 class FundamentalVerdict(BaseModel):
-    """What the LLM returns for a fundamental analysis — judgement only.
+    """What the LLM returns for a fundamental analysis — judgment only.
 
     Never carries measured ratios: those come from the market-data provider
     and are merged in by the agent to build a FundamentalSignal. See
@@ -353,7 +353,7 @@ class FundamentalSignal(BaseModel):
 
 
 class SentimentVerdict(BaseModel):
-    """What the LLM itself returns for a sentiment synthesis — judgement only.
+    """What the LLM itself returns for a sentiment synthesis — judgment only.
 
     Never carries the FinBERT metrics: those are computed locally and merged
     in by the agent to build a SentimentSignal. See GLOSSARY.md's Verdict entry.
@@ -423,7 +423,7 @@ class SentimentSignal(BaseModel):
     def pct_sums_to_one_approx(self) -> SentimentSignal:
         """Warns (not errors) if pct_positive + pct_negative exceeds 1.0.
 
-        A sum > 1 indicates a normalisation bug in the upstream FinBERT aggregation
+        A sum > 1 indicates a normalization bug in the upstream FinBERT aggregation
         step. A warning is preferred over a hard error to avoid rejecting otherwise
         valid signals from borderline rounding artifacts.
         """
@@ -432,7 +432,7 @@ class SentimentSignal(BaseModel):
             warnings.warn(
                 f"pct_positive ({self.pct_positive:.3f}) + pct_negative "
                 f"({self.pct_negative:.3f}) = {total:.3f} > 1.0 for ticker "
-                f"{self.ticker!r}; check normalisation.",
+                f"{self.ticker!r}; check normalization.",
                 stacklevel=3,
             )
         return self
@@ -588,7 +588,7 @@ class ProposedPosition(BaseModel):
 
 
 class PortfolioProposal(BaseModel):
-    """What the LLM itself returns for portfolio allocation — judgement only.
+    """What the LLM itself returns for portfolio allocation — judgment only.
 
     Advisory until the risk engine has enforced against it: caps, vetoes, and the
     cash residual are all applied by the agent afterwards, never trusted from this

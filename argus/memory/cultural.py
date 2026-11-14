@@ -372,7 +372,7 @@ class CulturalMemoryManager:
         Filters on the current regime, symmetrically with retrieve_warnings — both
         land in the same portfolio prompt, so successes shouldn't be drawn from every
         regime while failures are confined to this one. Rows stored with
-        regime="unknown" (from scripts/remediate_macro_regime_tags.py) never match,
+        regime="unknown" (no trustworthy regime classification) never match,
         since current_macro.macro_regime is always one of Regime's three live values —
         remediated rows are deliberately not credited to today's regime.
 
@@ -382,7 +382,7 @@ class CulturalMemoryManager:
             current_technical_summary: Free-text description of current technical posture.
             n_results: Maximum number of similar patterns to return.
             as_of: When given, excludes documents stored after this timestamp. Must
-                be naive, matching the naive datetime.now() this module stores
+                be naive, matching the naive now_local() this module stores
                 (see pyproject.toml's DTZ tracking comment). None (default) applies
                 no filtering.
 
@@ -412,7 +412,7 @@ class CulturalMemoryManager:
             current_macro: MacroContext used to scope the regime filter.
             n_results: Maximum number of warning documents to return.
             as_of: When given, excludes documents stored after this timestamp. Must
-                be naive, matching the naive datetime.now() this module stores.
+                be naive, matching the naive now_local() this module stores.
                 None (default) applies no filtering.
 
         Returns:
@@ -450,7 +450,7 @@ class CulturalMemoryManager:
             agent_name: Agent identifier string (e.g. 'technical', 'fundamental', 'sentiment').
             regime: Optional regime filter (e.g. 'EXPANSION'); queries all regimes if None.
             as_of: When given, excludes trades stored after this timestamp. Must be
-                naive, matching the naive datetime.now() this module stores. None
+                naive, matching the naive now_local() this module stores. None
                 (default) applies no filtering; replay's closed-loop evaluation
                 passes it to avoid reading future outcomes.
 

@@ -38,9 +38,9 @@ GOLDEN_DIR = FIXTURES_DIR / "golden"
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
-    """Registers --update-golden, which rewrites the committed behaviour snapshots.
+    """Registers --update-golden, which rewrites the committed behavior snapshots.
 
-    Only a PR that deliberately changes behaviour may use it, and its
+    Only a PR that deliberately changes behavior may use it, and its
     description must show the resulting snapshot diff.
     """
     parser.addoption(

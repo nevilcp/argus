@@ -24,7 +24,7 @@ def _raise_os_error(*_args: object, **_kwargs: object) -> None:
 
 def test_fetch_news_returns_none_when_reservation_hits_a_disk_error(monkeypatch):
     """A disk error while reserving a budget slot degrades fetch_news to None instead of raising."""
-    monkeypatch.setattr(fetchers.settings, "newsapi_key", "test-key")
+    monkeypatch.setattr(fetchers.settings, "NEWSAPI_KEY", "test-key")
     monkeypatch.setattr(fetchers, "_NEWSAPI_BUDGET", NewsApiBudget())
     monkeypatch.setattr(newsapi_budget, "open", _raise_os_error, raising=False)
 
@@ -37,13 +37,13 @@ def test_fetch_news_returns_none_when_reservation_hits_a_disk_error(monkeypatch)
 
 def test_fetch_news_returns_none_without_api_key(monkeypatch):
     """No NEWSAPI_KEY means no request is even attempted."""
-    monkeypatch.setattr(fetchers.settings, "newsapi_key", "")
+    monkeypatch.setattr(fetchers.settings, "NEWSAPI_KEY", "")
     assert fetchers.fetch_news("AAPL", "Apple Inc") is None
 
 
 def test_fetch_news_returns_none_when_budget_exhausted(monkeypatch):
     """An exhausted daily budget returns None distinguishable from an empty result."""
-    monkeypatch.setattr(fetchers.settings, "newsapi_key", "test-key")
+    monkeypatch.setattr(fetchers.settings, "NEWSAPI_KEY", "test-key")
     monkeypatch.setattr(fetchers, "_NEWSAPI_BUDGET", NewsApiBudget(daily_limit=0))
 
     with mock.patch("newsapi.NewsApiClient") as mock_client_cls:
@@ -55,7 +55,7 @@ def test_fetch_news_returns_none_when_budget_exhausted(monkeypatch):
 
 def test_fetch_news_returns_articles_at_max_page_size(monkeypatch):
     """A successful fetch requests NewsAPI's maximum page size and filters titleless articles."""
-    monkeypatch.setattr(fetchers.settings, "newsapi_key", "test-key")
+    monkeypatch.setattr(fetchers.settings, "NEWSAPI_KEY", "test-key")
     monkeypatch.setattr(fetchers, "_NEWSAPI_BUDGET", NewsApiBudget())
 
     mock_client = mock.Mock()
@@ -82,7 +82,7 @@ def test_fetch_news_returns_articles_at_max_page_size(monkeypatch):
 
 def test_fetch_news_reserves_one_budget_slot_per_attempt(monkeypatch):
     """Every retry of the page fetch is a real NewsAPI request, so each one spends budget."""
-    monkeypatch.setattr(fetchers.settings, "newsapi_key", "test-key")
+    monkeypatch.setattr(fetchers.settings, "NEWSAPI_KEY", "test-key")
     budget = NewsApiBudget(daily_limit=100)
     monkeypatch.setattr(fetchers, "_NEWSAPI_BUDGET", budget)
     monkeypatch.setattr(retry.time, "sleep", lambda _s: None)
@@ -100,7 +100,7 @@ def test_fetch_news_reserves_one_budget_slot_per_attempt(monkeypatch):
 
 def test_fetch_news_stops_retrying_once_the_budget_runs_out(monkeypatch):
     """A retry that finds the budget spent returns None instead of making an unbudgeted request."""
-    monkeypatch.setattr(fetchers.settings, "newsapi_key", "test-key")
+    monkeypatch.setattr(fetchers.settings, "NEWSAPI_KEY", "test-key")
     monkeypatch.setattr(fetchers, "_NEWSAPI_BUDGET", NewsApiBudget(daily_limit=1))
     monkeypatch.setattr(retry.time, "sleep", lambda _s: None)
 
@@ -116,7 +116,7 @@ def test_fetch_news_stops_retrying_once_the_budget_runs_out(monkeypatch):
 
 def test_fetch_news_returns_none_after_retries_exhausted(monkeypatch):
     """A retryable failure that never clears returns None, not an empty list read as success."""
-    monkeypatch.setattr(fetchers.settings, "newsapi_key", "test-key")
+    monkeypatch.setattr(fetchers.settings, "NEWSAPI_KEY", "test-key")
     monkeypatch.setattr(fetchers, "_NEWSAPI_BUDGET", NewsApiBudget())
     monkeypatch.setattr(retry.time, "sleep", lambda _s: None)
 
@@ -201,7 +201,7 @@ def test_fetch_fred_series_cache_evicts_the_oldest_entry_at_capacity(monkeypatch
     Without an explicit cap, growth was bounded only incidentally by the small,
     fixed set of series ids this system actually requests.
     """
-    monkeypatch.setattr(fetchers.settings, "fred_api_key", "test-key")
+    monkeypatch.setattr(fetchers.settings, "FRED_API_KEY", "test-key")
     monkeypatch.setattr(fetchers, "_FRED_CACHE", TTLCache(ttl=timedelta(hours=6), max_entries=2))
     monkeypatch.setattr("fredapi.Fred", _FakeFred)
     _FakeFred.calls = 0
@@ -253,10 +253,10 @@ def test_download_raises_on_an_empty_frame(monkeypatch):
         fetchers.fetch_ohlcv_intraday("AAPL", interval="5m", period="1d")
 
 
-def test_normalise_ohlcv_raises_when_the_close_column_is_missing():
+def test_normalize_ohlcv_raises_when_the_close_column_is_missing():
     """A frame without close raises, rather than carrying on with a frame no consumer can read."""
     with pytest.raises(retry.DataFetchError, match="no close column"):
-        fetchers._normalise_ohlcv(_raw_download(columns=("Open", "High")))
+        fetchers._normalize_ohlcv(_raw_download(columns=("Open", "High")))
 
 
 def test_fetch_vix_returns_the_latest_close(monkeypatch):

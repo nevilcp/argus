@@ -5,7 +5,7 @@ The durable record of completed decisions: the decisions.jsonl log and the
 LangGraph checkpoint database it falls back to.
 
 Responsibilities:
-  - decisions_log_lock: serialise appenders and the compactor on one log
+  - decisions_log_lock: serialize appenders and the compactor on one log
   - append_decisions_jsonl: add a session's decisions to the log, stamped with
     the running image tag
   - load_decisions_from_jsonl / load_decisions_from_checkpoints: read
@@ -73,7 +73,7 @@ def append_decisions_jsonl(decisions: list[ARGUSDecision], path: str) -> int:
     reconciliation reads, see orchestration/reconcile.py) reflects
     both instead of only the unattended collector's.
 
-    Each decision is stamped with the running process's image tag (issue #95)
+    Each decision is stamped with the running process's image tag
     before it's written, so a logged decision can be traced back to the build
     that produced it regardless of which docker tag was pulled to run it.
 
