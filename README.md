@@ -4,7 +4,6 @@ Multi-agent financial intelligence system orchestrating specialist LLMs and stat
 
 ![CI](https://github.com/nevilcp/argus/actions/workflows/ci.yml/badge.svg)
 ![Python Version](https://img.shields.io/badge/python-%E2%89%A53.14-blue)
-![Tests](https://img.shields.io/badge/tests-551_passing-brightgreen)
 ![License](https://img.shields.io/badge/license-Proprietary-red)
 
 > **RESEARCH PROJECT ONLY — NOT FINANCIAL ADVICE.** ARGUS is not registered with the SEC or any regulatory body. All outputs are for educational and research purposes only. Do not make investment decisions based on this system's output.
@@ -149,8 +148,8 @@ ARGUS sits at the intersection of quantitative finance, statistical modeling, an
 | `allocation_pct` | Fraction of `total_wealth` (the request's `user_investable_capital`) assigned to this ticker, `[0, SYSTEM.max_single_position_pct]` | Multiply by `total_wealth` directly for a dollar figure — `allocation_usd` on the same position is that product, already computed |
 | `cash_reserve_pct` | Fraction of `total_wealth` held back from any position | Recomputed server-side from the risk engine's own figures rather than trusted verbatim from the LLM, so it always stays consistent with the position sizes actually returned |
 | `macro_regime` | The Gaussian HMM's current 3-state classification (e.g. `EXPANSION`, `CONTRACTION`) | Its multiplier is applied once, at signal-aggregation time, to each specialist's vote weight — never to a specialist's own analysis, which runs independently of macro classification. A `CONTRACTION` regime can still override an otherwise-bullish consensus after aggregation |
-| `vix_level` | The VIX close feeding the macro and risk engines this session | Above the configured blackout threshold (default 35), the safety layer blocks new positions before `/analyze` even runs — an elevated-but-sub-threshold value here signals wider risk-engine caution (VIX scaling), not a guarantee of safety |
-| `errors` | List of non-fatal gaps the graph hit this session (e.g. a macro data outage) | Empty on a clean run. A populated list doesn't mean the response is unusable — the specialists, aggregation, and portfolio allocation still ran on whatever evidence they had — but it says which inputs were degraded |
+| `vix_level` | The macro context's VIX reading, or null when unavailable | Null means the macro reading is missing; risk can still try a direct lookup. At or above the configured blackout threshold, new positions are blocked |
+| `errors` | List of non-fatal gaps the graph hit this session (e.g. a macro data outage) | Read alongside nullable measurements, risk notes and availability flags. A populated list doesn't mean the response is unusable — the specialists, aggregation, and portfolio allocation still ran on whatever evidence they had — but it says which inputs were degraded |
 
 ### Concepts Behind Each Agent
 
@@ -162,7 +161,7 @@ ARGUS sits at the intersection of quantitative finance, statistical modeling, an
   - *ATR* (Average True Range): a volatility measure in price units, used to scale position sizing.
   - *ADX* (Average Directional Index): 0–100 trend *strength*, independent of direction.
   - *VWAP* (Volume-Weighted Average Price): an intraday benchmark price; distance from it signals whether price is running ahead of or behind volume-weighted flow.
-- **Risk measures** — VaR (Value-at-Risk) and CVaR (Conditional VaR / Expected Shortfall) quantify loss size at a confidence level and average loss beyond that level, respectively; beta measures sensitivity to a market benchmark. All three derive from the daily-bar covariance the risk engine estimates from `price_history`. See [`argus/agents/risk.py`](argus/agents/risk.py).
+- **Risk measures** — VaR (Value-at-Risk) and CVaR (Conditional VaR / Expected Shortfall) quantify loss size at a confidence level and average loss beyond that level, respectively; beta measures sensitivity to a market benchmark. These are measured from daily returns in `price_history`; unavailable beta is null with a degraded note. See [`argus/agents/risk.py`](argus/agents/risk.py).
 - **Kelly criterion / half-Kelly** — the Kelly criterion computes the wealth-maximizing bet size given a signal's edge; full Kelly is well known to overshoot under real-world estimation error, so ARGUS sizes at half that value.
 - **Kill switch / VIX blackout** — independent of the graph, monitored by a background thread: a drawdown kill switch halts all trading once realized portfolio drawdown crosses a risk-tolerance-scaled threshold (8/12/18%, `argus/params.py`'s `KILL_SWITCH` group), and a VIX blackout blocks *new* positions (not existing ones) once VIX crosses a configured level, regardless of drawdown. VIX is read once per `check_interval_seconds` (default 900s) and cached for that long, since it's a daily-close figure. The gate is process-global — one threshold, fixed at startup from `ARGUS_RISK_TOLERANCE` — not per-request; `GET /kill-switch/status` reports its current state. See [`argus/risk/kill_switch.py`](argus/risk/kill_switch.py).
 
@@ -219,7 +218,7 @@ python3.14 -m venv .venv
 source .venv/bin/activate
 
 # 3. Install dependencies
-pip install -e ".[dev,test]"
+pip install -e ".[dev]"
 
 # 4. Start API server
 uvicorn api.main:app --host 0.0.0.0 --port 8000
@@ -408,7 +407,7 @@ The Gaussian HMM behind `macro_regime` classification loads a pre-fitted artifac
 
 ```bash
 .venv/bin/python -m scripts.train_macro_hmm
-.venv/bin/python -m scripts.train_macro_hmm --start-date 2010-01-01 --output argus/models/macro_hmm.joblib
+.venv/bin/python -m scripts.train_macro_hmm --start-date 1990-01-01 --output argus/models/macro_hmm.joblib
 ```
 
 It requires `FRED_API_KEY` and network access (a direct `yf.download` call for VIX history, in addition to the FRED series), fits `RegimeClassifier`, and prints each hidden state's feature means alongside its assigned regime label — a human sanity check on the state-to-regime labeling heuristic (e.g. the highest-VIX state should read `CONTRACTION`) before you commit the retrained artifact. If the artifact is ever missing, corrupted, or was written by an incompatible `hmmlearn`/`scikit-learn` version, `MacroStatisticalAgent` logs an `ERROR` and falls back to a static VIX/yield-curve rule rather than failing — check `/pipeline/status`'s `macro_classifier_fitted` field to see which mode is active.
@@ -443,60 +442,57 @@ With the default `.env`, this alone gives the same unattended behavior — hourl
 
 ```text
 .
-├── api/                  # FastAPI entrypoint, HTTP routing, and market-hours gating
+├── api/                  # Routes, request/response models, startup guards and lifespan
 ├── argus/
-│   ├── agents/           # Core AI components (Macro, Fundamental, Sentiment, Risk, Portfolio)
-│   ├── backtesting/      # Return-series metrics and fixture-session replay
-│   ├── data/             # MFT Pipeline, OHLCV SQLite buffer, and external API fetchers
-│   ├── memory/           # ChromaDB-backed cultural wisdom retrieval mechanisms
-│   ├── orchestration/    # LangGraph definition, aggregator, safety governors, the
-│   │                     # unattended collector cycle, and outcome reconciliation
-│   ├── risk/             # Kill-switch daemon and drawdown/VIX blackout logic
-│   ├── schemas/          # Pydantic data contracts defining all inter-agent signaling
-│   ├── config.py         # Typed Settings (env vars) shared across all modules
-│   ├── governor.py       # Groq rate-limit governor
-│   ├── params.py         # Provenance-tagged numeric constants
-│   ├── ports.py          # MarketDataProvider / LLMClient protocols
-│   └── seams.py          # Live and fixture adapters for those ports, used by tests and replay
-├── scripts/              # collect_session, reconcile_outcomes, replay_backtest, run_evaluation
-├── .github/workflows/    # ci.yml (lint/type-check/test gate), image.yml, collector.yml, reconcile.yml
-├── data/                 # (Auto-generated, gitignored) Persistent intraday buffer, checkpoint DB, decision log
-├── chroma_db/            # (Auto-generated, gitignored) Local persistent vector database
-├── tests/
-│   └── fixtures/         # Recorded market_data and llm_responses used by replay/tests
-├── LICENSE                # Proprietary license — all rights reserved
-├── pyproject.toml         # Project dependencies, build configuration, and CLI entry points
-├── Dockerfile.api          # Multi-stage container image for the FastAPI service
-├── docker-compose.yml      # Single-service (argus-api) orchestration definition
-└── .dockerignore           # Keeps the build context to what the image actually needs
+│   ├── agents/           # Six specialists; macro classifier and pure context derivations
+│   ├── backtesting/      # Fixture replay, pre-registered evaluation, trade-level metrics
+│   ├── data/             # Fetchers, retry policy, news budget, bounded caches and indicators
+│   ├── infra/            # Clock, files, logging, backoff and diagnostics
+│   ├── memory/           # Bounded cultural outcomes, snapshots and reliability queries
+│   ├── models/           # Committed macro HMM artifact
+│   ├── orchestration/    # Graph wiring/nodes, state, aggregation, checkpoints, decision log,
+│   │                     # attribution, reconciliation, collection and scheduling
+│   ├── risk/             # Kill switch and synthetic paper equity
+│   ├── schemas/          # Signal/request contracts and prompt rendering
+│   ├── config.py         # Typed settings and data paths
+│   ├── governor.py       # Groq rate governance
+│   ├── outcomes.py       # Shared realized returns and close-price memo
+│   ├── params.py         # Provenance-tagged constants
+│   ├── ports.py          # MarketDataProvider and LLMClient protocols
+│   ├── seams.py          # Live and fixture adapters
+│   └── structured_output.py  # Response decoding, validation and degradation
+├── scripts/              # collect_session, reconcile_outcomes, replay_backtest,
+│                         # run_evaluation and train_macro_hmm
+├── .github/              # CI/deployment workflows and shared image/state actions
+├── docs/                 # System guide, macro walkthrough and limitations
+├── data/                 # Generated runtime state (gitignored)
+├── tests/                # Flat test modules
+│   ├── helpers/          # Shared builders, providers, candle helpers and paths
+│   └── fixtures/         # Recorded provider/model responses and golden snapshots
+├── CONTRIBUTING.md       # Development and verification conventions
+├── GLOSSARY.md           # Domain and engineering vocabulary
+├── pyproject.toml        # Dependencies, checks and five CLI entry points
+├── Dockerfile.api
+├── docker-compose.yml
+└── LICENSE
 ```
 
 ## Testing
 
-ARGUS includes a suite of deterministic unit tests covering core agents, rate limit governors, and the intraday MFT pipeline. Every LLM boundary is fixture-backed or mocked (via `argus/seams.py` and `pytest-mock`), so no test ever calls Groq. Three methods on `tests/test_integration.py::TestEndToEnd` deliberately exercise live yfinance calls, skipping with a clear reason when network access is unavailable; everything else runs offline.
+The graph, agents, caches, API, scripts and mathematical invariants have
+fixture-backed tests. No test calls Groq. The `live_network` integration tests
+exercise real Yahoo/FRED providers; DNS reachability alone does not guarantee
+that those providers return usable data.
 
-**Run the full test suite:**
-```bash
-pytest tests/ -v
-```
-
-**Run a single file or subset:**
-```bash
-pytest tests/test_risk.py -v
-```
-
-**Generate a coverage report** (requires the `dev` extra, which includes `pytest-cov`):
-```bash
-pytest tests/ --cov=argus --cov-report=term-missing
-```
-
-- **Categories**: Tests cover Pydantic validation boundaries, mathematical boundaries (e.g., Half-Kelly position sizing constraints), caching TTL expiration logic, and thread-safe rate limit assertions.
-- **Approximate Run Time**: ~150 seconds for 551 tests across 41 files. No Groq key is needed — LLM agents are always fixture-backed or mocked. `TestEndToEnd`'s live-network tests need network access and skip cleanly when it's absent; the rest of the suite needs none.
-- **CI gate**: `.github/workflows/ci.yml` additionally runs `ruff check .` and `mypy argus/` (pinned `ruff==0.16.2`, `mypy==2.3.0`) before the test step, and runs the suite on Python 3.14, the `requires-python = ">=3.14"` floor and the version the shipped image runs.
+See [CONTRIBUTING.md](CONTRIBUTING.md#development-and-verification) for setup,
+the verification commands, offline selection and the three CI jobs. See its
+[golden snapshot workflow](CONTRIBUTING.md#golden-snapshots) before changing
+expected graph or replay output. Tests stay flat and share builders and provider
+doubles under `tests/helpers/`.
 
 ## Contributing
 
-ARGUS is not an open-contribution project. It is maintained solely by its author as a private research and portfolio project. External pull requests and issues are closed, and — per the [License](#license--acknowledgements) below — forking, redistributing, or building on this code is not permitted without written permission. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the standing agent rules used while developing this repo.
+ARGUS is not an open-contribution project. It is maintained solely by its author as a private research and portfolio project. External pull requests and issues are closed, and — per the [License](#license--acknowledgements) below — forking, redistributing, or building on this code is not permitted without written permission. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for development conventions and verification requirements.
 
 ## License & Acknowledgements
 

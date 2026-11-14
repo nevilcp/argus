@@ -6,16 +6,15 @@ against the code rather than trusted blindly.
 
 ## Verdict, signal, proposal
 
-These three are the vocabulary introduced by the LLM seam work (issue #67) and are
-easy to conflate because the codebase already overloads two of the words elsewhere —
-see the notes under each entry.
+These terms separate model judgment, measured specialist output and an allocation
+proposal. The notes below distinguish them from the similarly named enums.
 
 - **Verdict** — what an LLM actually returns from a structured-output call. Narrower
-  than a signal: it carries only the model's own judgement (direction, conviction, and
-  the fields that support that judgement — moat score, decay risk, reasoning), never
+  than a signal: it carries only the model's own judgment (direction, conviction, and
+  the fields that support that judgment — moat score, decay risk, reasoning), never
   measured data the model was shown but does not own. *Not* `RiskVerdict`
   (`argus/schemas/signals.py`), which is the risk engine's deterministic
-  APPROVE/VETO/REDUCE disposition and carries no model judgement at all.
+  APPROVE/VETO/REDUCE disposition and carries no model judgment at all.
 
 - **Signal** — the domain object an agent produces by combining a verdict with
   measured data the agent itself owns. `FundamentalSignal` merges the fundamental
@@ -91,3 +90,19 @@ see the notes under each entry.
   snapshots, and applied-runs set so none of them grow forever. The API's background
   loop and the scheduled CLI script (`scripts/reconcile_outcomes.py`) both run it;
   only kill-switch sync differs between them, and stays at the API's call site.
+
+
+## Shared engineering contracts
+
+- **Ports** (`argus/ports.py`) — the `MarketDataProvider` and `LLMClient`
+  protocols that declare external boundaries, plus `RetryableTransportError`.
+  Live and fixture adapters implement them in `argus/seams.py`.
+- **Outcomes** (`argus/outcomes.py`) — shared realized-return calculations,
+  reconciliation eligibility and close-price memoization used by reconciliation,
+  evaluation and the paper book.
+- **Diagnostics** (`argus/infra/diagnostics.py`) — a collector whose `record`
+  method logs a degraded-path note and appends it to `messages`; graph nodes
+  expose those messages through state `errors`.
+- **GraphDeps** (`argus/orchestration/nodes.py`) — the dataclass carrying agents,
+  provider, aggregator, portfolio allocator and cultural-memory provider into
+  the graph's module-level node functions.
