@@ -1,31 +1,4 @@
-"""Replays recorded fixture sessions through the real ARGUS graph, in order.
-
-This exists instead of a multi-year walk-forward backtest because Yahoo's
-5-minute intraday data is only available for the trailing 60 days, and the
-MFT session_states dict (the technical-indicator snapshot
-TechnicalStatisticalAgent needs) is itself only ever captured live from the
-running pipeline, not reconstructible for an arbitrary past date. There is
-no historical 5-minute-resolution data to backtest against beyond ~60 days,
-and no way to fabricate session_states for older dates without violating
-the system's "return None rather than fabricate defaults" rule.
-
-A "session" here is one fixture snapshot directory shaped like
-tests/fixtures/ (market_data/ + llm_responses/ subdirectories) — one real
-point-in-time capture of everything the graph needs, hand-captured in the
-same format. Point-in-time correctness is structural here, not
-runtime-enforced (contrast the deleted PointInTimeEnforcer): each session's
-FixtureMarketDataProvider is scoped to that session's own directory, so a
-later session's data cannot leak into an earlier one — there is nothing to
-leak, since each session only ever sees its own files, and
-replay_sessions() only invokes session N+1 after N has returned.
-
-Today exactly one such session exists (tests/fixtures/). Scaling this to
-the ~60-day / ~780-decision-point window the design targets requires
-capturing that many more sessions from a live MFT pipeline run — future
-work, with the pre-registered evaluation as the first real consumer. This
-module's job is to prove the replay mechanism itself is correct and
-reusable, not to fabricate a backlog of sessions that were never recorded.
-"""
+"""Ordered fixture replay through the production decision graph."""
 
 from __future__ import annotations
 
@@ -51,20 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 def _normalize_as_of(ts: datetime) -> datetime:
-    """Strips an aware timestamp's tzinfo after converting it to ET wall-clock.
-
-    Naive input passes through unchanged, since every naive timestamp
-    reaching this codebase is already treated as local ET. Guards
-    node_log_decisions' session_timestamp against mixing naive and aware
-    values across runs, which raises when paper_book.compute_run_returns
-    later sorts by run.
-
-    Args:
-        ts: Parsed session-capture timestamp, aware or naive.
-
-    Returns:
-        Naive ET datetime.
-    """
+    """Convert aware timestamps to naive Eastern wall time and leave naive timestamps unchanged."""
     if ts.tzinfo is None:
         return ts
     return ts.astimezone(MARKET_TZ).replace(tzinfo=None)
@@ -72,13 +32,7 @@ def _normalize_as_of(ts: datetime) -> datetime:
 
 @dataclass
 class SessionResult:
-    """One replayed session's identity and raw graph output.
-
-    Attributes:
-        session_dir: Fixture directory the session was replayed from.
-        universe: Sorted tickers present in this session.
-        final_state: Raw ARGUSState dict returned by the graph.
-    """
+    """One replayed session's identity and raw graph output."""
 
     session_dir: Path
     universe: list[str]
@@ -86,22 +40,7 @@ class SessionResult:
 
 
 def _per_ticker_llm(session_dir: Path, fixture_file: str, universe: list[str]) -> FixtureLLMClient:
-    """Keys FixtureLLMClient by whichever universe ticker appears in the prompt.
-
-    Matches tests/test_golden_dag.py's approach — fundamental/sentiment
-    prompts embed the real ticker as their subject (build_compact_prompt,
-    backtest_mode=False).
-
-    Args:
-        session_dir: Directory shaped like tests/fixtures/.
-        fixture_file: Response file name under session_dir/llm_responses/,
-            e.g. "fundamental.json".
-        universe: Tickers to match against each prompt's text.
-
-    Returns:
-        A FixtureLLMClient that replies with the fixture response keyed to
-        whichever universe ticker the prompt names.
-    """
+    """Key FixtureLLMClient by whichever universe ticker appears in the prompt."""
 
     def key_fn(user_prompt: str) -> str:
         for ticker in universe:
@@ -109,40 +48,18 @@ def _per_ticker_llm(session_dir: Path, fixture_file: str, universe: list[str]) -
                 return ticker
         raise KeyError(f"no known ticker found in prompt: {user_prompt[:200]!r}")
 
-    return FixtureLLMClient.from_fixture_file(
-        session_dir / "llm_responses" / fixture_file, key_fn=key_fn
-    )
+    return FixtureLLMClient.from_fixture_file(session_dir / "llm_responses" / fixture_file, key_fn=key_fn)
 
 
 def _portfolio_llm(session_dir: Path) -> FixtureLLMClient:
-    """Builds the FixtureLLMClient for PortfolioManagerAgent's one LLM call.
-
-    PortfolioManagerAgent.allocate() makes exactly one LLM call per session,
-    so no per-ticker key function is needed.
-
-    Args:
-        session_dir: Directory shaped like tests/fixtures/.
-
-    Returns:
-        A FixtureLLMClient that returns the fixture's portfolio.json
-        response regardless of prompt content.
-    """
+    """Build the FixtureLLMClient for PortfolioManagerAgent's one LLM call."""
     with open(session_dir / "llm_responses" / "portfolio.json") as f:
         response = json.load(f)
     return FixtureLLMClient({"only": json.dumps(response)}, key_fn=lambda _prompt: "only")
 
 
 def _neutral_cultural_memory() -> mock.Mock:
-    """Builds a neutral mock cultural-memory client for open-loop replay.
-
-    Cultural memory isn't itself a fixture-replay candidate, so open-loop
-    replay substitutes this for the real chroma_db-backed client.
-
-    Returns:
-        A mock exposing empty wisdom/warnings and the 0.5 accuracy prior, so
-        reliability weighting stays fixed rather than reading live
-        chroma_db state.
-    """
+    """Build a neutral mock cultural-memory client for open-loop replay."""
     return mock.Mock(
         retrieve_wisdom=mock.Mock(return_value=[]),
         retrieve_warnings=mock.Mock(return_value=[]),
@@ -152,14 +69,7 @@ def _neutral_cultural_memory() -> mock.Mock:
 
 
 def _load_session_states(session_dir: Path) -> tuple[list[str], dict[str, dict]]:
-    """Loads the fixture's session_states.json and returns its sorted ticker universe.
-
-    Args:
-        session_dir: Directory shaped like tests/fixtures/.
-
-    Returns:
-        Tuple of (sorted ticker list, raw ticker -> session-state dict).
-    """
+    """Load the fixture's session_states.json and return its sorted ticker universe."""
     with open(session_dir / "market_data" / "session_states.json") as f:
         session_states = json.load(f)
     return sorted(session_states), session_states
@@ -173,40 +83,7 @@ def replay_session(
     closed_loop: bool = False,
     cultural_memory_provider: Callable[[], CulturalMemoryManager] | None = None,
 ) -> SessionResult:
-    """Runs the real graph once against a single captured fixture session.
-
-    Every agent here is fixture-backed (FixtureLLMClient never reaches the
-    governor — only GroqLLMClient does), so replay is inherently governor-free
-    without needing to patch anything. Returns the raw final ARGUSState dict;
-    this function makes no judgment about what a "good" outcome looks like —
-    that's the evaluation module's job.
-
-    Args:
-        session_dir: Directory shaped like tests/fixtures/ (market_data/ +
-            llm_responses/ subdirectories).
-        total_wealth: Simulated investable capital for this session.
-        invest_pct: Fraction of total_wealth eligible for allocation.
-        risk_tolerance: 'CONSERVATIVE', 'MODERATE', or 'AGGRESSIVE'.
-        closed_loop: When False (default), cultural memory is mocked to
-            return neutral wisdom/warnings/accuracy — it isn't a
-            fixture-replay candidate — so reliability weighting is fixed at
-            the 0.5 prior. When True, the real `get_cultural_memory()` is
-            used, so `wisdom`/`warnings`/reliability weighting read
-            whatever outcome history actually exists in `chroma_db`, scoped
-            via `as_of` to what existed as of this session's own capture
-            date — never outcomes from sessions replayed "later" in this
-            call. The evaluation runs both so it can compare the two
-            conditions. Either way, `as_of` is also what node_log_decisions
-            stamps each decision's session_timestamp with, so a replayed
-            decision's date is always the fixture's capture date, never
-            replay wall-clock time.
-        cultural_memory_provider: Overrides where the graph reads cultural
-            memory from, for a caller that wants a specific store in either
-            mode. None keeps the mode's default above.
-
-    Returns:
-        SessionResult with the session's universe and the graph's final state.
-    """
+    """Run the real graph once against a single captured fixture session."""
     universe, session_states = _load_session_states(session_dir)
     captured_at = next(iter(session_states.values()))["timestamp"]
     session_date = _normalize_as_of(datetime.fromisoformat(captured_at))
@@ -221,10 +98,7 @@ def replay_session(
     )
     config = new_run_config("replay")
 
-    # A dedicated temp checkpoint db, never the production argus_graph.db: replay
-    # is a read-only simulation over fixtures, and writing into the store
-    # decision_log.py's load_decisions_from_checkpoints() reads would make
-    # fabricated replay sessions indistinguishable from genuine live ones.
+    # Isolate replay checkpoints so simulated decisions cannot enter the production reconciliation history.
     if cultural_memory_provider is None and not closed_loop:
         neutral_memory = _neutral_cultural_memory()
 
@@ -246,19 +120,7 @@ def replay_session(
 
 
 def replay_sessions(session_dirs: list[Path], **kwargs: Any) -> list[SessionResult]:
-    """Replays each session directory in the given order.
-
-    Order is the whole point: session N+1 is never invoked until session N
-    has returned, which is what makes point-in-time correctness structural
-    rather than something a runtime enforcer has to check.
-
-    Args:
-        session_dirs: Session directories in chronological order.
-        **kwargs: Forwarded to replay_session (total_wealth, invest_pct, risk_tolerance).
-
-    Returns:
-        One SessionResult per session_dir, in the same order.
-    """
+    """Replay each session directory in the given order."""
     results: list[SessionResult] = []
     for session_dir in session_dirs:
         logger.info("Running session %s", session_dir)

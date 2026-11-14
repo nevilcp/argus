@@ -13,49 +13,33 @@ from argus.infra.diagnostics import Diagnostics
 from argus.schemas.prompting import UNTRUSTED_GUARD
 from tests.helpers.market_data import FakeMarketData
 
-_NEUTRAL_RESPONSE = (
-    '{"signal": "NEUTRAL", "conviction": 0.3, "sentiment_decay_risk": "LOW", "reasoning": "n/a"}'
-)
+_NEUTRAL_RESPONSE = '{"signal": "NEUTRAL", "conviction": 0.3, "sentiment_decay_risk": "LOW", "reasoning": "n/a"}'
 
 
 def _no_upcoming_earnings(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stubs the calendar lookup, which would otherwise reach yfinance on every analyze()."""
-    monkeypatch.setattr(
-        "argus.agents.sentiment._check_earnings_calendar", lambda ticker, market_data: False
-    )
+    """Stub the calendar lookup, which would otherwise reach yfinance on every analyze()."""
+    monkeypatch.setattr("argus.agents.sentiment._check_earnings_calendar", lambda ticker, market_data: False)
 
 
 def test_aggregate_finbert_scores_empty():
-    """An empty article list returns the neutral default with zero confidence.
-
-    Zero is what the article-volume formula (min(n / 10, 1)) gives for n = 0, and it
-    sits below the prompt's "< 0.30 means thin evidence" threshold; 0.3 sat just above it.
-    """
     res = aggregate_finbert_scores([])
     assert res == {"net": 0.0, "pct_pos": 0.0, "pct_neg": 0.0, "confidence": 0.0}
 
 
 def test_aggregate_finbert_scores_decay():
-    """A later-position negative article outweighs an equal-magnitude earlier positive one.
-
-    aggregate_finbert_scores itself only knows position, not real dates — callers
-    are responsible for sorting ``scored`` chronologically before calling it.
-    """
     scored = [
-        {"numeric": 1.0, "label": "positive"},  # earlier position
-        {"numeric": -1.0, "label": "negative"},  # later position
+        {"numeric": 1.0, "label": "positive"},
+        {"numeric": -1.0, "label": "negative"},
     ]
-    # decay_rate 0.95 weights the earlier position at 0.95^1, the later at 0.95^0,
-    # so the later position wins the net score
+    # Weight later chronological positions more heavily; positional decay does not inspect timestamps.
     res = aggregate_finbert_scores(scored)
     assert res["net"] < 0.0
     assert res["pct_pos"] == 0.5
     assert res["pct_neg"] == 0.5
-    assert res["confidence"] == 0.2  # 2 articles = 0.2
+    assert res["confidence"] == 0.2
 
 
 def test_aggregate_finbert_scores_confidence_cap():
-    """Confidence saturates at 1.0 regardless of how many articles are scored."""
     scored = [{"numeric": 1.0, "label": "positive"} for _ in range(15)]
     res = aggregate_finbert_scores(scored)
     assert res["confidence"] == 1.0
@@ -74,7 +58,6 @@ class _RecordingLLMClient:
 
 
 def test_analyze_degrades_the_ticker_on_governor_exhaustion_without_retrying(monkeypatch):
-    """A RateLimitExceeded from the LLM client fails that ticker immediately, once, into errors."""
     _no_upcoming_earnings(monkeypatch)
 
     market_data = FakeMarketData(news=[])
@@ -100,7 +83,6 @@ def test_analyze_degrades_the_ticker_on_governor_exhaustion_without_retrying(mon
 
 
 def test_analyze_degrades_the_ticker_without_repairing_a_bad_response(monkeypatch):
-    """Repair stays disabled: an invalid response is not re-prompted with the failure appended."""
     _no_upcoming_earnings(monkeypatch)
     monkeypatch.setattr("argus.structured_output.time.sleep", lambda s: None)
 
@@ -117,7 +99,6 @@ def test_analyze_degrades_the_ticker_without_repairing_a_bad_response(monkeypatc
 
 
 def test_analyze_flags_unavailable_news_in_the_llm_prompt(monkeypatch):
-    """A None news result surfaces as an explicit False flag, not a silent zero."""
     _no_upcoming_earnings(monkeypatch)
 
     market_data = FakeMarketData(news=None)
@@ -130,17 +111,14 @@ def test_analyze_flags_unavailable_news_in_the_llm_prompt(monkeypatch):
     assert signal.news_volume_7d == 0
     assert signal.news_scored_count == 0
     assert signal.news_data_available is False
-    # A failed fetch's 0.0 is indistinguishable from a real neutral read;
-    # the persisted signal must not fabricate a measured score
+    # Persist unavailable sentiment as None so a failed fetch cannot resemble a measured neutral score.
     assert signal.finbert_net_score is None
     assert "news_data_available: False" in llm.last_user_prompt
 
 
 def test_analyze_reports_availability_true_with_real_data(monkeypatch):
-    """Genuine news data is flagged available, not confused with the absence placeholder."""
     _no_upcoming_earnings(monkeypatch)
-    # Headlines are non-empty here, which would otherwise load the real FinBERT
-    # pipeline; stub it out since this test only cares about the availability flags.
+    # Stub FinBERT because nonempty headlines would otherwise load the real model in an availability test.
     monkeypatch.setattr(
         "argus.agents.sentiment.score_headlines_with_finbert",
         lambda articles: [
@@ -159,8 +137,7 @@ def test_analyze_reports_availability_true_with_real_data(monkeypatch):
         news=[{"title": "Real headline", "description": "", "published_at": "", "source": ""}],
     )
     llm = _RecordingLLMClient(
-        '{"signal": "BULLISH", "conviction": 0.6, "sentiment_decay_risk": "LOW",'
-        ' "reasoning": "positive"}'
+        '{"signal": "BULLISH", "conviction": 0.6, "sentiment_decay_risk": "LOW", "reasoning": "positive"}'
     )
     agent = SentimentAgent(llm_client=llm, market_data=market_data)
 
@@ -175,7 +152,6 @@ def test_analyze_reports_availability_true_with_real_data(monkeypatch):
 
 
 def test_batch_analyze_paces_only_against_a_live_market_data_provider(monkeypatch):
-    """Fixture-backed providers skip fan-out pacing so the test suite stays fast."""
     _no_upcoming_earnings(monkeypatch)
 
     market_data = FakeMarketData(news=[])
@@ -191,14 +167,6 @@ def test_batch_analyze_paces_only_against_a_live_market_data_provider(monkeypatc
 
 
 def test_scored_articles_are_sorted_by_published_at_before_aggregation(monkeypatch):
-    """Recency decay follows publish date, not NewsAPI's relevance rank.
-
-    NewsAPI is queried with sort_by="relevancy", so the fetched article order is a
-    relevance rank, not a timeline. Feeding that order straight into the
-    position-based decay would let a highly-relevant-but-stale article dominate.
-    Here the most relevant (first) article is old and negative; the least
-    relevant (last) article is new and positive. Decay must favor the new one.
-    """
     _no_upcoming_earnings(monkeypatch)
 
     def stub_score(articles):
@@ -217,7 +185,6 @@ def test_scored_articles_are_sorted_by_published_at_before_aggregation(monkeypat
     monkeypatch.setattr("argus.agents.sentiment.score_headlines_with_finbert", stub_score)
 
     market_data = FakeMarketData(
-        # Relevance order (as NewsAPI returns it): stale/negative ranks first.
         news=[
             {"title": "stale bad news", "published_at": "2024-01-01T00:00:00Z"},
             {"title": "fresh good news", "published_at": "2024-06-01T00:00:00Z"},
@@ -233,7 +200,6 @@ def test_scored_articles_are_sorted_by_published_at_before_aggregation(monkeypat
 
 
 def test_analyze_tolerates_a_raising_news_provider(monkeypatch):
-    """A news provider that raises mid-fetch degrades to unavailable rather than crashing."""
     _no_upcoming_earnings(monkeypatch)
 
     market_data = FakeMarketData(news=RuntimeError("provider outage"))
@@ -248,7 +214,6 @@ def test_analyze_tolerates_a_raising_news_provider(monkeypatch):
 
 
 def test_batch_analyze_tolerates_a_single_ticker_raising(monkeypatch):
-    """One ticker's uncaught exception must not abort the batch; the rest still complete."""
     _no_upcoming_earnings(monkeypatch)
 
     market_data = FakeMarketData(news=[])
@@ -272,7 +237,6 @@ def test_batch_analyze_tolerates_a_single_ticker_raising(monkeypatch):
 
 
 def test_batch_analyze_passes_company_name_for_known_tickers(monkeypatch):
-    """A short ticker like 'V' gets its full company name so the news query isn't 'V OR V'."""
     _no_upcoming_earnings(monkeypatch)
 
     received = {}
@@ -288,25 +252,22 @@ def test_batch_analyze_passes_company_name_for_known_tickers(monkeypatch):
     agent.batch_analyze(["V", "ZZZZ"])
 
     assert received["V"] == "Visa"
-    assert received["ZZZZ"] == "ZZZZ"  # unmapped ticker falls back to itself
+    assert received["ZZZZ"] == "ZZZZ"
 
 
 def test_check_earnings_calendar_past_date_is_not_upcoming():
-    """An earnings date in the past must not report an upcoming catalyst."""
     past_date = datetime.now() - timedelta(days=15)
     market_data = FakeMarketData(news=[], ticker_calendar={"Earnings Date": [past_date]})
     assert _check_earnings_calendar("AAPL", market_data) is False
 
 
 def test_check_earnings_calendar_future_date_within_window_is_upcoming():
-    """An earnings date within the next 14 days reports an upcoming catalyst."""
     future_date = datetime.now() + timedelta(days=5)
     market_data = FakeMarketData(news=[], ticker_calendar={"Earnings Date": [future_date]})
     assert _check_earnings_calendar("AAPL", market_data) is True
 
 
 def test_synthesis_prompt_wraps_the_metrics_and_tells_the_model_not_to_obey_them():
-    """The sentiment prompt carries the same not-a-directive guard as the other two agents."""
     prompt = _build_synthesis_prompt("AAPL", {"net_finbert_score": 0.2})
 
     assert prompt.startswith('<sentiment_data ticker="AAPL" as_of="intraday">\n')

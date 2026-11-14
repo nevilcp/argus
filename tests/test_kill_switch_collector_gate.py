@@ -1,12 +1,4 @@
-"""
-tests/test_kill_switch_collector_gate.py
-
-Tests for the kill-switch gate in argus/orchestration/collector.py:
-run_collection_cycle refusing to run while halted.
-
-fetch_vix is mocked throughout; _check() is driven directly, so no test sleeps
-on a real check interval.
-"""
+"""Collector admission under the process kill switch."""
 
 from __future__ import annotations
 
@@ -18,7 +10,6 @@ from tests.helpers.kill_switch import make_ks
 
 
 async def test_collector_skips_when_kill_switch_halted():
-    """run_collection_cycle refuses to run while this process's kill switch is halted."""
     ks = make_ks("MODERATE")
     ks._halted.set()
     ks._halt_reason = "test halt"
@@ -42,7 +33,6 @@ async def test_collector_skips_when_kill_switch_halted():
 
 
 async def test_collector_runs_when_no_kill_switch_initialized():
-    """A process with no kill switch initialized (get_kill_switch() is None) is ungated."""
     assert kill_switch_module.get_kill_switch() is None
 
     pipeline = mock.Mock()
@@ -58,5 +48,5 @@ async def test_collector_runs_when_no_kill_switch_initialized():
     )
 
     pipeline.run_once.assert_awaited_once()
-    assert result.ran is False  # no session data for AAPL in the empty {} session_states
+    assert result.ran is False
     assert "halted" not in result.reason

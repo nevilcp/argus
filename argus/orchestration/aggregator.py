@@ -1,21 +1,4 @@
-"""
-argus/orchestration/aggregator.py
-
-Multi-agent signal aggregation module implementing conflict arbitration.
-
-Responsibilities:
-  - Weight individual specialist signals by macro multipliers and, optionally,
-    per-regime historical reliability (see cultural.get_agent_accuracy)
-  - Apply majority voting and override rules to produce a single AggregatedSignal
-
-Not responsible for:
-  - LLM inference or data fetching
-  - Portfolio allocation (see agents/portfolio.py)
-  - Risk enforcement (see agents/risk.py)
-
-Dependencies:
-  - argus.schemas.signals (Signal, AggregatedSignal, MacroContext, etc.)
-"""
+"""Specialist consensus with macro and observed reliability weights."""
 
 from __future__ import annotations
 
@@ -35,22 +18,12 @@ from argus.schemas.signals import (
 
 logger = logging.getLogger(__name__)
 
-# The agents that cast a vote, in voting order. Reliability and ablation
-# iterate this; the weights and sources below are keyed by the same names.
+# Keep specialist voting order shared by aggregation, reliability, and attribution.
 SPECIALIST_AGENTS = ("fundamental", "technical", "sentiment")
 
 
 class HybridSignalAggregator:
-    """Arbitrates and fuses independent specialist signals into a consensus AggregatedSignal.
-
-    Each agent casts one conviction-weighted directional vote. Macro multipliers
-    scale its base weight at runtime; the highest-weighted signal pool wins.
-
-    Attributes:
-        DEFAULT_WEIGHTS: Base per-agent vote weight for fundamental, technical,
-            and sentiment, before macro multipliers and reliability scaling
-            are applied.
-    """
+    """Consensus from conviction-weighted specialist votes, macro multipliers, and outcome reliability."""
 
     DEFAULT_WEIGHTS: ClassVar[dict[str, float]] = {
         "fundamental": AGGREGATOR.weight_fundamental,
@@ -67,30 +40,7 @@ class HybridSignalAggregator:
         reliability: dict[str, float] | None = None,
         reliability_n: dict[str, int] | None = None,
     ) -> AggregatedSignal:
-        """Aggregates specialist signals via conviction-weighted voting with macro multipliers.
-
-        At least one of fundamental, technical, or sentiment must be non-None for
-        a meaningful signal to be generated.
-
-        Args:
-            technical: Optional TechnicalSignal from TechnicalStatisticalAgent.
-            macro: Optional MacroContext from MacroStatisticalAgent; used for multipliers.
-            fundamental: Optional FundamentalSignal from FundamentalAgent.
-            sentiment: Optional SentimentSignal from SentimentAgent.
-            reliability: Optional agent name -> historical win rate in [0, 1]
-                (see cultural.get_agent_accuracy), scaling that agent's vote
-                weight by win_rate / 0.5. An agent at the 0.5 neutral prior
-                (or missing/omitted entirely) votes at its unscaled base
-                weight — agents that have been right in this regime count
-                for more, agents that haven't count for less.
-            reliability_n: Optional agent name -> raw sample count each reliability
-                rate was computed from (see cultural.get_agent_accuracy's n).
-                Carried onto the result untouched, for agents/portfolio.py's
-                Half-Kelly anchor to distinguish "no data" from "measured 0.5".
-
-        Returns:
-            AggregatedSignal with a consensus direction, conviction, and weighted vote breakdown.
-        """
+        """Aggregate specialist signals via conviction-weighted voting with macro multipliers."""
         ticker = (
             (technical.ticker if technical else None)
             or (fundamental.ticker if fundamental else None)
@@ -106,13 +56,8 @@ class HybridSignalAggregator:
             "sentiment": sentiment,
         }
         macro_mults = macro.agent_multipliers if macro else {}
-        # Mass that could have been cast by all three agents, reliability excluded — the
-        # denominator that makes conviction monotone in participation instead of saturating
-        # whenever the agents who did vote happen to agree
-        w_eff = {
-            name: weight * macro_mults.get(name, 1.0)
-            for name, weight in self.DEFAULT_WEIGHTS.items()
-        }
+        # Normalize against all available vote capacity so conviction increases with participation.
+        w_eff = {name: weight * macro_mults.get(name, 1.0) for name, weight in self.DEFAULT_WEIGHTS.items()}
         max_pool = sum(w_eff.values())
 
         pools, weighted_votes = _cast_votes(sources, w_eff, reliability_used)
@@ -155,7 +100,7 @@ class HybridSignalAggregator:
             and conviction < AGGREGATOR.contraction_conviction_threshold
         ):
             logger.info(
-                "%s: Contraction regime override — suppressing BULLISH (conv=%.2f)",
+                "%s: Contraction regime override - suppressing BULLISH (conv=%.2f)",
                 ticker,
                 conviction,
             )
@@ -181,27 +126,14 @@ def _cast_votes(
     w_eff: dict[str, float],
     reliability: dict[str, float],
 ) -> tuple[dict[Signal, float], dict[str, float]]:
-    """Tallies each present agent's weighted vote into a per-direction pool.
-
-    Args:
-        sources: Agent name -> its signal, or None when the agent produced none.
-        w_eff: Agent name -> base weight after its macro multiplier.
-        reliability: Agent name -> historical win rate; a missing agent votes at
-            the neutral prior, i.e. unscaled.
-
-    Returns:
-        Tuple of (summed vote per direction, each agent's own weighted vote with
-        0.0 for an absent agent).
-    """
+    """Tally each present agent's weighted vote into a per-direction pool."""
     pools = {Signal.BULLISH: 0.0, Signal.BEARISH: 0.0, Signal.NEUTRAL: 0.0}
     weighted_votes: dict[str, float] = {}
     for name, signal in sources.items():
         if signal is None:
             weighted_votes[name] = 0.0
             continue
-        reliability_mult = (
-            reliability.get(name, AGGREGATOR.neutral_reliability) / AGGREGATOR.neutral_reliability
-        )
+        reliability_mult = reliability.get(name, AGGREGATOR.neutral_reliability) / AGGREGATOR.neutral_reliability
         vote = signal.conviction * w_eff[name] * reliability_mult
         pools[signal.signal] += vote
         weighted_votes[name] = vote

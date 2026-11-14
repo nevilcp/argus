@@ -1,10 +1,4 @@
-"""Enforces the import direction between ARGUS's packages.
-
-Every import in argus/, api/ and scripts/ is found by walking the syntax tree,
-so imports inside functions and under TYPE_CHECKING count as much as
-module-level ones. A package may import from its own layer or any layer below
-it, and from itself freely; anything else is an upward edge and fails here.
-"""
+"""Enforces the import direction between ARGUS's packages."""
 
 import ast
 from pathlib import Path
@@ -13,12 +7,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# Lowest layer first. Keys are the first path component under argus/ (a module
-# or a package), plus the two top-level application packages.
+# Order modules from the lowest dependency layer; keys name top-level packages or argus modules.
 LAYERS: dict[str, int] = {
     "params": 1,
-    # schemas is below config because config reads the shared request types and
-    # bounds from schemas/requests.py; schemas itself imports only params
+    # Keep schemas below config because settings depend on shared request bounds.
     "schemas": 2,
     "config": 3,
     "infra": 3,
@@ -37,12 +29,11 @@ LAYERS: dict[str, int] = {
     "scripts": 11,
 }
 
-# Directories under argus/ that hold no Python and so take no layer.
 NON_CODE = {"models", "__pycache__"}
 
 
 def _module_name(path: Path) -> str:
-    """Returns the dotted module name of a source file under ROOT."""
+    """Return the dotted module name of a source file under ROOT."""
     parts = list(path.relative_to(ROOT).with_suffix("").parts)
     if parts[-1] == "__init__":
         parts.pop()
@@ -50,26 +41,13 @@ def _module_name(path: Path) -> str:
 
 
 def _package_of(module: str) -> str:
-    """Returns the LAYERS key a dotted module name belongs to.
-
-    Resolved by position, not by substring, so ``argus.agents.risk`` belongs to
-    ``agents`` and is never mistaken for the ``risk`` package.
-    """
+    """Return the LAYERS key a dotted module name belongs to."""
     parts = module.split(".")
     return parts[1] if parts[0] == "argus" and len(parts) > 1 else parts[0]
 
 
 def imported_packages(source: str, module: str) -> set[str]:
-    """Returns the LAYERS keys that a source file imports from, at any depth.
-
-    Args:
-        source: Python source text.
-        module: Dotted name of the module the source belongs to, used to
-            resolve relative imports.
-
-    Returns:
-        The package of every absolute or relative import in the tree.
-    """
+    """Return the LAYERS keys that a source file imports from, at any depth."""
     found: set[str] = set()
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
@@ -79,7 +57,6 @@ def imported_packages(source: str, module: str) -> set[str]:
             if node.level:
                 anchor = module.split(".")[: -node.level]
                 base = ".".join([*anchor, base]) if base else ".".join(anchor)
-            # `from argus import governor` imports the module argus.governor
             targets = [f"{base}.{a.name}" for a in node.names] if base == "argus" else [base]
         else:
             continue
@@ -90,7 +67,7 @@ def imported_packages(source: str, module: str) -> set[str]:
 
 
 def _source_files() -> list[Path]:
-    """Returns every Python file under argus/, api/ and scripts/."""
+    """Return every Python file under argus/, api/ and scripts/."""
     return sorted(
         path
         for top in ("argus", "api", "scripts")
@@ -100,7 +77,7 @@ def _source_files() -> list[Path]:
 
 
 def _violations() -> list[str]:
-    """Returns one line per import that points at a higher layer."""
+    """Return one line per import that points at a higher layer."""
     problems: list[str] = []
     for path in _source_files():
         module = _module_name(path)
@@ -111,19 +88,15 @@ def _violations() -> list[str]:
             if imported == own or imported not in LAYERS:
                 continue
             if LAYERS[imported] > LAYERS[own]:
-                problems.append(
-                    f"{module} (layer {LAYERS[own]}) imports {imported} (layer {LAYERS[imported]})"
-                )
+                problems.append(f"{module} (layer {LAYERS[own]}) imports {imported} (layer {LAYERS[imported]})")
     return problems
 
 
 def test_no_import_points_at_a_higher_layer():
-    """No module imports from a layer above its own."""
     assert _violations() == []
 
 
 def test_every_package_has_a_layer():
-    """A new top-level module or package must be placed in LAYERS, not silently exempt."""
     top_level = {
         p.stem if p.is_file() else p.name
         for p in (ROOT / "argus").iterdir()
@@ -133,7 +106,6 @@ def test_every_package_has_a_layer():
 
 
 def test_layers_name_only_things_that_exist():
-    """A removed or renamed package is dropped from LAYERS rather than left behind."""
     existing = {p.stem if p.is_file() else p.name for p in (ROOT / "argus").iterdir()} | {
         "api",
         "scripts",
@@ -154,12 +126,10 @@ def test_layers_name_only_things_that_exist():
     ],
 )
 def test_imports_resolve_by_full_dotted_path(source, module, expected):
-    """argus.agents.risk counts as agents, never as the risk package."""
     assert imported_packages(source, module) == expected
 
 
 def test_imports_inside_functions_and_type_checking_blocks_are_found():
-    """A deferred or type-only import is still an edge."""
     source = (
         "from typing import TYPE_CHECKING\n"
         "if TYPE_CHECKING:\n"

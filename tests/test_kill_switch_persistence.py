@@ -1,12 +1,4 @@
-"""
-tests/test_kill_switch_persistence.py
-
-Tests for argus/risk/kill_switch.py's halt persistence: dumping a halt to
-disk and restoring it on init.
-
-fetch_vix is mocked throughout; _check() is driven directly, so no test sleeps
-on a real check interval.
-"""
+"""Persisted drawdown halt restoration regressions."""
 
 from __future__ import annotations
 
@@ -20,7 +12,6 @@ from tests.helpers.kill_switch import FETCH_VIX, make_ks, seed_persisted_halt
 
 
 def test_halt_restores_from_a_persisted_dump(tmp_path, monkeypatch):
-    """A halt dump written by one KillSwitch instance restores into a fresh one."""
     monkeypatch.chdir(tmp_path)
     seed = seed_persisted_halt()
 
@@ -35,7 +26,6 @@ def test_halt_restores_from_a_persisted_dump(tmp_path, monkeypatch):
 
 
 def test_halt_persisted_is_true_after_a_successful_dump(tmp_path, monkeypatch):
-    """A halt whose dump was written reports halt_persisted=True."""
     monkeypatch.setattr(settings, "ARGUS_RUNS_DIR", str(tmp_path / "runs"))
     ks = make_ks("MODERATE", inception=100_000.0)
     ks._current_portfolio_value = 80_000.0
@@ -48,10 +38,9 @@ def test_halt_persisted_is_true_after_a_successful_dump(tmp_path, monkeypatch):
 
 
 def test_halt_stays_engaged_but_flags_an_unpersisted_dump(tmp_path, monkeypatch, caplog):
-    """A halt whose dump cannot be written is still a halt, and says it won't survive a restart."""
     blocker = tmp_path / "not_a_directory"
     blocker.write_text("")
-    monkeypatch.setattr(settings, "ARGUS_RUNS_DIR", str(blocker / "runs"))  # mkdir must fail
+    monkeypatch.setattr(settings, "ARGUS_RUNS_DIR", str(blocker / "runs"))
     ks = make_ks("MODERATE", inception=100_000.0)
     ks._current_portfolio_value = 80_000.0
 
@@ -70,7 +59,6 @@ def test_halt_stays_engaged_but_flags_an_unpersisted_dump(tmp_path, monkeypatch,
 
 
 def test_update_portfolio_value_advances_the_high_water_mark_under_the_state_lock():
-    """The high-water mark's read-modify-write is serialized with the state lock."""
     ks = make_ks("MODERATE", inception=100_000.0)
 
     with ks._state_lock:
@@ -85,7 +73,6 @@ def test_update_portfolio_value_advances_the_high_water_mark_under_the_state_loc
 
 
 def test_concurrent_updates_never_lower_the_high_water_mark():
-    """Interleaved updates leave the mark at the highest value any of them saw."""
     ks = make_ks("MODERATE", inception=100_000.0)
     values = [100_000.0 + i for i in range(2_000)]
 
@@ -99,16 +86,11 @@ def test_concurrent_updates_never_lower_the_high_water_mark():
 
 
 def test_halt_restores_from_a_corrupt_dump(tmp_path, monkeypatch):
-    """A halt dump that exists but fails to parse still engages the halt.
-
-    Its mere existence is the evidence a halt occurred — treating an
-    unreadable dump as "no halt" would let a crash silently clear a real one.
-    """
     monkeypatch.chdir(tmp_path)
     seed_persisted_halt()
     halt_file = kill_switch_module._find_latest_halt_file()
     assert halt_file is not None
-    halt_file.write_text("{not valid json")  # corrupt it after the seed wrote it cleanly
+    halt_file.write_text("{not valid json")
 
     restored = KillSwitch("MODERATE")
     restored._restore_halt_from_file(halt_file)
@@ -117,7 +99,6 @@ def test_halt_restores_from_a_corrupt_dump(tmp_path, monkeypatch):
 
 
 def test_halt_restores_from_a_truncated_dump(tmp_path, monkeypatch):
-    """A halt dump truncated mid-write (e.g. by a crash) still engages the halt."""
     monkeypatch.chdir(tmp_path)
     seed_persisted_halt()
     halt_file = kill_switch_module._find_latest_halt_file()
@@ -132,7 +113,6 @@ def test_halt_restores_from_a_truncated_dump(tmp_path, monkeypatch):
 
 
 def test_initialize_kill_switch_restores_halt_on_reinit(tmp_path, monkeypatch):
-    """initialize_kill_switch() re-applies a leftover halt file rather than starting clean."""
     monkeypatch.chdir(tmp_path)
     seed = seed_persisted_halt()
 

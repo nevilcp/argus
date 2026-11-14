@@ -1,13 +1,10 @@
 name: Daily reconciliation
 
-# The other half of the decision -> outcome loop: resolves decisions past
-# their horizon against live prices and writes outcomes back to cultural
-# memory, so reliability weighting has real evidence to learn from. Runs
-# once daily, well after US market close.
+# Settle matured decisions after market close so reliability weighting can use observed returns.
 
 on:
   schedule:
-    - cron: "30 22 * * 1-5" # 22:30 UTC — after the last two-hourly collector tick
+    - cron: "30 22 * * 1-5" # 22:30 UTC - after the last two-hourly collector tick
   workflow_dispatch:
 
 concurrency:
@@ -21,8 +18,7 @@ permissions:
 jobs:
   reconcile:
     runs-on: ubuntu-latest
-    # Observed: under 1.5 min. 10 min covers a slow image pull or a larger
-    # batch of matured decisions without leaving room for a hung run.
+    # Allow larger settlement batches while bounding a stalled reconciliation run.
     timeout-minutes: 10
     steps:
       - name: Check out repository
@@ -38,13 +34,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run reconciliation
-        # No API secrets are required here, audited: reconciliation only reads
-        # live prices via yfinance (keyless — see argus/seams.py's
-        # LiveMarketDataProvider) and stores outcomes through a local
-        # sentence-transformer embedding model (argus/memory/cultural.py). It
-        # never builds the graph, so none of GROQ_API_KEY, FRED_API_KEY, or
-        # NEWSAPI_KEY — all consumed only at collection time, see
-        # collector.yml's preflight — need to be plumbed into this container.
+        # Reconciliation uses keyless prices and local embeddings; it never builds the model-backed graph.
         run: |
           docker run --rm \
             -v "$PWD/data:/app/data" \

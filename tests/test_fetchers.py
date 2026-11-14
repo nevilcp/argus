@@ -1,8 +1,4 @@
-"""Tests for argus/data/fetchers.py.
-
-Covers the "None means unavailable, not neutral" contract for NewsAPI, the
-shared Yahoo download path, the FRED and daily-bar caches, and fetch_vix.
-"""
+"""Tests for argus/data/fetchers.py."""
 
 import json
 from datetime import timedelta
@@ -23,7 +19,6 @@ def _raise_os_error(*_args: object, **_kwargs: object) -> None:
 
 
 def test_fetch_news_returns_none_when_reservation_hits_a_disk_error(monkeypatch):
-    """A disk error while reserving a budget slot degrades fetch_news to None instead of raising."""
     monkeypatch.setattr(fetchers.settings, "NEWSAPI_KEY", "test-key")
     monkeypatch.setattr(fetchers, "_NEWSAPI_BUDGET", NewsApiBudget())
     monkeypatch.setattr(newsapi_budget, "open", _raise_os_error, raising=False)
@@ -36,13 +31,11 @@ def test_fetch_news_returns_none_when_reservation_hits_a_disk_error(monkeypatch)
 
 
 def test_fetch_news_returns_none_without_api_key(monkeypatch):
-    """No NEWSAPI_KEY means no request is even attempted."""
     monkeypatch.setattr(fetchers.settings, "NEWSAPI_KEY", "")
     assert fetchers.fetch_news("AAPL", "Apple Inc") is None
 
 
 def test_fetch_news_returns_none_when_budget_exhausted(monkeypatch):
-    """An exhausted daily budget returns None distinguishable from an empty result."""
     monkeypatch.setattr(fetchers.settings, "NEWSAPI_KEY", "test-key")
     monkeypatch.setattr(fetchers, "_NEWSAPI_BUDGET", NewsApiBudget(daily_limit=0))
 
@@ -54,7 +47,6 @@ def test_fetch_news_returns_none_when_budget_exhausted(monkeypatch):
 
 
 def test_fetch_news_returns_articles_at_max_page_size(monkeypatch):
-    """A successful fetch requests NewsAPI's maximum page size and filters titleless articles."""
     monkeypatch.setattr(fetchers.settings, "NEWSAPI_KEY", "test-key")
     monkeypatch.setattr(fetchers, "_NEWSAPI_BUDGET", NewsApiBudget())
 
@@ -74,14 +66,11 @@ def test_fetch_news_returns_articles_at_max_page_size(monkeypatch):
     with mock.patch("newsapi.NewsApiClient", return_value=mock_client):
         result = fetchers.fetch_news("AAPL", "Apple Inc")
 
-    assert result == [
-        {"title": "Real headline", "description": "d", "published_at": "t", "source": "s"}
-    ]
+    assert result == [{"title": "Real headline", "description": "d", "published_at": "t", "source": "s"}]
     assert mock_client.get_everything.call_args.kwargs["page_size"] == 100
 
 
 def test_fetch_news_reserves_one_budget_slot_per_attempt(monkeypatch):
-    """Every retry of the page fetch is a real NewsAPI request, so each one spends budget."""
     monkeypatch.setattr(fetchers.settings, "NEWSAPI_KEY", "test-key")
     budget = NewsApiBudget(daily_limit=100)
     monkeypatch.setattr(fetchers, "_NEWSAPI_BUDGET", budget)
@@ -99,7 +88,6 @@ def test_fetch_news_reserves_one_budget_slot_per_attempt(monkeypatch):
 
 
 def test_fetch_news_stops_retrying_once_the_budget_runs_out(monkeypatch):
-    """A retry that finds the budget spent returns None instead of making an unbudgeted request."""
     monkeypatch.setattr(fetchers.settings, "NEWSAPI_KEY", "test-key")
     monkeypatch.setattr(fetchers, "_NEWSAPI_BUDGET", NewsApiBudget(daily_limit=1))
     monkeypatch.setattr(retry.time, "sleep", lambda _s: None)
@@ -115,7 +103,6 @@ def test_fetch_news_stops_retrying_once_the_budget_runs_out(monkeypatch):
 
 
 def test_fetch_news_returns_none_after_retries_exhausted(monkeypatch):
-    """A retryable failure that never clears returns None, not an empty list read as success."""
     monkeypatch.setattr(fetchers.settings, "NEWSAPI_KEY", "test-key")
     monkeypatch.setattr(fetchers, "_NEWSAPI_BUDGET", NewsApiBudget())
     monkeypatch.setattr(retry.time, "sleep", lambda _s: None)
@@ -129,13 +116,7 @@ def test_fetch_news_returns_none_after_retries_exhausted(monkeypatch):
     assert result is None
 
 
-# ---------------------------------------------------------------------------
-# fetch_multiple_daily caching
-# ---------------------------------------------------------------------------
-
-
 def test_fetch_multiple_daily_serves_second_call_from_cache(monkeypatch):
-    """A ticker already refreshed today is not refetched on a second call the same day."""
     monkeypatch.setattr(fetchers, "_DAILY_BAR_CACHE", DailyBarCache(db_path=":memory:"))
 
     calls = {"n": 0}
@@ -160,11 +141,6 @@ def test_fetch_multiple_daily_serves_second_call_from_cache(monkeypatch):
 
 
 def test_daily_bar_cache_lives_under_argus_data_dir(monkeypatch, tmp_path):
-    """The lazily-built module singleton lands under settings.ARGUS_DATA_DIR, not the cwd.
-
-    The old cwd-relative default landed outside docker-compose's mounted
-    volumes and was destroyed on every container restart.
-    """
     monkeypatch.setattr(fetchers, "_DAILY_BAR_CACHE", None)
 
     cache = fetchers._daily_bar_cache()
@@ -173,7 +149,6 @@ def test_daily_bar_cache_lives_under_argus_data_dir(monkeypatch, tmp_path):
 
 
 def test_daily_bar_cache_is_constructed_once_and_reused(monkeypatch):
-    """A second call to `_daily_bar_cache()` returns the same instance rather than rebuilding it."""
     monkeypatch.setattr(fetchers, "_DAILY_BAR_CACHE", None)
 
     first = fetchers._daily_bar_cache()
@@ -196,11 +171,6 @@ class _FakeFred:
 
 
 def test_fetch_fred_series_cache_evicts_the_oldest_entry_at_capacity(monkeypatch):
-    """The FRED series cache is bounded: a new series id at capacity evicts the oldest one.
-
-    Without an explicit cap, growth was bounded only incidentally by the small,
-    fixed set of series ids this system actually requests.
-    """
     monkeypatch.setattr(fetchers.settings, "FRED_API_KEY", "test-key")
     monkeypatch.setattr(fetchers, "_FRED_CACHE", TTLCache(ttl=timedelta(hours=6), max_entries=2))
     monkeypatch.setattr("fredapi.Fred", _FakeFred)
@@ -218,19 +188,13 @@ def test_fetch_fred_series_cache_evicts_the_oldest_entry_at_capacity(monkeypatch
     assert _FakeFred.calls == 4, "C is still cached"
 
 
-# ---------------------------------------------------------------------------
-# Yahoo download path: daily, intraday, VIX, fundamentals
-# ---------------------------------------------------------------------------
-
-
 def _raw_download(columns=("Close", "High", "Low", "Open", "Volume"), rows=3) -> pd.DataFrame:
-    """Builds a frame shaped like yf.download's single-ticker output."""
+    """Build a frame shaped like yf.download's single-ticker output."""
     index = pd.date_range("2024-01-02", periods=rows, freq="D")
     return pd.DataFrame({c: [float(i + 1) for i in range(rows)] for c in columns}, index=index)
 
 
 def test_daily_and_intraday_fetchers_share_one_download_path(monkeypatch):
-    """Both fetchers call yf.download once, differing only in interval and period."""
     download = mock.Mock(return_value=_raw_download())
     monkeypatch.setattr(fetchers.yf, "download", download)
 
@@ -245,7 +209,6 @@ def test_daily_and_intraday_fetchers_share_one_download_path(monkeypatch):
 
 
 def test_download_raises_on_an_empty_frame(monkeypatch):
-    """An empty Yahoo response is a DataFetchError naming the interval, not an empty frame."""
     monkeypatch.setattr(retry.time, "sleep", lambda _s: None)
     monkeypatch.setattr(fetchers.yf, "download", mock.Mock(return_value=pd.DataFrame()))
 
@@ -254,20 +217,17 @@ def test_download_raises_on_an_empty_frame(monkeypatch):
 
 
 def test_normalize_ohlcv_raises_when_the_close_column_is_missing():
-    """A frame without close raises, rather than carrying on with a frame no consumer can read."""
     with pytest.raises(retry.DataFetchError, match="no close column"):
         fetchers._normalize_ohlcv(_raw_download(columns=("Open", "High")))
 
 
 def test_fetch_vix_returns_the_latest_close(monkeypatch):
-    """fetch_vix reads the last ^VIX close through the shared daily download."""
     monkeypatch.setattr(fetchers.yf, "download", mock.Mock(return_value=_raw_download(rows=4)))
 
     assert fetchers.fetch_vix() == 4.0
 
 
 def test_fetch_vix_raises_instead_of_guessing_a_column_when_close_is_missing(monkeypatch):
-    """A VIX frame with no Close column is an error, not the first column's value."""
     monkeypatch.setattr(retry.time, "sleep", lambda _s: None)
     download = mock.Mock(return_value=_raw_download(columns=("Open", "High")))
     monkeypatch.setattr(fetchers.yf, "download", download)
@@ -278,7 +238,6 @@ def test_fetch_vix_raises_instead_of_guessing_a_column_when_close_is_missing(mon
 
 
 def test_fetch_fundamentals_is_built_from_fetch_ticker_info(monkeypatch):
-    """fundamentals derive from fetch_ticker_info's dict, so there is one retried .info call."""
     info = {
         "freeCashflow": 50.0,
         "marketCap": 1000.0,
@@ -300,7 +259,6 @@ def test_fetch_fundamentals_is_built_from_fetch_ticker_info(monkeypatch):
 
 
 def test_fetch_fundamentals_retries_the_info_call_once_per_attempt(monkeypatch):
-    """A persistently failing .info lookup costs one retry budget, not a nested one."""
     monkeypatch.setattr(retry.time, "sleep", lambda _s: None)
     ticker_cls = mock.Mock()
     type(ticker_cls.return_value).info = mock.PropertyMock(side_effect=http_error(500))

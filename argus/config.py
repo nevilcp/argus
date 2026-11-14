@@ -1,22 +1,4 @@
-"""
-argus/config.py
-
-Environment and system configuration service for ARGUS.
-
-Uses pydantic-settings to bind variables from the local environment registry or .env file.
-Enforces structured typing across secrets, technical weights, portfolio limits, and safety
-thresholds.
-
-Responsibilities:
-  - Expose a single typed Settings instance used across all modules
-  - Validate API key and numeric threshold types on startup
-  - Load .env into os.environ once, before Settings is constructed, so every
-    entry point (api/main.py, the scripts/ CLIs) sees the same values without
-    each calling python-dotenv itself
-
-Not responsible for:
-  - Key rotation or secret management
-"""
+"""Typed environment settings with defaults from parameter provenance."""
 
 from __future__ import annotations
 
@@ -45,26 +27,14 @@ from argus.schemas.requests import (
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# Must run before Settings() reads the environment, and before any
-# LangChain/Groq import elsewhere that reads env vars at import time — this
-# module is imported early enough (nearly everything imports argus.config)
-# that this ordering holds without every entry point repeating the call.
-# Searches from the working directory, not BASE_DIR: an installed (non-editable)
-# package's BASE_DIR resolves inside site-packages, which never holds a .env.
+# Load .env before provider imports, using the working directory so installed packages find deployment settings.
 load_dotenv()
 
 
 class Settings(BaseSettings):
-    """Type-safe application settings resolved from environment variables and .env.
+    """Type-safe application settings resolved from environment variables and .env."""
 
-    All fields default to safe empty strings or conservative thresholds so the system
-    degrades gracefully when optional keys (e.g. FRED_API_KEY, NEWSAPI_KEY) are absent.
-    """
-
-    # env_file is relative to the working directory, for the same reason
-    # load_dotenv() above is. That call already populated os.environ from
-    # this same file, so this is mostly a fallback for keys present in .env
-    # but not yet exported to the environment.
+    # Resolve env_file relative to the deployment working directory, matching load_dotenv above.
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -78,7 +48,6 @@ class Settings(BaseSettings):
 
     NEWSAPI_KEY: str = Field(default="", description="NewsAPI.org key")
 
-    # Twenty tickers across seven GICS sectors reduce sector concentration risk.
     ARGUS_UNIVERSE: Annotated[list[str], NoDecode] = Field(
         default=[
             "AAPL",
@@ -105,32 +74,17 @@ class Settings(BaseSettings):
         description="Ticker universe the unattended collector tracks and analyzes",
     )
 
-    # Numeric defaults live in argus/params.py, tagged with provenance; this class
-    # only adds env-var override capability on top of them.
-    #
-    # yfinance's chart endpoint returns the whole requested period in one HTTP
-    # call regardless of interval granularity, so 1m candles cost nothing extra
-    # against any rate limit — see data/pipeline.py for how coarser resolutions
-    # are derived locally via resampling rather than fetched separately.
+    # Numeric defaults and provenance live in params.py; settings supply environment overrides.
     MFT_CANDLE_INTERVAL: str = "1m"
-    # None means "derive from MFT_CANDLE_INTERVAL" (see data/pipeline.py's
-    # _derive_buffer_size); set explicitly only to override that derivation.
+    # Derive buffer depth from the candle interval unless explicitly overridden.
     CANDLE_BUFFER_SIZE: int | None = None
 
-    # ─── Unattended operation ────────────────────────────────────────────────
-    ARGUS_DATA_DIR: str = Field(
-        default="data", description="Directory for the persistent intraday buffer and logs"
-    )
-    # None means "derive as <ARGUS_DATA_DIR>/chroma_db" / "<ARGUS_DATA_DIR>/runs"
-    # (see memory/cultural.py's get_cultural_memory and risk/kill_switch.py) —
-    # set explicitly only to point at a directory outside ARGUS_DATA_DIR, e.g.
-    # a dedicated named volume as docker-compose.yml does.
+    ARGUS_DATA_DIR: str = Field(default="data", description="Directory for the persistent intraday buffer and logs")
+    # Derive Chroma and runs paths under ARGUS_DATA_DIR unless separate storage is configured.
     ARGUS_CHROMA_DIR: str | None = Field(
         default=None, description="Directory backing the ChromaDB cultural-memory store"
     )
-    ARGUS_RUNS_DIR: str | None = Field(
-        default=None, description="Directory for kill-switch halt-event dumps"
-    )
+    ARGUS_RUNS_DIR: str | None = Field(default=None, description="Directory for kill-switch halt-event dumps")
     ARGUS_COLLECTOR_ENABLED: bool = Field(
         default=False, description="Run the graph automatically on a schedule during market hours"
     )
@@ -172,9 +126,7 @@ class Settings(BaseSettings):
             "local development behind a trusted network boundary, not production."
         ),
     )
-    ARGUS_LOG_LEVEL: str = Field(
-        default="INFO", description="Log level for the argus, api and scripts loggers"
-    )
+    ARGUS_LOG_LEVEL: str = Field(default="INFO", description="Log level for the argus, api and scripts loggers")
 
     ARGUS_IMAGE_TAG: str = Field(
         default="unknown",
@@ -184,10 +136,7 @@ class Settings(BaseSettings):
         ),
     )
 
-    # Conservative free-tier bootstrap floor for the rate governor (see
-    # argus/governor.py), applied uniformly to every registered
-    # model until Groq's own response headers correct it per-model for the
-    # account's actual tier.
+    # Use bootstrap quotas until provider response headers reveal the account limits for each model.
     ARGUS_GROQ_RPM: int = Field(
         default=GOVERNOR.bootstrap_rpm,
         gt=0,
@@ -210,45 +159,26 @@ class Settings(BaseSettings):
         ),
     )
 
-    # Model IDs for the three LLM-backed agents. Must each be a member of
-    # argus.governor.REGISTERED_MODELS — asserted at API startup
-    # so a typo or unsupported model fails at boot rather than at first call.
+    # Require registered model identifiers at startup so configuration errors fail before the first request.
     ARGUS_FUNDAMENTAL_MODEL: str = Field(default="openai/gpt-oss-120b")
     ARGUS_SENTIMENT_MODEL: str = Field(default="openai/gpt-oss-20b")
     ARGUS_PORTFOLIO_MODEL: str = Field(default="openai/gpt-oss-120b")
 
     ARGUS_HMM_MODEL_PATH: str = Field(
         default=str(BASE_DIR / "argus" / "models" / "macro_hmm.joblib"),
-        description=(
-            "Path to the persisted RegimeClassifier artifact (scripts/train_macro_hmm.py output)"
-        ),
+        description=("Path to the persisted RegimeClassifier artifact (scripts/train_macro_hmm.py output)"),
     )
 
     @field_validator("ARGUS_UNIVERSE", "ARGUS_CORS_ORIGINS", mode="before")
     @classmethod
     def _parse_csv_list(cls, value: object) -> object:
-        """Splits a comma-separated env string into a list; passes non-strings through.
-
-        pydantic-settings JSON-decodes env values for list-typed fields by
-        default, which rejects a plain `AAPL,MSFT` string — both fields
-        validated here are marked `NoDecode` to skip that and land here instead.
-
-        Args:
-            value: Raw field value — a comma-separated string from the
-                environment, or an already-parsed list (e.g. the Python-level
-                default).
-
-        Returns:
-            A list of stripped, non-empty strings, or `value` unchanged if it
-            wasn't a string.
-        """
+        """Split a comma-separated env string into a list; passes non-strings through."""
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
 
     TECHNICAL_INDICATOR_WEIGHTS: dict[str, float] = asdict(_TECHNICAL_WEIGHTS)
 
-    # Portfolio hard limits enforced by RiskStatisticalAgent.
     MAX_SINGLE_POSITION_PCT: float = SYSTEM.max_single_position_pct
     MAX_SECTOR_CONCENTRATION: float = SYSTEM.max_sector_concentration
     MAX_PORTFOLIO_BETA: float = SYSTEM.max_portfolio_beta
@@ -256,28 +186,13 @@ class Settings(BaseSettings):
     VIX_BLACKOUT_THRESHOLD: float = SYSTEM.vix_blackout_threshold
 
     def data_path(self, name: str) -> Path:
-        """Returns `name` under the current ARGUS_DATA_DIR.
-
-        Resolved on each call, not at import, so a per-test or per-deployment
-        override of ARGUS_DATA_DIR applies.
-
-        Args:
-            name: File or directory name relative to the data directory.
-
-        Returns:
-            The joined path; nothing is created.
-        """
+        """Return `name` under the current ARGUS_DATA_DIR."""
         return Path(self.ARGUS_DATA_DIR) / name
 
 
 def web_concurrency() -> str | None:
-    """Returns the WEB_CONCURRENCY environment value, or None when unset.
-
-    Read from the environment on every call, not captured at import, so a
-    process that sets it after startup (and tests that monkeypatch it) are seen.
-    """
+    """Return the WEB_CONCURRENCY environment value, or None when unset."""
     return os.environ.get("WEB_CONCURRENCY")
 
 
-# Module-level singleton — import this everywhere rather than instantiating locally.
 settings = Settings()

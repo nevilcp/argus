@@ -1,19 +1,4 @@
-"""
-scripts/run_evaluation.py
-
-CLI entry point for the pre-registered evaluation. Replays a fixture session
-open-loop and closed-loop, scores both against real forward returns, and
-prints the report the pre-registered success threshold is judged against,
-plus system-behavior metrics reported separately.
-
-    .venv/bin/python scripts/run_evaluation.py [--fixtures-dir PATH]
-        [--horizon-days N] [--deadband X]
-
-Requires network access (LiveMarketDataProvider fetches real daily closes
-for the session's tickers) — this is the one place in the test/eval stack
-that's expected to, since the whole point is scoring against real forward
-returns rather than fixture data.
-"""
+"""CLI for pre-registered open-loop and closed-loop outcome evaluation."""
 
 from __future__ import annotations
 
@@ -37,16 +22,26 @@ from argus.seams import LiveMarketDataProvider
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
 
 
+CLI_DESCRIPTION = """
+scripts/run_evaluation.py
+
+CLI entry point for the pre-registered evaluation. Replays a fixture session
+open-loop and closed-loop, scores both against real forward returns, and
+prints the report the pre-registered success threshold is judged against,
+plus system-behavior metrics reported separately.
+
+    .venv/bin/python scripts/run_evaluation.py [--fixtures-dir PATH]
+        [--horizon-days N] [--deadband X]
+
+Requires network access (LiveMarketDataProvider fetches real daily closes
+for the session's tickers) — this is the one place in the test/eval stack
+that's expected to, since the whole point is scoring against real forward
+returns rather than fixture data.
+"""
+
+
 def _format_ci(bounds: tuple[float | None, float | None], number_format: str) -> str:
-    """Formats a confidence interval for display.
-
-    Args:
-        bounds: (lower, upper) bound pair; both None when the CI is undefined.
-        number_format: Format spec applied to each bound (e.g. "+.4f").
-
-    Returns:
-        "[lo, hi]" formatted with number_format, or "undefined" if bounds is unset.
-    """
+    """Format a confidence interval for display."""
     lo, hi = bounds
     if lo is None:
         return "undefined"
@@ -54,13 +49,7 @@ def _format_ci(bounds: tuple[float | None, float | None], number_format: str) ->
 
 
 def _print_evaluation(label: str, result: EvaluationResult) -> None:
-    """Prints one evaluation section's rank IC, hit-rate, and trade-level stats.
-
-    Args:
-        label: Section heading, e.g. "Open-loop" or "Closed-loop".
-        result: Evaluation output to report; sections whose inputs are
-            undefined (fewer than 2 decisions, or no trade pairs) are skipped.
-    """
+    """Print one evaluation section's rank IC, hit-rate, and trade-level stats."""
     print(f"\n--- {label} (n={result.n}) ---")
     if result.n < 2:
         print("  Too few decisions to compute rank IC or hit-rate.")
@@ -79,10 +68,7 @@ def _print_evaluation(label: str, result: EvaluationResult) -> None:
 
     trade_stats = trade_level_win_loss_stats(result.pairs)
     if trade_stats:
-        print(
-            f"  win rate:       {trade_stats['win_rate']:.4f} "
-            f"({trade_stats['total_trades']} decisions)"
-        )
+        print(f"  win rate:       {trade_stats['win_rate']:.4f} ({trade_stats['total_trades']} decisions)")
         print(f"  profit factor:  {trade_stats['profit_factor']}")
         print(
             f"  avg win/loss:   {trade_stats['avg_win_pct']:+.4f} / "
@@ -92,15 +78,10 @@ def _print_evaluation(label: str, result: EvaluationResult) -> None:
 
 
 def main(*, market_data: MarketDataProvider | None = None) -> None:
-    """Replays open-loop and closed-loop sessions and prints the evaluation report.
-
-    Args:
-        market_data: Forward-price source; defaults to live fetches. Tests inject
-            a fixture-backed one.
-    """
+    """Replay open-loop and closed-loop sessions and print the evaluation report."""
     configure_logging()
 
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=CLI_DESCRIPTION)
     parser.add_argument("--fixtures-dir", type=Path, default=FIXTURES_DIR)
     parser.add_argument("--horizon-days", type=int, default=RECONCILIATION.horizon_days)
     parser.add_argument("--deadband", type=float, default=RECONCILIATION.min_abs_return_for_storage)
@@ -117,9 +98,7 @@ def main(*, market_data: MarketDataProvider | None = None) -> None:
     closed_decisions = closed_loop.final_state.get("decisions") or []
 
     open_result = evaluate_decisions(open_decisions, market_data, args.horizon_days, args.deadband)
-    closed_result = evaluate_decisions(
-        closed_decisions, market_data, args.horizon_days, args.deadband
-    )
+    closed_result = evaluate_decisions(closed_decisions, market_data, args.horizon_days, args.deadband)
 
     print(f"\n=== Pre-registered evaluation (H={args.horizon_days}d, deadband={args.deadband}) ===")
     _print_evaluation("Open-loop", open_result)
@@ -150,10 +129,7 @@ def main(*, market_data: MarketDataProvider | None = None) -> None:
         f"(enforced structurally by RiskAssessment's Pydantic validator; "
         f"{sys_report.reduce_verdicts} REDUCE verdicts exercised it)"
     )
-    print(
-        f"  API calls/decision:    {sys_report.api_calls_per_decision:.2f} "
-        f"(total {sys_report.total_api_calls})"
-    )
+    print(f"  API calls/decision:    {sys_report.api_calls_per_decision:.2f} (total {sys_report.total_api_calls})")
     print("  retries/decision:      not instrumented (disclosed gap)")
     print("  tokens/decision:       not instrumented (disclosed gap)")
 

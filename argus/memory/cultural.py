@@ -1,28 +1,4 @@
-"""
-argus/memory/cultural.py
-
-Long-term vector memory interface for ARGUS.
-
-Integrates ChromaDB and sentence-transformer embeddings to store and query trade outcomes
-and decision snapshots, providing qualitative historical wisdom to the Portfolio Manager.
-
-Responsibilities:
-  - Persist successful and failed trade outcomes as embedded documents
-  - Retrieve semantically similar historical patterns for current macro and technical contexts
-  - Expose agent-level accuracy statistics and regime diagnostics
-  - Expire PENDING decision snapshots that never settled (see
-    expire_pending_snapshots), and cap settled trades by MEMORY.max_trade_outcomes
-
-Not responsible for:
-  - Real-time signal generation (see agents/)
-  - Credit assignment / primary_driver computation (see
-    orchestration/reconcile.py)
-  - Portfolio allocation (see agents/portfolio.py)
-
-Dependencies:
-  - chromadb
-  - sentence-transformers (all-MiniLM-L6-v2, downloaded on first import)
-"""
+"""ChromaDB decision snapshots, settled outcomes, and regime-filtered retrieval."""
 
 from __future__ import annotations
 
@@ -42,12 +18,9 @@ from argus.schemas.signals import ARGUSDecision, MacroContext, Outcome
 
 logger = logging.getLogger(__name__)
 
-_SETTLED_IN: dict[Literal["$in", "$nin"], list[str | int | float | bool]] = {
-    "$in": ["SUCCESSFUL", "FAILED", "FLAT"]
-}
+_SETTLED_IN: dict[Literal["$in", "$nin"], list[str | int | float | bool]] = {"$in": ["SUCCESSFUL", "FAILED", "FLAT"]}
 _SETTLED_WHERE: Where = {"outcome": _SETTLED_IN}
 
-# Model downloaded once to ~/.cache/sentence-transformers on first invocation.
 _EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 
 
@@ -58,34 +31,11 @@ class EmbeddingModelMismatchError(RuntimeError):
 def _check_embedding_model_identity(
     persisted_metadata: dict[str, Any] | None, expected_model: str
 ) -> dict[str, Any] | None:
-    """Compares a collection's recorded embedding model against the one this process uses.
-
-    `get_or_create_collection` ignores the `metadata` argument for a collection that
-    already exists, so an existing collection's `embedding_model` — if ever
-    recorded — reflects whatever model actually produced its vectors, not this
-    process's current configuration.
-
-    Args:
-        persisted_metadata: The collection's current metadata, or None.
-        expected_model: The model name this process is configured to embed with.
-
-    Returns:
-        Metadata to backfill via `collection.modify` when the collection predates
-        this check (no `embedding_model` recorded yet), or None when nothing needs
-        writing back.
-
-    Raises:
-        EmbeddingModelMismatchError: The collection was embedded with a different
-            model. Its vectors are geometrically incomparable to anything this
-            process would add — similarity search would otherwise silently degrade
-            toward meaningless results rather than surfacing the mismatch.
-    """
+    """Check the stored embedding model identity without overwriting existing provenance."""
     persisted_metadata = persisted_metadata or {}
     recorded_model = persisted_metadata.get("embedding_model")
     if recorded_model is None:
-        # collection.modify() rejects any metadata dict containing "hnsw:space"
-        # outright, even when the value is unchanged, so the backfill write can
-        # only carry the key actually being added.
+        # Backfill only embedding provenance because Chroma rejects hnsw:space in collection.modify metadata.
         return {"embedding_model": expected_model}
     if recorded_model != expected_model:
         raise EmbeddingModelMismatchError(
@@ -98,12 +48,12 @@ def _check_embedding_model_identity(
 
 
 def _where(conditions: list[dict[str, Any]]) -> dict[str, Any]:
-    """Combines metadata filter conditions into a single ChromaDB ``where`` clause."""
+    """Combine metadata filter conditions into a single ChromaDB `where` clause."""
     return conditions[0] if len(conditions) == 1 else {"$and": conditions}
 
 
 def _outcome_for(actual_return_pct: float) -> Outcome:
-    """Classifies a realized return as successful, failed, or flat (within the storage band)."""
+    """Classify a realized return as successful, failed, or flat (within the storage band)."""
     if actual_return_pct > RECONCILIATION.min_abs_return_for_storage:
         return Outcome.SUCCESSFUL
     if actual_return_pct < -RECONCILIATION.min_abs_return_for_storage:
@@ -118,14 +68,10 @@ def _render_trade_document(
     holding_days: int,
     exit_reason: str,
 ) -> str:
-    """Renders the text document stored (and embedded) for a settled trade."""
+    """Render the text document stored (and embedded) for a settled trade."""
     technical = decision.technical
     macro_regime = decision.macro.macro_regime.value if decision.macro else "unknown"
-    vix_regime = (
-        decision.macro.vix_regime.value
-        if decision.macro and decision.macro.vix_regime
-        else "unknown"
-    )
+    vix_regime = decision.macro.vix_regime.value if decision.macro and decision.macro.vix_regime else "unknown"
     tech_rsi = f"{technical.rsi_14:.0f}" if technical else "N/A"
     tech_macd = f"{technical.macd_histogram:.3f}" if technical else "N/A"
     fund_moat = decision.fundamental.moat_score if decision.fundamental else "N/A"
@@ -146,41 +92,21 @@ Outcome: {actual_return_pct * 100:+.1f}% in {holding_days} days. Exit: {exit_rea
 
 
 def _signal_or_na(agent_signal: Any) -> str:
-    """Returns an agent signal block's enum value, or "N/A" when the agent didn't run."""
+    """Return an agent signal block's enum value, or "N/A" when the agent didn't run."""
     return agent_signal.signal.value if agent_signal else "N/A"
 
 
 class CulturalMemoryManager:
-    """Manages persistent vector databases, semantic indexing, and similarity lookups.
-
-    Uses a local SentenceTransformer embedding model (all-MiniLM-L6-v2) to avoid
-    per-query API costs and ensure retrieval works offline. The collection uses
-    cosine similarity (hnsw:space=cosine) to match multi-dimensional market context.
-
-    Attributes:
-        client: ChromaDB PersistentClient backing the store.
-        ef: SentenceTransformer embedding function used for indexing and queries.
-        collection: The ``argus_wisdom`` ChromaDB collection.
-        persist_dir: Absolute filesystem directory the collection persists to.
-    """
+    """Local vector memory for decision snapshots and settled, regime-filtered outcomes."""
 
     def __init__(self, persist_dir: str | None = None):
-        """Opens (or creates) the persistent ChromaDB collection and embedding function.
-
-        Args:
-            persist_dir: Filesystem directory backing the ChromaDB PersistentClient.
-                None resolves to ``default_chroma_dir()``.
-        """
         if persist_dir is None:
             persist_dir = default_chroma_dir()
-        # Deferred to construction time: embedding_functions pulls in
-        # sentence-transformers, an optional `models` extra (see pyproject.toml),
-        # so importing this module must not require it
+        # Import optional embedding dependencies only when constructing the memory store.
         import chromadb
         from chromadb.utils import embedding_functions
 
-        # Resolved to an absolute path so a caller launching from an unexpected
-        # working directory gets a loud warning instead of a silent, empty store
+        # Resolve the storage path so unexpected working directories produce a visible warning.
         persist_dir = os.path.abspath(persist_dir)
         is_fresh = not os.path.isdir(persist_dir)
         os.makedirs(persist_dir, exist_ok=True)
@@ -196,42 +122,25 @@ class CulturalMemoryManager:
             settings=chromadb.config.Settings(anonymized_telemetry=False),
         )
 
-        self.ef = embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name=_EMBEDDING_MODEL_NAME
-        )
+        self.ef = embedding_functions.SentenceTransformerEmbeddingFunction(model_name=_EMBEDDING_MODEL_NAME)
 
         self.collection = self.client.get_or_create_collection(
             name="argus_wisdom",
             embedding_function=self.ef,  # type: ignore[arg-type]  # chromadb/sentence-transformers stub mismatch
             metadata={"hnsw:space": "cosine", "embedding_model": _EMBEDDING_MODEL_NAME},
         )
-        backfill_metadata = _check_embedding_model_identity(
-            self.collection.metadata, _EMBEDDING_MODEL_NAME
-        )
+        backfill_metadata = _check_embedding_model_identity(self.collection.metadata, _EMBEDDING_MODEL_NAME)
         if backfill_metadata is not None:
             self.collection.modify(metadata=backfill_metadata)
             logger.info(
-                "Backfilled embedding_model=%s onto a pre-existing collection "
-                "with no recorded model",
+                "Backfilled embedding_model=%s onto a pre-existing collection with no recorded model",
                 _EMBEDDING_MODEL_NAME,
             )
         self.persist_dir = persist_dir
         logger.info("Cultural Memory Manager initialized at %s", persist_dir)
 
     def already_reconciled(self, decision_ids: list[str]) -> set[str]:
-        """Returns the subset of decision_ids that already have a stored trade outcome.
-
-        A single batched ``get`` rather than one existence check per decision,
-        so a caller reconciling a growing history of decisions (see
-        orchestration/reconcile.py) can filter its work list down to
-        unreconciled decisions before touching market data at all.
-
-        Args:
-            decision_ids: Candidate ARGUSDecision.decision_id values.
-
-        Returns:
-            The subset already stored under a ``trade_{decision_id}`` row.
-        """
+        """Return the subset of decision_ids that already have a stored trade outcome."""
         if not decision_ids:
             return set()
         ids = [f"trade_{decision_id}" for decision_id in decision_ids]
@@ -246,31 +155,10 @@ class CulturalMemoryManager:
         exit_reason: str,
         primary_driver: str,
     ) -> None:
-        """Persists trade outcomes to index trading history patterns.
-
-        Flat or minor return trades (|return| ≤ 1%) are stored as "FLAT" rather than
-        excluded: get_agent_accuracy's win rate is P(win | stored), so dropping flat
-        trades from storage would have conditioned that rate on |return| > 1% while
-        still reporting it as a plain win rate. FLAT documents don't match either
-        retrieve_wisdom's or retrieve_warnings' outcome filter, so they only affect
-        the accuracy denominator.
-
-        Args:
-            decision: Completed ARGUSDecision containing all agent signals.
-            actual_return_pct: Realized return as a decimal (e.g. 0.05 = +5%).
-            holding_days: Number of calendar days the position was held.
-            exit_reason: Free-text description of the exit trigger.
-            primary_driver: Agent name ('technical'/'fundamental'/'sentiment'/'unknown')
-                credited via leave-one-out ablation
-                (see argus/orchestration/attribution.py:credit_primary_driver).
-                Signal arbitration is this method's caller's job, not this
-                module's — see its docstring's "Not responsible for" list.
-        """
+        """Store successful, failed, and flat outcomes, replacing any pending snapshot."""
         prefix = _outcome_for(actual_return_pct)
         macro_regime = decision.macro.macro_regime.value if decision.macro else "unknown"
-        document = _render_trade_document(
-            prefix, decision, actual_return_pct, holding_days, exit_reason
-        )
+        document = _render_trade_document(prefix, decision, actual_return_pct, holding_days, exit_reason)
 
         doc_id = f"trade_{decision.decision_id}"
 
@@ -289,9 +177,7 @@ class CulturalMemoryManager:
             ],
         )
 
-        # The PENDING snapshot has now settled into a trade_{id} row; leaving it
-        # in place would double-count the decision (dragging down avg_return_pct
-        # via its zero return_pct) in summary_stats
+        # Remove the settled PENDING snapshot so one decision cannot inflate counts or dilute average returns.
         snapshot_id = f"snapshot_{decision.decision_id}"
         try:
             self.collection.delete(ids=[snapshot_id])
@@ -302,7 +188,7 @@ class CulturalMemoryManager:
         logger.info("Stored %s trade pattern. Total: %d", prefix, self.collection.count())
 
     def _prune_trade_outcomes(self) -> None:
-        """Keeps the most recent settled outcomes, with IDs breaking timestamp ties."""
+        """Keep the most recent settled outcomes, with IDs breaking timestamp ties."""
         rows = self.collection.get(
             where=_SETTLED_WHERE,
             include=["metadatas"],
@@ -325,21 +211,7 @@ class CulturalMemoryManager:
         as_of: datetime | None,
         label: str,
     ) -> list[str]:
-        """Runs one outcome- and regime-filtered similarity query, returning [] on failure.
-
-        Shared by retrieve_wisdom and retrieve_warnings so the two filter identically.
-
-        Args:
-            query: Free-text similarity query.
-            outcome: Outcome to filter on (SUCCESSFUL or FAILED).
-            regime: Macro regime to scope the lookup to.
-            n_results: Maximum number of documents to return.
-            as_of: When given, excludes documents stored after this timestamp.
-            label: Noun used in the failure log line.
-
-        Returns:
-            Matching document strings, or [] if the store is empty or the query failed.
-        """
+        """Run one outcome- and regime-filtered similarity query, returning [] on failure."""
         if self.collection.count() == 0:
             return []
 
@@ -365,30 +237,7 @@ class CulturalMemoryManager:
         n_results: int = 5,
         as_of: datetime | None = None,
     ) -> list[str]:
-        """Queries the vector collection to retrieve successful historic patterns.
-
-        Retrieves patterns similar to the current posture.
-
-        Filters on the current regime, symmetrically with retrieve_warnings — both
-        land in the same portfolio prompt, so successes shouldn't be drawn from every
-        regime while failures are confined to this one. Rows stored with
-        regime="unknown" (no trustworthy regime classification) never match,
-        since current_macro.macro_regime is always one of Regime's three live values —
-        remediated rows are deliberately not credited to today's regime.
-
-        Args:
-            current_macro: MacroContext used to construct the similarity query and
-                to scope the regime filter.
-            current_technical_summary: Free-text description of current technical posture.
-            n_results: Maximum number of similar patterns to return.
-            as_of: When given, excludes documents stored after this timestamp. Must
-                be naive, matching the naive now_local() this module stores
-                (see pyproject.toml's DTZ tracking comment). None (default) applies
-                no filtering.
-
-        Returns:
-            List of matching document strings from the SUCCESSFUL outcome filter.
-        """
+        """Query the vector collection to retrieve successful historic patterns."""
         regime = current_macro.macro_regime.value
         vix_regime = current_macro.vix_regime.value if current_macro.vix_regime else "unknown"
         return self._retrieve_by_outcome(
@@ -406,19 +255,7 @@ class CulturalMemoryManager:
         n_results: int = 3,
         as_of: datetime | None = None,
     ) -> list[str]:
-        """Retrieves failed historic patterns within the current macro regime to serve as warnings.
-
-        Args:
-            current_macro: MacroContext used to scope the regime filter.
-            n_results: Maximum number of warning documents to return.
-            as_of: When given, excludes documents stored after this timestamp. Must
-                be naive, matching the naive now_local() this module stores.
-                None (default) applies no filtering.
-
-        Returns:
-            List of matching document strings from the FAILED outcome filter for
-            the current regime.
-        """
+        """Retrieve failed historic patterns within the current macro regime to serve as warnings."""
         regime = current_macro.macro_regime.value
         return self._retrieve_by_outcome(
             query=f"Failed trades in {regime} regime",
@@ -435,32 +272,7 @@ class CulturalMemoryManager:
         regime: str | None = None,
         as_of: datetime | None = None,
     ) -> tuple[float, int]:
-        """Computes shrunk statistical win rates for specialist agent-driven trades.
-
-        Win rate is shrunk toward the 0.5 neutral prior by
-        MEMORY.accuracy_shrinkage_k pseudo-observations (wins + k*0.5) / (n + k),
-        so an agent with 3 observations isn't trusted like one with 300 — it
-        converges to the raw win rate as n grows and collapses to 0.5 as
-        n -> 0. Feeds orchestration/aggregator.py's reliability weighting. n
-        includes FLAT outcomes (store_trade_outcome's |return| ≤ 1% bucket) as
-        non-wins, so this is a true win rate over all stored trades, not one
-        conditioned on |return| > 1%.
-
-        Args:
-            agent_name: Agent identifier string (e.g. 'technical', 'fundamental', 'sentiment').
-            regime: Optional regime filter (e.g. 'EXPANSION'); queries all regimes if None.
-            as_of: When given, excludes trades stored after this timestamp. Must be
-                naive, matching the naive now_local() this module stores. None
-                (default) applies no filtering; replay's closed-loop evaluation
-                passes it to avoid reading future outcomes.
-
-        Returns:
-            (rate, n) — the shrunk win rate in [0, 1], and the raw sample count
-            it was computed from. n distinguishes "0.5 because no data exists"
-            from "0.5 because that's the measured rate"; callers that need to gate
-            on data actually existing (e.g. the Kelly anchor) should check n,
-            not rate.
-        """
+        """Return per-agent win rate shrunk toward 0.5 and its sample count, including flat non-wins."""
         if self.collection.count() == 0:
             return 0.5, 0
 
@@ -488,17 +300,7 @@ class CulturalMemoryManager:
             return 0.5, 0
 
     def summary_stats(self) -> dict[str, Any]:
-        """Compiles performance statistics and regime diagnostics from the memory store.
-
-        avg_return_pct averages over settled rows only (SUCCESSFUL/FAILED/FLAT
-        outcomes carry a real return_pct; PENDING snapshots don't). Dividing by
-        total_stored instead — which includes every still-open PENDING
-        snapshot — structurally biases the average toward 0.0.
-
-        Returns:
-            Dict with keys: total_stored, successful_count, failed_count,
-            pending_count, avg_return_pct, best_regime_for_wins.
-        """
+        """Summarize settled returns separately from pending decision counts."""
         count = 0
         try:
             count = self.collection.count()
@@ -531,7 +333,7 @@ class CulturalMemoryManager:
                 regime = str(m.get("regime", "unknown"))
 
                 settled += 1
-                total_ret += float(m.get("return_pct", 0.0) or 0.0)  # type: ignore[arg-type]  # chromadb metadata values are typed as a broad scalar union
+                total_ret += float(m.get("return_pct", 0.0) or 0.0)  # type: ignore[arg-type]
                 if outcome == Outcome.SUCCESSFUL:
                     wins += 1
                     regime_wins[regime] = regime_wins.get(regime, 0) + 1
@@ -553,24 +355,10 @@ class CulturalMemoryManager:
             return empty
 
     def store_decision_snapshot(self, decision: ARGUSDecision) -> bool:
-        """Persists a real-time decision profile before outcomes are finalized.
-
-        Populates the vector store with decision-making context, enabling retrieval
-        of historical similarities before trade settlement data is processed.
-
-        Args:
-            decision: In-flight ARGUSDecision captured at signal generation time.
-
-        Returns:
-            True if the snapshot was written, False if the write failed.
-        """
+        """Persist a real-time decision profile before outcomes are finalized."""
         try:
             macro_regime = decision.macro.macro_regime.value if decision.macro else "unknown"
-            vix_regime = (
-                decision.macro.vix_regime.value
-                if decision.macro and decision.macro.vix_regime
-                else "unknown"
-            )
+            vix_regime = decision.macro.vix_regime.value if decision.macro and decision.macro.vix_regime else "unknown"
             agg_signal = _signal_or_na(decision.aggregated)
             agg_conv = decision.aggregated.conviction if decision.aggregated else 0.0
             fund_sig = _signal_or_na(decision.fundamental)
@@ -614,26 +402,7 @@ class CulturalMemoryManager:
             return False
 
     def expire_pending_snapshots(self, cutoff: datetime) -> int:
-        """Deletes PENDING decision snapshots older than cutoff.
-
-        A snapshot only leaves PENDING once store_trade_outcome settles it
-        (see its docstring); a decision that never took a position, or whose
-        reconciliation permanently fails (e.g. the ticker's price history is
-        never fetchable again), would otherwise sit PENDING indefinitely,
-        growing the collection and dragging summary_stats.pending_count up
-        forever. Called on the same reconciliation cadence as
-        orchestration.checkpoint.prune_checkpoints and
-        compact_decisions_jsonl, with the same horizon-plus-margin cutoff — a
-        snapshot that old has already had its chance to settle.
-
-        Args:
-            cutoff: Snapshots whose ``timestamp`` metadata is before this are
-                deleted. Should be tz-naive, matching the naive
-                session_timestamps snapshots are stored with.
-
-        Returns:
-            Count of snapshots deleted.
-        """
+        """Delete PENDING decision snapshots older than cutoff."""
         try:
             results = self.collection.get(where={"outcome": Outcome.PENDING.value})
         except Exception as e:
@@ -651,8 +420,7 @@ class CulturalMemoryManager:
                 timestamp = datetime.fromisoformat(str(timestamp_raw))
             except ValueError:
                 continue
-            # Comparing aware with the naive cutoff raises TypeError and would abort the
-            # whole pass.
+            # Normalize timestamps before comparing with the naive retention cutoff.
             if as_naive_timestamp(timestamp) < cutoff:
                 stale_ids.append(doc_id)
 
@@ -674,34 +442,12 @@ _cultural_memory_lock = Lock()
 
 
 def default_chroma_dir() -> str:
-    """Returns where the cultural-memory store lives when no directory is given.
-
-    Returns:
-        settings.ARGUS_CHROMA_DIR, or <ARGUS_DATA_DIR>/chroma_db if that's unset.
-        Read at call time so a per-test or per-deployment settings override applies.
-    """
+    """Return where the cultural-memory store lives when no directory is given."""
     return settings.ARGUS_CHROMA_DIR or str(settings.data_path("chroma_db"))
 
 
 def get_cultural_memory(persist_dir: str | None = None) -> CulturalMemoryManager:
-    """Returns the process-wide CulturalMemoryManager, constructing it on first call.
-
-    Lazy on purpose: construction pulls in sentence-transformers (and its
-    torch dependency) to build the embedding function, and both are an
-    optional `[models]` extra (see pyproject.toml) — importing this module
-    must not require them, only actually using cultural memory does.
-
-    Args:
-        persist_dir: Filesystem directory backing the ChromaDB PersistentClient,
-            used only on the first call that constructs the manager — a later
-            call with a different persist_dir cannot reconfigure the singleton
-            and is logged rather than silently ignored. None resolves to
-            settings.ARGUS_CHROMA_DIR, or <ARGUS_DATA_DIR>/chroma_db if that's
-            also unset.
-
-    Returns:
-        The process-wide CulturalMemoryManager singleton.
-    """
+    """Return the process-wide CulturalMemoryManager, constructing it on first call."""
     if persist_dir is None:
         persist_dir = default_chroma_dir()
 
@@ -713,8 +459,7 @@ def get_cultural_memory(persist_dir: str | None = None) -> CulturalMemoryManager
                 return _cultural_memory
     if os.path.abspath(persist_dir) != _cultural_memory.persist_dir:
         logger.warning(
-            "get_cultural_memory(persist_dir=%r) ignored; the process-wide "
-            "singleton is already initialized at %s.",
+            "get_cultural_memory(persist_dir=%r) ignored; the process-wide singleton is already initialized at %s.",
             persist_dir,
             _cultural_memory.persist_dir,
         )

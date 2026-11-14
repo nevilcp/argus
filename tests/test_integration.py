@@ -1,18 +1,4 @@
-"""
-tests/test_integration.py
-
-Integration tests for ARGUS: the statistical-agent pipeline, the orchestrator
-graph end to end, signal-schema serialization, and the shared Governor's
-rate limits.
-
-Three of TestEndToEnd's methods exercise live yfinance calls and are skipped
-with a visible reason, via the `live_network` marker, when that network is
-unreachable — see `tests/conftest.py::_skip_without_live_network`.
-FRED is not a hard prerequisite: MacroStatisticalAgent.analyze() degrades to
-STABLE/0.0 defaults rather than raising when FRED_API_KEY is absent, so none
-of these tests need it to pass. The rest of the class, and every LLM boundary
-any test crosses, run offline.
-"""
+"""Integration coverage for statistical agents, graph execution, contracts, and quota admission."""
 
 import asyncio
 import time
@@ -58,7 +44,6 @@ class TestEndToEnd:
 
     @pytest.mark.live_network
     def test_statistical_agents_pipeline(self):
-        """TechnicalAgent -> MacroAgent -> RiskEngine chain runs with zero LLM calls."""
         pipeline = MFTDataPipeline(["AAPL"], LiveMarketDataProvider())
         df = yf.download("AAPL", period="60d", interval="5m", progress=False, threads=False)
         if isinstance(df.columns, pd.MultiIndex):
@@ -93,9 +78,7 @@ class TestEndToEnd:
 
         risk = RiskStatisticalAgent()
         price_history = {
-            "AAPL": pd.Series(
-                [150.0, 151.0, 149.0, 155.0, 160.0], index=pd.date_range("2023-01-01", periods=5)
-            )
+            "AAPL": pd.Series([150.0, 151.0, 149.0, 155.0, 160.0], index=pd.date_range("2023-01-01", periods=5))
         }
         r_sig = risk.evaluate([{"ticker": "AAPL", "weight": 0.1}], price_history, m_ctx.vix_level)
         assert isinstance(r_sig, RiskAssessment)
@@ -103,15 +86,6 @@ class TestEndToEnd:
 
     @pytest.mark.live_network
     def test_reconcile_decision_resolves_a_matured_decision_against_live_prices(self):
-        """A decision old enough to have matured reconciles end to end against real Yahoo prices.
-
-        Regression coverage for issue #93 (yfinance 401 "Invalid Crumb"): this
-        is the one place the reconciliation path — compute_realized_return's
-        market_data.ohlcv_daily() call through to reconcile_decision — runs
-        against LiveMarketDataProvider instead of a fixture/fake, so a crumb
-        handshake failure here would fail this test rather than only surface
-        in production.
-        """
         horizon_days = 5
         session_timestamp = datetime.now() - pd.Timedelta(days=30)
         technical = TechnicalSignal(
@@ -147,9 +121,7 @@ class TestEndToEnd:
         )
         cultural = mock.create_autospec(CulturalMemoryManager, instance=True)
 
-        stored = reconcile_decision(
-            decision, LiveMarketDataProvider(), cultural, horizon_days=horizon_days
-        )
+        stored = reconcile_decision(decision, LiveMarketDataProvider(), cultural, horizon_days=horizon_days)
 
         assert stored is True
         cultural.store_trade_outcome.assert_called_once()
@@ -164,25 +136,9 @@ class TestEndToEnd:
     @mock.patch("argus.agents.fundamental.FundamentalAgent.analyze")
     @mock.patch("argus.agents.sentiment.SentimentAgent.analyze")
     async def test_full_graph_smoke(self, mock_sent, mock_fund, mock_portfolio, tmp_path):
-        """Runs the complete LangGraph graph for AAPL, MSFT using mocked LLMs.
-
-        Cultural memory is mocked out (not just left real) because its embedding
-        function needs the optional `[models]` extra (sentence-transformers) that
-        default installs/CI don't have, and because this smoke test is about graph
-        wiring, not vector-DB behavior. PortfolioManagerAgent.allocate is mocked
-        for the same reason FundamentalAgent/SentimentAgent are: GROQ_API_KEY is
-        intentionally unset in CI (see .github/workflows/ci.yml), and this
-        2-ticker universe no longer VETOes every ticker, so allocate() now
-        actually reaches the LLM call instead of short-circuiting to all-cash
-        before ever touching the network.
-
-        The checkpoint is written under tmp_path so this run never lands in the
-        production argus_graph.db.
-        """
         memory = neutral_cultural_memory()
 
         def fund_side_effect(ticker, backtest_mode=False, session_seed=None, diagnostics=None):
-            """Returns a fixed BULLISH FundamentalSignal; the extra params match analyze()."""
             return FundamentalSignal(
                 ticker=ticker,
                 sector="Technology",
@@ -198,7 +154,6 @@ class TestEndToEnd:
         mock_fund.side_effect = fund_side_effect
 
         def sent_side_effect(ticker, *args, **kwargs):
-            """Returns a fixed BULLISH SentimentSignal; the extra params match analyze()."""
             return SentimentSignal(
                 ticker=ticker,
                 signal=Signal.BULLISH,
@@ -223,7 +178,6 @@ class TestEndToEnd:
             cultural_warnings=None,
             diagnostics=None,
         ):
-            """Returns a fixed all-cash PortfolioAllocation; the extra params match allocate()."""
             return PortfolioAllocation(
                 session_id=str(uuid4()),
                 user_investable_capital=float(user_profile.get("total_wealth") or 0.0),
@@ -272,17 +226,13 @@ class TestEndToEnd:
             assert len(alloc.portfolio) >= 1 or alloc.cash_reserve_pct == 1.0
 
             for pos in alloc.portfolio:
-                # The per-ticker risk gate now REDUCEs (stop_loss=0.0) real
-                # positions it previously under-detected, so 0.0 is a legitimate
-                # outcome on live market data, not just an unpopulated field
+                # A reduced allocation may have a zero stop; its risk statistics remain measured independently.
                 assert pos.stop_loss >= 0.0
         except Exception as e:
-            # The checkpointer can raise a dataframe serialization error unrelated to graph wiring
             if "msgpack" not in str(e).lower():
                 raise
 
     def test_schema_round_trip(self):
-        """Signal schemas survive a JSON dump/validate round trip unchanged."""
         tech = TechnicalSignal(
             ticker="AAPL",
             current_price=150.0,
@@ -328,44 +278,31 @@ class TestEndToEnd:
         assert macro.macro_regime == macro2.macro_regime
 
     def test_governor_prevents_over_limit(self):
-        """The shared governor sleeps once a model's rolling-window request count reaches
-        its limit."""
         model = next(iter(REGISTERED_MODELS))
         limit = BOOTSTRAP_LIMITS[model]["requests_per_minute"]
 
         usage = governor._get_usage(model)
-        # governor is a module-level singleton, so its rolling window may carry
-        # entries from an earlier test; seed a clean window rather than assume
-        # one, so a real window rollover mid-suite can't spuriously affect this
+        # Reset the shared governor so wall-clock rollover and earlier tests cannot change admission.
         usage.requests_window.clear()
         usage.requests_window.extend([time.monotonic()] * (limit - 1))
 
-        # Simulates the window rolling over during the sleep, so the retry loop's
-        # re-check finds room on its second pass rather than exhausting every
-        # attempt against a mock that never advances real time.
+        # Advance the window in the sleep side effect so the retry can observe newly available capacity.
         def _advance_window(_seconds):
             usage.requests_window.clear()
 
-        # Reaching exactly the limit still succeeds without sleeping
         try:
             with mock.patch("argus.governor.time.sleep", side_effect=_advance_window) as mock_sleep:
                 governor.wait_if_needed(model)
                 assert len(usage.requests_window) == limit
                 assert mock_sleep.call_count == 0
 
-                # Exceeding it sleeps out the remainder of the rolling window
                 governor.wait_if_needed(model)
                 assert mock_sleep.call_count == 1
         finally:
-            # governor is a module-level singleton shared across tests; the
-            # _advance_window side effect above cleared its rolling windows,
-            # which must not leak a stale state into later tests
+            # Clear singleton counters after the simulated rollover so later tests see no stale state.
             usage.requests_window.clear()
             usage.tokens_window.clear()
 
     def test_half_kelly_formula(self):
-        """half_kelly_weight() computes half the Kelly-optimal position size."""
-        weight = half_kelly_weight(
-            win_probability=0.6, avg_win_pct=0.08, avg_loss_pct=0.04, max_position=0.15
-        )
+        weight = half_kelly_weight(win_probability=0.6, avg_win_pct=0.08, avg_loss_pct=0.04, max_position=0.15)
         assert abs(weight - 0.15) < 1e-5

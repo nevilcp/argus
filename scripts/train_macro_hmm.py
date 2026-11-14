@@ -1,4 +1,15 @@
-"""
+"""CLI for manual macro HMM training and validation before artifact publication."""
+
+import argparse
+
+from argus.agents.macro import MacroStatisticalAgent
+from argus.config import settings
+from argus.infra.log import configure_logging
+from argus.params import MACRO
+from argus.ports import MarketDataProvider
+from argus.schemas.signals import Regime
+
+CLI_DESCRIPTION = """
 scripts/train_macro_hmm.py
 
 CLI entry point to fit RegimeClassifier (argus/agents/macro_hmm.py) on a long FRED +
@@ -17,25 +28,12 @@ back empty — a non-zero exit here means the fit produced a model that isn't a
 function of the macro data, and no artifact is written for it.
 """
 
-import argparse
-
-from argus.agents.macro import MacroStatisticalAgent
-from argus.config import settings
-from argus.infra.log import configure_logging
-from argus.params import MACRO
-from argus.ports import MarketDataProvider
-from argus.schemas.signals import Regime
-
 
 def main(*, market_data: MarketDataProvider | None = None) -> None:
-    """Parses CLI args, fits the HMM, and saves the artifact if it validates.
-
-    Args:
-        market_data: History source; defaults to live fetches. Tests inject a fixture-backed one.
-    """
+    """Parse CLI args, fit the HMM, and save the artifact if it validates."""
     configure_logging()
 
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=CLI_DESCRIPTION)
     parser.add_argument(
         "--start-date",
         default=MACRO.hmm_training_start,
@@ -75,8 +73,7 @@ def main(*, market_data: MarketDataProvider | None = None) -> None:
 
     classifier.save(args.output, start_date=args.start_date)
     print(
-        f"\nValidation gate passed. Saved artifact to {args.output} "
-        f"({classifier.n_train_observations} observations)."
+        f"\nValidation gate passed. Saved artifact to {args.output} ({classifier.n_train_observations} observations)."
     )
 
 

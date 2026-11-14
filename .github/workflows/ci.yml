@@ -38,14 +38,10 @@ jobs:
   test:
     name: Integration Test Suite (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    # Observed: ~2-3.5 min per matrix leg. 15 min covers a slow PyPI mirror
-    # without leaving room for a truly hung run.
+    # Allow slow dependency resolution without leaving hung checks unbounded.
     timeout-minutes: 15
 
-    # pyproject.toml declares requires-python = ">=3.14", the same version the
-    # shipped image (Dockerfile.api) runs, so a single leg covers the whole
-    # supported range. Kept as a matrix so a future floor bump or an added
-    # version is a one-line change.
+    # Test the supported Python floor; keep the matrix available for future supported versions.
     strategy:
       fail-fast: false
       matrix:
@@ -69,27 +65,21 @@ jobs:
         run: |
           python -m pytest tests/ -v --tb=short
         env:
-          # FRED key provided for macro data fetching in tests
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-          # Groq key intentionally omitted — LLM agents are mocked or
-          # fixture-backed in CI (see argus/seams.py)
+          # Keep model calls fixture-backed; CI must never call Groq.
           GROQ_API_KEY: ""
 
   clean-install:
     name: Clean Install (pyproject.toml only, no pip cache)
     runs-on: ubuntu-latest
-    # Observed: ~2-3.5 min. 15 min covers an uncached resolve against a slow
-    # PyPI mirror without leaving room for a truly hung run.
+    # Allow slow dependency resolution without leaving hung checks unbounded.
     timeout-minutes: 15
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      # No `cache: "pip"` here on purpose (DEP-5): the `test` job's cache can
-      # mask a dependency resolution that only works because a stale wheel is
-      # already sitting in the cache. This job resolves from pyproject.toml
-      # alone, the same way a fresh clone or a Docker build does.
+      # Resolve dependencies without a pip cache to expose installs that only work with stale local wheels.
       - name: Set up Python 3.14
         uses: actions/setup-python@v7
         with:

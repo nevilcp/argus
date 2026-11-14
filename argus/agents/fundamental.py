@@ -1,20 +1,4 @@
-"""Generative fundamental analysis agent powered by Groq.
-
-Responsibilities:
-  - Ingest and evaluate financial ratio payloads (valuation multiples, capital efficiency, growth rates)
-  - Generate structured directional signals via LLM analysis
-  - Apply deterministic ticker anonymization to isolate reasoning models from parametric memory
-    contamination during backtests
-
-Not responsible for:
-  - Fetching raw price data (see data/fetchers.py)
-  - Risk assessment (see agents/risk.py)
-  - Portfolio allocation (see agents/portfolio.py)
-
-Dependencies:
-  - langchain_groq
-  - GROQ_API_KEY env var must be set (see .env.example)
-"""
+"""Generative fundamental analysis agent powered by Groq."""
 
 from __future__ import annotations
 
@@ -38,8 +22,7 @@ from argus.structured_output import decode_or_degrade
 
 logger = logging.getLogger(__name__)
 
-# Approximate sector-median P/E anchors for the LLM prompt; rough averages, not precise thresholds.
-# Provenance: ARBITRARY — no cited source or as-of date, so treat them as rough anchors.
+# Arbitrary sector P/E anchors lack a cited source or as-of date; use them only as rough prompt context.
 _SECTOR_PE_MEDIANS: dict[str, float] = {
     "Technology": 32.0,
     "Consumer Cyclical": 24.0,
@@ -54,7 +37,6 @@ _SECTOR_PE_MEDIANS: dict[str, float] = {
     "Basic Materials": 16.0,
 }
 
-# Measured from market_data.fundamentals(); LLM only supplies signal/conviction/moat/reasoning.
 _MEASURED_FUNDAMENTAL_FIELDS = (
     "sector",
     "industry",
@@ -73,65 +55,23 @@ _MEASURED_FUNDAMENTAL_FIELDS = (
 
 
 def _use_backtest_seed(backtest_mode: bool, session_seed: int | None) -> bool:
-    """Decides whether a session should anonymize and derive as_of_date from session_seed.
-
-    Args:
-        backtest_mode: Whether the caller requested backtest anonymization.
-        session_seed: Session seed, if any. ``0`` is a legal seed — checked via
-            ``is not None``, not truthiness, since ``bool(0)`` is False.
-
-    Returns:
-        True if backtest anonymization/date-seeding should apply.
-    """
+    """Decide whether a session should anonymize and derive as_of_date from session_seed."""
     return backtest_mode and session_seed is not None
 
 
 def _session_seed_to_date(session_seed: int) -> date:
-    """Parses a session_seed integer date stamp into a calendar date.
-
-    Args:
-        session_seed: Integer date stamp (e.g. 20240115), as documented on
-            ``anonymize_ticker``.
-
-    Returns:
-        The corresponding calendar date.
-    """
+    """Parse a session_seed integer date stamp into a calendar date."""
     return datetime.strptime(str(session_seed), "%Y%m%d").date()  # noqa: DTZ007
 
 
 def anonymize_ticker(ticker: str, session_seed: int) -> str:
-    """Generates a deterministic hash-based identifier to mask real tickers during backtesting.
-
-    Uses MD5 (not cryptographic — just for deterministic obfuscation) to produce
-    a short code that is stable per ticker+session combination, enabling the LLM
-    to reason about metrics without accessing parametric memory of the real company.
-
-    Args:
-        ticker: Real equity ticker symbol (e.g. 'AAPL').
-        session_seed: Integer date stamp (e.g. 20240115) that scopes anonymization
-            to a specific simulation date.
-
-    Returns:
-        Anonymized identifier string in the format ``COMP_XXXX``.
-    """
+    """Generate a deterministic hash-based identifier to mask real tickers during backtesting."""
     h = hashlib.md5(f"{ticker}{session_seed}".encode()).hexdigest()[:4].upper()
     return f"COMP_{h}"
 
 
 def build_compact_prompt(ticker: str, pit_data: dict, anon_id: str | None = None) -> str:
-    """Constructs a structured, token-minimized evaluation prompt with metric unit classifications.
-
-    Formats metric values with their units and context thresholds so the LLM can
-    interpret raw numbers without needing domain knowledge embedded in the question.
-
-    Args:
-        ticker: Real equity ticker symbol; used as subject when not anonymized.
-        pit_data: Point-in-time dict with keys ``fundamentals`` and ``as_of_date``.
-        anon_id: If set, replaces the ticker in the prompt for backtest anonymization.
-
-    Returns:
-        Stripped prompt string ready for LLM invocation.
-    """
+    """Construct a structured, token-minimized evaluation prompt with metric unit classifications."""
     subject = anon_id if anon_id else ticker
     fundamentals = pit_data.get("fundamentals", {})
     as_of = pit_data.get("as_of_date", "")
@@ -229,26 +169,14 @@ SYSTEM_PROMPT = (
 )
 
 
-def _signal_payload(
-    verdict: FundamentalVerdict, ticker: str, pit_data: dict[str, Any]
-) -> dict[str, Any]:
-    """Merges an LLM verdict with the measured ratios into a FundamentalSignal payload.
-
-    Args:
-        verdict: Decoded LLM verdict, supplying only signal/conviction/moat_score/reasoning.
-        ticker: Equity ticker symbol.
-        pit_data: Point-in-time dict with keys ``fundamentals`` and ``as_of_date``.
-
-    Returns:
-        Dict ready for ``FundamentalSignal.model_validate``.
-    """
+def _signal_payload(verdict: FundamentalVerdict, ticker: str, pit_data: dict[str, Any]) -> dict[str, Any]:
+    """Merge an LLM verdict with the measured ratios into a FundamentalSignal payload."""
     data: dict[str, Any] = verdict.model_dump()
     data["ticker"] = ticker
     data["data_as_of_date"] = pit_data["as_of_date"]
     data["timestamp"] = now_local().isoformat()
     data["api_calls_used"] = 1
 
-    # Measured ratios come from the fetched payload, never the LLM echo.
     f = pit_data.get("fundamentals", {})
     for key in _MEASURED_FUNDAMENTAL_FIELDS:
         data[key] = f.get(key)
@@ -260,32 +188,13 @@ def _signal_payload(
 
 
 class FundamentalAgent:
-    """Agent coordinating LLM valuation and economic moat auditing.
-
-    Uses an injected LLMClient (Groq by default) to construct structured
-    investment theses from ratio payloads fetched via an injected
-    MarketDataProvider, applying local caches, the client's remaining-capacity
-    reserve, and the shared structured-output decoder's parse/validate/retry
-    (with repair).
-
-    Attributes:
-        llm_client: Injected LLM backend used to generate verdicts.
-        market_data: Injected provider used to fetch fundamentals.
-        cache: TTL-bounded cache of prior signals, keyed by
-            ``(ticker, session_seed)``.
-    """
+    """Agent coordinating LLM valuation and economic moat auditing."""
 
     def __init__(
         self,
         llm_client: LLMClient | None = None,
         market_data: MarketDataProvider | None = None,
     ) -> None:
-        """Constructs Groq/live defaults for any provider not injected.
-
-        Args:
-            llm_client: LLM backend; defaults to a Groq-backed client.
-            market_data: Provider for fundamentals lookups; defaults to live fetches.
-        """
         self.llm_client = llm_client or default_groq_client(
             settings.ARGUS_FUNDAMENTAL_MODEL,
             STRUCTURED_OUTPUT.llm_temperature,
@@ -304,25 +213,7 @@ class FundamentalAgent:
         session_seed: int | None = None,
         diagnostics: Diagnostics | None = None,
     ) -> FundamentalSignal | None:
-        """Audits fundamentals for a single ticker and returns a validated Pydantic signal.
-
-        Checks the local cache first, enforces the injected LLM client's
-        remaining capacity, fetches current financial ratios, and decodes a
-        FundamentalVerdict from the LLM via argus.structured_output.decode
-        (with repair enabled).
-
-        Args:
-            ticker: Equity ticker symbol.
-            backtest_mode: When True, anonymizes the ticker to prevent LLM parametric recall.
-            session_seed: Integer date seed for deterministic anonymization; required when
-                backtest_mode is True.
-            diagnostics: Receives a reason on every path that returns None, so
-                callers can surface the failure instead of only logging it.
-                Defaults to a throwaway collector.
-
-        Returns:
-            A validated FundamentalSignal, or None if decoding ultimately fails.
-        """
+        """Audit fundamentals for a single ticker and return a validated Pydantic signal."""
         diagnostics = diagnostics or Diagnostics()
         label = f"fundamental_analysis[{ticker}]"
         cached = self.cache.get((ticker, session_seed))
@@ -371,7 +262,6 @@ class FundamentalAgent:
         try:
             signal = FundamentalSignal.model_validate(data)
         except ValidationError as e:
-            # Merged measured data (e.g. negative debt_to_equity) can fail schema even after a clean decode.
             diagnostics.record(f"{label}: measured data failed validation: {e}")
             return None
 
@@ -380,32 +270,14 @@ class FundamentalAgent:
         return signal
 
     def _has_spare_capacity(self) -> bool:
-        """Reports whether the LLM client has room left beyond the held-back reserve.
-
-        Returns:
-            True when the client's remaining capacity still covers the reserve kept
-            for the same-model portfolio agent (see ``FUNDAMENTAL.capacity_reserve_fraction``).
-        """
-        capacity_reserve = max(
-            1, int(settings.ARGUS_GROQ_RPM * FUNDAMENTAL.capacity_reserve_fraction)
-        )
+        """Report whether the LLM client has room left beyond the held-back reserve."""
+        capacity_reserve = max(1, int(settings.ARGUS_GROQ_RPM * FUNDAMENTAL.capacity_reserve_fraction))
         return self.llm_client.remaining_capacity() >= capacity_reserve
 
     def batch_analyze(
         self, tickers: list[str], backtest_mode: bool = False, session_seed: int | None = None
     ) -> tuple[dict[str, FundamentalSignal], list[str]]:
-        """Performs fundamental evaluations sequentially across a set of tickers.
-
-        Args:
-            tickers: List of equity ticker symbols.
-            backtest_mode: Passed through to each ``analyze`` call for anonymization.
-            session_seed: Passed through to each ``analyze`` call for anonymization.
-
-        Returns:
-            Tuple of (signals, errors). ``signals`` maps ticker → FundamentalSignal
-            for each successfully analyzed ticker. ``errors`` names each ticker
-            omitted and why.
-        """
+        """Perform fundamental evaluations sequentially across a set of tickers."""
         results = {}
         diagnostics = Diagnostics()
         for ticker in tickers:

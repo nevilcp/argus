@@ -1,16 +1,4 @@
-"""
-api/models.py
-
-Request and response models for the HTTP gateway.
-
-Responsibilities:
-  - AnalysisRequest: validate and normalize the /analyze payload
-  - AnalysisResponse: the shape /analyze returns
-
-Not responsible for:
-  - Routing or admission checks (see api/main.py)
-  - The input bounds themselves (see argus/schemas/requests.py)
-"""
+"""Validated HTTP request and response contracts."""
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -35,17 +23,7 @@ class AnalysisRequest(BaseModel):
     @field_validator("tickers")
     @classmethod
     def _normalize_tickers(cls, tickers: list[str]) -> list[str]:
-        """Strips whitespace, upper-cases, validates ticker shape, then dedupes.
-
-        Runs in that order deliberately: pydantic's StringConstraints checks
-        `pattern` against the raw, pre-transform string even when combined
-        with `to_upper`/`strip_whitespace`, so a case/whitespace-only field
-        constraint can't do this — the transform has to happen before the
-        pattern check runs.
-
-        Raises:
-            ValueError: If any entry isn't a valid ticker after normalization.
-        """
+        """Normalize case and whitespace before validating ticker shape and removing duplicates."""
         normalized = [t.strip().upper() for t in tickers]
         invalid = [t for t in normalized if not is_valid_ticker(t)]
         if invalid:

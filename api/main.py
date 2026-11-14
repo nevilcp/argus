@@ -1,32 +1,4 @@
-"""
-api/main.py
-
-FastAPI gateway service for the ARGUS multi-agent decision system.
-
-Exposes REST API endpoints to orchestrate execution graphs and audit system
-safety/governor statistics. There is no live /backtest endpoint; a
-multi-year walk-forward backtest isn't offered, so scripts/replay_backtest.py
-replays recorded fixtures through this same graph over the ~60-day window
-that is genuinely available.
-
-Responsibilities:
-  - Build the app and its routes
-  - Route analysis requests to the LangGraph execution pipeline, enforcing
-    the kill-switch, market-hours and live-cache admission gates first
-  - Append every /analyze decision to the same decisions.jsonl log the
-    unattended collector writes to (see argus/orchestration/collector.py),
-    so reconciliation sees both entry points into the graph
-  - Expose health, memory, governor, and kill-switch management endpoints
-
-Not responsible for:
-  - Request/response models (see api/models.py)
-  - Startup checks and the single-process lock (see api/guards.py)
-  - Startup/shutdown, the background loops' lifetimes and the shared runtime
-    state (see api/lifespan.py)
-  - The collector and reconcile loops themselves (see
-    argus/orchestration/scheduler.py)
-  - Agent logic (see argus/agents/)
-"""
+"""HTTP routes for portfolio analysis, diagnostics, and safety controls."""
 
 import asyncio
 import logging
@@ -64,33 +36,13 @@ app.add_middleware(
 
 
 async def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
-    """Gates mutating endpoints (/analyze, /kill-switch/reset) behind a shared secret.
-
-    A blank ARGUS_API_KEY (the default) disables the check entirely, so local
-    development and any deployment that hasn't set one keep working unchanged
-    — this is a minimum bar for a publicly reachable deployment, not a
-    substitute for running behind a real auth layer.
-
-    Args:
-        x_api_key: Value of the X-API-Key request header, if present.
-
-    Raises:
-        HTTPException 401: If ARGUS_API_KEY is set and the header doesn't match.
-    """
+    """Gate mutating endpoints (/analyze, /kill-switch/reset) behind a shared secret."""
     if settings.ARGUS_API_KEY and x_api_key != settings.ARGUS_API_KEY:
         raise HTTPException(401, "Missing or invalid X-API-Key header.")
 
 
 def _background_task_status(task: asyncio.Task | None) -> dict:
-    """Reports a background task's liveness, distinguishing "never enabled" from "died".
-
-    Args:
-        task: The task to inspect, or None if the loop it would run was never
-            started (e.g. ARGUS_COLLECTOR_ENABLED is False).
-
-    Returns:
-        Dict with ``enabled``, ``alive``, and — only when dead — ``error``.
-    """
+    """Report a background task's liveness, distinguishing "never enabled" from "died"."""
     if task is None:
         return {"enabled": False, "alive": True}
     if not task.done():
@@ -105,17 +57,7 @@ def _background_task_status(task: asyncio.Task | None) -> dict:
 
 @app.get("/health")
 async def health():
-    """Validates connectivity to model backends, API quotas, and system diagnostics.
-
-    Reads background-task liveness, the kill switch's halt state, and cache
-    freshness — not just in-memory governor counters — so a dead
-    pipeline/collector/reconcile loop shows up here instead of staying
-    invisible behind a green /health.
-
-    Raises:
-        HTTPException 503: If any background task (MFT pipeline, collector,
-            or reconciliation loop) has stopped running.
-    """
+    """Report task liveness, safety state, and cache freshness; return 503 for a dead background task."""
     try:
         can_make_calls = governor.get_remaining_capacity(settings.ARGUS_PORTFOLIO_MODEL) > 0
     except Exception:
@@ -158,15 +100,7 @@ async def health():
 
 @app.get("/pipeline/status")
 async def pipeline_status():
-    """Reports the background MFT pipeline's live state without perturbing it.
-
-    Intended for watching the unattended collector — buffer depth, session
-    cache freshness, and the last automatic collection cycle's outcome — all
-    without triggering a real analysis request.
-
-    Raises:
-        HTTPException 503: If the pipeline hasn't started yet.
-    """
+    """Report the background MFT pipeline's live state without perturbing it."""
     pipeline = runtime.pipeline
     if pipeline is None:
         raise HTTPException(503, "Pipeline not yet initialized.")
@@ -185,9 +119,7 @@ async def pipeline_status():
         "is_market_hours": pipeline.is_market_hours(),
         "collector_enabled": settings.ARGUS_COLLECTOR_ENABLED,
         "last_collection_result": (
-            None
-            if runtime.last_collection_result is None
-            else asdict(runtime.last_collection_result)
+            None if runtime.last_collection_result is None else asdict(runtime.last_collection_result)
         ),
         "reconcile_enabled": settings.ARGUS_RECONCILE_ENABLED,
         "reconcile_hour_et": settings.ARGUS_RECONCILE_HOUR_ET,
@@ -196,45 +128,15 @@ async def pipeline_status():
 
 
 def _raise_if_halted(phase: str = "") -> KillSwitch | None:
-    """Raises 503 if the kill switch has halted the system; otherwise returns the switch.
-
-    Args:
-        phase: Appended to the message to say when the halt was seen, e.g.
-            " during analysis" for the re-check after a graph run.
-
-    Returns:
-        The kill switch, or None if none has been initialized.
-
-    Raises:
-        HTTPException 503: If the kill switch is halted.
-    """
+    """Raise 503 if the kill switch has halted the system; otherwise returns the switch."""
     ks = get_kill_switch()
     if ks and ks.is_halted:
-        raise HTTPException(
-            503, f"System halted{phase}. Kill switch triggered. Manual reset required."
-        )
+        raise HTTPException(503, f"System halted{phase}. Kill switch triggered. Manual reset required.")
     return ks
 
 
 def _admit_live_session(req: AnalysisRequest) -> dict[str, dict]:
-    """Applies every pre-graph gate and returns the live feature dict per requested ticker.
-
-    The kill switch's drawdown gate is process-global, fixed at startup from
-    settings.ARGUS_RISK_TOLERANCE (see argus/risk/kill_switch.py's class
-    docstring) — a request's own risk_tolerance does not change which
-    threshold guards it. A mismatch is logged, not rejected.
-
-    Args:
-        req: The validated request.
-
-    Returns:
-        Ticker → live technical feature dict, one entry per requested ticker.
-
-    Raises:
-        HTTPException 503: If the system is halted or blocked on VIX, the market
-            is closed, or the live cache is missing, stalled or stale for any
-            requested ticker.
-    """
+    """Apply every pre-graph gate and return the live feature dict per requested ticker."""
     ks = _raise_if_halted()
     if ks:
         if not ks.new_positions_allowed:
@@ -247,9 +149,7 @@ def _admit_live_session(req: AnalysisRequest) -> dict[str, dict]:
                 ks.risk_tolerance,
             )
 
-    # Daily bars would mismatch the resolution the technical agent expects, and
-    # checking this first confines every age check below to a weekday
-    # 09:30-16:00 ET window, eliminating the weekend/holiday false positive
+    # Check market hours before freshness; daily bars cannot substitute for intraday technical features.
     pipeline = runtime.pipeline
     if pipeline is None or not pipeline.is_market_hours():
         raise HTTPException(
@@ -258,17 +158,13 @@ def _admit_live_session(req: AnalysisRequest) -> dict[str, dict]:
             "Retry between 09:30 and 16:00 ET on a weekday.",
         )
 
-    # Registered only once every earlier gate has cleared — a rejected
-    # request must not mutate pipeline state or spend a slot in the
-    # tracked-universe cap
+    # Register tickers only after the earlier gates pass, so rejected requests consume no tracking slots.
     pipeline.register_tickers(req.tickers)
 
     if runtime.live_cache is None:
         raise HTTPException(503, "Live session cache not yet initialized.")
 
-    # Admission answers only "how old is this" for each ticker; the ordering
-    # against market hours above is what decides whether that age matters
-    # right now
+    # Market hours determine when the cached publication and bar ages matter.
     admission = runtime.live_cache.admit(req.tickers, now_market())
 
     if admission.absent:
@@ -295,32 +191,14 @@ def _admit_live_session(req: AnalysisRequest) -> dict[str, dict]:
 
 
 async def _run_graph(state: ARGUSState) -> dict:
-    """Invokes the shared graph once, under the analyze lock and the request deadline.
-
-    Args:
-        state: Initial graph state for this request.
-
-    Returns:
-        The graph's final state.
-
-    Raises:
-        HTTPException 429: If another analysis holds the lock, or the governor's
-            rate budget is exhausted.
-        HTTPException 503: If the graph isn't built yet, or a configured model has
-            no rate-limit profile (a misconfiguration, not a transient condition).
-        HTTPException 504: If the run exceeds ARGUS_ANALYZE_DEADLINE_SECONDS.
-        HTTPException 500: For any other graph failure, with a correlation ref
-            instead of the internal exception text.
-    """
+    """Invoke the shared graph once, under the analyze lock and the request deadline."""
     graph = runtime.graph
     if graph is None:
         raise HTTPException(503, "Agent graph not yet initialized.")
 
     config = new_run_config("analyze")
 
-    # No await between this check and the acquire below, so nothing can slip
-    # in between them — Semaphore.acquire returns synchronously when
-    # unlocked, and a later refactor that inserts an await here breaks that.
+    # Keep the lock check and acquire adjacent; an intervening await would allow another request to enter.
     if runtime.analyze_lock.locked():
         raise HTTPException(
             429,
@@ -335,9 +213,7 @@ async def _run_graph(state: ARGUSState) -> dict:
                 timeout=settings.ARGUS_ANALYZE_DEADLINE_SECONDS,
             )
     except TimeoutError:
-        # The underlying thread can't be canceled and keeps running — async
-        # job submission is a possible future improvement — but the server no
-        # longer holds the connection open past a proxy's own timeout with no signal.
+        # The worker thread continues after timeout; only the HTTP wait is bounded.
         logger.error("Graph run exceeded the %ss deadline", settings.ARGUS_ANALYZE_DEADLINE_SECONDS)
         raise HTTPException(
             504,
@@ -357,20 +233,7 @@ async def _run_graph(state: ARGUSState) -> dict:
 
 
 def _build_response(final_state: dict) -> AnalysisResponse:
-    """Turns a finished graph state into the /analyze response.
-
-    Args:
-        final_state: The graph's final state.
-
-    Returns:
-        The allocation and diagnostics.
-
-    Raises:
-        HTTPException 503: If the portfolio agent produced no allocation. Refusing
-            to answer is correct here — see PortfolioManagerAgent.allocate's
-            degrade-not-fabricate contract — so this is an upstream LLM outage,
-            not a bug in this server; 503 says so rather than the generic 500.
-    """
+    """Turn a finished graph state into the /analyze response."""
     allocation = final_state.get("portfolio_allocation")
     if not allocation:
         raise HTTPException(503, "Portfolio allocation failed.")
@@ -390,34 +253,7 @@ def _build_response(final_state: dict) -> AnalysisResponse:
 
 @app.post("/analyze", response_model=AnalysisResponse, dependencies=[Depends(require_api_key)])
 async def analyze(req: AnalysisRequest):
-    """Executes a real-time portfolio analysis pipeline across a target ticker universe.
-
-    Checks system safety (kill switches), validates that the MFT live cache is fully
-    populated for all requested tickers, then runs LangGraph arbitrated orchestration
-    and returns target allocation distributions.
-
-    Args:
-        req: AnalysisRequest with tickers, total_wealth, invest_pct, and risk_tolerance.
-
-    Raises:
-        HTTPException 401: If ARGUS_API_KEY is set and the X-API-Key header doesn't match.
-        HTTPException 429: If the governor's rate budget is exhausted for a
-            configured model, or another analysis (a concurrent /analyze
-            call or the unattended collector) is already in progress —
-            retry after a short wait.
-        HTTPException 503: If the graph hasn't finished initializing, the kill switch
-            is triggered (before or after the graph run), VIX is above the blackout
-            threshold, the market is currently closed, the MFT cache has not yet
-            been populated for all requested tickers, the cache hasn't been
-            refreshed recently (pipeline stalled), the cached bars are older
-            than expected (stale data survived a restart), a configured model
-            has no rate-limit profile (a misconfiguration, not a transient
-            condition), or the portfolio agent's LLM call failed and correctly
-            degraded to no allocation rather than fabricating one.
-        HTTPException 504: If the graph run exceeds the analysis deadline.
-        HTTPException 500: If the LangGraph execution fails for a reason other
-            than the LLM call above.
-    """
+    """Execute a real-time portfolio analysis pipeline across a target ticker universe."""
     live_states = _admit_live_session(req)
     final_state = await _run_graph(
         initial_state(
@@ -429,20 +265,14 @@ async def analyze(req: AnalysisRequest):
         )
     )
 
-    # /analyze is the other entry point into the graph besides the unattended
-    # collector — without this, decisions.jsonl (the only source
-    # reconcile_decisions reads) never sees a request served through this
-    # endpoint, and an API-only deployment reconciles nothing. Off the event
-    # loop because it takes a file lock and fsyncs.
+    # Persist API decisions alongside collector decisions; the file lock and fsync must run off the event loop.
     await asyncio.to_thread(
         append_decisions_jsonl,
         final_state.get("decisions") or [],
         str(settings.data_path("decisions.jsonl")),
     )
 
-    # Re-checked rather than trusted from before the (potentially many-second)
-    # graph run: the kill switch is process-global and the reconcile loop can
-    # trip it mid-run
+    # Recheck safety because the independent monitor can halt the system during graph execution.
     _raise_if_halted(" during analysis")
 
     return _build_response(final_state)
@@ -450,44 +280,19 @@ async def analyze(req: AnalysisRequest):
 
 @app.get("/memory/stats")
 async def get_memory_stats():
-    """Retrieves high-level metadata and diagnostic stats from the vector DB memory vault."""
+    """Retrieve high-level metadata and diagnostic stats from the vector DB memory vault."""
     return get_cultural_memory().summary_stats()
 
 
 @app.get("/governor/report")
 async def get_governor_report():
-    """Provides a detailed usage count of today's API provider calls and tokens."""
+    """Provide a detailed usage count of today's API provider calls and tokens."""
     return governor.get_usage_report()
 
 
 @app.post("/kill-switch/reset", dependencies=[Depends(require_api_key)])
 async def reset_kill_switch(new_inception_value: float = Query(gt=MIN_TOTAL_WEALTH)):
-    """Resets the safety monitoring daemon to a new inception capital base.
-
-    Also deletes any persisted halt-dump files (see KillSwitch.reset), so a
-    subsequent restart can't silently re-apply a halt this call just resolved.
-    Rebases the persisted paper-equity curve to new_inception_value in the same
-    operation — otherwise the next reconcile pass would call
-    update_portfolio_value with the stale, already-drawn-down equity and
-    re-halt within check_interval_seconds.
-
-    Args:
-        new_inception_value: New portfolio value to use as the drawdown base
-            (USD); must exceed 1000, matching AnalysisRequest.total_wealth's floor.
-
-    Returns:
-        Dict with ``status`` key on success.
-
-    Raises:
-        HTTPException 401: If ARGUS_API_KEY is set and the X-API-Key header doesn't match.
-        HTTPException 404: If the kill switch has not been initialized.
-        HTTPException 500: If the persisted paper-equity file exists but is
-            corrupt. Rebasing a book paper_book.load() couldn't actually read
-            would silently drop its runs_applied, letting a run already
-            reflected in the old (unreadable) equity get double-applied by
-            the next reconcile pass — so this is refused rather than papered
-            over. Move the corrupt file aside and retry.
-    """
+    """Reset the safety monitoring daemon to a new inception capital base."""
     ks = get_kill_switch()
     if ks is None:
         raise HTTPException(404, "Kill switch not initialized")
@@ -509,16 +314,7 @@ async def reset_kill_switch(new_inception_value: float = Query(gt=MIN_TOTAL_WEAL
 
 @app.get("/kill-switch/status")
 async def kill_switch_status():
-    """Reports the kill switch's current gate state.
-
-    Lets an operator see why the system halted without reading logs.
-
-    Returns:
-        Dict mirroring KillSwitchStatus's fields, plus the configured risk_tolerance.
-
-    Raises:
-        HTTPException 404: If the kill switch has not been initialized.
-    """
+    """Report the kill switch's current gate state."""
     ks = get_kill_switch()
     if ks is None:
         raise HTTPException(404, "Kill switch not initialized")

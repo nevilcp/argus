@@ -1,14 +1,4 @@
-"""
-tests/test_aggregator.py
-
-Unit tests for HybridSignalAggregator.aggregate()'s reliability weighting.
-
-Reuses the signal/macro builders from test_aggregator_properties.py rather
-than duplicating them. Covers two claims about that mechanism: an agent
-with a strong regime-specific track record measurably outweighs one with a
-poor record, and with no history the result is identical to today's
-(pre-reliability) behavior.
-"""
+"""Unit tests for HybridSignalAggregator.aggregate()'s reliability weighting."""
 
 from argus.orchestration.aggregator import HybridSignalAggregator
 from argus.schemas.signals import (
@@ -28,7 +18,7 @@ from tests.helpers.builders import (
 
 
 def _split_signals() -> tuple[TechnicalSignal, MacroContext, FundamentalSignal, SentimentSignal]:
-    """A genuine three-way split: BULLISH vs. BEARISH vs. NEUTRAL, equal weight."""
+    """Build an equally weighted three-way directional split."""
     technical = technical_signal(Signal.BULLISH, 0.8)
     fundamental = fundamental_signal(Signal.BEARISH, 0.8)
     sentiment = sentiment_signal(Signal.NEUTRAL, 0.3)
@@ -37,7 +27,6 @@ def _split_signals() -> tuple[TechnicalSignal, MacroContext, FundamentalSignal, 
 
 
 def test_no_history_reliability_matches_unweighted_aggregation():
-    """With no reliability history, aggregation is identical to the unweighted path."""
     technical, macro, fundamental, sentiment = _split_signals()
     aggregator = HybridSignalAggregator()
 
@@ -49,9 +38,7 @@ def test_no_history_reliability_matches_unweighted_aggregation():
         sentiment,
         reliability={"technical": 0.5, "fundamental": 0.5, "sentiment": 0.5},
     )
-    no_reliability_arg = aggregator.aggregate(
-        technical, macro, fundamental, sentiment, reliability=None
-    )
+    no_reliability_arg = aggregator.aggregate(technical, macro, fundamental, sentiment, reliability=None)
 
     for other in (explicit_prior, no_reliability_arg):
         assert other.signal == unweighted.signal
@@ -60,7 +47,6 @@ def test_no_history_reliability_matches_unweighted_aggregation():
 
 
 def test_strong_track_record_measurably_outweighs_a_poor_one():
-    """A high-reliability agent's vote gains weight; a low-reliability one's shrinks."""
     technical, macro, fundamental, sentiment = _split_signals()
     aggregator = HybridSignalAggregator()
 
@@ -81,12 +67,6 @@ def test_strong_track_record_measurably_outweighs_a_poor_one():
 
 
 def test_aggregate_with_every_input_signal_absent():
-    """No specialist signal at all degrades to a neutral, zero-conviction result.
-
-    Every input absent must complete and report a visibly unmeasured
-    result — NEUTRAL at zero conviction with no agents present — rather
-    than raise or fabricate a directional call.
-    """
     aggregator = HybridSignalAggregator()
 
     result = aggregator.aggregate(None, None, None, None)

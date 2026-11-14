@@ -1,21 +1,4 @@
-"""Runs the complete ARGUS LangGraph DAG (build_graph()).
-
-Every network and LLM boundary is served from tests/fixtures/ — zero
-network calls, zero LLM API calls, zero torch/transformers import — and
-the output must be stable across repeated runs.
-
-Cultural memory is mocked, not fixture-backed: it isn't part of the
-MarketDataProvider/LLMClient seam (it's inherently stateful, not a
-replay candidate), and leaving it real would pull in sentence-transformers
-(the optional `[models]` extra) and write to a real ./chroma_db directory on
-every test run — the same reasoning tests/test_integration.py already
-applies to its graph smoke test.
-
-Nondeterministic fields (timestamps, session_id/UUIDs, wall-clock-derived
-`data_as_of_date`) are stripped before comparison; everything else — signal
-values, convictions, verdicts, allocations — must be byte-identical between
-two independent invocations of the same fixture-backed graph.
-"""
+"""Runs the complete ARGUS LangGraph DAG (build_graph())."""
 
 import json
 from collections.abc import Callable
@@ -36,11 +19,7 @@ UNIVERSE = ["AAPL", "MSFT", "NVDA", "GOOGL", "JPM", "XOM"]
 
 
 def _per_ticker_llm(fixture_file: str) -> FixtureLLMClient:
-    """Keys FixtureLLMClient by whichever universe ticker appears in the prompt.
-
-    Fundamental/sentiment prompts embed the real ticker as their subject
-    (build_compact_prompt, backtest_mode=False) — see argus/agents/fundamental.py.
-    """
+    """Key FixtureLLMClient by whichever universe ticker appears in the prompt."""
     with open(FIXTURES_DIR / "llm_responses" / fixture_file) as f:
         responses = json.load(f)
 
@@ -54,7 +33,7 @@ def _per_ticker_llm(fixture_file: str) -> FixtureLLMClient:
 
 
 def _portfolio_llm() -> FixtureLLMClient:
-    """PortfolioManagerAgent.allocate() makes exactly one LLM call per session."""
+    """Return the captured portfolio response for its single session-level call."""
     with open(FIXTURES_DIR / "llm_responses" / "portfolio.json") as f:
         response = json.load(f)
     return FixtureLLMClient({"only": json.dumps(response)}, key_fn=lambda _prompt: "only")
@@ -88,7 +67,6 @@ def _initial_state() -> ARGUSState:
     )
 
 
-# Excluded from the stability comparison (not from the run itself) since they vary run-to-run
 _VOLATILE_KEYS = {"timestamp", "session_id", "data_as_of_date"}
 
 
@@ -101,7 +79,7 @@ def _strip_volatile(obj):
 
 
 def _strip_volatile_signals(signals: dict) -> dict:
-    """Dumps a ticker -> pydantic signal mapping to JSON with the volatile keys removed."""
+    """Dump a ticker -> pydantic signal mapping to JSON with the volatile keys removed."""
     return {ticker: _strip_volatile(sig.model_dump(mode="json")) for ticker, sig in signals.items()}
 
 
@@ -111,21 +89,7 @@ def _build_fixture_graph(
     portfolio_llm: FixtureLLMClient | None = None,
     cultural_memory_provider: Callable[[], Any] | None = None,
 ):
-    """Compiles the DAG with every seam fixture-backed.
-
-    Args:
-        tmp_path: Per-test checkpoint directory — keeps this run's
-            checkpoints out of the real argus_graph.db, not just the fixture
-            autouse `_isolated_data_dir` build_graph()'s default would also
-            resolve against.
-        market_data: Provider override, for tests that degrade one boundary.
-        portfolio_llm: Allocator LLM override, for tests that capture its prompt.
-        cultural_memory_provider: Memory-store override; defaults to a neutral
-            double, so a test can degrade this boundary too.
-
-    Returns:
-        The compiled LangGraph.
-    """
+    """Compile the DAG with every seam fixture-backed."""
     memory = neutral_cultural_memory()
     return build_graph(
         market_data=market_data or FixtureMarketDataProvider(),
@@ -138,44 +102,21 @@ def _build_fixture_graph(
 
 
 def _invoke(graph, state: ARGUSState | None = None) -> dict:
-    """Invokes the graph once on a fresh thread.
-
-    The governor needs no patch: every LLM call here is fixture-backed, and
-    FixtureLLMClient never reaches it (only GroqLLMClient does).
-
-    Args:
-        graph: A graph from _build_fixture_graph.
-        state: Starting state; defaults to _initial_state().
-
-    Returns:
-        The final ARGUSState dict produced by the graph.
-    """
+    """Invoke the graph once on a fresh thread."""
     config = {"configurable": {"thread_id": str(uuid4())}}
 
     return graph.invoke(_initial_state() if state is None else state, config)
 
 
 class _NoneMacroMarketData(FixtureMarketDataProvider):
-    """Wraps the real fixture provider but forces a total FRED data outage.
-
-    Every other method (fred_series, ohlcv_daily, ...) is inherited unchanged,
-    so if a downstream node ran anyway it would get real fixture data rather
-    than crashing for an unrelated reason.
-    """
+    """Wraps the real fixture provider but forces a total FRED data outage."""
 
     def macro_bundle(self) -> dict:
-        """Returns an all-None bundle, matching a total FRED outage."""
+        """Return an all-None bundle, matching a total FRED outage."""
         return {"vix": None, "fed_funds": None, "t10y2y": None}
 
 
 def test_macro_context_none_still_produces_a_degraded_allocation(tmp_path):
-    """A None macro_context must not gate the three specialists or the allocator.
-
-    No specialist agent consumes MacroContext, so a FRED outage must not
-    zero out a session that needs no FRED data. The three specialists,
-    aggregation, risk evaluation, and portfolio allocation must all still
-    run, degraded rather than empty, with the gap named in errors.
-    """
     final_state = _invoke(_build_fixture_graph(tmp_path, market_data=_NoneMacroMarketData()))
 
     assert final_state.get("macro_context") is None
@@ -193,14 +134,7 @@ def test_macro_context_none_still_produces_a_degraded_allocation(tmp_path):
 
 
 class _SpyCountingMarketData(FixtureMarketDataProvider):
-    """Wraps the fixture provider to count ``ohlcv_daily`` calls and fabricate a SPY series.
-
-    The shared price_history fixture has no "SPY" entry, and adding one
-    there would perturb every other golden_dag test's carefully-tuned
-    VETO/REDUCE expectations (real beta feeding risk.py's beta gate).
-    Fabricating it only here keeps this test's SPY data isolated from the
-    rest of the fixture-backed suite.
-    """
+    """Wraps the fixture provider to count `ohlcv_daily` calls and fabricate a SPY series."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -210,14 +144,14 @@ class _SpyCountingMarketData(FixtureMarketDataProvider):
         self._spy_df = pd.DataFrame({"close": prices}, index=dates)
 
     def ohlcv_daily(self, ticker: str, period: str = "2y"):
-        """Records the call and returns fabricated SPY data, else defers to the fixture."""
+        """Record the call and return fabricated SPY data, else defers to the fixture."""
         self.ohlcv_daily_calls.append(ticker)
         if ticker == "SPY":
             return self._spy_df
         return super().ohlcv_daily(ticker, period=period)
 
     def multiple_daily(self, tickers: list[str], period: str = "1y"):
-        """Same as the base multiple_daily, but routes SPY through ohlcv_daily for counting."""
+        """Route benchmark reads through the counted daily fetch."""
         result = super().multiple_daily([t for t in tickers if t != "SPY"], period=period)
         if "SPY" in tickers:
             result["SPY"] = self.ohlcv_daily("SPY", period=period)
@@ -225,14 +159,6 @@ class _SpyCountingMarketData(FixtureMarketDataProvider):
 
 
 def test_spy_fetched_once_per_graph_run_not_once_per_risk_call(tmp_path):
-    """SPY rides along with node_fetch_price_history's universe fetch.
-
-    Without this, node_fetch_price_history never carries SPY in
-    price_history, so risk.py's ols_portfolio_beta falls back to its own
-    live fetch on every one of the N+1 risk_engine.evaluate() calls a
-    session makes (one portfolio-level plus one per ticker) — 7 fetches for
-    this 6-ticker universe instead of 1.
-    """
     provider = _SpyCountingMarketData()
     _invoke(_build_fixture_graph(tmp_path, market_data=provider))
 
@@ -247,19 +173,12 @@ class _CountingVixMarketData(_NoneMacroMarketData):
         self.vix_calls = 0
 
     def vix(self) -> float:
-        """Records the call, then defers to the inherited fixture-backed reading."""
+        """Record the call, then defers to the inherited fixture-backed reading."""
         self.vix_calls += 1
         return super().vix()
 
 
 def test_macro_context_none_still_reaches_a_real_vix_reading(tmp_path):
-    """A FRED outage must not silently default the blackout gate to 20.0.
-
-    _NoneMacroMarketData forces macro_bundle() (hence macro_context) to None
-    but leaves vix() — read straight from yfinance in production, independent
-    of FRED — intact, so the risk engine's blackout gate should reach a real
-    VIX reading via one explicit call rather than defaulting.
-    """
     provider = _CountingVixMarketData()
     final_state = _invoke(_build_fixture_graph(tmp_path, market_data=provider))
 
@@ -268,7 +187,6 @@ def test_macro_context_none_still_reaches_a_real_vix_reading(tmp_path):
 
 
 def test_golden_dag_runs_offline_and_produces_a_valid_allocation(tmp_path):
-    """The fixture-backed DAG runs end to end with zero network/LLM/torch dependencies."""
     final_state = _invoke(_build_fixture_graph(tmp_path))
 
     assert final_state.get("macro_context") is not None
@@ -279,12 +197,7 @@ def test_golden_dag_runs_offline_and_produces_a_valid_allocation(tmp_path):
     assert final_state.get("aggregated_signals")
     assert all(agg.model_healthy is True for agg in final_state["aggregated_signals"].values())
 
-    # The fixture LLM response proposes allocations for three VETO'd tickers;
-    # code-level enforcement zeroes them rather than trusting the prompt, and
-    # records each correction here instead of leaving errors empty. It also
-    # forces cash_reserve_pct to its residual, which itself records an
-    # adjustment since the fixture's proposed value no longer matches once
-    # those three positions are zeroed.
+    # Enforce fixture vetoes and recompute residual cash, recording every advisory proposal correction.
     errors = final_state.get("errors")
     assert errors is not None
     assert len(errors) == 4
@@ -301,7 +214,7 @@ def test_golden_dag_runs_offline_and_produces_a_valid_allocation(tmp_path):
 
 
 def _state_missing_nvda_adx() -> ARGUSState:
-    """An initial state whose NVDA session lacks the adx_14 the technical agent requires."""
+    """Build a session whose NVDA indicators lack required ADX evidence."""
     with open(FIXTURES_DIR / "market_data" / "session_states.json") as f:
         session_states = json.load(f)
     del session_states["NVDA"]["adx_14"]
@@ -312,7 +225,6 @@ def _state_missing_nvda_adx() -> ARGUSState:
 
 
 def test_missing_indicator_is_reported_in_errors_not_silently_dropped(tmp_path):
-    """A ticker missing a required indicator is named in errors, not dropped without a trace."""
     final_state = _invoke(_build_fixture_graph(tmp_path), _state_missing_nvda_adx())
 
     assert "NVDA" not in final_state["technical_signals"]
@@ -320,11 +232,6 @@ def test_missing_indicator_is_reported_in_errors_not_silently_dropped(tmp_path):
 
 
 def test_missing_indicator_still_reaches_aggregation_with_evidence_surfaced(tmp_path):
-    """A ticker missing one specialist still reaches aggregated_signals with the gap named.
-
-    agents_present must name the missing specialist, and the allocator's prompt must show
-    the reduced evidence rather than treating the ticker as fully evidenced.
-    """
     with open(FIXTURES_DIR / "llm_responses" / "portfolio.json") as f:
         portfolio_response = json.load(f)
     captured_prompts = []
@@ -333,9 +240,7 @@ def test_missing_indicator_still_reaches_aggregation_with_evidence_surfaced(tmp_
         captured_prompts.append(user_prompt)
         return "only"
 
-    portfolio_llm = FixtureLLMClient(
-        {"only": json.dumps(portfolio_response)}, key_fn=_capture_key_fn
-    )
+    portfolio_llm = FixtureLLMClient({"only": json.dumps(portfolio_response)}, key_fn=_capture_key_fn)
 
     graph = _build_fixture_graph(tmp_path, portfolio_llm=portfolio_llm)
     final_state = _invoke(graph, _state_missing_nvda_adx())
@@ -349,13 +254,6 @@ def test_missing_indicator_still_reaches_aggregation_with_evidence_surfaced(tmp_
 
 
 def test_cultural_memory_import_error_degrades_instead_of_crashing_the_run(tmp_path):
-    """A missing sentence-transformers/torch [models] extra must not abort the session.
-
-    get_cultural_memory() raising ImportError must degrade
-    retrieve_cultural_memory to an empty result and signal_aggregation's
-    reliability lookup to the 0.5 prior, rather than crashing the whole
-    graph run.
-    """
 
     def unavailable() -> Any:
         raise ImportError("sentence-transformers not installed")
@@ -369,16 +267,13 @@ def test_cultural_memory_import_error_degrades_instead_of_crashing_the_run(tmp_p
     assert final_state.get("portfolio_allocation") is not None
     assert len(final_state["portfolio_allocation"].portfolio) == len(UNIVERSE)
 
-    # Reliability fell back to the 0.5 prior because cultural memory was
-    # unavailable, not because no outcome history exists yet — model_healthy
-    # must say so rather than carrying full multiplier authority silently.
+    # Mark reliability unhealthy when memory is unavailable; a neutral prior alone cannot disclose the outage.
     aggs = final_state.get("aggregated_signals") or {}
     assert aggs
     assert all(agg.model_healthy is False for agg in aggs.values())
 
 
 def test_golden_dag_output_is_stable_across_runs(tmp_path):
-    """Two independent invocations of the same fixture-backed graph are byte-identical."""
     first = _invoke(_build_fixture_graph(tmp_path))
     second = _invoke(_build_fixture_graph(tmp_path))
 
@@ -391,7 +286,7 @@ def test_golden_dag_output_is_stable_across_runs(tmp_path):
 
 
 def _round_floats(obj, ndigits: int = 8):
-    """Rounds every float so the snapshot tolerates last-digit libm/numpy differences."""
+    """Round every float so the snapshot tolerates last-digit libm/numpy differences."""
     if isinstance(obj, float):
         return round(obj, ndigits)
     if isinstance(obj, dict):
@@ -402,16 +297,12 @@ def _round_floats(obj, ndigits: int = 8):
 
 
 def _snapshot_text(final_state: dict) -> str:
-    """Serializes the behavior-relevant slice of a final state to stable JSON text."""
+    """Serialize the behavior-relevant slice of a final state to stable JSON text."""
     macro = final_state.get("macro_context")
     payload = {
         "portfolio_allocation": final_state["portfolio_allocation"].model_dump(mode="json"),
-        "aggregated_signals": {
-            t: s.model_dump(mode="json") for t, s in final_state["aggregated_signals"].items()
-        },
-        "risk_assessments": {
-            t: s.model_dump(mode="json") for t, s in final_state["risk_assessments"].items()
-        },
+        "aggregated_signals": {t: s.model_dump(mode="json") for t, s in final_state["aggregated_signals"].items()},
+        "risk_assessments": {t: s.model_dump(mode="json") for t, s in final_state["risk_assessments"].items()},
         "macro_context": macro.model_dump(mode="json") if macro is not None else None,
         "errors": final_state["errors"],
     }
@@ -419,7 +310,6 @@ def _snapshot_text(final_state: dict) -> str:
 
 
 def test_golden_dag_matches_snapshot(tmp_path, assert_golden):
-    """The fixture-backed DAG output equals the committed snapshot from before the cleanup."""
     final_state = _invoke(_build_fixture_graph(tmp_path))
 
     assert_golden("dag_snapshot.json", _snapshot_text(final_state))

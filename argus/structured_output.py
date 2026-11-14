@@ -1,39 +1,4 @@
-"""
-argus/structured_output.py
-
-Decodes and validates an LLM's raw JSON response against a Pydantic schema.
-
-The fundamental, sentiment and portfolio agents share this decoder over the
-LLMClient transport port. Transport and response validation have independent
-responsibilities; see argus/ports.py's LLMClient docstring.
-
-Responsibilities:
-  - Strip a markdown code fence from a raw LLM response, in any of its four
-    observed shapes (unfenced, fenced, json-tagged, unterminated)
-  - Parse the fence-stripped text as JSON and validate it against a
-    caller-supplied Pydantic schema
-  - Retry invalid-JSON and schema-violating responses up to a declared
-    attempt cap, with exponential back-off between attempts
-  - Retry a transport-level RetryableTransportError from the same attempt
-    budget, honoring the provider's own retry hint when the adapter
-    supplies one
-  - Optionally re-prompt with the prior failure appended (repair), so the
-    model can correct itself
-  - Raise a typed, stage-tagged error when every attempt is exhausted
-
-Not responsible for:
-  - Sending the request or governing rate limits (argus/seams.py's
-    LLMClient owns transport). An adapter makes one invocation per call and
-    performs no retry loop of its own — this module is the only place that
-    loops
-  - Classifying which transport failures are worth retrying versus terminal
-    — that stays with the LLMClient implementation (e.g. GroqLLMClient)
-  - Defining what a valid response looks like for any particular agent —
-    callers supply the target schema
-  - Deciding what a failed decode means for the caller — decode() raises
-    StructuredOutputError, and decode_or_degrade() turns it into a
-    diagnostics note and None for callers that degrade rather than abort
-"""
+"""Shared model response parsing, schema validation, repair, and retry policy."""
 
 from __future__ import annotations
 
@@ -55,26 +20,9 @@ logger = logging.getLogger(__name__)
 
 
 class StructuredOutputError(Exception):
-    """Every decode attempt was exhausted; names which stage kept failing.
-
-    Attributes:
-        stage: "json_parse" if the response was never valid JSON,
-            "schema_validation" if it parsed but never matched the target
-            schema, or "transport" if the LLMClient call itself kept failing
-            transiently.
-        attempts: Number of attempts made before giving up.
-        cause: The last attempt's underlying exception.
-    """
+    """Every decode attempt was exhausted; names which stage kept failing."""
 
     def __init__(self, stage: str, attempts: int, cause: Exception) -> None:
-        """Builds the error message from stage, attempt count, and underlying cause.
-
-        Args:
-            stage: Which decode stage kept failing — "json_parse",
-                "schema_validation", or "transport".
-            attempts: Number of attempts made before giving up.
-            cause: The last attempt's underlying exception.
-        """
         self.stage = stage
         self.attempts = attempts
         self.cause = cause
@@ -82,22 +30,7 @@ class StructuredOutputError(Exception):
 
 
 def _strip_markdown_fence(raw: str) -> str:
-    """Strips a markdown code fence from a raw LLM response, if present.
-
-    Handles four shapes: unfenced text (returned unchanged), a closed fence
-    (```...```), a json-tagged fence (```json...```), and an unterminated
-    fence (a single opening marker with no closing one, which truncated
-    generations have produced in practice). Only the leading and trailing
-    fence markers are stripped, not every ``` occurrence in the text — a
-    JSON string value that itself quotes a fenced snippet (e.g. a
-    "reasoning" field citing code) must survive intact.
-
-    Args:
-        raw: The LLM's raw response text.
-
-    Returns:
-        The response text with any surrounding fence markers removed.
-    """
+    """Strip a markdown code fence from a raw LLM response, if present."""
     raw = raw.strip()
     if not raw.startswith("```"):
         return raw
@@ -111,15 +44,7 @@ def _strip_markdown_fence(raw: str) -> str:
 
 
 def _repair_prompt(user_prompt: str, last_error: str) -> str:
-    """Appends the prior attempt's failure to a prompt so the model can correct itself.
-
-    Args:
-        user_prompt: The original user prompt.
-        last_error: ``str(exception)`` from the previous attempt's failure.
-
-    Returns:
-        The user prompt with a correction request appended.
-    """
+    """Append the prior attempt's failure to a prompt so the model can correct itself."""
     return (
         f"{user_prompt}\n\n"
         f"Your previous response was invalid: {last_error}\n"
@@ -139,7 +64,7 @@ class _Failure:
 def _attempt_once[T: BaseModel](
     llm_client: LLMClient, system_prompt: str, prompt: str, schema: type[T]
 ) -> T | _Failure:
-    """Makes one send-parse-validate attempt, returning the instance or why it failed."""
+    """Make one send-parse-validate attempt, returning the instance or why it failed."""
     try:
         raw = llm_client.complete(system_prompt, prompt)
     except RetryableTransportError as e:
@@ -155,12 +80,7 @@ def _attempt_once[T: BaseModel](
 
 
 def _retry_delay(attempt: int, failure: _Failure) -> float:
-    """Returns how long to sleep before the next attempt.
-
-    A transport failure uses full jitter (honoring the server's hint) so parallel
-    agents don't thundering-herd a shared provider outage; a content failure uses
-    deterministic capped exponential backoff.
-    """
+    """Return how long to sleep before the next attempt."""
     base = STRUCTURED_OUTPUT.backoff_base_seconds
     cap = STRUCTURED_OUTPUT.backoff_max_seconds
     if failure.stage == "transport":
@@ -176,46 +96,7 @@ def decode[T: BaseModel](
     *,
     repair: bool,
 ) -> T:
-    """Sends a prompt and decodes the response into a validated instance of ``schema``.
-
-    Owns everything between "send the prompt" and "hand back a usable
-    object": strips a markdown fence, parses JSON, and validates against
-    ``schema``. Invalid JSON, schema-violating JSON, and a retryable
-    transport failure are each retried up to ``STRUCTURED_OUTPUT.max_attempts``,
-    backing off exponentially between attempts (full-jitter for an unhinted
-    transport retry, to avoid the parallel agents thundering-herding a
-    shared provider outage; deterministic otherwise). With ``repair=True``,
-    the most recent json_parse/schema_validation failure's error is kept
-    appended to the prompt across attempts, including one interrupted by a
-    transport retry in between — a transport hiccup carries no content
-    feedback of its own, so it must not discard repair context that was
-    about to be sent.
-
-    ``llm_client.complete()`` may itself raise. A RetryableTransportError is
-    retried from this same attempt budget — honoring its ``retry_after``
-    hint when the adapter supplied one, else the same exponential back-off
-    used for invalid-JSON/schema-violation retries. Anything else (a
-    terminal transport error, or the governor's
-    RateLimitExceeded/UnregisteredModel) propagates immediately: the
-    governor has already exhausted its own bounded wait before raising
-    either of its exceptions, and a terminal transport error would only
-    fail identically on a second attempt.
-
-    Args:
-        llm_client: Transport to send the prompt over.
-        system_prompt: The system message text.
-        user_prompt: The user message text.
-        schema: Pydantic model class the decoded response must validate against.
-        repair: Whether to append the prior failure to the next attempt's prompt.
-
-    Returns:
-        A validated instance of ``schema``.
-
-    Raises:
-        StructuredOutputError: If every attempt fails to produce valid JSON
-            (stage="json_parse"), schema-valid data (stage="schema_validation"),
-            or a successful transport call (stage="transport").
-    """
+    """Decode and validate model JSON with one bounded retry budget and optional persistent repair context."""
     last_content_error: Exception | None = None
 
     for attempt in range(STRUCTURED_OUTPUT.max_attempts):
@@ -251,35 +132,7 @@ def decode_or_degrade[T: BaseModel](
     decode_level: Literal["warning", "error"] = "warning",
     api_error_text: str = "API error",
 ) -> T | None:
-    """Runs ``decode`` and turns every failure into a diagnostics note and ``None``.
-
-    The three failure classes have distinct notes so a reader can tell them apart:
-    ``StructuredOutputError`` (``"<label>: <error>"``), a governor rejection
-    (``"<label>: rate limited: <error>"``), and any other exception
-    (``"<label>: <api_error_text>: <error>"``, always at error level).
-
-    Args:
-        llm_client: Transport to send the prompt over.
-        system_prompt: The system message text.
-        user_prompt: The user message text.
-        schema: Pydantic model class the decoded response must validate against.
-        repair: Passed through to ``decode``.
-        diagnostics: Receives one note per failure.
-        label: Prefix of every note, e.g. ``"fundamental_analysis[AAPL]"``.
-        reraise_governor: When True, ``RateLimitExceeded`` and
-            ``UnregisteredModel`` propagate instead of being noted. For a
-            caller with no per-item fallback to degrade to.
-        decode_level: Log level for a ``StructuredOutputError`` note.
-        api_error_text: Wording between the label and the error for an
-            unclassified exception.
-
-    Returns:
-        A validated instance of ``schema``, or None if the call failed.
-
-    Raises:
-        RateLimitExceeded: Only when ``reraise_governor`` is True.
-        UnregisteredModel: Only when ``reraise_governor`` is True.
-    """
+    """Turn decoder failures into stage-specific diagnostics and None."""
     try:
         return decode(llm_client, system_prompt, user_prompt, schema, repair=repair)
     except StructuredOutputError as e:
@@ -287,7 +140,6 @@ def decode_or_degrade[T: BaseModel](
     except (RateLimitExceeded, UnregisteredModel) as e:
         if reraise_governor:
             raise
-        # Governor already exhausted its bounded wait; degrade rather than retry into it.
         diagnostics.record(f"{label}: rate limited: {e}")
     except Exception as e:
         diagnostics.record(f"{label}: {api_error_text}: {e}", "error")

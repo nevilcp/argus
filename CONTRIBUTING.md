@@ -45,6 +45,12 @@ narration. Use US spelling and explicit exceptions for runtime invariants.
 
 ## Shared conventions
 
+Follow [the commenting guide](docs/commenting-style.md) across every source language
+and project configuration. Code, comments, and docstrings use a 120-character limit.
+Keep retained docstrings and explanatory comments on one physical line, use ASCII
+for them and static log text, and put detailed design reasoning in the
+[documentation collection](docs/README.md). Convention tests run with the test suite.
+
 - **Parameters:** put hand-set numbers in the appropriate frozen dataclass in
   `argus/params.py` using `p(value, Provenance.X, "reason")`. Explain arbitrary
   choices honestly and bump `PARAMS_VERSION` when parameter values change.

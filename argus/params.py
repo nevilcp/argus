@@ -1,33 +1,4 @@
-"""
-argus/params.py
-
-Single source of truth for every free (hand-set, non-derived) numeric
-parameter in ARGUS, each tagged with where its value came from.
-
-A system that mixes textbook constants (RSI period 14), industry convention
-(RSI 30/70 overbought/oversold), values tuned against ARGUS's own data, and
-outright guesses reads identically in the source unless the provenance is
-written down next to the value. This module makes that distinction
-mechanical instead of relying on comments that rot.
-
-Provenance categories:
-  LITERATURE  — a standard value with a citable source (e.g. RSI/ATR period
-                14, VaR confidence 99%).
-  CONVENTION  — a widely-used default with no single citation, but common
-                enough that deviating from it would need justification
-                (e.g. RSI 30/70 bands, half-Kelly sizing).
-  CALIBRATED  — tuned against ARGUS's own data or backtests. As of this
-                writing there is no honest instance of this category: the
-                Phase 1/2 calibration harness measured a constant that has
-                since been removed. Any future value in this category must
-                point at real evidence.
-  ARBITRARY   — a guess with no basis beyond "seemed reasonable". Writing
-                ARBITRARY where it is arbitrary is the point of this
-                module: it is a to-do list for what needs real evaluation.
-
-PARAMS_VERSION exists so a changed value can be pinned in a fixture or a
-backtest run's metadata; bump it whenever any value below changes.
-"""
+"""Frozen numeric parameter groups with provenance and audit metadata."""
 
 from __future__ import annotations
 
@@ -39,10 +10,7 @@ PARAMS_VERSION = 20
 
 
 class Provenance(StrEnum):
-    """Where a parameter's value came from.
-
-    See the module docstring for the category definitions.
-    """
+    """Evidence category attached to a numeric parameter."""
 
     LITERATURE = "literature"
     CONVENTION = "convention"
@@ -51,21 +19,7 @@ class Provenance(StrEnum):
 
 
 def p[T](value: T, provenance: Provenance, note: str = "") -> T:
-    """Declare a dataclass field carrying a provenance tag as metadata.
-
-    The field still holds `value` directly — call sites read it like any
-    other attribute (`TECHNICAL.rsi_oversold`), no unwrapping required. The
-    provenance/note live in `__dataclass_fields__[name].metadata` for
-    introspection (see `all_params` below).
-
-    Args:
-        value: The default value the field holds.
-        provenance: Category explaining where the value came from.
-        note: Free-text detail supporting the provenance category.
-
-    Returns:
-        A dataclasses.field() configured with `value` as its default.
-    """
+    """Declare a dataclass field carrying a provenance tag as metadata."""
     return field(default=value, metadata={"provenance": provenance, "note": note})
 
 
@@ -83,18 +37,10 @@ class SystemParams:
     max_single_position_pct: float = p(
         0.15, Provenance.CONVENTION, "common retail/advisory single-name concentration ceiling"
     )
-    max_sector_concentration: float = p(
-        0.40, Provenance.ARBITRARY, "no external basis; picked as a loose backstop"
-    )
-    max_portfolio_beta: float = p(
-        1.50, Provenance.ARBITRARY, "no external basis; picked as a loose backstop"
-    )
-    vix_blackout_threshold: float = p(
-        35.0, Provenance.CONVENTION, "VIX > 35 is commonly treated as a high-fear regime"
-    )
-    trading_days_per_year: int = p(
-        252, Provenance.LITERATURE, "252 = standard US trading days per year"
-    )
+    max_sector_concentration: float = p(0.40, Provenance.ARBITRARY, "no external basis; picked as a loose backstop")
+    max_portfolio_beta: float = p(1.50, Provenance.ARBITRARY, "no external basis; picked as a loose backstop")
+    vix_blackout_threshold: float = p(35.0, Provenance.CONVENTION, "VIX > 35 is commonly treated as a high-fear regime")
+    trading_days_per_year: int = p(252, Provenance.LITERATURE, "252 = standard US trading days per year")
     mft_fetch_interval_seconds: int = p(
         300,
         Provenance.ARBITRARY,
@@ -168,31 +114,18 @@ class SystemParams:
     )
 
 
-# Defined here, not with the other groups at the bottom, because RiskParams and
-# PortfolioParams derive their defaults from it at class-definition time.
+# Define structural limits before parameter classes that derive defaults from them.
 SYSTEM = SystemParams()
 
 
 @dataclass(frozen=True)
 class KillSwitchParams:
-    """Drawdown circuit-breaker tiers and halt-dump retention.
+    """Drawdown circuit-breaker tiers and halt-dump retention."""
 
-    Used by risk/kill_switch.py. Each risk-tolerance tier has its own drawdown
-    limit, independent of the market-wide VIX gate.
-    """
-
-    conservative_drawdown_halt: float = p(
-        0.08, Provenance.ARBITRARY, "no external basis; picked as a loose backstop"
-    )
-    moderate_drawdown_halt: float = p(
-        0.12, Provenance.ARBITRARY, "no external basis; picked as a loose backstop"
-    )
-    aggressive_drawdown_halt: float = p(
-        0.18, Provenance.ARBITRARY, "no external basis; picked as a loose backstop"
-    )
-    max_halt_dumps_retained: int = p(
-        20, Provenance.ARBITRARY, "no basis for this specific retention count"
-    )
+    conservative_drawdown_halt: float = p(0.08, Provenance.ARBITRARY, "no external basis; picked as a loose backstop")
+    moderate_drawdown_halt: float = p(0.12, Provenance.ARBITRARY, "no external basis; picked as a loose backstop")
+    aggressive_drawdown_halt: float = p(0.18, Provenance.ARBITRARY, "no external basis; picked as a loose backstop")
+    max_halt_dumps_retained: int = p(20, Provenance.ARBITRARY, "no basis for this specific retention count")
     check_interval_seconds: int = p(
         900,
         Provenance.ARBITRARY,
@@ -219,25 +152,16 @@ class TechnicalIndicatorWeights:
     """Per-indicator weights in the technical consensus score (config.py)."""
 
     rsi: float = p(2.0, Provenance.ARBITRARY, "no basis for relative weighting vs other indicators")
-    macd: float = p(
-        2.0, Provenance.ARBITRARY, "no basis for relative weighting vs other indicators"
-    )
+    macd: float = p(2.0, Provenance.ARBITRARY, "no basis for relative weighting vs other indicators")
     bb: float = p(1.5, Provenance.ARBITRARY, "no basis for relative weighting vs other indicators")
     adx: float = p(1.0, Provenance.ARBITRARY, "no basis for relative weighting vs other indicators")
-    vwap: float = p(
-        1.0, Provenance.ARBITRARY, "no basis for relative weighting vs other indicators"
-    )
-    momentum: float = p(
-        1.5, Provenance.ARBITRARY, "no basis for relative weighting vs other indicators"
-    )
+    vwap: float = p(1.0, Provenance.ARBITRARY, "no basis for relative weighting vs other indicators")
+    momentum: float = p(1.5, Provenance.ARBITRARY, "no basis for relative weighting vs other indicators")
 
 
 @dataclass(frozen=True)
 class TechnicalParams:
-    """Thresholds and curve shapes used by TechnicalStatisticalAgent.
-
-    See agents/technical.py.
-    """
+    """Thresholds and curve shapes used by TechnicalStatisticalAgent."""
 
     rsi_oversold: float = p(
         25,
@@ -245,86 +169,48 @@ class TechnicalParams:
         "RSI < 30 is the standard oversold convention; 25 used as the max-bullish anchor",
     )
     rsi_bullish_transition: float = p(30, Provenance.CONVENTION, "standard RSI oversold boundary")
-    rsi_bullish_transition_score: float = p(
-        0.85, Provenance.ARBITRARY, "no basis for this specific score level"
-    )
+    rsi_bullish_transition_score: float = p(0.85, Provenance.ARBITRARY, "no basis for this specific score level")
     rsi_overbought: float = p(
         75,
         Provenance.CONVENTION,
         "RSI > 70 is the standard overbought convention; 75 used as the max-bearish anchor",
     )
     rsi_bearish_transition: float = p(70, Provenance.CONVENTION, "standard RSI overbought boundary")
-    rsi_neutral_low: float = p(
-        45.0, Provenance.ARBITRARY, "dead-zone boundary; no basis beyond symmetry around 50"
-    )
-    rsi_neutral_high: float = p(
-        55.0, Provenance.ARBITRARY, "dead-zone boundary; no basis beyond symmetry around 50"
-    )
+    rsi_neutral_low: float = p(45.0, Provenance.ARBITRARY, "dead-zone boundary; no basis beyond symmetry around 50")
+    rsi_neutral_high: float = p(55.0, Provenance.ARBITRARY, "dead-zone boundary; no basis beyond symmetry around 50")
 
-    macd_normalization_scale: float = p(
-        0.5, Provenance.ARBITRARY, "no basis for this specific scale"
-    )
+    macd_normalization_scale: float = p(0.5, Provenance.ARBITRARY, "no basis for this specific scale")
 
-    bollinger_breach_multiplier: float = p(
-        2.0, Provenance.ARBITRARY, "no basis for this specific multiplier"
-    )
+    bollinger_breach_multiplier: float = p(2.0, Provenance.ARBITRARY, "no basis for this specific multiplier")
     bollinger_breach_boost: float = p(0.5, Provenance.ARBITRARY, "no basis for this specific boost")
 
-    adx_dampen_threshold: float = p(
-        20.0, Provenance.CONVENTION, "ADX < 20 commonly read as 'no trend'"
-    )
-    adx_dampen_multiplier: float = p(
-        0.6, Provenance.ARBITRARY, "no basis for this specific multiplier"
-    )
-    adx_amplify_threshold: float = p(
-        40.0, Provenance.CONVENTION, "ADX > 40 commonly read as 'strong trend'"
-    )
-    adx_amplify_multiplier: float = p(
-        1.2, Provenance.ARBITRARY, "no basis for this specific multiplier"
-    )
+    adx_dampen_threshold: float = p(20.0, Provenance.CONVENTION, "ADX < 20 commonly read as 'no trend'")
+    adx_dampen_multiplier: float = p(0.6, Provenance.ARBITRARY, "no basis for this specific multiplier")
+    adx_amplify_threshold: float = p(40.0, Provenance.CONVENTION, "ADX > 40 commonly read as 'strong trend'")
+    adx_amplify_multiplier: float = p(1.2, Provenance.ARBITRARY, "no basis for this specific multiplier")
 
-    vwap_spread_normalization: float = p(
-        0.015, Provenance.ARBITRARY, "no basis for +/-1.5% as the normalizing spread"
-    )
+    vwap_spread_normalization: float = p(0.015, Provenance.ARBITRARY, "no basis for +/-1.5% as the normalizing spread")
 
-    momentum_30m_weight: float = p(
-        0.4, Provenance.ARBITRARY, "no basis for 40/60 split vs 1d momentum"
-    )
-    momentum_1d_weight: float = p(
-        0.6, Provenance.ARBITRARY, "no basis for 40/60 split vs 30m momentum"
-    )
-    momentum_saturation_bound: float = p(
-        0.02, Provenance.ARBITRARY, "no basis for +/-2% as the clipping bound"
-    )
+    momentum_30m_weight: float = p(0.4, Provenance.ARBITRARY, "no basis for 40/60 split vs 1d momentum")
+    momentum_1d_weight: float = p(0.6, Provenance.ARBITRARY, "no basis for 40/60 split vs 30m momentum")
+    momentum_saturation_bound: float = p(0.02, Provenance.ARBITRARY, "no basis for +/-2% as the clipping bound")
 
     volume_ratio_divisor: float = p(1.5, Provenance.ARBITRARY, "no basis for this specific divisor")
     volume_modifier_floor: float = p(0.7, Provenance.ARBITRARY, "no basis for this specific floor")
-    volume_modifier_ceiling: float = p(
-        1.3, Provenance.ARBITRARY, "no basis for this specific ceiling"
-    )
+    volume_modifier_ceiling: float = p(1.3, Provenance.ARBITRARY, "no basis for this specific ceiling")
 
-    net_score_neutral_threshold: float = p(
-        0.12, Provenance.ARBITRARY, "no basis for this specific cutoff"
-    )
-    neutral_conviction_floor: float = p(
-        0.30, Provenance.ARBITRARY, "no basis for this specific floor"
-    )
+    net_score_neutral_threshold: float = p(0.12, Provenance.ARBITRARY, "no basis for this specific cutoff")
+    neutral_conviction_floor: float = p(0.30, Provenance.ARBITRARY, "no basis for this specific floor")
     conviction_base: float = p(0.40, Provenance.ARBITRARY, "no basis for this specific base")
-    conviction_score_multiplier: float = p(
-        0.55, Provenance.ARBITRARY, "no basis for this specific multiplier"
-    )
-    conviction_ceiling: float = p(
-        0.92, Provenance.ARBITRARY, "kept below 1.0 so no signal claims certainty"
-    )
+    conviction_score_multiplier: float = p(0.55, Provenance.ARBITRARY, "no basis for this specific multiplier")
+    conviction_ceiling: float = p(0.92, Provenance.ARBITRARY, "kept below 1.0 so no signal claims certainty")
 
 
 @dataclass(frozen=True)
 class AggregatorParams:
     """Multi-agent voting parameters (orchestration/aggregator.py)."""
 
-    weight_fundamental: float = p(
-        0.35, Provenance.ARBITRARY, "no basis for relative agent weighting"
-    )
+    weight_fundamental: float = p(0.35, Provenance.ARBITRARY, "no basis for relative agent weighting")
     weight_technical: float = p(0.35, Provenance.ARBITRARY, "no basis for relative agent weighting")
     weight_sentiment: float = p(0.30, Provenance.ARBITRARY, "no basis for relative agent weighting")
     contraction_conviction_threshold: float = p(
@@ -333,12 +219,8 @@ class AggregatorParams:
         "restated post-issue-24-Decision-A against achievable conviction (~0.665 for a "
         "two-agent unanimous call), not the pre-A 1.0 scale; no basis for this specific value",
     )
-    contraction_conviction_reduction: float = p(
-        0.6, Provenance.ARBITRARY, "no basis for this specific multiplier"
-    )
-    max_conviction: float = p(
-        0.95, Provenance.ARBITRARY, "kept below 1.0 so no aggregate claims certainty"
-    )
+    contraction_conviction_reduction: float = p(0.6, Provenance.ARBITRARY, "no basis for this specific multiplier")
+    max_conviction: float = p(0.95, Provenance.ARBITRARY, "kept below 1.0 so no aggregate claims certainty")
     neutral_reliability: float = p(
         0.5,
         Provenance.CONVENTION,
@@ -366,12 +248,8 @@ class PortfolioParams:
         Provenance.CONVENTION,
         "derived from SystemParams.max_single_position_pct",
     )
-    kelly_divisor: float = p(
-        2.0, Provenance.CONVENTION, "half-Kelly is a standard variance-reduction convention"
-    )
-    llm_temperature: float = p(
-        0.05, Provenance.CONVENTION, "near-zero temperature for reproducible structured output"
-    )
+    kelly_divisor: float = p(2.0, Provenance.CONVENTION, "half-Kelly is a standard variance-reduction convention")
+    llm_temperature: float = p(0.05, Provenance.CONVENTION, "near-zero temperature for reproducible structured output")
     llm_max_tokens: int = p(
         3000,
         Provenance.ARBITRARY,
@@ -381,26 +259,17 @@ class PortfolioParams:
         "3000 leaves ~50% headroom. Upper bound: the governor reserves max_tokens plus "
         "the ~2,000-token prompt up front, and must stay under the 6,000 TPM bootstrap floor",
     )
-    equity_floor_adjustment: float = p(
-        0.05, Provenance.ARBITRARY, "no basis for this specific adjustment"
-    )
+    equity_floor_adjustment: float = p(0.05, Provenance.ARBITRARY, "no basis for this specific adjustment")
     cash_reserve_floor_pct: float = p(
         0.05, Provenance.ARBITRARY, "matches PortfolioAllocation.cash_reserve_pct's schema floor"
     )
-    thesis_char_limit: int = p(
-        120, Provenance.ARBITRARY, "no basis beyond keeping per-position text short"
-    )
-    advisor_note_char_limit: int = p(
-        600, Provenance.ARBITRARY, "no basis beyond keeping the rationale readable"
-    )
+    thesis_char_limit: int = p(120, Provenance.ARBITRARY, "no basis beyond keeping per-position text short")
+    advisor_note_char_limit: int = p(600, Provenance.ARBITRARY, "no basis beyond keeping the rationale readable")
 
 
 @dataclass(frozen=True)
 class RiskParams:
-    """VaR/CVaR, optimization, and structural-gate parameters.
-
-    See agents/risk.py.
-    """
+    """VaR/CVaR, optimization, and structural-gate parameters."""
 
     sector_cache_ttl_seconds: int = p(
         86400, Provenance.ARBITRARY, "24h cache lifetime; GICS classifications rarely change"
@@ -417,30 +286,18 @@ class RiskParams:
         Provenance.LITERATURE,
         "one year of trading days, from SystemParams.trading_days_per_year",
     )
-    var_confidence: float = p(
-        0.99, Provenance.CONVENTION, "99% is a standard VaR/CVaR confidence level"
-    )
-    cvar_confidence: float = p(
-        0.99, Provenance.CONVENTION, "99% is a standard VaR/CVaR confidence level"
-    )
+    var_confidence: float = p(0.99, Provenance.CONVENTION, "99% is a standard VaR/CVaR confidence level")
+    cvar_confidence: float = p(0.99, Provenance.CONVENTION, "99% is a standard VaR/CVaR confidence level")
     min_beta_overlap_points: int = p(10, Provenance.ARBITRARY, "no basis for this specific minimum")
-    # These back close_to_close_stop_losses (agents/risk.py), which computes
-    # mean absolute close-to-close change, not true ATR — the period and
-    # multiplier are still borrowed from the standard ATR-14, 2-3x convention.
-    stop_multiplier: float = p(
-        2.5, Provenance.CONVENTION, "2-3x ATR is a common stop-loss distance convention"
-    )
+    # Use mean absolute close changes for stops; the borrowed ATR period does not make this true ATR.
+    stop_multiplier: float = p(2.5, Provenance.CONVENTION, "2-3x ATR is a common stop-loss distance convention")
     stop_lookback_period: int = p(14, Provenance.LITERATURE, "14 is the standard Wilder ATR period")
-    min_positions_diversification: int = p(
-        5, Provenance.ARBITRARY, "no basis for this specific minimum"
-    )
+    min_positions_diversification: int = p(5, Provenance.ARBITRARY, "no basis for this specific minimum")
     max_positions: int = p(20, Provenance.ARBITRARY, "no basis for this specific maximum")
     slsqp_risk_aversion: float = p(
         1.0, Provenance.ARBITRARY, "equal weighting of conviction return vs variance; not tuned"
     )
-    slsqp_max_total_deployment: float = p(
-        1.0, Provenance.CONVENTION, "a long-only book cannot exceed its capital"
-    )
+    slsqp_max_total_deployment: float = p(1.0, Provenance.CONVENTION, "a long-only book cannot exceed its capital")
     slsqp_zero_cap_epsilon: float = p(
         1e-3,
         Provenance.ARBITRARY,
@@ -450,9 +307,7 @@ class RiskParams:
     slsqp_maxiter: int = p(300, Provenance.CONVENTION, "typical SciPy SLSQP iteration cap")
     var_limit: float = p(0.03, Provenance.ARBITRARY, "no basis for this specific daily VaR ceiling")
     cvar_limit: float = p(0.05, Provenance.ARBITRARY, "no basis for this specific CVaR ceiling")
-    correlation_limit: float = p(
-        0.75, Provenance.ARBITRARY, "no basis for this specific correlation ceiling"
-    )
+    correlation_limit: float = p(0.75, Provenance.ARBITRARY, "no basis for this specific correlation ceiling")
     reduce_weight_multiplier: float = p(
         0.5, Provenance.ARBITRARY, "no basis for this specific haircut on statistical violation"
     )
@@ -460,10 +315,7 @@ class RiskParams:
 
 @dataclass(frozen=True)
 class MacroParams:
-    """RegimeClassifier windowed-inference parameters.
-
-    See agents/macro_hmm.py, agents/macro_context.py and data/macro_features.py.
-    """
+    """RegimeClassifier windowed-inference parameters."""
 
     inference_window_months: int = p(
         36,
@@ -478,9 +330,7 @@ class MacroParams:
         "FRED/VIX history fetched for windowed inference; must exceed the 5-year "
         "VIX percentile warmup plus the inference window itself, with margin",
     )
-    fed_funds_publication_lag_days: int = p(
-        32, Provenance.LITERATURE, "Federal Reserve H.15 release lag for FEDFUNDS"
-    )
+    fed_funds_publication_lag_days: int = p(32, Provenance.LITERATURE, "Federal Reserve H.15 release lag for FEDFUNDS")
     unemployment_publication_lag_days: int = p(
         35, Provenance.LITERATURE, "BLS Employment Situation release lag for UNRATE"
     )
@@ -562,15 +412,11 @@ class MacroParams:
     rule_contraction_t10y2y_below: float = p(
         -0.5, Provenance.ARBITRARY, "rule-based fallback: deep curve inversion, in percent"
     )
-    rule_expansion_vix_below: float = p(
-        18.0, Provenance.ARBITRARY, "rule-based fallback: calm-market VIX ceiling"
-    )
+    rule_expansion_vix_below: float = p(18.0, Provenance.ARBITRARY, "rule-based fallback: calm-market VIX ceiling")
     rule_expansion_t10y2y_above: float = p(
         0.3, Provenance.ARBITRARY, "rule-based fallback: clearly positive curve, in percent"
     )
-    rule_default_t10y2y: float = p(
-        0.0, Provenance.ARBITRARY, "stand-in 10Y-2Y spread when the FRED bundle has none"
-    )
+    rule_default_t10y2y: float = p(0.0, Provenance.ARBITRARY, "stand-in 10Y-2Y spread when the FRED bundle has none")
     yield_curve_inverted_below: float = p(
         -0.10,
         Provenance.CONVENTION,
@@ -596,8 +442,7 @@ class MacroParams:
     hmm_fit_start: str = p(
         "2010-01-01",
         Provenance.ARBITRARY,
-        "default start for RegimeClassifier.fit_on_history, chosen to include the "
-        "post-GFC recovery cycle",
+        "default start for RegimeClassifier.fit_on_history, chosen to include the post-GFC recovery cycle",
     )
     vix_percentile_window_days: int = p(
         1260,
@@ -618,8 +463,7 @@ class ReconciliationParams:
     horizon_days: int = p(
         5,
         Provenance.ARBITRARY,
-        "pre-registered before any evaluation result was observed; still no "
-        "empirical basis for this specific value",
+        "pre-registered before any evaluation result was observed; still no empirical basis for this specific value",
     )
     min_abs_return_for_storage: float = p(
         0.01,
@@ -647,17 +491,13 @@ class ReconciliationParams:
     daily_run_hour_et: int = p(
         17,
         Provenance.ARBITRARY,
-        "Eastern-time hour of the daily reconcile pass; after the 16:00 ET close, "
-        "so the day's closing prices exist",
+        "Eastern-time hour of the daily reconcile pass; after the 16:00 ET close, so the day's closing prices exist",
     )
 
 
 @dataclass(frozen=True)
 class MemoryParams:
-    """Reliability-weighting parameters.
-
-    See memory/cultural.py and orchestration/aggregator.py.
-    """
+    """Reliability-weighting parameters."""
 
     max_trade_outcomes: int = p(
         5000,
@@ -675,14 +515,7 @@ class MemoryParams:
 
 @dataclass(frozen=True)
 class StructuredOutputParams:
-    """Retry/back-off controls for the structured-output decoder.
-
-    See structured_output.py. One attempt budget replacing the three
-    per-agent copies of ``range(3)`` + ``time.sleep(2**attempt)`` this
-    decoder consolidates (fundamental.py, sentiment.py, portfolio.py) —
-    none of those three had any basis beyond "seemed reasonable" either,
-    so the value carries forward unchanged rather than being re-guessed.
-    """
+    """Retry/back-off controls for the structured-output decoder."""
 
     llm_temperature: float = p(
         0.1,
@@ -694,8 +527,7 @@ class StructuredOutputParams:
     max_attempts: int = p(
         3,
         Provenance.ARBITRARY,
-        "matches the per-agent retry loops this decoder replaces; not evaluated "
-        "against alternatives",
+        "matches the per-agent retry loops this decoder replaces; not evaluated against alternatives",
     )
     backoff_base_seconds: float = p(
         1.0,
@@ -714,14 +546,7 @@ class StructuredOutputParams:
 
 @dataclass(frozen=True)
 class CollectorParams:
-    """Thresholds the unattended collector uses to judge a completed cycle's health.
-
-    See orchestration/collector.py's CycleOutcome: a cycle that ran but produced
-    too few usable allocations is DEGRADED, not SUCCESS, even though nothing
-    raised — the LLM agents' "degrade, never fabricate" behavior means a dead
-    upstream, including missing credentials, shows up as null
-    fields on every decision rather than an exception.
-    """
+    """Thresholds the unattended collector uses to judge a completed cycle's health."""
 
     min_decisions_with_allocation: int = p(
         1,
@@ -731,23 +556,14 @@ class CollectorParams:
         "reported DEGRADED and the job fails. 1 is a floor, not a fraction — "
         "not tuned against real degraded-run data",
     )
-    interval_seconds: int = p(
-        3600, Provenance.ARBITRARY, "seconds between automatic collection cycles; a guess"
-    )
-    total_wealth: float = p(
-        100_000.0, Provenance.ARBITRARY, "simulated wealth a collection cycle allocates"
-    )
-    invest_pct: float = p(
-        0.6, Provenance.ARBITRARY, "fraction of total_wealth a collection cycle invests"
-    )
+    interval_seconds: int = p(3600, Provenance.ARBITRARY, "seconds between automatic collection cycles; a guess")
+    total_wealth: float = p(100_000.0, Provenance.ARBITRARY, "simulated wealth a collection cycle allocates")
+    invest_pct: float = p(0.6, Provenance.ARBITRARY, "fraction of total_wealth a collection cycle invests")
 
 
 @dataclass(frozen=True)
 class GovernorParams:
-    """Token estimation and rolling-window admission for the Groq rate governor.
-
-    See argus/governor.py.
-    """
+    """Token estimation and rolling-window admission for the Groq rate governor."""
 
     word_to_token_ratio: float = p(
         2.2,
@@ -760,8 +576,7 @@ class GovernorParams:
     chat_template_overhead_tokens: int = p(
         20,
         Provenance.ARBITRARY,
-        "spot-measured ~15 tokens for the role wrapper and special tokens, rounded up "
-        "for headroom rather than fit",
+        "spot-measured ~15 tokens for the role wrapper and special tokens, rounded up for headroom rather than fit",
     )
     window_seconds: float = p(
         60.0,
@@ -773,8 +588,7 @@ class GovernorParams:
     max_wait_attempts: int = p(
         3,
         Provenance.ARBITRARY,
-        "sleeps wait_if_needed makes before giving up with RateLimitExceeded; "
-        "not evaluated against alternatives",
+        "sleeps wait_if_needed makes before giving up with RateLimitExceeded; not evaluated against alternatives",
     )
     bootstrap_rpm: int = p(
         30,
@@ -792,11 +606,7 @@ class GovernorParams:
 
 @dataclass(frozen=True)
 class EvaluationParams:
-    """Bootstrap and power settings for the pre-registered evaluation.
-
-    See backtesting/evaluation.py and scripts/run_evaluation.py. These definitions
-    are pre-registered: changing one invalidates comparison with earlier reports.
-    """
+    """Bootstrap and power settings for the pre-registered evaluation."""
 
     bootstrap_resamples: int = p(2000, Provenance.CONVENTION, "percentile-bootstrap resample count")
     bootstrap_seed: int = p(0, Provenance.CONVENTION, "fixed so a report is reproducible")
@@ -807,20 +617,13 @@ class EvaluationParams:
         "pre-registered: below this many scored decisions (the full fixture universe) "
         "the report warns that statistical power is very low",
     )
-    replay_total_wealth: float = p(
-        100_000.0, Provenance.ARBITRARY, "simulated wealth for a replayed session"
-    )
-    replay_invest_pct: float = p(
-        0.8, Provenance.ARBITRARY, "fraction of replay_total_wealth eligible for allocation"
-    )
+    replay_total_wealth: float = p(100_000.0, Provenance.ARBITRARY, "simulated wealth for a replayed session")
+    replay_invest_pct: float = p(0.8, Provenance.ARBITRARY, "fraction of replay_total_wealth eligible for allocation")
 
 
 @dataclass(frozen=True)
 class FundamentalParams:
-    """LLM-call and output-bound controls for the fundamental agent.
-
-    See agents/fundamental.py.
-    """
+    """LLM-call and output-bound controls for the fundamental agent."""
 
     max_tokens: int = p(
         450,
@@ -830,12 +633,9 @@ class FundamentalParams:
     capacity_reserve_fraction: float = p(
         0.1,
         Provenance.ARBITRARY,
-        "fraction of the RPM budget held back so the portfolio agent has room after "
-        "a fundamental batch",
+        "fraction of the RPM budget held back so the portfolio agent has room after a fundamental batch",
     )
-    reasoning_char_limit: int = p(
-        400, Provenance.ARBITRARY, "no basis beyond keeping the rationale short"
-    )
+    reasoning_char_limit: int = p(400, Provenance.ARBITRARY, "no basis beyond keeping the rationale short")
     default_sector_pe_median: float = p(
         20.0,
         Provenance.ARBITRARY,
@@ -845,10 +645,7 @@ class FundamentalParams:
 
 @dataclass(frozen=True)
 class SentimentParams:
-    """LLM-call, news-scoring and output-bound controls for the sentiment agent.
-
-    See agents/sentiment.py.
-    """
+    """LLM-call, news-scoring and output-bound controls for the sentiment agent."""
 
     max_tokens: int = p(
         550,
@@ -871,12 +668,8 @@ class SentimentParams:
     headline_char_limit_for_model: int = p(
         512, Provenance.CONVENTION, "FinBERT's 512-token input ceiling, applied as characters"
     )
-    headline_char_limit_stored: int = p(
-        100, Provenance.ARBITRARY, "no basis beyond keeping per-headline text short"
-    )
-    reasoning_char_limit: int = p(
-        400, Provenance.ARBITRARY, "no basis beyond keeping the rationale short"
-    )
+    headline_char_limit_stored: int = p(100, Provenance.ARBITRARY, "no basis beyond keeping per-headline text short")
+    reasoning_char_limit: int = p(400, Provenance.ARBITRARY, "no basis beyond keeping the rationale short")
     catalyst_window_days: int = p(
         14,
         Provenance.ARBITRARY,
@@ -901,23 +694,14 @@ EVALUATION = EvaluationParams()
 FUNDAMENTAL = FundamentalParams()
 SENTIMENT = SentimentParams()
 
-# Every module-level dataclass instance is a parameter group; a new group is
-# registered by being defined, not by being listed here. The classes themselves
-# (which are `type`s) and Provenance (an enum) are excluded. A test asserts every
-# group is frozen.
+# Discover frozen parameter instances from globals so a new group needs no separate registry.
 _ALL_GROUPS: dict[str, Any] = {
     name: obj for name, obj in globals().items() if is_dataclass(obj) and not isinstance(obj, type)
 }
 
 
 def all_params() -> list[dict[str, Any]]:
-    """Flat listing of every declared parameter, for tests and audits.
-
-    Each entry: group name, field name, current value, Provenance, note.
-    Used by tests/test_params.py to assert every field carries provenance
-    metadata (i.e. nobody added a bare `float = 0.5` field and skipped
-    `p(...)`).
-    """
+    """List parameter groups, fields, values, provenance, and notes for audits."""
     return [
         {
             "group": group_name,

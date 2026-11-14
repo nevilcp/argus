@@ -16,26 +16,18 @@ from argus.governor import (
 )
 from argus.params import GOVERNOR
 
-# Any registered model exercises the same governor code path; the tests that
-# need two distinct models take them from REGISTERED_MODELS directly.
+# Use any registered model unless a test explicitly requires separate per-model budgets.
 MODEL = next(iter(REGISTERED_MODELS))
 
 
 def _tokens_this_window(usage) -> int:
-    """Sums the rolling token window's entries.
-
-    The window-based replacement for the old tokens_this_minute scalar.
-    """
+    """Sum the rolling token window's entries."""
     return sum(tok for _, tok in usage.tokens_window)
 
 
 @pytest.fixture
 def governor():
-    """A fresh RateLimitGovernor with no prior usage recorded.
-
-    Returns:
-        A new RateLimitGovernor instance.
-    """
+    """Return a rate governor with empty usage counters."""
     return RateLimitGovernor()
 
 
@@ -47,19 +39,7 @@ def _rate_limit_headers(
     reset_requests: str = "23h59m59s",
     reset_tokens: str = "7.66s",
 ) -> dict[str, str]:
-    """Builds a synthetic set of Groq rate-limit response headers.
-
-    Args:
-        limit_requests: Value for x-ratelimit-limit-requests (a DAILY figure).
-        limit_tokens: Value for x-ratelimit-limit-tokens (a PER-MINUTE figure).
-        remaining_requests: Value for x-ratelimit-remaining-requests.
-        remaining_tokens: Value for x-ratelimit-remaining-tokens.
-        reset_requests: Go-style duration string for x-ratelimit-reset-requests.
-        reset_tokens: Go-style duration string for x-ratelimit-reset-tokens.
-
-    Returns:
-        Dict of header name -> value, matching Groq's real header names.
-    """
+    """Build a synthetic set of Groq rate-limit response headers."""
     return {
         "x-ratelimit-limit-requests": str(limit_requests),
         "x-ratelimit-limit-tokens": str(limit_tokens),
@@ -71,13 +51,6 @@ def _rate_limit_headers(
 
 
 def test_governor_admits_after_window_rolls_over(monkeypatch, governor):
-    """Exceeding the rolling window's request budget sleeps, then admits once entries age out.
-
-    A fixed-minute bucket could admit 2x budget across a boundary straddle;
-    the rolling window instead tracks each admission's own timestamp, so the
-    request is only clear to retry once GOVERNOR.window_seconds has actually elapsed
-    since the oldest entry.
-    """
     req_limit = BOOTSTRAP_LIMITS[MODEL]["requests_per_minute"]
 
     fake_now = [1_000.0]
@@ -90,7 +63,7 @@ def test_governor_admits_after_window_rolls_over(monkeypatch, governor):
 
     def _fake_sleep(seconds):
         sleep_calls.append(seconds)
-        fake_now[0] += 61  # advance past the window so the oldest admission ages out
+        fake_now[0] += 61
 
     monkeypatch.setattr("argus.governor.time.sleep", _fake_sleep)
 
@@ -100,9 +73,7 @@ def test_governor_admits_after_window_rolls_over(monkeypatch, governor):
 
 @patch("argus.governor.time.sleep")
 def test_governor_wait_gives_up_after_max_attempts(mock_sleep, governor):
-    """A request too large to ever fit the per-minute budget raises rather than looping forever."""
-    # estimated_tokens alone exceeds the per-minute budget, so no amount of
-    # waiting for the minute to reset ever makes this admissible.
+    # Reject reservations larger than the entire minute budget because no window rollover can admit them.
     with pytest.raises(RateLimitExceeded):
         governor.wait_if_needed(MODEL, BOOTSTRAP_LIMITS[MODEL]["tokens_per_minute"] + 1)
 
@@ -113,12 +84,6 @@ def test_governor_wait_gives_up_after_max_attempts(mock_sleep, governor):
 
 
 def test_governor_does_not_block_other_models_while_sleeping(governor):
-    """A stall throttling one model must not block a concurrent call for a different model.
-
-    Regression test for the lock being held across time.sleep(): with the lock
-    held for the whole sleep, a call for `other_model` on another thread would
-    have queued behind `throttled_model`'s wait instead of returning immediately.
-    """
     models = list(REGISTERED_MODELS)
     assert len(models) >= 2, "test requires at least two registered models"
     throttled_model, other_model = models[0], models[1]
@@ -128,9 +93,7 @@ def test_governor_does_not_block_other_models_while_sleeping(governor):
     usage.requests_window.extend([now] * BOOTSTRAP_LIMITS[throttled_model]["requests_per_minute"])
 
     sleeping = threading.Event()
-    # `time` is a single shared module: patching governor's time.sleep patches
-    # this attribute globally, so a plain time.sleep(0.3) call in the side_effect
-    # below would recurse into the mock. Capture the real function first.
+    # Capture real sleep before patching the shared time module so the mock side effect cannot recurse.
     real_sleep = time.sleep
 
     def _blocking_sleep(_seconds):
@@ -158,19 +121,16 @@ def test_governor_does_not_block_other_models_while_sleeping(governor):
 
 
 def test_governor_unregistered_model_raises(governor):
-    """A model absent from REGISTERED_MODELS raises rather than being silently ungoverned."""
     with pytest.raises(UnregisteredModel):
         governor.wait_if_needed("some-typo-d-model-id", 100)
 
 
 def test_governor_get_capacity_unregistered_model_raises(governor):
-    """Remaining capacity for an unregistered model raises rather than reading as exhausted."""
     with pytest.raises(UnregisteredModel):
         governor.get_remaining_capacity("some-typo-d-model-id")
 
 
 def test_governor_get_capacity(governor):
-    """Remaining per-minute capacity decrements by one for each request recorded."""
     initial_capacity = governor.get_remaining_capacity(MODEL)
 
     governor.wait_if_needed(MODEL, 10)
@@ -178,7 +138,6 @@ def test_governor_get_capacity(governor):
 
 
 def test_governor_report(governor):
-    """The usage report reflects today's usage alongside the published per-minute limits."""
     governor.wait_if_needed(MODEL, 100)
 
     report = governor.get_usage_report()
@@ -203,36 +162,27 @@ def test_governor_report(governor):
     ],
 )
 def test_parse_reset_duration(value, expected_seconds):
-    """Go-style Groq reset durations parse into the equivalent number of seconds."""
     assert _parse_reset_duration(value) == pytest.approx(expected_seconds)
 
 
 def test_parse_reset_duration_rejects_unparseable_input():
-    """A string with no recognizable duration component raises rather than silently returning 0."""
     with pytest.raises(ValueError, match="unparseable Groq reset duration"):
         _parse_reset_duration("not-a-duration")
 
 
 def test_estimate_tokens_combines_prompts_and_max_tokens():
-    """Word count across both prompts is scaled and added to the completion ceiling."""
     system_prompt = "one two three"
     user_prompt = "four five"
     max_tokens = 100
 
     estimated = estimate_tokens(system_prompt, user_prompt, max_tokens)
-    assert (
-        estimated
-        == int(5 * GOVERNOR.word_to_token_ratio) + GOVERNOR.chat_template_overhead_tokens + 100
-    )
+    assert estimated == int(5 * GOVERNOR.word_to_token_ratio) + GOVERNOR.chat_template_overhead_tokens + 100
 
 
 def test_observe_headers_overrides_bootstrap(governor):
-    """A real Groq response header sets limits_observed and overrides the bootstrap figures."""
     assert governor._get_usage(MODEL).limits_observed is False
 
-    governor.observe_headers(
-        MODEL, _rate_limit_headers(limit_tokens=123_456, remaining_tokens=100_000)
-    )
+    governor.observe_headers(MODEL, _rate_limit_headers(limit_tokens=123_456, remaining_tokens=100_000))
 
     usage = governor._get_usage(MODEL)
     assert usage.limits_observed is True
@@ -245,20 +195,17 @@ def test_observe_headers_overrides_bootstrap(governor):
 
 
 def test_observe_headers_unregistered_model_raises(governor):
-    """Feeding headers for an unregistered model raises rather than fabricating a profile."""
     with pytest.raises(UnregisteredModel):
         governor.observe_headers("some-typo-d-model-id", _rate_limit_headers())
 
 
 def test_observe_headers_skips_incomplete_headers(governor):
-    """A response missing rate-limit headers leaves the bootstrap state untouched."""
     governor.observe_headers(MODEL, {"content-type": "application/json"})
     assert governor._get_usage(MODEL).limits_observed is False
 
 
 @patch("argus.governor.time.sleep")
 def test_observed_tpm_governs_wait_if_needed(mock_sleep, governor):
-    """Once headers are observed, tokens-per-minute admission uses the header-reported remaining."""
     governor.observe_headers(MODEL, _rate_limit_headers(limit_tokens=1_000, remaining_tokens=1_000))
 
     # Bootstrap TPM would happily admit this, but the header-observed remaining won't.
@@ -268,10 +215,7 @@ def test_observed_tpm_governs_wait_if_needed(mock_sleep, governor):
 
 
 def test_observed_daily_exhaustion_raises_immediately(governor):
-    """A provider-reported daily budget of zero fails fast rather than sleeping out its reset."""
-    governor.observe_headers(
-        MODEL, _rate_limit_headers(remaining_requests=0, reset_requests="23h59m0s")
-    )
+    governor.observe_headers(MODEL, _rate_limit_headers(remaining_requests=0, reset_requests="23h59m0s"))
 
     with (
         patch("argus.governor.time.sleep") as mock_sleep,
@@ -282,13 +226,6 @@ def test_observed_daily_exhaustion_raises_immediately(governor):
 
 
 def test_unobserved_daily_budget_is_permissive_by_design(governor):
-    """Before any response headers arrive, the daily-request axis never blocks admission.
-
-    Intentional, not a gap: Groq publishes no bootstrap figure for requests-per-day
-    (see BOOTSTRAP_LIMITS), so inventing one would fabricate a cap nothing publishes.
-    The per-minute axes still gate every call, bounding the window this stays fully
-    permissive to roughly the first response's round trip.
-    """
     assert governor._get_usage(MODEL).limits_observed is False
 
     for _ in range(5):
@@ -298,7 +235,6 @@ def test_unobserved_daily_budget_is_permissive_by_design(governor):
 
 
 def test_record_usage_applies_delta_to_bootstrap_counters(governor):
-    """record_usage corrects the local today/window counters toward the actual token count."""
     governor.wait_if_needed(MODEL, 100)
 
     governor.record_usage(MODEL, estimated_tokens=100, prompt_tokens=40, completion_tokens=10)
@@ -309,7 +245,6 @@ def test_record_usage_applies_delta_to_bootstrap_counters(governor):
 
 
 def test_record_usage_never_lets_counters_go_negative(governor):
-    """An overestimate correcting downward floors at 0 rather than going negative."""
     governor.wait_if_needed(MODEL, 100)
 
     governor.record_usage(MODEL, estimated_tokens=100, prompt_tokens=0, completion_tokens=0)
@@ -320,18 +255,11 @@ def test_record_usage_never_lets_counters_go_negative(governor):
 
 
 def test_record_usage_unregistered_model_raises(governor):
-    """Recording usage for an unregistered model raises rather than fabricating a profile."""
     with pytest.raises(UnregisteredModel):
         governor.record_usage("some-typo-d-model-id", 100, 50, 10)
 
 
 def test_record_usage_does_not_touch_header_derived_remaining(governor):
-    """record_usage only corrects bootstrap counters — the header-observed remaining is untouched.
-
-    observe_headers already refreshed the header-derived remaining with the
-    provider's own post-call figure by the time record_usage runs (see
-    GroqLLMClient.complete), so applying a second delta there would double-adjust.
-    """
     governor.observe_headers(MODEL, _rate_limit_headers(remaining_tokens=5_000))
 
     governor.record_usage(MODEL, estimated_tokens=1_000, prompt_tokens=1, completion_tokens=1)
@@ -340,7 +268,6 @@ def test_record_usage_does_not_touch_header_derived_remaining(governor):
 
 
 def test_release_reservation_restores_bootstrap_budget(governor):
-    """A released reservation gives back the exact request+token budget wait_if_needed granted."""
     initial_capacity = governor.get_remaining_capacity(MODEL)
 
     governor.wait_if_needed(MODEL, 500)
@@ -356,7 +283,6 @@ def test_release_reservation_restores_bootstrap_budget(governor):
 
 
 def test_release_reservation_restores_header_observed_remaining(governor):
-    """Releasing restores the header-derived remaining too, capped at the observed limit."""
     governor.observe_headers(MODEL, _rate_limit_headers(limit_tokens=1_000, remaining_tokens=1_000))
 
     governor.wait_if_needed(MODEL, 400)
@@ -370,13 +296,11 @@ def test_release_reservation_restores_header_observed_remaining(governor):
 
 
 def test_release_reservation_unregistered_model_raises(governor):
-    """Releasing for an unregistered model raises rather than fabricating a profile."""
     with pytest.raises(UnregisteredModel):
         governor.release_reservation("some-typo-d-model-id", 100)
 
 
 def test_observe_headers_updates_token_axis_without_request_axis(governor):
-    """A response carrying only token-axis headers still updates that axis."""
     headers = {
         "x-ratelimit-limit-tokens": "50000",
         "x-ratelimit-remaining-tokens": "40000",
@@ -393,7 +317,6 @@ def test_observe_headers_updates_token_axis_without_request_axis(governor):
 
 
 def test_observe_headers_updates_request_axis_without_token_axis(governor):
-    """A response carrying only request-axis headers still updates that axis."""
     headers = {
         "x-ratelimit-limit-requests": "14400",
         "x-ratelimit-remaining-requests": "14000",
@@ -410,7 +333,6 @@ def test_observe_headers_updates_request_axis_without_token_axis(governor):
 
 
 def test_observe_headers_malformed_reset_still_applies_limit_and_remaining(governor):
-    """An unparseable reset duration still applies the separately-parsed ints."""
     governor.observe_headers(MODEL, _rate_limit_headers(reset_tokens="not-a-duration"))
 
     usage = governor._get_usage(MODEL)

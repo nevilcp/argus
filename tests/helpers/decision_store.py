@@ -1,12 +1,4 @@
-"""
-tests/helpers/decision_store.py
-
-Writers for the two places completed decisions are stored: the decisions.jsonl
-log and the LangGraph checkpoint database.
-
-Not responsible for:
-  - Building the decisions themselves (see tests/helpers/builders.py)
-"""
+"""Decision writers for JSONL logs and graph checkpoints."""
 
 from __future__ import annotations
 
@@ -23,20 +15,15 @@ from argus.schemas.signals import ARGUSDecision
 
 
 def write_decisions_log(path: Path, *decisions: ARGUSDecision) -> Path:
-    """Writes `decisions` as one JSON object per line at `path` and returns that path."""
+    """Write `decisions` as one JSON object per line at `path` and return that path."""
     with open(path, "w", encoding="utf-8") as f:
         for decision in decisions:
             f.write(decision.model_dump_json() + "\n")
     return path
 
 
-def put_checkpoint(
-    db_path: str, thread_id: str, ts: datetime, decisions: list[ARGUSDecision] | None = None
-) -> None:
-    """Writes one checkpoint for `thread_id` stamped with `ts`.
-
-    Carries `decisions` if given.
-    """
+def put_checkpoint(db_path: str, thread_id: str, ts: datetime, decisions: list[ARGUSDecision] | None = None) -> None:
+    """Write one checkpoint for `thread_id` stamped with `ts`."""
     config: RunnableConfig = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
     checkpoint: Checkpoint = {
         "v": 1,

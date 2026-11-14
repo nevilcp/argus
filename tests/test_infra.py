@@ -19,7 +19,7 @@ def test_now_local_is_naive_and_now_market_is_aware_in_market_tz():
 
 
 def test_as_naive_timestamp_converts_aware_values_to_utc_before_dropping_tz():
-    aware = datetime(2024, 1, 2, 9, 30, tzinfo=MARKET_TZ)  # 14:30 UTC
+    aware = datetime(2024, 1, 2, 9, 30, tzinfo=MARKET_TZ)
 
     assert as_naive_timestamp(aware) == pd.Timestamp("2024-01-02 14:30")
     assert as_naive_timestamp(aware.astimezone(UTC)) == pd.Timestamp("2024-01-02 14:30")
@@ -52,7 +52,7 @@ def test_full_jitter_delay_draws_from_zero_to_capped_backoff():
     delays = [full_jitter_delay(3, 1.5, 10.0, rng=rng) for _ in range(200)]
 
     assert all(0.0 <= d <= 10.0 for d in delays)
-    assert max(delays) > 5.0  # the cap, not the base, bounds the draw
+    assert max(delays) > 5.0
 
 
 def test_data_path_follows_the_current_data_dir(monkeypatch, tmp_path):

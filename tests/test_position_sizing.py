@@ -1,10 +1,4 @@
-"""Regression tests for the Half-Kelly anchor and the allocation capital base.
-
-The Half-Kelly anchor must come from a measured win rate (not
-direction-blind conviction) and must be omitted when no such measurement
-exists, and the capital base for allocation_pct/allocation_usd must be total
-wealth rather than wealth pre-scaled by invest_pct.
-"""
+"""Regression tests for the Half-Kelly anchor and the allocation capital base."""
 
 import json
 
@@ -13,7 +7,6 @@ from argus.schemas.signals import AggregatedSignal, Signal, TickerSnapshot
 from argus.seams import FixtureLLMClient
 from tests.helpers.builders import risk_assessment, user_profile
 
-# An all-cash response: these tests read the prompt the agent built, not its output
 _ALL_CASH_BODY = {
     "portfolio": [],
     "cash_reserve_pct": 1.0,
@@ -29,7 +22,7 @@ def _snapshot(
     reliability: dict[str, float] | None = None,
     reliability_n: dict[str, int] | None = None,
 ) -> TickerSnapshot:
-    """A risk-approved snapshot whose aggregated signal is what the Kelly anchor reads."""
+    """Build a risk-approved snapshot with the aggregate used by Kelly sizing."""
     return TickerSnapshot(
         risk=risk_assessment(),
         aggregated=AggregatedSignal(
@@ -45,7 +38,7 @@ def _snapshot(
 
 
 def _agent_with_capture(body: dict) -> tuple[PortfolioManagerAgent, list[str]]:
-    """Builds a PortfolioManagerAgent whose FixtureLLMClient records the user prompt."""
+    """Build a PortfolioManagerAgent whose FixtureLLMClient records the user prompt."""
     prompts: list[str] = []
 
     def key_fn(user_prompt: str) -> str:
@@ -57,10 +50,6 @@ def _agent_with_capture(body: dict) -> tuple[PortfolioManagerAgent, list[str]]:
 
 
 def test_bearish_ticker_receives_no_kelly_anchor():
-    """A BEARISH ticker is never listed under HALF-KELLY ANCHORS.
-
-    Even with outcome data present.
-    """
     snapshots = {
         "BULL": _snapshot(
             "BULL",
@@ -86,10 +75,6 @@ def test_bearish_ticker_receives_no_kelly_anchor():
 
 
 def test_kelly_anchor_block_omitted_when_no_agent_has_data():
-    """The whole HALF-KELLY ANCHORS block is omitted, with an explanation.
-
-    When every agent's reliability sample size (n) is 0.
-    """
     snapshots = {
         "AAPL": _snapshot(
             "AAPL",
@@ -108,7 +93,6 @@ def test_kelly_anchor_block_omitted_when_no_agent_has_data():
 
 
 def test_kelly_anchor_uses_primary_drivers_measured_win_rate_not_conviction():
-    """The anchor is derived from the argmax(weighted_votes) agent's reliability rate."""
     snapshots = {
         "AAPL": _snapshot(
             "AAPL",
@@ -121,17 +105,10 @@ def test_kelly_anchor_uses_primary_drivers_measured_win_rate_not_conviction():
     agent, prompts = _agent_with_capture(_ALL_CASH_BODY)
     agent.allocate(user_profile=user_profile(), snapshots=snapshots, macro=None)
 
-    # b=2, p=0.7, q=0.3: full Kelly (2*0.7-0.3)/2=0.55, half=0.275, clipped to the 0.15 cap
     assert "AAPL: half-Kelly suggests 15.0%" in prompts[0]
 
 
 def test_capital_base_is_total_wealth_not_wealth_times_invest_pct():
-    """user_investable_capital and allocation_usd are based on total_wealth.
-
-    Not on invest_pct. Previously invest_pct was applied once to shrink the
-    capital base and again by the LLM's deployment target, so requesting
-    80% deployment produced roughly invest_pct^2 (64%) of true total wealth.
-    """
     body = {
         "portfolio": [
             {

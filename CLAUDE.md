@@ -8,6 +8,11 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup, verification
 commands, branch and message conventions, import layers, shared helpers, and
 golden snapshot workflow. That is the single home for those conventions.
 
+Read [docs/commenting-style.md](docs/commenting-style.md) before editing comments
+or docstrings. Apply it to all source languages and configuration, with a
+120-character code limit and ASCII static log text. Detailed design notes live
+in the [documentation index](docs/README.md).
+
 ## Before changing the system
 
 Read [docs/system-guide.md](docs/system-guide.md) for the architecture and module

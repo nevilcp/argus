@@ -1,22 +1,4 @@
-"""
-scripts/collect_session.py
-
-CLI entry point for argus/orchestration/collector.py — runs one unattended
-fetch-and-analyze cycle: sweep the MFT pipeline, invoke the graph over
-whichever tickers actually got session data, and append the resulting
-decisions to a JSONL log.
-
-    .venv/bin/python -m scripts.collect_session [--universe AAPL,MSFT,...]
-
-This is the same cycle the API's background collector loop
-(argus/orchestration/scheduler.py) runs on a timer; this script is what the
-scheduled GitHub Actions workflow invokes once per cron tick. Exits 0 for a no-op
-(market holiday, off-hours tick) or a successful cycle — neither is a failure.
-Exits 1 for a DEGRADED cycle: the graph ran but too few decisions came back
-with a real allocation to be worth reconciling (see argus.orchestration.collector.CycleOutcome and
-params.COLLECTOR), the same "ran but produced nothing" failure the secrets
-preflight in collector.yml catches upfront, caught here after the fact.
-"""
+"""CLI for one unattended collection cycle."""
 
 from __future__ import annotations
 
@@ -36,20 +18,38 @@ from argus.orchestration.graph import build_graph
 from argus.schemas.requests import RiskTolerance
 from argus.seams import LiveMarketDataProvider
 
+CLI_DESCRIPTION = """
+scripts/collect_session.py
+
+CLI entry point for argus/orchestration/collector.py — runs one unattended
+fetch-and-analyze cycle: sweep the MFT pipeline, invoke the graph over
+whichever tickers actually got session data, and append the resulting
+decisions to a JSONL log.
+
+    .venv/bin/python -m scripts.collect_session [--universe AAPL,MSFT,...]
+
+This is the same cycle the API's background collector loop
+(argus/orchestration/scheduler.py) runs on a timer; this script is what the
+scheduled GitHub Actions workflow invokes once per cron tick. Exits 0 for a no-op
+(market holiday, off-hours tick) or a successful cycle — neither is a failure.
+Exits 1 for a DEGRADED cycle: the graph ran but too few decisions came back
+with a real allocation to be worth reconciling (see argus.orchestration.collector.CycleOutcome and
+params.COLLECTOR), the same "ran but produced nothing" failure the secrets
+preflight in collector.yml catches upfront, caught here after the fact.
+"""
+
 
 def main() -> None:
-    """Parses CLI args, runs one collection cycle, and prints the outcome."""
+    """Parse CLI args, run one collection cycle, and print the outcome."""
     configure_logging()
 
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=CLI_DESCRIPTION)
     parser.add_argument(
         "--universe",
         default=None,
         help="Comma-separated tickers (default: ARGUS_UNIVERSE / Settings default)",
     )
-    parser.add_argument(
-        "--total-wealth", type=float, default=None, help="Default: ARGUS_TOTAL_WEALTH"
-    )
+    parser.add_argument("--total-wealth", type=float, default=None, help="Default: ARGUS_TOTAL_WEALTH")
     parser.add_argument("--invest-pct", type=float, default=None, help="Default: ARGUS_INVEST_PCT")
     parser.add_argument(
         "--risk-tolerance",

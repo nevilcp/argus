@@ -1,12 +1,4 @@
-"""Regression tests for PortfolioManagerAgent.allocate()'s in-code enforcement.
-
-Risk verdicts and per-position caps must be enforced in code, not merely
-displayed in the prompt — the audit found an over-cap allocation, a VETO'd
-ticker, and a fabricated ticker all validated cleanly. Also, when the
-structured-output decoder exhausts its retries, allocate() must say which
-stage failed (JSON parse or schema validation), not a single generic message
-regardless of cause.
-"""
+"""Regression tests for PortfolioManagerAgent.allocate()'s in-code enforcement."""
 
 import json
 
@@ -29,11 +21,7 @@ from tests.helpers.builders import risk_assessment, user_profile
 
 
 class _CapturingLLMClient:
-    """A stub LLMClient that records the prompt it was called with.
-
-    Unlike FixtureLLMClient (keyed lookup by design), tests that need to
-    inspect the exact prompt text sent to the model use this instead.
-    """
+    """A stub LLMClient that records the prompt it was called with."""
 
     def __init__(self, response_json: dict) -> None:
         self._response_json = response_json
@@ -45,19 +33,15 @@ class _CapturingLLMClient:
 
 
 def _approved(*tickers: str, weight: float = 0.10) -> dict[str, TickerSnapshot]:
-    """Snapshots for tickers the risk engine approved at the same per-position cap."""
+    """Build risk-approved snapshots sharing one per-position cap."""
     return {
-        ticker: TickerSnapshot(
-            risk=risk_assessment(RiskVerdict.APPROVE, weight, proposed_weight=weight)
-        )
+        ticker: TickerSnapshot(risk=risk_assessment(RiskVerdict.APPROVE, weight, proposed_weight=weight))
         for ticker in tickers
     }
 
 
-def _position(
-    ticker: str, allocation_pct: float, stop_loss: float = 10.0, thesis: str = "Bullish"
-) -> dict:
-    """One proposed position inside the allocator LLM's response body."""
+def _position(ticker: str, allocation_pct: float, stop_loss: float = 10.0, thesis: str = "Bullish") -> dict:
+    """Build one advisory position in the model response."""
     return {
         "ticker": ticker,
         "allocation_pct": allocation_pct,
@@ -69,7 +53,7 @@ def _position(
 
 
 def _llm_response(portfolio: list[dict]) -> FixtureLLMClient:
-    """Wraps `portfolio` positions in a full allocator response body, keyed "only"."""
+    """Wrap `portfolio` positions in a full allocator response body, keyed "only"."""
     body = {
         "portfolio": portfolio,
         "cash_reserve_pct": 0.5,
@@ -80,13 +64,6 @@ def _llm_response(portfolio: list[dict]) -> FixtureLLMClient:
 
 
 def test_allocate_reraises_on_governor_exhaustion_without_retrying():
-    """A RateLimitExceeded from the LLM client propagates immediately.
-
-    Unlike fundamental/sentiment, there is no per-ticker fallback for a
-    whole-portfolio call: a session either produces the entire allocation or
-    none of it, so the caller needs the rate-limit signal itself rather than
-    a swallowed None.
-    """
 
     class _RateLimitedLLMClient:
         def __init__(self) -> None:
@@ -106,7 +83,6 @@ def test_allocate_reraises_on_governor_exhaustion_without_retrying():
 
 
 def test_allocate_does_not_repair_a_bad_response(monkeypatch):
-    """Repair stays disabled: an invalid response isn't re-prompted with its failure."""
     monkeypatch.setattr("argus.structured_output.time.sleep", lambda *_: None)
     llm_client = _CapturingLLMClient({"cash_reserve_pct": 0.5})
 
@@ -118,16 +94,8 @@ def test_allocate_does_not_repair_a_bad_response(monkeypatch):
 
 
 def test_allocate_enforces_caps_vetoes_and_fabrications_in_code():
-    """Each of an over-cap, a VETO'd, and a fabricated ticker is corrected in code.
-
-    The over-cap allocation is clamped, the VETO'd ticker is zeroed-not-dropped, and
-    the fabricated ticker absent from snapshots is dropped — each producing an
-    diagnostics entry rather than validating silently.
-    """
     snapshots = _approved("OVER_CAP")
-    snapshots["VETOED"] = TickerSnapshot(
-        risk=risk_assessment(RiskVerdict.VETO, 0.0, proposed_weight=0.10)
-    )
+    snapshots["VETOED"] = TickerSnapshot(risk=risk_assessment(RiskVerdict.VETO, 0.0, proposed_weight=0.10))
 
     llm_client = _llm_response(
         [
@@ -153,21 +121,14 @@ def test_allocate_enforces_caps_vetoes_and_fabrications_in_code():
     assert positions["VETOED"].allocation_pct == 0.0
     assert "FABRICATED" not in positions
 
-    assert any(
-        "clamped OVER_CAP allocation from 0.1500 to risk cap 0.1000" in a
-        for a in diagnostics.messages
-    )
+    assert any("clamped OVER_CAP allocation from 0.1500 to risk cap 0.1000" in a for a in diagnostics.messages)
     assert any("zeroed VETOED allocation (risk verdict VETO)" in a for a in diagnostics.messages)
     assert any("dropped FABRICATED" in a for a in diagnostics.messages)
-    assert any(
-        "cash_reserve_pct forced to residual 0.9000 (LLM proposed 0.5000)" in a
-        for a in diagnostics.messages
-    )
+    assert any("cash_reserve_pct forced to residual 0.9000 (LLM proposed 0.5000)" in a for a in diagnostics.messages)
     assert len(diagnostics.messages) == 4
 
 
 def test_allocate_names_the_json_parse_stage_on_exhausted_retries(monkeypatch):
-    """A response that never parses as JSON is reported as json_parse, not generic."""
     monkeypatch.setattr("argus.structured_output.time.sleep", lambda *_: None)
     llm_client = FixtureLLMClient({"only": "not valid json"}, key_fn=lambda _prompt: "only")
 
@@ -185,12 +146,7 @@ def test_allocate_names_the_json_parse_stage_on_exhausted_retries(monkeypatch):
 
 
 def test_allocate_names_the_schema_validation_stage_on_exhausted_retries(monkeypatch):
-    """Valid JSON failing the proposal schema is reported as schema_validation.
-
-    Not as json_parse, which the prior test covers.
-    """
     monkeypatch.setattr("argus.structured_output.time.sleep", lambda *_: None)
-    # Missing the required "rebalance_trigger" field -> model_validate raises, json.loads does not
     llm_client = FixtureLLMClient(
         {"only": json.dumps({"cash_reserve_pct": "not_a_number"})}, key_fn=lambda _prompt: "only"
     )
@@ -209,27 +165,11 @@ def test_allocate_names_the_schema_validation_stage_on_exhausted_retries(monkeyp
 
 
 def test_allocation_pct_cap_matches_system_max_single_position_pct():
-    """Regression: allocation_pct's cap must track SYSTEM.max_single_position_pct.
-
-    Rather than duplicate it as a bare literal that a param change would
-    silently stop enforcing.
-    """
-    le_constraint = next(
-        m for m in PositionAllocation.model_fields["allocation_pct"].metadata if hasattr(m, "le")
-    )
+    le_constraint = next(m for m in PositionAllocation.model_fields["allocation_pct"].metadata if hasattr(m, "le"))
     assert le_constraint.le == SYSTEM.max_single_position_pct
 
 
 def test_proposed_position_allocation_pct_bounded_at_proposal():
-    """Regression: allocation_pct is bounded on the LLM's own proposal, not just
-    on the risk-enforced PositionAllocation downstream.
-
-    Before the fix, ProposedPosition.allocation_pct was unbounded, so a
-    negative value (never "too high" and therefore never clamped by
-    _enforce_risk's cap check) survived enforcement and only failed the
-    final PortfolioAllocation schema — turning a value that should have been
-    caught at the point of proposal into a whole-run failure instead.
-    """
     base = {
         "ticker": "AAPL",
         "thesis": "Bullish",
@@ -243,28 +183,14 @@ def test_proposed_position_allocation_pct_bounded_at_proposal():
     with pytest.raises(ValidationError, match=r".*"):
         ProposedPosition(**base, allocation_pct=SYSTEM.max_single_position_pct + 0.01)
 
-    # Within bounds still validates.
     ProposedPosition(**base, allocation_pct=SYSTEM.max_single_position_pct)
 
 
 def test_portfolio_allocation_has_no_expected_sharpe_field():
-    """Regression: expected_sharpe is dropped rather than left unenforced.
-
-    It used to pass through from the LLM's raw JSON with no validation,
-    unlike every other numeric field on this schema. No agent in the system
-    produces a genuine expected-return estimate to compute a real Sharpe
-    figure from, so the field is dropped instead.
-    """
     assert "expected_sharpe" not in PortfolioAllocation.model_fields
 
 
 def test_allocate_clamps_cash_reserve_to_schema_floor_at_high_deployment():
-    """Regression: cash_reserve_pct must clamp to the schema's floor.
-
-    Rather than leave a residual just under PORTFOLIO.cash_reserve_floor_pct,
-    which used to fail model_validate (and surface as a 500) on a
-    near-fully-deployed session.
-    """
     caps = {f"T{i}": 0.15 for i in range(6)}
     caps["T6"] = 0.051
 
@@ -286,15 +212,7 @@ def test_allocate_clamps_cash_reserve_to_schema_floor_at_high_deployment():
 
 
 def test_allocate_states_achievable_deployment_ceiling_not_raw_invest_pct():
-    """Regression: the prompt must state the achievable deployment ceiling.
-
-    min(invest_pct, sum of approved caps), not raw invest_pct, so ALLOCATION
-    RULE 3's target is reachable for a small approved universe under
-    per-position caps.
-    """
-    llm_client = _CapturingLLMClient(
-        {"portfolio": [], "cash_reserve_pct": 1.0, "rebalance_trigger": "MONTHLY"}
-    )
+    llm_client = _CapturingLLMClient({"portfolio": [], "cash_reserve_pct": 1.0, "rebalance_trigger": "MONTHLY"})
 
     agent = PortfolioManagerAgent(llm_client=llm_client)
     agent.allocate(
@@ -303,18 +221,12 @@ def test_allocate_states_achievable_deployment_ceiling_not_raw_invest_pct():
         macro=None,
     )
 
-    # 3 tickers capped at 0.15 each => achievable ceiling is 0.45, not the requested 0.95
     assert "deployment_ceiling: 45%" in llm_client.last_prompt
     assert "invest_pct: 95%" in llm_client.last_prompt
 
 
 @pytest.mark.parametrize("total_wealth", [None, 0.0, -5.0])
 def test_allocate_without_positive_total_wealth_returns_none_and_records_it(total_wealth):
-    """A missing or non-positive capital base fails the allocation instead of raising.
-
-    The all-cash fallback builds a PortfolioAllocation whose capital must be positive, so
-    passing it 0.0 would raise a ValidationError out of allocate().
-    """
     llm = _CapturingLLMClient({})
     agent = PortfolioManagerAgent(llm_client=llm)
     diagnostics = Diagnostics()
@@ -322,9 +234,7 @@ def test_allocate_without_positive_total_wealth_returns_none_and_records_it(tota
 
     for snapshots in (_approved("AAPL"), {}):
         diagnostics.messages.clear()
-        alloc = agent.allocate(
-            user_profile=profile, snapshots=snapshots, macro=None, diagnostics=diagnostics
-        )
+        alloc = agent.allocate(user_profile=profile, snapshots=snapshots, macro=None, diagnostics=diagnostics)
 
         assert alloc is None
         assert len(diagnostics.messages) == 1

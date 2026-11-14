@@ -1,18 +1,4 @@
-"""
-argus/risk/kill_switch.py
-
-Asynchronous kill switch daemon monitoring drawdown thresholds and volatility limits.
-
-Responsibilities:
-  - Monitor portfolio drawdown against configurable risk-tolerance thresholds
-  - Enforce VIX blackout gates to block new positions during extreme volatility
-  - Persist crash dump JSON on circuit breaker activation for manual review
-
-Not responsible for:
-  - Portfolio allocation (see agents/portfolio.py)
-  - Signal aggregation (see orchestration/aggregator.py)
-  - RateLimitGovernor (see argus/governor.py)
-"""
+"""Independent drawdown and VIX monitoring with persisted drawdown halts."""
 
 from __future__ import annotations
 
@@ -35,12 +21,12 @@ logger = logging.getLogger(__name__)
 
 
 def _default_runs_dir() -> str:
-    """Resolves the halt-dump directory: settings.ARGUS_RUNS_DIR, or <ARGUS_DATA_DIR>/runs."""
+    """Resolve the halt-dump directory: settings.ARGUS_RUNS_DIR, or <ARGUS_DATA_DIR>/runs."""
     return settings.ARGUS_RUNS_DIR or str(settings.data_path("runs"))
 
 
 def drawdown_fraction(high_water_mark: float, current_value: float) -> float:
-    """Returns peak-to-trough drawdown as a fraction, or 0.0 when there is no positive peak."""
+    """Return peak-to-trough drawdown as a fraction, or 0.0 when there is no positive peak."""
     if high_water_mark <= 0:
         return 0.0
     return (high_water_mark - current_value) / high_water_mark
@@ -48,21 +34,7 @@ def drawdown_fraction(high_water_mark: float, current_value: float) -> float:
 
 @dataclass
 class KillSwitchStatus:
-    """Snapshot of the active kill switch status and calculated indicators.
-
-    Attributes:
-        halted: Whether the drawdown circuit breaker has triggered.
-        new_positions_blocked: Whether the VIX blackout gate is currently
-            blocking new positions.
-        reason: Human-readable halt reason, or None if not halted.
-        triggered_at: When the halt was triggered, or None if not halted.
-        realized_drawdown: Current peak-to-trough drawdown as a fraction.
-        current_vix: Most recently observed VIX level, or None if none has
-            been fetched yet.
-        halt_persisted: False when a halt engaged but its crash dump could not
-            be written, so a process restart would resume trading. True
-            otherwise (including when not halted).
-    """
+    """Snapshot of the active kill switch status and calculated indicators."""
 
     halted: bool
     new_positions_blocked: bool
@@ -74,42 +46,7 @@ class KillSwitchStatus:
 
 
 class KillSwitch:
-    """Monitors portfolio drawdown and market volatility limits to trigger circuit breakers.
-
-    Runs a background daemon thread that evaluates portfolio value and VIX every
-    ``check_interval_seconds``. Two independent gates exist, with deliberately
-    different recovery semantics:
-      1. VIX blackout: blocks *new* positions when VIX ≥ VIX_BLACKOUT_THRESHOLD,
-         and clears itself automatically once VIX next reads below that
-         threshold. VIX is an external market read, not a symptom of anything
-         ARGUS did — once the input normalizes there is nothing to review, so
-         self-clearing is safe and a stuck blackout would just be noise.
-      2. Drawdown halt: freezes all activity when realized drawdown ≥ risk
-         threshold, and stays halted — surviving even a process restart, see
-         initialize_kill_switch — until an operator calls reset() (typically
-         via POST /kill-switch/reset). Drawdown reflects ARGUS's own realized
-         losses, which don't un-happen when the market ticks back up;
-         auto-clearing it would let a losing strategy keep running unreviewed,
-         so it requires a human to confirm the loss was understood before
-         capital is put back to work.
-
-    The drawdown threshold is fixed at construction from a single
-    ``risk_tolerance`` (see api/lifespan.py's ``settings.ARGUS_RISK_TOLERANCE``).
-    ARGUS serves every /analyze request from the same process, so this gate
-    is intentionally process-global rather than per-request: a request whose
-    own ``risk_tolerance`` differs from the configured one is still governed
-    by the configured threshold, not its own.
-
-    Attributes:
-        risk_tolerance: Risk tier this instance was configured with
-            ('CONSERVATIVE', 'MODERATE', or 'AGGRESSIVE'); an unrecognized
-            value passed to the constructor is normalized to 'MODERATE'.
-        check_interval: Seconds between monitor loop iterations.
-        vix_blackout: VIX level at or above which new positions are blocked.
-        market_data: Provider used for the VIX lookup.
-        DRAWDOWN_THRESHOLDS: Per-risk-tolerance drawdown fraction that
-            triggers a halt.
-    """
+    """Independent process-wide VIX blackout and persistent drawdown halt monitoring."""
 
     DRAWDOWN_THRESHOLDS: ClassVar[dict[str, float]] = {
         "CONSERVATIVE": KILL_SWITCH.conservative_drawdown_halt,
@@ -123,46 +60,27 @@ class KillSwitch:
         check_interval_seconds: int = KILL_SWITCH.check_interval_seconds,
         market_data: MarketDataProvider | None = None,
     ):
-        """Initializes the kill switch, deferring monitoring until start() is called.
-
-        Args:
-            user_risk_tolerance: Risk tier string ('CONSERVATIVE', 'MODERATE',
-                'AGGRESSIVE'); unrecognized values fall back to 'MODERATE'.
-            check_interval_seconds: Seconds between monitor loop iterations.
-            market_data: Provider for the VIX lookup; defaults to live fetches.
-
-        Raises:
-            TypeError: If user_risk_tolerance isn't a string.
-        """
         if not isinstance(user_risk_tolerance, str):
-            raise TypeError(
-                f"risk_tolerance must be a string, got {type(user_risk_tolerance).__name__}"
-            )
+            raise TypeError(f"risk_tolerance must be a string, got {type(user_risk_tolerance).__name__}")
 
         self.risk_tolerance = user_risk_tolerance.upper()
         if self.risk_tolerance not in self.DRAWDOWN_THRESHOLDS:
-            logger.warning(
-                "Unknown risk tolerance %s, defaulting to MODERATE.", self.risk_tolerance
-            )
+            logger.warning("Unknown risk tolerance %s, defaulting to MODERATE.", self.risk_tolerance)
             self.risk_tolerance = "MODERATE"
 
         self.check_interval = check_interval_seconds
         self.market_data = market_data or LiveMarketDataProvider()
-        # Read once from settings at construction, not at class-body import
-        # time — the prior `getattr(settings, ..., 35.0)` default was
-        # unreachable because settings always defines this field
+        # Read safety settings at construction so deployment and test overrides take effect.
         self.vix_blackout = settings.VIX_BLACKOUT_THRESHOLD
 
         self._halted = threading.Event()
         self._new_positions_blocked = threading.Event()
         self._stop_event = threading.Event()
 
-        # Guards _halt_reason/_halt_time so a reader never observes one half
-        # of a halt update torn from the other
+        # Guard halt reason and time together so readers cannot observe a partial halt update.
         self._state_lock = threading.Lock()
         self._halt_reason: str | None = None
         self._halt_time: datetime | None = None
-        # False only while a halt is engaged whose dump could not be written
         self._halt_persisted: bool = True
 
         self._portfolio_inception_value: float | None = None
@@ -177,13 +95,7 @@ class KillSwitch:
         self._thread: threading.Thread | None = None
 
     def start(self, initial_portfolio_value: float) -> None:
-        """Starts the background thread monitoring loop with the initial portfolio value.
-
-        A no-op if the monitor thread is already running (idempotent).
-
-        Args:
-            initial_portfolio_value: Total portfolio value at session inception (USD).
-        """
+        """Start the background thread monitoring loop with the initial portfolio value."""
         if self._thread is not None and self._thread.is_alive():
             logger.warning("start() called while already running; ignoring.")
             return
@@ -192,9 +104,7 @@ class KillSwitch:
         self._portfolio_inception_value = initial_portfolio_value
         self._current_portfolio_value = initial_portfolio_value
         self._high_water_mark = initial_portfolio_value
-        self._thread = threading.Thread(
-            target=self._monitor_loop, daemon=True, name="KillSwitchMonitor"
-        )
+        self._thread = threading.Thread(target=self._monitor_loop, daemon=True, name="KillSwitchMonitor")
         self._thread.start()
         logger.info(
             "Kill switch monitor started. Inception value: $%s",
@@ -202,52 +112,25 @@ class KillSwitch:
         )
 
     def stop(self, timeout: float | None = None) -> None:
-        """Signals the monitor loop to exit and waits for the thread to finish.
-
-        Args:
-            timeout: Max seconds to wait for the thread to join; None waits
-                indefinitely.
-        """
+        """Signal the monitor loop to exit and wait for the thread to finish."""
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=timeout)
             logger.info("Kill switch monitor stopped.")
 
     def update_portfolio_value(self, current_value: float) -> None:
-        """Thread-safe update of the current portfolio valuation.
-
-        Also advances the high-water mark if this value is a new peak, so
-        drawdown is always measured peak-to-trough rather than against the
-        (possibly stale) inception value.
-
-        Args:
-            current_value: Current mark-to-market portfolio value (USD).
-        """
+        """Update portfolio value and its high-water mark under the state lock."""
         self._current_portfolio_value = current_value
         self._advance_high_water_mark(current_value)
 
     def _advance_high_water_mark(self, value: float) -> float:
-        """Raises the high-water mark to ``value`` if it is a new peak, under the state lock.
-
-        The monitor thread and callers of update_portfolio_value both advance the
-        mark; an unlocked read-modify-write could let one overwrite the other's
-        newer peak with a lower one.
-
-        Args:
-            value: Candidate portfolio value (USD).
-
-        Returns:
-            The high-water mark after the update.
-        """
+        """Raise the high-water mark to `value` if it is a new peak, under the state lock."""
         with self._state_lock:
             self._high_water_mark = max(self._high_water_mark, value)
             return self._high_water_mark
 
     def _marked_value(self) -> float:
-        """Returns the latest mark, falling back to inception before the first update.
-
-        Callers must have already established that an inception value exists.
-        """
+        """Return the latest mark, falling back to inception before the first update."""
         if self._current_portfolio_value is not None:
             return self._current_portfolio_value
         if self._portfolio_inception_value is None:
@@ -255,18 +138,14 @@ class KillSwitch:
         return self._portfolio_inception_value
 
     def _engage_halt(self, reason: str, halt_time: datetime) -> None:
-        """Records the halt reason/time under the state lock, then raises the halt flag.
-
-        The flag is set last so a reader that sees ``halted`` always sees the
-        matching reason and timestamp with it.
-        """
+        """Publish halt details under the state lock before setting the halted flag."""
         with self._state_lock:
             self._halt_reason = reason
             self._halt_time = halt_time
         self._halted.set()
 
     def _monitor_loop(self) -> None:
-        """Monitoring loop, waiting between checks until stop() is called."""
+        """Monitor risk with interruptible waits until stopped."""
         while not self._stop_event.is_set():
             try:
                 self._check()
@@ -275,11 +154,7 @@ class KillSwitch:
             self._stop_event.wait(self.check_interval)
 
     def _fetch_vix_cached(self) -> float:
-        """Fetches VIX, reusing a recent reading for KILL_SWITCH.vix_cache_ttl_seconds.
-
-        Raises whatever the underlying fetch raises when the cache is empty
-        or stale; a cache hit never raises.
-        """
+        """Fetch VIX, reusing a recent reading for KILL_SWITCH.vix_cache_ttl_seconds."""
         now = time.monotonic()
         if (
             self._vix_cache_value is not None
@@ -294,14 +169,7 @@ class KillSwitch:
         return value
 
     def _check(self) -> None:
-        """Evaluates portfolio drawdown and VIX levels against safety limits.
-
-        Drawdown is measured peak-to-trough against _high_water_mark, not
-        against the inception value. A VIX fetch failure never clears an
-        active blackout; after KILL_SWITCH.vix_failure_halt_threshold consecutive
-        failures it sets one — a monitor that can't observe volatility fails
-        closed rather than silently substituting a benign guess.
-        """
+        """Check peak drawdown and VIX, retaining or engaging blackout when volatility cannot be observed."""
         if self._portfolio_inception_value is None:
             return
 
@@ -314,9 +182,7 @@ class KillSwitch:
             vix = self._fetch_vix_cached()
         except Exception as exc:
             self._consecutive_vix_failures += 1
-            logger.error(
-                "VIX fetch failed (%d consecutive): %s", self._consecutive_vix_failures, exc
-            )
+            logger.error("VIX fetch failed (%d consecutive): %s", self._consecutive_vix_failures, exc)
             if (
                 self._consecutive_vix_failures >= KILL_SWITCH.vix_failure_halt_threshold
                 and not self._new_positions_blocked.is_set()
@@ -332,9 +198,7 @@ class KillSwitch:
 
             if vix >= self.vix_blackout and not self._new_positions_blocked.is_set():
                 self._new_positions_blocked.set()
-                logger.warning(
-                    "VIX BLACKOUT: %.1f >= %s. New positions blocked.", vix, self.vix_blackout
-                )
+                logger.warning("VIX BLACKOUT: %.1f >= %s. New positions blocked.", vix, self.vix_blackout)
             elif vix < self.vix_blackout and self._new_positions_blocked.is_set():
                 self._new_positions_blocked.clear()
                 logger.info("VIX normalized to %.1f. New positions unblocked.", vix)
@@ -346,23 +210,8 @@ class KillSwitch:
             logger.critical("KILL SWITCH TRIGGERED: %s", reason)
             self._persist_halt_event(reason, halt_time, drawdown, self._last_vix or 0.0)
 
-    def _persist_halt_event(
-        self, reason: str, halt_time: datetime, drawdown: float, vix: float
-    ) -> None:
-        """Saves a JSON crash dump to disk upon triggering a circuit breaker halt.
-
-        The dump includes a mandatory manual intervention instruction so operators
-        cannot accidentally restart the system without reviewing the halt reason.
-        Also prunes dumps beyond KILL_SWITCH.max_halt_dumps_retained, so a
-        long-lived deployment with many halt/reset cycles doesn't grow runs/
-        unbounded.
-
-        Args:
-            reason: Human-readable halt reason, as set on ``self._halt_reason``.
-            halt_time: Timestamp of the halt, as set on ``self._halt_time``.
-            drawdown: Realized drawdown at the time of halt.
-            vix: VIX level at the time of halt.
-        """
+    def _persist_halt_event(self, reason: str, halt_time: datetime, drawdown: float, vix: float) -> None:
+        """Save a JSON crash dump to disk upon triggering a circuit breaker halt."""
         timestamp = halt_time.strftime("%Y%m%d_%H%M%S")
         runs_dir = Path(_default_runs_dir())
         filename = runs_dir / f"argus_halt_{timestamp}.json"
@@ -375,9 +224,7 @@ class KillSwitch:
             "halt_value": self._current_portfolio_value,
             "realized_drawdown": drawdown,
             "vix_at_halt": vix,
-            "instruction": (
-                "MANUAL INTERVENTION REQUIRED. Delete this file to allow system restart."
-            ),
+            "instruction": ("MANUAL INTERVENTION REQUIRED. Delete this file to allow system restart."),
         }
 
         try:
@@ -386,8 +233,7 @@ class KillSwitch:
                 json.dump(dump, f, indent=4)
             self._halt_persisted = True
         except Exception as e:
-            # The halt itself is already engaged in memory; only its survival of a
-            # restart is lost, so make that loud and visible on /kill-switch/status.
+            # Report a failed dump visibly because the active in-memory halt would otherwise disappear on restart.
             self._halt_persisted = False
             logger.critical(
                 "Failed to persist halt event file %s: %s. The halt is ACTIVE but will NOT "
@@ -400,15 +246,11 @@ class KillSwitch:
 
     @property
     def status(self) -> KillSwitchStatus:
-        """Returns a point-in-time status snapshot without advancing any internal state."""
+        """Return a point-in-time status snapshot without advancing any internal state."""
         if self._portfolio_inception_value is None:
             drawdown = 0.0
         else:
-            peak = (
-                self._high_water_mark
-                if self._high_water_mark > 0
-                else self._portfolio_inception_value
-            )
+            peak = self._high_water_mark if self._high_water_mark > 0 else self._portfolio_inception_value
             drawdown = drawdown_fraction(peak, self._marked_value())
 
         with self._state_lock:
@@ -426,17 +268,7 @@ class KillSwitch:
         )
 
     def _restore_halt_from_file(self, path: Path) -> None:
-        """Re-applies a persisted halt so a process restart can't silently clear it.
-
-        A dump that exists but fails to parse (or fails partway through)
-        still engages the halt with whatever fields were recovered, falling
-        back to a generic reason/time for the rest — the dump's mere
-        existence is itself the evidence a halt occurred, so a corrupt or
-        truncated file must not be read as "no halt".
-
-        Args:
-            path: Path to a halt-event JSON file written by ``_persist_halt_event``.
-        """
+        """Restore a persisted halt, engaging it even if its dump is corrupt or incomplete."""
         reason = f"Restored from unreadable halt dump {path.name}"
         halt_time = now_local()
         try:
@@ -444,8 +276,7 @@ class KillSwitch:
                 dump = json.load(f)
             reason = dump.get("reason") or f"Restored from {path.name}"
             halt_time_raw = dump.get("halt_time")
-            # Naive local if no persisted halt_time — matches fromisoformat's
-            # naive parse of halt_time_raw
+            # Use naive local fallback timestamps to match persisted halt-time parsing.
             if halt_time_raw:
                 halt_time = datetime.fromisoformat(halt_time_raw)
         except Exception as e:
@@ -465,24 +296,16 @@ class KillSwitch:
 
     @property
     def is_halted(self) -> bool:
-        """Returns True if the drawdown circuit breaker has been triggered."""
+        """Return True if the drawdown circuit breaker has been triggered."""
         return self._halted.is_set()
 
     @property
     def new_positions_allowed(self) -> bool:
-        """Returns True only when both the VIX blackout and drawdown halt gates are clear."""
+        """Return True only when both the VIX blackout and drawdown halt gates are clear."""
         return not self._new_positions_blocked.is_set() and not self._halted.is_set()
 
     def reset(self, new_inception_value: float) -> None:
-        """Resets the circuit breaker and re-initializes the inception value.
-
-        Clears all halt flags and deletes any persisted halt dumps, so a
-        process restart can't silently resurrect a halt the operator already
-        reviewed and resolved through this call.
-
-        Args:
-            new_inception_value: Replacement inception portfolio value (USD).
-        """
+        """Reset the circuit breaker and re-initializes the inception value."""
         self._halted.clear()
         self._new_positions_blocked.clear()
         with self._state_lock:
@@ -501,19 +324,7 @@ _kill_switch: KillSwitch | None = None
 
 
 def _list_halt_dumps(runs_dir: str | None = None) -> list[Path]:
-    """Lists halt-event dumps oldest-to-newest by their own ``halt_time`` field.
-
-    Ranks by content rather than the filename's embedded timestamp —
-    lexicographic filename sort only coincidentally matches chronological
-    order. Falls back to file mtime for a dump that fails to parse.
-
-    Args:
-        runs_dir: Directory ``_persist_halt_event`` writes halt dumps to.
-            None resolves to :func:`_default_runs_dir`.
-
-    Returns:
-        Halt-dump paths sorted oldest to newest; empty if none exist.
-    """
+    """Sort halt dumps by recorded halt time, falling back to file modification time."""
     directory = Path(runs_dir if runs_dir is not None else _default_runs_dir())
     if not directory.is_dir():
         return []
@@ -526,15 +337,14 @@ def _list_halt_dumps(runs_dir: str | None = None) -> list[Path]:
                 return datetime.fromisoformat(raw)
         except Exception:
             pass
-        # Naive local, matching the fromisoformat fallback above — must not mix
-        # aware/naive in the sort key
+        # Keep fallback sort timestamps naive, matching parsed local halt times.
         return datetime.fromtimestamp(path.stat().st_mtime)  # noqa: DTZ006
 
     return sorted(directory.glob("argus_halt_*.json"), key=_halt_time)
 
 
 def _delete_halt_dumps(paths: list[Path]) -> None:
-    """Deletes the given halt dumps, logging and skipping any that can't be removed."""
+    """Delete the given halt dumps, logging and skipping any that can't be removed."""
     for path in paths:
         try:
             path.unlink()
@@ -543,27 +353,14 @@ def _delete_halt_dumps(paths: list[Path]) -> None:
 
 
 def _prune_halt_dumps(runs_dir: str | None = None) -> None:
-    """Deletes all but the most recent KILL_SWITCH.max_halt_dumps_retained halt dumps.
-
-    Args:
-        runs_dir: Directory ``_persist_halt_event`` writes halt dumps to.
-            None resolves to :func:`_default_runs_dir`.
-    """
+    """Delete all but the most recent KILL_SWITCH.max_halt_dumps_retained halt dumps."""
     keep = KILL_SWITCH.max_halt_dumps_retained
     dumps = _list_halt_dumps(runs_dir)
     _delete_halt_dumps(dumps[:-keep] if keep > 0 else dumps)
 
 
 def _find_latest_halt_file(runs_dir: str | None = None) -> Path | None:
-    """Finds the most recently written halt-event dump, if any exist.
-
-    Args:
-        runs_dir: Directory ``_persist_halt_event`` writes halt dumps to.
-            None resolves to :func:`_default_runs_dir`.
-
-    Returns:
-        Path to the newest ``argus_halt_*.json`` file, or None if none exist.
-    """
+    """Find the most recently written halt-event dump, if any exist."""
     dumps = _list_halt_dumps(runs_dir)
     return dumps[-1] if dumps else None
 
@@ -574,23 +371,7 @@ def initialize_kill_switch(
     check_interval: int = KILL_SWITCH.check_interval_seconds,
     market_data: MarketDataProvider | None = None,
 ) -> KillSwitch:
-    """Initializes and starts the module-level KillSwitch singleton.
-
-    Safe to call multiple times; returns the existing instance if already initialized.
-    An unattended process restarting after a halt should not silently resume trading,
-    so a leftover ``runs/argus_halt_*.json`` from a prior run re-applies the halt
-    immediately, per that file's own "manual intervention required" instruction.
-
-    Args:
-        risk_tolerance: Risk tier string ('CONSERVATIVE', 'MODERATE', 'AGGRESSIVE').
-        portfolio_value: Initial portfolio value used as the drawdown base (USD).
-        check_interval: Seconds between monitor loop iterations (defaults to
-            KILL_SWITCH.check_interval_seconds, which matches the VIX cache TTL).
-        market_data: Provider for the VIX lookup; defaults to live fetches.
-
-    Returns:
-        The active KillSwitch singleton.
-    """
+    """Initialize and start the module-level KillSwitch singleton."""
     global _kill_switch
     if _kill_switch is None:
         _kill_switch = KillSwitch(risk_tolerance, check_interval, market_data=market_data)
@@ -602,9 +383,5 @@ def initialize_kill_switch(
 
 
 def get_kill_switch() -> KillSwitch | None:
-    """Retrieves the active KillSwitch singleton instance.
-
-    Returns:
-        The KillSwitch singleton, or None if not yet initialized.
-    """
+    """Retrieve the active KillSwitch singleton instance."""
     return _kill_switch

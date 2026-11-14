@@ -1,9 +1,4 @@
-"""Tests for scripts/replay_backtest.py's argument parsing.
-
-Before this, sys.argv[1:] was consumed directly as session directories, so
-any flag (e.g. --help, a typo) became a Path and blew up with a raw
-traceback instead of a usage error.
-"""
+"""Tests for scripts/replay_backtest.py's argument parsing."""
 
 from pathlib import Path
 from unittest import mock
@@ -40,10 +35,8 @@ def test_positional_args_are_parsed_as_session_dirs(monkeypatch):
 
 
 def test_replay_stdout_matches_snapshot(monkeypatch, capsys, assert_golden):
-    """The fixture session's printed allocation equals the committed pre-cleanup output."""
     monkeypatch.setattr("sys.argv", ["replay_backtest.py"])
     main()
 
-    # The session directory is an absolute, machine-specific path.
     stdout = capsys.readouterr().out.replace(str(DEFAULT_SESSION_DIR), "<FIXTURES>")
     assert_golden("replay_stdout.txt", stdout)

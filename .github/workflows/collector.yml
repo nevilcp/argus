@@ -1,31 +1,10 @@
 name: Unattended collector
 
-# Runs the collection cycle (argus-collect, see scripts/collect_session.py)
-# against the pre-built image from image.yml. Most ticks outside actual
-# trading hours are a fast no-op — MFTDataPipeline's own market-hours check
-# is what decides whether a given tick does anything, not this schedule.
-#
-# GitHub's cron is best-effort: it can drift under load or skip a tick
-# outright, and scheduled workflows stop firing after 60 days with no
-# repository activity (a push or manual run resets that clock).
+# Trigger candidate collection cycles; runtime market-hours checks and the persisted news budget control actual work.
 
 on:
   schedule:
-    # Every 2 hours, 09:05-17:05 ET (GOV-14) — a fixed UTC cron can't track
-    # DST itself, so this is two schedules, one per offset, switched by
-    # calendar month rather than the exact (year-varying) changeover date:
-    #   - Mar-Oct: always EDT (UTC-4) -> 13:05-21:05 UTC
-    #   - Nov-Feb: always EST (UTC-5) -> 14:05-22:05 UTC
-    # March runs the EDT times, which land an hour early in ET for the
-    # roughly one-to-two weeks before the changeover (second Sunday); the
-    # window still brackets the trading session, just off by an hour at
-    # the open and close. Same trade-off in reverse is impossible in
-    # November, since DST always ends by the first Sunday.
-    #
-    # This is a candidate trigger list, not a budget throttle: NewsAPI's
-    # 100 request/day free-tier cap is enforced by the persisted ledger in
-    # argus/data/newsapi_budget.py (NewsApiBudget), which counts actual requests
-    # across process restarts, so dropped or extra ticks can't breach it.
+    # Approximate Eastern hours by month; March can be an hour early. See docs/operations.md.
     - cron: "5 13-21/2 * 3-10 1-5"
     - cron: "5 14-22/2 * 11,12,1,2 1-5"
   workflow_dispatch:
@@ -41,30 +20,22 @@ permissions:
 jobs:
   collect:
     runs-on: ubuntu-latest
-    # Observed: under 1-3 min per tick. 15 min covers a slow image pull or
-    # sluggish NewsAPI/yfinance calls without leaving room for a hung run.
+    # Allow image pulls and slow market providers while bounding stalled collection cycles.
     timeout-minutes: 15
     steps:
       - name: Verify required secrets are present
-        # GROQ_API_KEY is required: fundamental, sentiment, and portfolio are
-        # all LLM agents, and every decision comes out with those fields (plus
-        # risk and allocation) null without it — a run that starts without
-        # this key cannot produce anything of value, so fail before checkout
-        # or the docker pull rather than report a false green. FRED_API_KEY
-        # and NEWSAPI_KEY only degrade the macro agent and sentiment's
-        # catalyst detection respectively (see argus/config.py), so their
-        # absence is a warning, not a failure.
+        # Require Groq for usable allocations; missing market-provider keys degrade their evidence with a warning.
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
         run: |
           if [ -z "$GROQ_API_KEY" ]; then
-            echo "::error::GROQ_API_KEY secret is not set — fundamental, sentiment, and portfolio all need it, so this run cannot produce a decision. Configure it under Settings > Secrets and variables > Actions before the collector can run."
+            echo "::error::GROQ_API_KEY is unset; configure it under Settings > Secrets and variables > Actions."
             exit 1
           fi
-          [ -z "$FRED_API_KEY" ] && echo "::warning::FRED_API_KEY secret is not set — the macro agent will degrade to single-observation inference this run."
-          [ -z "$NEWSAPI_KEY" ] && echo "::warning::NEWSAPI_KEY secret is not set — sentiment will run without news-based catalyst detection this run."
+          [ -z "$FRED_API_KEY" ] && echo "::warning::FRED_API_KEY is unset; macro evidence will degrade."
+          [ -z "$NEWSAPI_KEY" ] && echo "::warning::NEWSAPI_KEY is unset; news sentiment will be unavailable."
           exit 0
 
       - name: Check out repository
@@ -81,19 +52,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run collection cycle
-        # Exits non-zero (failing this step, and the job) when the cycle ran
-        # but came back DEGRADED — decisions logged with no usable allocation,
-        # see argus/orchestration/collector.py's CycleOutcome and
-        # params.COLLECTOR.min_decisions_with_allocation. The steps below
-        # still run via if: always() so a degraded cycle's detail reaches
-        # status.json instead of being lost with the failed step.
-        #
-        # Removes the prior cycle's collector_result.json first: restore-state
-        # brought it back along with the rest of data/, and without this an
-        # unrelated failure here (e.g. GHCR login, image pull, a crash before
-        # argus-collect writes its own result) would leave that stale file
-        # behind for "Compute status update" to republish under a fresh
-        # last_run, misreporting an infra outage as an ordinary past cycle.
+        # Remove stale cycle output before running; publish fresh diagnostics even when the cycle exits degraded.
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
@@ -108,11 +67,7 @@ jobs:
 
       - name: Compute status update
         id: status
-        # always() so a DEGRADED "Run collection cycle" step (see above) doesn't
-        # skip this — but gated on checkout having succeeded, so a preflight
-        # failure (no secrets — see the first step) still skips straight past
-        # this and Publish rather than pushing state for a run that never
-        # touched data/.
+        # Publish degraded-cycle details after checkout, but never overwrite state when preflight prevented checkout.
         if: always() && steps.checkout.outcome == 'success'
         run: |
           if [ -f data/collector_result.json ]; then
@@ -125,8 +80,9 @@ jobs:
               last_degraded_inputs: (.degraded_inputs // {})
             }' data/collector_result.json)"
           else
-            echo "::warning::collector_result.json absent after this cycle — nothing has ever been logged"
-            json="$(jq -nc --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{last_run: $t, last_reason: "unknown", last_outcome: "unknown"}')"
+            echo "::warning::collector_result.json absent after this cycle - nothing has ever been logged"
+            json="$(jq -nc --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              '{last_run: $t, last_reason: "unknown", last_outcome: "unknown"}')"
           fi
           echo "json=$json" >> "$GITHUB_OUTPUT"
 

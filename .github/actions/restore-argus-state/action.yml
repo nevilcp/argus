@@ -20,15 +20,13 @@ runs:
         mkdir -p data
         if [ -d state/data ]; then
           cp -r state/data/. ./data/
-        elif [ -d state ] && [ -n "$(find state -mindepth 1 -maxdepth 1 ! -name .git ! -name status.json -print -quit)" ]; then
-          # The argus-data branch is always laid out as data/ plus status.json.
-          # Anything else means the layout is wrong, and carrying on would let
-          # publish-argus-state overwrite the branch with an empty data/.
-          echo "::error::argus-data has files but no data/ directory; refusing to continue so the branch is not overwritten with empty state"
+        elif [ -d state ] && [ -n "$(find state -mindepth 1 -maxdepth 1 \
+          ! -name .git ! -name status.json -print -quit)" ]; then
+          # Reject malformed state layouts so publishing cannot replace existing history with an empty data directory.
+          echo "::error::argus-data has files but no data/ directory; refusing to overwrite history with empty state."
           exit 1
         else
           echo "no prior state"
         fi
-        # World-writable so the image's non-root `argus` user (uid 1000) can
-        # write here regardless of the runner's own uid
+        # Allow the container user to write restored state regardless of the runner UID.
         chmod -R a+rwX data

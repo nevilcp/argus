@@ -1,21 +1,4 @@
-"""
-argus/schemas/signals.py
-
-Canonical Pydantic data contracts for the ARGUS multi-agent system.
-
-Responsibilities:
-  - Define all typed schema classes used for inter-agent signal propagation
-  - Enforce field-level validation constraints (conviction caps, weight bounds)
-  - Provide cross-model validators that prevent silent allocation bugs
-  - Define TickerSnapshot, the plain per-ticker view the portfolio agent reads
-
-Not responsible for:
-  - Signal computation (see individual agent modules)
-  - Serialization format (handled by Pydantic model_dump_json)
-
-Dependencies:
-  - pydantic >= 2.0
-"""
+"""Validated specialist measurements, model judgments, and allocation contracts."""
 
 from __future__ import annotations
 
@@ -60,34 +43,34 @@ class Regime(StrEnum):
 class RiskVerdict(StrEnum):
     """Risk assessment outcome determining portfolio allocation routing."""
 
-    APPROVE = "APPROVE"  # proceed with proposed_weight unchanged
-    VETO = "VETO"  # block the position entirely
-    REDUCE = "REDUCE"  # approved_weight < proposed_weight
+    APPROVE = "APPROVE"
+    VETO = "VETO"
+    REDUCE = "REDUCE"
 
 
 class VixRegime(StrEnum):
     """Categorized volatility regimes derived from the CBOE VIX spot level."""
 
     LOW = "LOW"  # VIX < 15
-    MEDIUM = "MEDIUM"  # 15 ≤ VIX < 25
-    HIGH = "HIGH"  # 25 ≤ VIX < 35
-    EXTREME = "EXTREME"  # VIX ≥ 35 → Governor kill-switch zone
+    MEDIUM = "MEDIUM"  # 15 <= VIX < 25
+    HIGH = "HIGH"  # 25 <= VIX < 35
+    EXTREME = "EXTREME"  # VIX >= 35 -> Governor kill-switch zone
 
 
 class YieldCurve(StrEnum):
     """Yield curve classification based on the US Treasury 10Y-2Y spread."""
 
-    NORMAL = "NORMAL"  # spread ≥ +15 bps
-    FLAT = "FLAT"  # -10 bps ≤ spread < +15 bps
+    NORMAL = "NORMAL"  # spread >= +15 bps
+    FLAT = "FLAT"  # -10 bps <= spread < +15 bps
     INVERTED = "INVERTED"  # spread < -10 bps (recession signal)
 
 
 class SectorSignal(StrEnum):
     """Macroeconomic-implied equity sector preferences."""
 
-    GROWTH_FAVORED = "GROWTH_FAVORED"  # risk-on, lower rates
-    VALUE_FAVORED = "VALUE_FAVORED"  # rising rates, reflation
-    DEFENSIVE = "DEFENSIVE"  # high VIX / contraction regime
+    GROWTH_FAVORED = "GROWTH_FAVORED"
+    VALUE_FAVORED = "VALUE_FAVORED"
+    DEFENSIVE = "DEFENSIVE"
 
 
 class Trend(StrEnum):
@@ -115,7 +98,6 @@ class Outcome(StrEnum):
     PENDING = "PENDING"  # snapshot stored, outcome not yet reconciled
 
 
-# Sector reported when it can't be fetched; risk and fundamental agents both emit it.
 UNKNOWN_SECTOR = "Unknown"
 
 
@@ -135,28 +117,12 @@ SESSION_STATE_REQUIRED_KEYS: frozenset[str] = frozenset(
     }
 )
 
-# timestamp is a required key but not a numeric indicator — it's checked for
-# presence like every other key, but exempt from the finite-float check
-# below, which would otherwise raise trying to float() an ISO string.
+# Require timestamp presence without interpreting its ISO text as a numeric indicator.
 _NUMERIC_SESSION_STATE_KEYS = SESSION_STATE_REQUIRED_KEYS - {"timestamp"}
 
 
 def missing_session_state_keys(state: dict) -> list[str]:
-    """Finds required session-state keys that are absent, None, or non-finite.
-
-    The contract a compressed technical feature dict must satisfy before a
-    consumer can trust it: data/pipeline.py's compress_all() uses this to
-    decide what "ready" means, and agents/technical.py's analyze() uses it
-    to decide what "usable" means, so both share one definition instead of
-    each re-deriving it.
-
-    Args:
-        state: A compressed technical feature dict.
-
-    Returns:
-        Sorted list of missing/invalid key names; empty if the state is
-        complete.
-    """
+    """Find absent, null, or non-finite technical indicators, checking timestamp presence separately."""
     missing = [k for k in SESSION_STATE_REQUIRED_KEYS if state.get(k) is None]
     if missing:
         return sorted(missing)
@@ -167,30 +133,17 @@ _CONVICTION_MAX = 0.95
 
 
 def _clamp_conviction(v: float) -> float:
-    """Clamps a conviction value to 0.95, warning when truncation occurs.
-
-    The 0.95 ceiling prevents the system from expressing certainty in any signal,
-    preserving a minimum margin of doubt as a risk management mechanism.
-
-    Args:
-        v: Raw conviction value.
-
-    Returns:
-        Clamped value ≤ 0.95.
-    """
+    """Clamp conviction at 0.95 and warn when truncation occurs."""
     if v > _CONVICTION_MAX:
         warnings.warn(
-            f"conviction={v:.4f} exceeds maximum {_CONVICTION_MAX}; "
-            "clamping to 0.95 — check your scoring function.",
+            f"conviction={v:.4f} exceeds maximum {_CONVICTION_MAX}; clamping to 0.95 - check your scoring function.",
             stacklevel=3,
         )
         return _CONVICTION_MAX
     return v
 
 
-# BeforeValidator is listed after the constraints so it wraps them: the clamp
-# runs first and the ge/le check sees the clamped value. Reversing the order
-# would make a conviction of 0.99 a ValidationError instead of a warning.
+# Run the clamp before numeric bounds so excess conviction warns instead of failing validation.
 _Conviction = Annotated[
     float,
     Field(ge=0.0, le=_CONVICTION_MAX),
@@ -225,17 +178,12 @@ class MacroContext(BaseModel):
     interest_rate_trend: Trend = Field(..., description="Direction of short-term interest rates")
     yield_curve_shape: YieldCurve | None = Field(..., description="10Y-2Y Treasury spread shape")
     vix_regime: VixRegime | None = Field(..., description="Categorical VIX bucket")
-    vix_percentile: float = Field(
-        ..., ge=0.0, le=100.0, description="VIX vs. trailing historical distribution"
-    )
+    vix_percentile: float = Field(..., ge=0.0, le=100.0, description="VIX vs. trailing historical distribution")
     inflation_trajectory: Trend = Field(..., description="Direction of CPI year-over-year rate")
     sector_rotation_signal: SectorSignal = Field(..., description="Macro-implied sector preference")
     agent_multipliers: dict[str, float] = Field(
         ...,
-        description=(
-            "Conviction multipliers keyed by agent name "
-            "(fundamental, technical, sentiment). Each in (0, 2]."
-        ),
+        description=("Conviction multipliers keyed by agent name (fundamental, technical, sentiment). Each in (0, 2]."),
     )
     api_calls_used: int = Field(0, ge=0)
     timestamp: datetime = Field(..., description="Naive local timestamp of signal production")
@@ -243,25 +191,14 @@ class MacroContext(BaseModel):
     @field_validator("agent_multipliers", mode="before")
     @classmethod
     def validate_agent_multipliers(cls, v: dict[str, float]) -> dict[str, float]:
-        """Fills missing agent keys with 1.0 and checks every multiplier is in (0, 2].
-
-        Args:
-            v: Raw multiplier dict from the macro agent; not modified.
-
-        Returns:
-            A new dict with at least fundamental, technical, and sentiment keys.
-
-        Raises:
-            ValueError: If any multiplier falls outside (0, 2].
-        """
+        """Fill missing agent keys with 1.0 and check every multiplier is in (0, 2]."""
         v = dict(v)
         for key in ("fundamental", "technical", "sentiment"):
             v.setdefault(key, 1.0)
         for key, mult in v.items():
             if not (0.0 < mult <= 2.0):
                 raise ValueError(
-                    f"agent_multipliers['{key}']={mult} is outside (0, 2]; "
-                    "must be a positive scaling factor"
+                    f"agent_multipliers['{key}']={mult} is outside (0, 2]; must be a positive scaling factor"
                 )
         return v
 
@@ -283,9 +220,7 @@ class TechnicalSignal(BaseModel):
     momentum_1d: float = Field(..., description="1-day log-return")
 
     signal: Signal = Field(..., description="Directional label derived from net_score")
-    conviction: _Conviction = Field(
-        ..., description="Normalized confidence in the signal [0, 0.95]"
-    )
+    conviction: _Conviction = Field(..., description="Normalized confidence in the signal [0, 0.95]")
     net_score: float = Field(
         ...,
         ge=-1.0,
@@ -298,16 +233,9 @@ class TechnicalSignal(BaseModel):
 
 
 class FundamentalVerdict(BaseModel):
-    """What the LLM returns for a fundamental analysis — judgment only.
+    """Model fundamental judgment without provider-measured financial ratios."""
 
-    Never carries measured ratios: those come from the market-data provider
-    and are merged in by the agent to build a FundamentalSignal. See
-    GLOSSARY.md's Verdict entry.
-    """
-
-    signal: Annotated[Signal, PromptText("signal (string)")] = Field(
-        ..., description="Directional label"
-    )
+    signal: Annotated[Signal, PromptText("signal (string)")] = Field(..., description="Directional label")
     conviction: Annotated[_Conviction, PromptText("conviction (float 0.0-1.0)")]
     moat_score: Annotated[float, PromptText("moat_score (float 0.0-10.0)")] = Field(
         ..., ge=0.0, le=10.0, description="Qualitative competitive moat [0, 10]"
@@ -339,9 +267,7 @@ class FundamentalSignal(BaseModel):
 
     signal: Signal = Field(..., description="Directional label")
     conviction: _Conviction
-    moat_score: float = Field(
-        ..., ge=0.0, le=10.0, description="Qualitative competitive moat [0, 10]"
-    )
+    moat_score: float = Field(..., ge=0.0, le=10.0, description="Qualitative competitive moat [0, 10]")
     reasoning: str = Field(
         ...,
         max_length=FUNDAMENTAL.reasoning_char_limit,
@@ -353,15 +279,9 @@ class FundamentalSignal(BaseModel):
 
 
 class SentimentVerdict(BaseModel):
-    """What the LLM itself returns for a sentiment synthesis — judgment only.
+    """Model sentiment judgment without locally measured FinBERT metrics."""
 
-    Never carries the FinBERT metrics: those are computed locally and merged
-    in by the agent to build a SentimentSignal. See GLOSSARY.md's Verdict entry.
-    """
-
-    signal: Annotated[Signal, PromptText('"BULLISH|BEARISH|NEUTRAL"')] = Field(
-        ..., description="Directional label"
-    )
+    signal: Annotated[Signal, PromptText('"BULLISH|BEARISH|NEUTRAL"')] = Field(..., description="Directional label")
     conviction: Annotated[_Conviction, PromptText("<float 0.0-1.0>")]
     sentiment_decay_risk: Annotated[DecayRisk, PromptText('"LOW|MEDIUM|HIGH"')] = Field(
         ..., description="Estimated speed at which the sentiment signal will decay"
@@ -382,15 +302,9 @@ class SentimentSignal(BaseModel):
         le=1.0,
         description="FinBERT weighted net score [-1, +1]; None if the news fetch failed",
     )
-    pct_positive: float = Field(
-        ..., ge=0.0, le=1.0, description="Fraction of articles scored positive"
-    )
-    pct_negative: float = Field(
-        ..., ge=0.0, le=1.0, description="Fraction of articles scored negative"
-    )
-    news_volume_7d: int = Field(
-        ..., ge=0, description="Total news articles ingested (7-day window)"
-    )
+    pct_positive: float = Field(..., ge=0.0, le=1.0, description="Fraction of articles scored positive")
+    pct_negative: float = Field(..., ge=0.0, le=1.0, description="Fraction of articles scored negative")
+    news_volume_7d: int = Field(..., ge=0, description="Total news articles ingested (7-day window)")
     news_scored_count: int = Field(
         0,
         ge=0,
@@ -401,16 +315,12 @@ class SentimentSignal(BaseModel):
     news_data_available: bool = Field(
         True, description="False means the news fetch failed; news metrics are placeholders"
     )
-    catalyst_data_available: bool = Field(
-        False, description="Whether the earnings calendar was fetched successfully"
-    )
+    catalyst_data_available: bool = Field(False, description="Whether the earnings calendar was fetched successfully")
     upcoming_catalyst: bool = Field(..., description="True if earnings / FDA / FOMC within 14 days")
 
     signal: Signal = Field(..., description="Directional label")
     conviction: _Conviction
-    sentiment_decay_risk: DecayRisk = Field(
-        ..., description="Estimated speed at which the sentiment signal will decay"
-    )
+    sentiment_decay_risk: DecayRisk = Field(..., description="Estimated speed at which the sentiment signal will decay")
     reasoning: str = Field(
         ...,
         max_length=SENTIMENT.reasoning_char_limit,
@@ -421,12 +331,7 @@ class SentimentSignal(BaseModel):
 
     @model_validator(mode="after")
     def pct_sums_to_one_approx(self) -> SentimentSignal:
-        """Warns (not errors) if pct_positive + pct_negative exceeds 1.0.
-
-        A sum > 1 indicates a normalization bug in the upstream FinBERT aggregation
-        step. A warning is preferred over a hard error to avoid rejecting otherwise
-        valid signals from borderline rounding artifacts.
-        """
+        """Warn when sentiment proportions exceed one without rejecting rounding artifacts."""
         total = self.pct_positive + self.pct_negative
         if total > 1.001:
             warnings.warn(
@@ -442,23 +347,15 @@ class RiskAssessment(BaseModel):
     """Risk verdict, exposure limits, and volatility stats for a position."""
 
     verdict: RiskVerdict = Field(..., description="Disposition on the proposed portfolio")
-    approved_weight: float = Field(
-        ..., ge=0.0, le=1.0, description="Equity exposure approved by Risk agent"
-    )
-    proposed_weight: float = Field(
-        ..., ge=0.0, le=1.0, description="Aggregate equity exposure before risk review"
-    )
-    veto_reasons: list[str] = Field(
-        default_factory=list, description="Human-readable reasons for VETO / REDUCE"
-    )
+    approved_weight: float = Field(..., ge=0.0, le=1.0, description="Equity exposure approved by Risk agent")
+    proposed_weight: float = Field(..., ge=0.0, le=1.0, description="Aggregate equity exposure before risk review")
+    veto_reasons: list[str] = Field(default_factory=list, description="Human-readable reasons for VETO / REDUCE")
 
     var_99: float | None = Field(None, description="99% 1-day Value-at-Risk (as + %)")
     cvar: float | None = Field(None, description="Conditional VaR / Expected Shortfall")
     marginal_var: float | None = Field(None, description="Marginal contribution to portfolio VaR")
     portfolio_beta: float | None = Field(None, description="Dollar-weighted beta vs SPY")
-    avg_correlation: float | None = Field(
-        None, ge=-1.0, le=1.0, description="Average pairwise return correlation"
-    )
+    avg_correlation: float | None = Field(None, ge=-1.0, le=1.0, description="Average pairwise return correlation")
 
     stop_loss: float | None = Field(None, description="Calculated stop-loss price level")
 
@@ -483,15 +380,10 @@ class RiskAssessment(BaseModel):
 
     @model_validator(mode="after")
     def approved_le_proposed(self) -> RiskAssessment:
-        """Enforces that approved_weight never exceeds proposed_weight.
-
-        Violated when an upstream bug or rounding error inflates the approved weight.
-        A hard validation error is intentional to surface configuration issues early.
-        """
+        """Reject any risk assessment whose approved weight exceeds its proposal."""
         if self.approved_weight > self.proposed_weight + 1e-6:
             raise ValueError(
-                f"approved_weight ({self.approved_weight}) cannot exceed "
-                f"proposed_weight ({self.proposed_weight})"
+                f"approved_weight ({self.approved_weight}) cannot exceed proposed_weight ({self.proposed_weight})"
             )
         return self
 
@@ -552,12 +444,7 @@ class AggregatedSignal(BaseModel):
 
 
 class ProposedPosition(BaseModel):
-    """A position as the LLM proposes it — advisory, not yet risk-enforced.
-
-    Never carries allocation_usd or a risk-approved stop_loss: the agent computes
-    the former from allocation_pct and overrides the latter with the risk engine's
-    own figure when one exists. See GLOSSARY.md's Proposal entry.
-    """
+    """Advisory model position before dollar amounts, stops, and risk caps are enforced."""
 
     ticker: Annotated[str, PromptText('""')] = Field(..., description="Equity ticker symbol")
     allocation_pct: Annotated[float, PromptText("0.0")] = Field(
@@ -566,15 +453,11 @@ class ProposedPosition(BaseModel):
         le=SYSTEM.max_single_position_pct,
         description="Proposed target portfolio weight",
     )
-    stop_loss: Annotated[float | None, PromptText("0.0")] = Field(
-        None, description="Model's own stop-loss estimate"
-    )
+    stop_loss: Annotated[float | None, PromptText("0.0")] = Field(None, description="Model's own stop-loss estimate")
     target_price: Annotated[float | None, PromptText("null")] = Field(
         None, description="12-month price target (optional)"
     )
-    thesis: Annotated[str, PromptText('"<≤20 words>"')] = Field(
-        ..., description="One-sentence position thesis"
-    )
+    thesis: Annotated[str, PromptText('"<≤20 words>"')] = Field(..., description="One-sentence position thesis")
     advisor_note: Annotated[
         str | None,
         PromptText('"2-4 professional sentences: rationale, key risks, what to monitor"'),
@@ -588,17 +471,10 @@ class ProposedPosition(BaseModel):
 
 
 class PortfolioProposal(BaseModel):
-    """What the LLM itself returns for portfolio allocation — judgment only.
-
-    Advisory until the risk engine has enforced against it: caps, vetoes, and the
-    cash residual are all applied by the agent afterwards, never trusted from this
-    object directly. See GLOSSARY.md's Proposal entry.
-    """
+    """Advisory model portfolio before risk caps, vetoes, and the cash residual are enforced."""
 
     portfolio: list[ProposedPosition] = Field(default_factory=list)
-    cash_reserve_pct: Annotated[float, PromptText("0.0")] = Field(
-        ..., description="Model's own residual estimate"
-    )
+    cash_reserve_pct: Annotated[float, PromptText("0.0")] = Field(..., description="Model's own residual estimate")
     rebalance_trigger: Annotated[str, PromptText('"MONTHLY"')] = Field(
         ..., description="Condition that will next trigger rebalancing, e.g. 'VIX > 35'"
     )
@@ -630,9 +506,7 @@ class PositionAllocation(BaseModel):
             f"Portfolio Manager (≤{PORTFOLIO.advisor_note_char_limit} chars)"
         ),
     )
-    composite_conviction: float = Field(
-        ..., ge=0.0, le=1.0, description="Aggregated conviction across all agents"
-    )
+    composite_conviction: float = Field(..., ge=0.0, le=1.0, description="Aggregated conviction across all agents")
     time_horizon: str = Field(..., description="Expected holding period, e.g. '30 days'")
 
 
@@ -649,30 +523,21 @@ class PortfolioAllocation(BaseModel):
             "pre-scaled by invest_pct"
         ),
     )
-    portfolio: list[PositionAllocation] = Field(
-        default_factory=list, description="List of recommended positions"
-    )
+    portfolio: list[PositionAllocation] = Field(default_factory=list, description="List of recommended positions")
     cash_reserve_pct: float = Field(
         ...,
         ge=PORTFOLIO.cash_reserve_floor_pct,
         le=1.00,
         description="Fraction of capital held as cash [PORTFOLIO.cash_reserve_floor_pct, 1.00]",
     )
-    rebalance_trigger: str = Field(
-        ..., description="Condition that will next trigger rebalancing, e.g. 'VIX > 35'"
-    )
+    rebalance_trigger: str = Field(..., description="Condition that will next trigger rebalancing, e.g. 'VIX > 35'")
     api_calls_used: int = Field(1, ge=0)
     timestamp: datetime = Field(..., description="Naive local timestamp of signal production")
 
     @field_validator("portfolio")
     @classmethod
     def tickers_are_unique(cls, portfolio: list[PositionAllocation]) -> list[PositionAllocation]:
-        """Rejects a portfolio with a repeated ticker.
-
-        Every downstream consumer (node_log_decisions, risk cap enforcement)
-        keys positions by ticker; a duplicate would silently overwrite one
-        of the two allocations rather than raising.
-        """
+        """Reject duplicate tickers before keyed consumers can overwrite a position."""
         counts = Counter(pos.ticker for pos in portfolio)
         duplicates = sorted(ticker for ticker, n in counts.items() if n > 1)
         if duplicates:
@@ -681,16 +546,7 @@ class PortfolioAllocation(BaseModel):
 
     @model_validator(mode="after")
     def total_allocation_sums_to_one(self) -> PortfolioAllocation:
-        """Verifies that equity weights + cash_reserve_pct sum to within [0.95, 1.01].
-
-        The upper bound (> 1.01) prevents leverage by catching over-allocation.
-        The lower bound (< 0.95) catches a silent under-deployment bug where the LLM
-        sets a low cash_reserve_pct *and* a low equity allocation, leaving a large
-        fraction of capital completely unaccounted for.
-
-        cash_reserve_pct should always be treated as the residual:
-            cash_reserve_pct = 1.0 - sum(allocation_pct)
-        """
+        """Validate total equity and residual cash within the permitted allocation tolerance."""
         total_equity = sum(p.allocation_pct for p in self.portfolio)
         grand_total = total_equity + self.cash_reserve_pct
         if grand_total > 1.01:
@@ -717,11 +573,8 @@ class ARGUSDecision(BaseModel):
         description="UUID v4 unique identifier for this decision record",
     )
     ticker: str = Field(..., description="Equity ticker symbol")
-    session_timestamp: datetime = Field(
-        ..., description="Naive local timestamp of the decision cycle"
-    )
+    session_timestamp: datetime = Field(..., description="Naive local timestamp of the decision cycle")
 
-    # All signal fields are optional; populated as each agent completes
     technical: TechnicalSignal | None = Field(None)
     macro: MacroContext | None = Field(None)
     fundamental: FundamentalSignal | None = Field(None)
@@ -742,26 +595,14 @@ class ARGUSDecision(BaseModel):
     @computed_field  # type: ignore[misc]
     @property
     def total_api_calls(self) -> int:
-        """Total api_calls_used summed across every non-None child schema."""
+        """Sum model calls across the available specialist and allocation records."""
         sources = [self.technical, self.macro, self.fundamental, self.sentiment, self.risk]
         return sum(s.api_calls_used for s in sources if s is not None)
 
 
 @dataclass(frozen=True)
 class TickerSnapshot:
-    """The per-ticker join of every specialist agent's output for one session.
-
-    A pure, on-demand projection of ARGUSState's parallel per-ticker maps —
-    never stored in state or the checkpoint, and never validated or
-    serialized the way the schemas.signals models are. See build_ticker_snapshots.
-
-    Attributes:
-        technical: This ticker's TechnicalSignal, or None if absent.
-        fundamental: This ticker's FundamentalSignal, or None if absent.
-        sentiment: This ticker's SentimentSignal, or None if absent.
-        risk: This ticker's RiskAssessment, or None if the risk node never evaluated it.
-        aggregated: This ticker's AggregatedSignal, or None if absent.
-    """
+    """Transient per-ticker projection of specialist outputs, excluded from persisted graph state."""
 
     technical: TechnicalSignal | None = None
     fundamental: FundamentalSignal | None = None
@@ -771,11 +612,7 @@ class TickerSnapshot:
 
     @property
     def risk_approved(self) -> bool:
-        """Whether this ticker's risk verdict permits an equity allocation.
-
-        Returns:
-            True for APPROVE or REDUCE; False for VETO or a missing assessment.
-        """
+        """Return whether the risk verdict permits an equity allocation."""
         return self.risk is not None and self.risk.verdict in (
             RiskVerdict.APPROVE,
             RiskVerdict.REDUCE,

@@ -1,7 +1,5 @@
-# ─── Secrets ─────────────────────────────────────────────────────────────────
 .env
 
-# ─── Python ───────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.pyc
@@ -9,45 +7,36 @@ __pycache__/
 *.pyd
 .Python
 
-# ─── Virtual environments ─────────────────────────────────────────────────────
 .venv/
 venv/
 env/
 ENV/
 
-# ─── Build & packaging ────────────────────────────────────────────────────────
 dist/
 build/
 *.egg-info/
 *.egg
 
-# ─── Generated data & databases ───────────────────────────────────────────────
 chroma_db/
 *.db
 *.sqlite
 *.sqlite3
 
-# ─── Testing & coverage ───────────────────────────────────────────────────────
 .pytest_cache/
 .coverage
 htmlcov/
 .mypy_cache/
 .ruff_cache/
 
-# ─── IDE / OS ─────────────────────────────────────────────────────────────────
 .idea/
 .vscode/
 *.DS_Store
 Thumbs.db
 
-# ─── Logs ─────────────────────────────────────────────────────────────────────
 *.log
 logs/
 
-# ─── Runtime artifacts ────────────────────────────────────────────────────────
-# Leading slash anchors these to the repo root — unanchored, `data/` would
-# also match the real argus/data/ source package and silently swallow any
-# new file added under it
+# Anchor runtime paths at the repository root so they cannot hide source packages such as argus/data/.
 /runs/
 argus_halt_*.json
 /data/
@@ -55,11 +44,9 @@ argus_halt_*.json
 .env.*
 !.env.example
 
-# ─── Reference-only docs (not committed; see CONTRIBUTING.md) ─────────────────
 /docs/
 /langsmith/
 scripts/capture_fixtures.py
 
-# ─── Local tooling ──────────────────────────────────────────────────────────
 .claude/
 .hypothesis/
