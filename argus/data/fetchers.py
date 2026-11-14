@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 _OHLCV_COLUMNS = ["open", "high", "low", "close", "volume"]
 
 
-def _normalise_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
+def _normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     """Standardizes DataFrame schemas to lower-case OHLCV columns.
 
     yfinance ≥ 0.2.40 returns MultiIndex columns; this function flattens them
@@ -118,7 +118,7 @@ def _download_ohlcv(ticker: str, *, period: str, interval: str) -> pd.DataFrame:
             f"yfinance returned empty DataFrame for ticker={ticker!r} "
             f"interval={interval!r} period={period!r}"
         )
-    df = _normalise_ohlcv(raw)
+    df = _normalize_ohlcv(raw)
     df.sort_index(inplace=True)
     logger.info("%s [%s] → %d rows", ticker, interval, len(df))
     return df
@@ -301,8 +301,7 @@ def fetch_ticker_info(ticker: str) -> dict:
     """Fetches yfinance's raw ``.info`` dict for a ticker.
 
     Shared retried entry point for callers that only need a slice of `.info`
-    (e.g. `sector`) — previously agents/risk.py called `yf.Ticker(ticker).info`
-    directly, bypassing retry/back-off entirely.
+    (e.g. `sector`), so all callers share retry and backoff handling.
 
     Args:
         ticker: Equity ticker symbol.
@@ -318,9 +317,7 @@ def fetch_ticker_info(ticker: str) -> dict:
 def fetch_ticker_calendar(ticker: str) -> Any:
     """Fetches yfinance's raw ``.calendar`` object for a ticker.
 
-    Shared retried entry point for earnings-date lookups — previously
-    agents/sentiment.py called `yf.Ticker(ticker).calendar` directly,
-    bypassing retry/back-off entirely.
+    Earnings-date lookups share the same retry and backoff policy as other fetches.
 
     Args:
         ticker: Equity ticker symbol.
@@ -356,7 +353,7 @@ def fetch_fred_series(series_id: str, start: str = MACRO.fred_default_start) -> 
     Raises:
         DataFetchError: If FRED_API_KEY is not configured or the series is empty.
     """
-    if not settings.fred_api_key:
+    if not settings.FRED_API_KEY:
         raise DataFetchError("FRED_API_KEY is not set — configure it in .env to use macro data.")
 
     cache_key = f"{series_id}::{start}"
@@ -368,7 +365,7 @@ def fetch_fred_series(series_id: str, start: str = MACRO.fred_default_start) -> 
     logger.debug("fetching %s from FRED", series_id)
     from fredapi import Fred  # Lazy import; only loaded when FRED is actually used
 
-    fred = Fred(api_key=settings.fred_api_key)
+    fred = Fred(api_key=settings.FRED_API_KEY)
     raw: pd.Series = fred.get_series(series_id, observation_start=start)
     if raw.empty:
         raise DataFetchError(f"FRED returned empty series for {series_id!r}")
@@ -517,14 +514,14 @@ def fetch_news(
         exhausted, or the request failed after retries — distinguishable from
         an empty list, which means the request succeeded but found nothing.
     """
-    if not settings.newsapi_key:
+    if not settings.NEWSAPI_KEY:
         logger.debug("NEWSAPI_KEY not set")
         return None
 
     try:
         from newsapi import NewsApiClient  # Lazy import; only loaded when NewsAPI is used
 
-        client = NewsApiClient(api_key=settings.newsapi_key)
+        client = NewsApiClient(api_key=settings.NEWSAPI_KEY)
         from_date = (datetime.now(UTC) - timedelta(days=days_back)).strftime("%Y-%m-%d")
         query = f"{ticker} OR {company_name}"
 

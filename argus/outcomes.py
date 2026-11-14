@@ -90,7 +90,8 @@ def _realized_return_from_prices(
         price series doesn't yet extend past the target exit date — horizon
         not reached, deferred rather than fabricated.
     """
-    assert decision.technical is not None, "caller must confirm needs_reconciliation(decision)"
+    if decision.technical is None:
+        raise ValueError("caller must confirm needs_reconciliation(decision)")
     entry_price = decision.technical.current_price
     entry_date = as_naive_timestamp(decision.session_timestamp)
     target_exit_date = entry_date + timedelta(days=horizon_days)

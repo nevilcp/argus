@@ -15,7 +15,7 @@ Responsibilities:
     outcome and hand it to cultural.store_trade_outcome
   - run_reconciliation_pass: compose the above plus the paper-book update and
     every store's bounding step into one pass
-  - ReconciliationReport: what that pass did, and how to summarise it
+  - ReconciliationReport: what that pass did, and how to summarize it
 
 Not responsible for:
   - Reading or compacting the decision log (see orchestration/decision_log.py)

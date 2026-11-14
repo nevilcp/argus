@@ -96,7 +96,7 @@ def _background_task_status(task: asyncio.Task | None) -> dict:
     if not task.done():
         return {"enabled": True, "alive": True}
     if task.cancelled():
-        error = "task was cancelled"
+        error = "task was canceled"
     else:
         exc = task.exception()
         error = str(exc) if exc else "task exited unexpectedly"
@@ -335,7 +335,7 @@ async def _run_graph(state: ARGUSState) -> dict:
                 timeout=settings.ARGUS_ANALYZE_DEADLINE_SECONDS,
             )
     except TimeoutError:
-        # The underlying thread can't be cancelled and keeps running — async
+        # The underlying thread can't be canceled and keeps running — async
         # job submission is a possible future improvement — but the server no
         # longer holds the connection open past a proxy's own timeout with no signal.
         logger.error("Graph run exceeded the %ss deadline", settings.ARGUS_ANALYZE_DEADLINE_SECONDS)

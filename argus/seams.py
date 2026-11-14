@@ -367,11 +367,11 @@ def default_groq_client(model: str, temperature: float, max_tokens: int) -> Groq
         max_tokens: Maximum completion length in tokens.
 
     Returns:
-        A GroqLLMClient keyed with ``settings.groq_api_key``. A missing key is
+        A GroqLLMClient keyed with ``settings.GROQ_API_KEY``. A missing key is
         logged, not raised, so an agent can still be constructed; the first
         call fails instead.
     """
-    api_key = settings.groq_api_key
+    api_key = settings.GROQ_API_KEY
     if not api_key:
         logger.warning("GROQ_API_KEY is not set — LLM calls will fail at invocation time.")
     return GroqLLMClient(
@@ -383,7 +383,7 @@ class FixtureLLMClient:
     """Returns pre-captured response text instead of calling Groq.
 
     `responses` maps an opaque key (agent's choosing — e.g. ticker) to the
-    exact raw response text the real model previously produced, hand-captured
+    exact raw response text recorded from the model, hand-captured
     under tests/fixtures/llm_responses/. `complete` is keyed by
     `key_fn(user_prompt)` so a fixture-backed agent test doesn't need to
     guess call order.

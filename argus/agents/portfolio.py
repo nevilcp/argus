@@ -112,7 +112,8 @@ def build_signal_table(snapshots: dict[str, TickerSnapshot], macro: MacroContext
         if not snap.risk_approved:
             continue
         risk = snap.risk
-        assert risk is not None  # risk_approved guarantees this
+        if risk is None:
+            raise RuntimeError("Required risk assessment is missing")
 
         f = snap.fundamental
         t = snap.technical
@@ -283,7 +284,7 @@ class PortfolioManagerAgent:
             logger.debug("No approved tickers. Reverting to all-cash.")
             return self._all_cash_allocation(investable)
 
-        # PA-4: invest_pct can be unreachable for a small universe; state the achievable ceiling instead.
+        # invest_pct can be unreachable for a small universe; state the achievable ceiling instead.
         invest_pct = float(user_profile.get("invest_pct", 1.0))
         deployment_ceiling = min(invest_pct, self._approved_cap_sum(approved_tickers, snapshots))
 
@@ -329,7 +330,8 @@ class PortfolioManagerAgent:
         total = 0.0
         for t in approved_tickers:
             risk = snapshots[t].risk
-            assert risk is not None  # approved_tickers is filtered by risk_approved
+            if risk is None:
+                raise RuntimeError("Required risk assessment is missing")
             total += risk.approved_weight
         return total
 
@@ -350,7 +352,7 @@ class PortfolioManagerAgent:
         try:
             enforced_portfolio = self._enforce_risk(proposal, snapshots, investable, diagnostics)
 
-            # Force residual exact and clamp to the schema floor (PA-4) rather than let model_validate 500.
+            # Force residual exact and clamp to the schema floor rather than let model_validate 500.
             total_equity = sum(p["allocation_pct"] for p in enforced_portfolio)
             cash_reserve_pct = round(max(PORTFOLIO.cash_reserve_floor_pct, 1.0 - total_equity), 6)
             if abs(cash_reserve_pct - proposal.cash_reserve_pct) > 1e-6:
@@ -389,7 +391,7 @@ class PortfolioManagerAgent:
             Mapping of ticker → Half-Kelly weight, empty when no agent has recorded
             outcome history yet or every approved ticker is BEARISH.
         """
-        # Uses primary_driver's win rate as Kelly's probability, not direction-blind conviction (PA-2/PA-3).
+        # Uses primary_driver's win rate as Kelly's probability, not direction-blind conviction.
         reliability_n: dict[str, int] = {}
         for ticker in approved_tickers:
             agg = snapshots[ticker].aggregated
@@ -550,7 +552,8 @@ class PortfolioManagerAgent:
                     )
                 pos_data["allocation_pct"] = 0.0
             else:
-                assert risk is not None  # snap.risk_approved guarantees this
+                if risk is None:
+                    raise RuntimeError("Required risk assessment is missing")
                 cap = risk.approved_weight
                 if proposed_pct > cap + 1e-9:
                     diagnostics.record(

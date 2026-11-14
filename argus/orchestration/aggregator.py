@@ -43,8 +43,8 @@ SPECIALIST_AGENTS = ("fundamental", "technical", "sentiment")
 class HybridSignalAggregator:
     """Arbitrates and fuses independent specialist signals into a consensus AggregatedSignal.
 
-    Arbitration uses a weighted Borda-count style voting scheme. Macro multipliers
-    scale each agent's base weight at runtime; the highest-weighted signal pool wins.
+    Each agent casts one conviction-weighted directional vote. Macro multipliers
+    scale its base weight at runtime; the highest-weighted signal pool wins.
 
     Attributes:
         DEFAULT_WEIGHTS: Base per-agent vote weight for fundamental, technical,

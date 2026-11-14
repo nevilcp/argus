@@ -11,7 +11,7 @@ Responsibilities:
   - Count calls per method
 
 Not responsible for:
-  - Doubles that must inherit real provider behaviour (those subclass
+  - Doubles that must inherit real provider behavior (those subclass
     FixtureMarketDataProvider or LiveMarketDataProvider directly)
 """
 

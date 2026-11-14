@@ -25,7 +25,7 @@ Responsibilities:
   - Prune stale LangGraph checkpoint threads from the checkpoint database
     before returning (see _prune_stale_checkpoints), so whatever a caller
     publishes next — the scheduled collector force-pushes the whole data
-    directory to argus-data every cycle — is already bounded (issue #99)
+    directory to argus-data every cycle — is already bounded
 
 Not responsible for:
   - Scheduling (see orchestration/scheduler.py and scripts/collect_session.py)
@@ -66,7 +66,7 @@ _DECISION_SIGNAL_FIELDS = ("technical", "macro", "fundamental", "sentiment", "ri
 class CycleOutcome(StrEnum):
     """What a completed run_collection_cycle() call actually achieved.
 
-    The three outcomes issue #91 asks the collector to tell apart — market
+    The three outcomes — market
     closed (NO_OP), a normal run (SUCCESS), and a run that produced only
     decisions with no usable allocation (DEGRADED) — look identical from a
     green exit code otherwise.
@@ -138,7 +138,7 @@ def _prune_stale_checkpoints(checkpoint_db_path: str) -> None:
     Uses retention_cutoff() — the same window
     reconcile.py's own daily pass prunes to — so a checkpoint thread
     survives exactly as long under either path. Called on every collector
-    cycle (issue #99) so the state each cycle publishes to argus-data is
+    cycle so the state each cycle publishes to argus-data is
     already bounded, rather than relying solely on the once-daily reconcile
     job to catch up after the fact.
 

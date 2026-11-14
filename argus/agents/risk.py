@@ -103,12 +103,12 @@ def compute_asset_returns(
     Args:
         positions: List of dicts with key ``ticker``.
         price_history: Mapping of ticker → daily close price Series.
-        lookback: Number of trading days to include (default 252 = 1 year).
+        lookback: Trading days to include (default RISK.returns_lookback_days).
         dropped: Optional list that receives tickers excluded for having
             fewer than RISK.min_beta_overlap_points own return observations —
             without this, one short-history ticker shrinks the joint
             intersection (and therefore the covariance) for every other
-            ticker via the trailing ``dropna()`` below (RE-15).
+            ticker via the trailing ``dropna()`` below.
 
     Returns:
         DataFrame of raw daily returns per ticker, with NaN rows dropped.
@@ -139,7 +139,7 @@ def compute_portfolio_returns(
     Args:
         positions: List of dicts with keys ``ticker`` and ``weight``.
         price_history: Mapping of ticker → daily close price Series.
-        lookback: Number of trading days to include (default 252 = 1 year).
+        lookback: Trading days to include (default RISK.returns_lookback_days).
 
     Returns:
         DataFrame of weighted daily returns per ticker, with NaN rows dropped.
@@ -204,7 +204,8 @@ def conditional_var(
     if portfolio_returns.empty:
         return None
     var = historical_var(portfolio_returns, confidence)
-    assert var is not None  # non-empty series always yields a VaR value
+    if var is None:
+        raise RuntimeError("Non-empty return history did not yield a measurable VaR")
     tail = portfolio_returns[portfolio_returns <= -var]
     return abs(float(tail.mean())) if len(tail) > 0 else var
 
@@ -224,10 +225,9 @@ def ols_portfolio_beta(
         benchmark_ticker: Index to use as market proxy (default 'SPY').
         market_data: Source for the benchmark series when it isn't already in
             ``price_history``. Defaults to a live fetch.
-        lookback: Number of trading days to include (default 252 = 1 year),
-            matching compute_asset_returns — without this, beta silently
-            widened from a 1y to a multi-year window as DailyBarCache
-            accumulated history across restarts (RE-14).
+        lookback: Trading days to include (default RISK.returns_lookback_days),
+            matching compute_asset_returns so accumulated cache history does not
+            widen the estimation window across restarts.
 
     Returns:
         Dollar-weighted portfolio beta. Returns None if the benchmark cannot be fetched or

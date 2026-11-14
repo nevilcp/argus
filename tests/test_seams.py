@@ -302,7 +302,7 @@ def test_groq_llm_client_does_not_warn_on_normal_stop(caplog):
 
 def test_default_groq_client_uses_the_configured_key(monkeypatch):
     """The key comes from settings, and the model parameters pass through."""
-    monkeypatch.setattr("argus.seams.settings.groq_api_key", "configured-key")
+    monkeypatch.setattr("argus.seams.settings.GROQ_API_KEY", "configured-key")
 
     client = default_groq_client("openai/gpt-oss-20b", 0.1, 50)
 
@@ -314,7 +314,7 @@ def test_default_groq_client_uses_the_configured_key(monkeypatch):
 
 def test_default_groq_client_warns_but_builds_without_a_key(monkeypatch, caplog):
     """A missing key is logged, not raised, so an agent can still be constructed."""
-    monkeypatch.setattr("argus.seams.settings.groq_api_key", "")
+    monkeypatch.setattr("argus.seams.settings.GROQ_API_KEY", "")
 
     with caplog.at_level(logging.WARNING, logger="argus.seams"):
         client = default_groq_client("openai/gpt-oss-20b", 0.1, 50)

@@ -113,7 +113,7 @@ class MacroStatisticalAgent:
             except Exception as exc:
                 logger.warning(
                     "failed to fetch NBER USREC series (%s); "
-                    "CONTRACTION will not be labelled on this fit.",
+                    "CONTRACTION will not be labeled on this fit.",
                     exc,
                 )
 
@@ -308,6 +308,7 @@ class MacroStatisticalAgent:
         t10y2y = float(window_final["t10y2y"]) if window_final is not None else t10y2y_raw
         if t10y2y is None:
             logger.warning("Yield curve unavailable: no t10y2y measurement")
+
         curve = yield_curve_shape(t10y2y)
         cpi = self._resolve_field(window_final, "cpi_yoy", current.get("cpi_yoy"))
         inflation_trajectory = self._trend_vs_lag(

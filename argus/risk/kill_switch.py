@@ -250,7 +250,8 @@ class KillSwitch:
         """
         if self._current_portfolio_value is not None:
             return self._current_portfolio_value
-        assert self._portfolio_inception_value is not None, "caller must check inception first"
+        if self._portfolio_inception_value is None:
+            raise RuntimeError("caller must check inception first")
         return self._portfolio_inception_value
 
     def _engage_halt(self, reason: str, halt_time: datetime) -> None:
@@ -425,7 +426,7 @@ class KillSwitch:
         )
 
     def _restore_halt_from_file(self, path: Path) -> None:
-        """Re-applies a previously persisted halt so a process restart can't silently clear it.
+        """Re-applies a persisted halt so a process restart can't silently clear it.
 
         A dump that exists but fails to parse (or fails partway through)
         still engages the halt with whatever fields were recovered, falling
