@@ -35,7 +35,7 @@ from dataclasses import dataclass, field, fields, is_dataclass
 from enum import StrEnum
 from typing import Any
 
-PARAMS_VERSION = 19
+PARAMS_VERSION = 20
 
 
 class Provenance(StrEnum):
@@ -662,6 +662,12 @@ class MemoryParams:
     See memory/cultural.py and orchestration/aggregator.py.
     """
 
+    max_trade_outcomes: int = p(
+        5000,
+        Provenance.ARBITRARY,
+        "maximum settled outcomes retained for retrieval and reliability weighting; "
+        "oldest session timestamps are evicted first, not evaluated against alternatives",
+    )
     accuracy_shrinkage_k: float = p(
         10.0,
         Provenance.ARBITRARY,

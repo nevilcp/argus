@@ -154,6 +154,10 @@ def test_fetch_multiple_daily_serves_second_call_from_cache(monkeypatch):
     assert calls["n"] == 2, "second same-day call must be served entirely from cache"
     assert set(second.keys()) == {"AAPL", "MSFT"}
 
+    fetchers.fetch_multiple_daily(["MSFT"])
+    assert fetchers._DAILY_BAR_CACHE.get("AAPL") is None
+    assert fetchers._DAILY_BAR_CACHE.get("MSFT") is not None
+
 
 def test_daily_bar_cache_lives_under_argus_data_dir(monkeypatch, tmp_path):
     """The lazily-built module singleton lands under settings.ARGUS_DATA_DIR, not the cwd.

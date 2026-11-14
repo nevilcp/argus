@@ -50,18 +50,16 @@ class TTLCache[K: Hashable, V]:
     argus/agents/sentiment.py).
 
     An expired entry is dropped on the next `get` or `set` that touches it
-    rather than lingering in the dict, and `max_entries`, when given, bounds
-    the store independently of TTL — the risk agent's sector cache and the
-    FRED series cache (see argus/agents/risk.py and argus/data/fetchers.py)
-    were otherwise bounded only incidentally, by the size of the ticker
-    universe or the number of known series.
+    rather than lingering in the dict. Every caller supplies `max_entries` to
+    bound the store independently of TTL.
     """
 
     def __init__(
         self,
         ttl: timedelta,
         clock: Callable[[], datetime] = now_local,
-        max_entries: int | None = None,
+        *,
+        max_entries: int,
     ) -> None:
         """Initializes an empty cache.
 
@@ -72,9 +70,10 @@ class TTLCache[K: Hashable, V]:
                 waiting for `ttl` to actually elapse.
             max_entries: Ceiling on the number of live entries. When a `set`
                 for a new key would exceed it, the single oldest entry (by
-                cached-at time) is evicted first. None leaves the store
-                unbounded, matching prior behavior for existing callers.
+                cached-at time) is evicted first. Must be positive.
         """
+        if max_entries < 1:
+            raise ValueError("max_entries must be positive")
         self._ttl = ttl
         self._clock = clock
         self._max_entries = max_entries
@@ -103,9 +102,8 @@ class TTLCache[K: Hashable, V]:
     def set(self, key: K, value: V) -> None:
         """Stores value under key, timestamped at the current clock time.
 
-        Evicts every expired entry first, then — if `max_entries` is set and
-        still at capacity for a genuinely new key — the single oldest
-        surviving entry, so the store never grows past its cap.
+        Evicts every expired entry first, then the oldest surviving entry if a
+        new key would exceed capacity.
 
         Args:
             key: Cache key.
@@ -119,11 +117,7 @@ class TTLCache[K: Hashable, V]:
             for k in expired:
                 del self._entries[k]
 
-            if (
-                self._max_entries is not None
-                and key not in self._entries
-                and len(self._entries) >= self._max_entries
-            ):
+            if key not in self._entries and len(self._entries) >= self._max_entries:
                 oldest_key = min(self._entries, key=lambda k: self._entries[k][1])
                 del self._entries[oldest_key]
 
@@ -488,7 +482,9 @@ class DailyBarCache:
     ThreadPoolExecutor workers in fetchers.fetch_multiple_daily.
     """
 
-    def __init__(self, db_path: str | None = None) -> None:
+    def __init__(
+        self, db_path: str | None = None, *, max_tickers: int = SYSTEM.max_tracked_tickers + 1
+    ) -> None:
         """Opens (or creates) the SQLite-backed daily bar cache.
 
         Args:
@@ -496,7 +492,12 @@ class DailyBarCache:
                 under ARGUS_DATA_DIR so the cache survives process restarts
                 within the same UTC day; pass ':memory:' for an ephemeral
                 cache in tests.
+            max_tickers: Ticker cap, including one benchmark beyond the tracked
+                universe. Oldest refreshes are evicted first.
         """
+        if max_tickers < 1:
+            raise ValueError("max_tickers must be positive")
+        self._max_tickers = max_tickers
         self._db_path = (
             db_path if db_path is not None else str(settings.data_path("daily_bars_cache.db"))
         )
@@ -569,9 +570,31 @@ class DailyBarCache:
                 earliest = df.index.min().date().isoformat()
                 self._conn.execute(_DELETE_STALE_DAILY_OHLCV, (ticker, earliest))
             self._conn.execute(_UPSERT_DAILY_REFRESH, (ticker, today))
+            retained = (
+                "SELECT ticker FROM daily_ohlcv_refresh "
+                "ORDER BY refreshed_on DESC, rowid DESC LIMIT ?"
+            )
+            self._conn.execute(
+                f"DELETE FROM daily_ohlcv WHERE ticker NOT IN ({retained})", (self._max_tickers,)
+            )
+            self._conn.execute(
+                f"DELETE FROM daily_ohlcv_refresh WHERE ticker NOT IN ({retained})",
+                (self._max_tickers,),
+            )
             self._conn.commit()
 
         logger.debug("%s ← %d rows, refreshed_on=%s", ticker, len(rows), today)
+
+    def prune_untracked(self, tracked_tickers: set[str]) -> int:
+        """Removes bars and refresh markers outside the current daily-fetch universe."""
+        tracked = tuple(t.upper() for t in tracked_tickers)
+        placeholders = ",".join("?" for _ in tracked)
+        clause = f"WHERE ticker NOT IN ({placeholders})" if tracked else ""
+        with self._lock:
+            cursor = self._conn.execute(f"DELETE FROM daily_ohlcv {clause}", tracked)
+            self._conn.execute(f"DELETE FROM daily_ohlcv_refresh {clause}", tracked)
+            self._conn.commit()
+        return cursor.rowcount
 
     def close(self) -> None:
         """Closes the underlying database connection."""

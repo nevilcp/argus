@@ -32,7 +32,28 @@ def _manager_with_metadatas(metadatas: list[dict]) -> CulturalMemoryManager:
     manager = object.__new__(CulturalMemoryManager)
     manager.collection = mock.Mock()
     manager.collection.count.return_value = len(metadatas)
-    manager.collection.get.return_value = {"metadatas": metadatas}
+
+    def get_rows(*, where=None, include=None, **kwargs):
+        def matches(meta, condition):
+            if "$and" in condition:
+                return all(matches(meta, part) for part in condition["$and"])
+            for key, expected in condition.items():
+                value = meta.get(key)
+                if isinstance(expected, dict):
+                    if "$in" in expected and value not in expected["$in"]:
+                        return False
+                    if "$lte" in expected and value is not None and value > expected["$lte"]:
+                        return False
+                elif value != expected:
+                    return False
+            return True
+
+        rows = [
+            (f"trade_{i}", m) for i, m in enumerate(metadatas) if where is None or matches(m, where)
+        ]
+        return {"ids": [i for i, _ in rows], "metadatas": [m for _, m in rows]}
+
+    manager.collection.get.side_effect = get_rows
     return manager
 
 
@@ -145,6 +166,7 @@ def test_get_agent_accuracy_as_of_filters_on_timestamp():
     assert where == {
         "$and": [
             {"primary_driver": "technical"},
+            {"outcome": {"$in": ["SUCCESSFUL", "FAILED", "FLAT"]}},
             {"regime": "EXPANSION"},
             {"timestamp": {"$lte": as_of.isoformat()}},
         ]
@@ -224,6 +246,7 @@ def test_already_reconciled_returns_ids_with_a_stored_trade_row():
     data, to skip decisions already reconciled on a prior run.
     """
     manager = _manager_with_metadatas([])
+    manager.collection.get.side_effect = None
     manager.collection.get.return_value = {"ids": ["trade_abc", "trade_def"]}
 
     result = manager.already_reconciled(["abc", "def", "ghi"])
@@ -437,3 +460,33 @@ def test_trade_document_renders_missing_indicators_as_unavailable():
     document = manager.collection.upsert.call_args.kwargs["documents"][0]
     assert "RSI=N/A, MACD hist=N/A" in document
     assert "VIX regime: unknown" in document
+
+
+def test_trade_retention_evicts_oldest_rows_and_preserves_pending(monkeypatch):
+    from dataclasses import replace
+
+    monkeypatch.setattr(cultural_module, "MEMORY", replace(MEMORY, max_trade_outcomes=2))
+    manager = _manager_with_metadatas(
+        [
+            {"outcome": "SUCCESSFUL", "timestamp": "2026-01-03"},
+            {"outcome": "FLAT", "timestamp": "2026-01-01"},
+            {"outcome": "FAILED", "timestamp": "2026-01-02"},
+            {"outcome": "PENDING", "timestamp": "2025-01-01"},
+        ]
+    )
+    manager._prune_trade_outcomes()
+    manager.collection.delete.assert_called_once_with(ids=["trade_1"])
+
+
+def test_summary_failure_returns_the_full_response_shape():
+    manager = _manager_with_metadatas([{"outcome": "PENDING"}])
+    manager.collection.get.side_effect = OSError("unavailable")
+    stats = manager.summary_stats()
+    assert stats == {
+        "total_stored": 1,
+        "successful_count": 0,
+        "failed_count": 0,
+        "pending_count": 0,
+        "avg_return_pct": 0.0,
+        "best_regime_for_wins": "N/A",
+    }

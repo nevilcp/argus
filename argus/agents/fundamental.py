@@ -29,7 +29,7 @@ from argus.config import settings
 from argus.data.cache import TTLCache
 from argus.infra.clock import now_local
 from argus.infra.diagnostics import Diagnostics
-from argus.params import FUNDAMENTAL, STRUCTURED_OUTPUT
+from argus.params import FUNDAMENTAL, STRUCTURED_OUTPUT, SYSTEM
 from argus.ports import LLMClient, MarketDataProvider
 from argus.schemas.prompting import UNTRUSTED_GUARD, field_list, wrap_untrusted
 from argus.schemas.signals import UNKNOWN_SECTOR, FundamentalSignal, FundamentalVerdict
@@ -294,7 +294,7 @@ class FundamentalAgent:
         self.market_data = market_data or LiveMarketDataProvider()
         # Keyed on (ticker, session_seed) so backtest sessions and live calls never share a cached signal.
         self.cache: TTLCache[tuple[str, int | None], FundamentalSignal] = TTLCache(
-            ttl=timedelta(days=7)
+            ttl=timedelta(days=7), max_entries=SYSTEM.max_tracked_tickers
         )
 
     def analyze(

@@ -197,3 +197,13 @@ def test_ages_measures_publication_age_correctly_across_a_dst_transition():
     # Real elapsed time is 47h (one DST hour was skipped), not the 48h a
     # same-tzinfo subtraction would report
     assert cache_age_seconds["AAPL"] == pytest.approx(47 * 3600)
+
+
+def test_publication_evicts_oldest_at_capacity_and_filters_untracked_entries():
+    cache = LiveSessionCache(1, max_entries=2)
+    now = datetime.now(_ET)
+    cache.publish({"AAPL": {}}, ["AAPL", "MSFT", "NVDA"], now=now - timedelta(seconds=1))
+    cache.publish({"MSFT": {}, "NVDA": {}, "IGNORED": {}}, ["AAPL", "MSFT", "NVDA"], now=now)
+    assert len(cache) == 2
+    result = cache.admit(["AAPL", "IGNORED"], now)
+    assert result.absent == ["AAPL", "IGNORED"]

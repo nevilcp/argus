@@ -200,6 +200,7 @@ def fetch_multiple_daily(tickers: list[str], period: str = "1y") -> dict[str, pd
         Mapping of ticker → DataFrame. Failed tickers are omitted with a warning.
     """
     cache = _daily_bar_cache()
+    cache.prune_untracked(set(tickers))
     results: dict[str, pd.DataFrame] = {}
     to_fetch: list[str] = []
 
