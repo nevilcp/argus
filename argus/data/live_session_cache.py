@@ -27,7 +27,7 @@ Not responsible for:
     argus.schemas.signals.missing_session_state_keys)
 
 Publication and admission both measure age against one timezone-aware
-America/New_York clock, via `datetime.timestamp()` rather than plain
+MARKET_TZ clock, via `datetime.timestamp()` rather than plain
 subtraction — two aware datetimes sharing the same ZoneInfo instance (as
 every clock read here does) compare their naive wall-clock fields instead of
 real elapsed time, which is wrong by exactly the DST offset across a

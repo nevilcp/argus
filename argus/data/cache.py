@@ -290,7 +290,7 @@ class OHLCVBuffer:
 
         ticker = ticker.upper()
         # One base "now" for the whole batch, not one per candle: the primary key is
-        # (ticker, timestamp), so several untimestamped candles calling datetime.now()
+        # (ticker, timestamp), so several untimestamped candles reading the wall clock
         # independently can land on the same stored value under a coarse clock and
         # collide under the upsert below, silently losing all but the last. Offsetting
         # each by a growing microsecond delta keeps them unique within the batch.

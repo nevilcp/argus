@@ -112,8 +112,8 @@ def seconds_until_next_reconcile(now_et: datetime, hour: int) -> float:
     boundary. Converting both to UTC first sidesteps that.
 
     Args:
-        now_et: Current time in America/New_York.
-        hour: Target hour (0-23) in America/New_York.
+        now_et: Current time in MARKET_TZ.
+        hour: Target hour (0-23) in MARKET_TZ.
 
     Returns:
         Seconds until the next occurrence of that hour, today or tomorrow.
