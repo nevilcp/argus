@@ -11,7 +11,7 @@ Responsibilities:
   - Retrieve semantically similar historical patterns for current macro and technical contexts
   - Expose agent-level accuracy statistics and regime diagnostics
   - Expire PENDING decision snapshots that never settled (see
-    expire_pending_snapshots), so the collection stays bounded
+    expire_pending_snapshots), and cap settled trades by MEMORY.max_trade_outcomes
 
 Not responsible for:
   - Real-time signal generation (see agents/)
@@ -30,7 +30,10 @@ import logging
 import os
 from datetime import datetime
 from threading import Lock
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from chromadb.api.types import Where
 
 from argus.config import settings
 from argus.infra.clock import as_naive_timestamp
@@ -38,6 +41,11 @@ from argus.params import MEMORY, RECONCILIATION
 from argus.schemas.signals import ARGUSDecision, MacroContext, Outcome
 
 logger = logging.getLogger(__name__)
+
+_SETTLED_IN: dict[Literal["$in", "$nin"], list[str | int | float | bool]] = {
+    "$in": ["SUCCESSFUL", "FAILED", "FLAT"]
+}
+_SETTLED_WHERE: Where = {"outcome": _SETTLED_IN}
 
 # Model downloaded once to ~/.cache/sentence-transformers on first invocation.
 _EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
@@ -290,7 +298,23 @@ class CulturalMemoryManager:
         except Exception as e:
             logger.warning("Failed to delete snapshot %s: %s", snapshot_id, e)
 
+        self._prune_trade_outcomes()
         logger.info("Stored %s trade pattern. Total: %d", prefix, self.collection.count())
+
+    def _prune_trade_outcomes(self) -> None:
+        """Keeps the most recent settled outcomes, with IDs breaking timestamp ties."""
+        rows = self.collection.get(
+            where=_SETTLED_WHERE,
+            include=["metadatas"],
+        )
+        trades = sorted(
+            (str(meta.get("timestamp", "")), doc_id)
+            for doc_id, meta in zip(rows.get("ids") or [], rows.get("metadatas") or [], strict=True)
+            if doc_id.startswith("trade_")
+        )
+        excess = len(trades) - MEMORY.max_trade_outcomes
+        if excess > 0:
+            self.collection.delete(ids=[doc_id for _, doc_id in trades[:excess]])
 
     def _retrieve_by_outcome(
         self,
@@ -441,13 +465,16 @@ class CulturalMemoryManager:
             return 0.5, 0
 
         try:
-            conditions: list[dict[str, Any]] = [{"primary_driver": agent_name.lower()}]
+            conditions: list[dict[str, Any]] = [
+                {"primary_driver": agent_name.lower()},
+                _SETTLED_WHERE,
+            ]
             if regime:
                 conditions.append({"regime": regime})
             if as_of is not None:
                 conditions.append({"timestamp": {"$lte": as_of.isoformat()}})
 
-            results = self.collection.get(where=_where(conditions))  # type: ignore[arg-type]
+            results = self.collection.get(where=_where(conditions), include=["metadatas"])  # type: ignore[arg-type]
             metadatas = results.get("metadatas", [])
             if not metadatas:
                 return 0.5, 0
@@ -472,23 +499,29 @@ class CulturalMemoryManager:
             Dict with keys: total_stored, successful_count, failed_count,
             pending_count, avg_return_pct, best_regime_for_wins.
         """
-        count = self.collection.count()
+        count = 0
+        try:
+            count = self.collection.count()
+        except Exception as exc:
+            logger.warning("Failed to count memory rows: %s", exc)
+        empty = {
+            "total_stored": count,
+            "successful_count": 0,
+            "failed_count": 0,
+            "pending_count": 0,
+            "avg_return_pct": 0.0,
+            "best_regime_for_wins": "N/A",
+        }
         if count == 0:
-            return {
-                "total_stored": 0,
-                "successful_count": 0,
-                "failed_count": 0,
-                "pending_count": 0,
-                "avg_return_pct": 0.0,
-                "best_regime_for_wins": "N/A",
-            }
+            return empty
 
         try:
-            results = self.collection.get()
+            results = self.collection.get(where=_SETTLED_WHERE, include=["metadatas"])
             metadatas = results.get("metadatas") or []
             wins = 0
             fails = 0
-            pending = 0
+            pending_rows = self.collection.get(where={"outcome": "PENDING"}, include=[])
+            pending = len(pending_rows.get("ids") or [])
             settled = 0
             total_ret = 0.0
             regime_wins: dict[str, int] = {}
@@ -496,10 +529,6 @@ class CulturalMemoryManager:
             for m in metadatas:
                 outcome = m.get("outcome")
                 regime = str(m.get("regime", "unknown"))
-
-                if outcome == Outcome.PENDING:
-                    pending += 1
-                    continue
 
                 settled += 1
                 total_ret += float(m.get("return_pct", 0.0) or 0.0)  # type: ignore[arg-type]  # chromadb metadata values are typed as a broad scalar union
@@ -521,7 +550,7 @@ class CulturalMemoryManager:
             }
         except Exception as e:
             logger.warning("Failed to compute summary stats: %s", e)
-            return {"total_stored": count}
+            return empty
 
     def store_decision_snapshot(self, decision: ARGUSDecision) -> bool:
         """Persists a real-time decision profile before outcomes are finalized.

@@ -336,7 +336,7 @@ class _FakeClock:
 def _clocked_ttl_cache() -> tuple[TTLCache[str, str], _FakeClock]:
     """Builds a one-day TTLCache alongside the settable clock driving its expiry."""
     clock = _FakeClock(datetime(2026, 1, 1, 12, 0, 0))
-    return TTLCache(ttl=timedelta(days=1), clock=clock), clock
+    return TTLCache(ttl=timedelta(days=1), clock=clock, max_entries=100), clock
 
 
 def test_ttl_cache_returns_a_value_stored_within_the_window():
@@ -361,7 +361,7 @@ def test_ttl_cache_does_not_return_a_value_once_the_window_has_passed():
 
 def test_ttl_cache_returns_none_for_a_key_that_was_never_stored():
     """A key with no prior `set` call returns nothing rather than raising."""
-    cache: TTLCache[str, str] = TTLCache(ttl=timedelta(days=1))
+    cache: TTLCache[str, str] = TTLCache(ttl=timedelta(days=1), max_entries=100)
 
     assert cache.get("AAPL") is None
 
@@ -373,7 +373,7 @@ def test_ttl_cache_keys_differing_only_in_one_component_do_not_share_a_value():
     sessions replaying the same ticker must not share a cached value, and a
     live call (session_seed=None) must not be conflated with either.
     """
-    cache: TTLCache[tuple[str, int | None], str] = TTLCache(ttl=timedelta(days=7))
+    cache: TTLCache[tuple[str, int | None], str] = TTLCache(ttl=timedelta(days=7), max_entries=100)
 
     cache.set(("AAPL", 20240101), "session 1")
     cache.set(("AAPL", 20240102), "session 2")
@@ -447,13 +447,34 @@ def test_ttl_cache_max_entries_does_not_evict_when_refreshing_an_existing_key():
     assert cache.get("MSFT") == "neutral"
 
 
-def test_ttl_cache_with_no_max_entries_stays_unbounded():
-    """Omitting max_entries preserves the prior unbounded behavior for existing callers."""
-    clock = _FakeClock(datetime(2026, 1, 1, 12, 0, 0))
-    cache: TTLCache[str, int] = TTLCache(ttl=timedelta(days=1), clock=clock)
+def test_ttl_cache_requires_a_positive_capacity():
+    with pytest.raises(TypeError):
+        TTLCache(ttl=timedelta(days=1))
+    for capacity in (0, -1):
+        with pytest.raises(ValueError, match="positive"):
+            TTLCache(ttl=timedelta(days=1), max_entries=capacity)
 
-    for i in range(1000):
-        cache.set(f"T{i}", i)
 
-    assert cache.get("T0") == 0
-    assert cache.get("T999") == 999
+def test_daily_cache_prunes_bars_and_refresh_markers_for_untracked_tickers():
+    cache = DailyBarCache(":memory:")
+    frame = pd.DataFrame({"close": [100.0]}, index=pd.date_range("2026-01-01", periods=1))
+    cache.put("AAPL", frame)
+    cache.put("MSFT", frame)
+    assert cache.prune_untracked({"aapl"}) == 1
+    assert cache.get("AAPL") is not None
+    assert cache.get("MSFT") is None
+    assert cache.prune_untracked(set()) == 1
+    assert cache._conn.execute("SELECT COUNT(*) FROM daily_ohlcv_refresh").fetchone()[0] == 0
+    cache.close()
+
+
+def test_daily_cache_bounds_direct_inserts_and_keeps_refresh_markers_in_sync():
+    cache = DailyBarCache(":memory:", max_tickers=2)
+    frame = pd.DataFrame({"close": [100.0]}, index=pd.date_range("2026-01-01", periods=1))
+    for ticker in ("AAPL", "MSFT", "NVDA"):
+        cache.put(ticker, frame)
+    assert cache.get("AAPL") is None
+    assert cache.get("MSFT") is not None
+    assert cache.get("NVDA") is not None
+    assert cache._conn.execute("SELECT COUNT(*) FROM daily_ohlcv_refresh").fetchone()[0] == 2
+    cache.close()

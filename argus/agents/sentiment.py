@@ -27,7 +27,7 @@ from argus.config import settings
 from argus.data.cache import TTLCache
 from argus.infra.clock import now_local
 from argus.infra.diagnostics import Diagnostics
-from argus.params import SENTIMENT, STRUCTURED_OUTPUT
+from argus.params import SENTIMENT, STRUCTURED_OUTPUT, SYSTEM
 from argus.ports import LLMClient, MarketDataProvider
 from argus.schemas.prompting import UNTRUSTED_GUARD, schema_block, wrap_untrusted
 from argus.schemas.signals import SentimentSignal, SentimentVerdict
@@ -346,7 +346,9 @@ class SentimentAgent:
             SENTIMENT.max_tokens,
         )
         self.market_data = market_data or LiveMarketDataProvider()
-        self.cache: TTLCache[str, SentimentSignal] = TTLCache(ttl=timedelta(days=1))
+        self.cache: TTLCache[str, SentimentSignal] = TTLCache(
+            ttl=timedelta(days=1), max_entries=SYSTEM.max_tracked_tickers
+        )
 
     def analyze(
         self,

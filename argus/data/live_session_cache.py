@@ -123,13 +123,18 @@ class LiveSessionCache:
     a stand-in pipeline object.
     """
 
-    def __init__(self, interval_minutes: int) -> None:
+    def __init__(
+        self, interval_minutes: int, *, max_entries: int = SYSTEM.max_tracked_tickers
+    ) -> None:
         """Creates an empty cache sized for the given candle resolution.
 
         Args:
             interval_minutes: Native candle resolution the tracked pipeline
                 fetches at, used to size the max-bar-age threshold.
         """
+        if max_entries < 1:
+            raise ValueError("max_entries must be positive")
+        self._max_entries = max_entries
         self._interval_minutes = interval_minutes
         self._states: dict[str, tuple[dict, datetime]] = {}
 
@@ -158,11 +163,15 @@ class LiveSessionCache:
                 write age without reaching into private state.
         """
         published_at = now if now is not None else now_market()
-        for ticker, state in session_states.items():
-            self._states[ticker] = (state, published_at)
-
         tracked = set(tracked_universe)
         self._states = {t: entry for t, entry in self._states.items() if t in tracked}
+        for ticker, state in session_states.items():
+            if ticker not in tracked:
+                continue
+            self._states[ticker] = (state, published_at)
+        while len(self._states) > self._max_entries:
+            oldest = min(self._states, key=lambda t: self._states[t][1].timestamp())
+            del self._states[oldest]
 
     def admit(self, tickers: Iterable[str], now: datetime) -> AdmissionResult:
         """Determines which of the requested tickers may be allocated against right now.
