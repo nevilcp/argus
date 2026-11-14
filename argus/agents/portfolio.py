@@ -92,9 +92,14 @@ def build_signal_table(snapshots: dict[str, TickerSnapshot], macro: MacroContext
     """
     lines = []
     if macro is not None:
+        vix_display = (
+            f"VIX {macro.vix_level:.2f} ({macro.vix_regime.value})"
+            if macro.vix_level is not None and macro.vix_regime is not None
+            else "VIX unavailable"
+        )
         lines.append(
             f"MACRO: {macro.macro_regime.value} | "
-            f"VIX {macro.vix_level:.2f} ({macro.vix_regime.value}) | "
+            f"{vix_display} | "
             f"{macro.sector_rotation_signal.value}"
         )
     else:
@@ -120,11 +125,12 @@ def build_signal_table(snapshots: dict[str, TickerSnapshot], macro: MacroContext
         asig = f"{agg.signal.value}({agg.conviction:.2f})" if agg else "N/A"
         stop_display = f"{risk.stop_loss:.2f}" if isinstance(risk.stop_loss, float) else "N/A"
         var_display = f"{risk.var_99:.2%}" if isinstance(risk.var_99, float) else "N/A"
+        beta_display = f"{risk.portfolio_beta:.2f}" if risk.portfolio_beta is not None else "N/A"
         evidence = f"{len(agg.agents_present)}/3" if agg else "0/3"
 
         line = (
             f"{ticker}: FUND={fsig} TECH={tsig} SENT={ssig} AGG={asig} Evidence={evidence} "
-            f"VaR={var_display} Beta={risk.portfolio_beta:.2f} Stop={stop_display} Cap={risk.approved_weight:.1%}"
+            f"VaR={var_display} Beta={beta_display} Stop={stop_display} Cap={risk.approved_weight:.1%}"
         )
         lines.append(line)
 

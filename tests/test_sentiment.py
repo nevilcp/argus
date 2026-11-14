@@ -311,3 +311,9 @@ def test_synthesis_prompt_wraps_the_metrics_and_tells_the_model_not_to_obey_them
 
     assert prompt.startswith('<sentiment_data ticker="AAPL" as_of="intraday">\n')
     assert "</sentiment_data>\n" + UNTRUSTED_GUARD in prompt
+
+
+def test_failed_calendar_is_distinguished_from_no_catalyst(monkeypatch):
+    monkeypatch.undo()
+    provider = FakeMarketData(ticker_calendar=OSError("unavailable"))
+    assert _check_earnings_calendar("AAPL", provider) is None

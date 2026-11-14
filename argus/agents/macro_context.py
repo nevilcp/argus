@@ -37,18 +37,23 @@ def rule_based(v: dict) -> tuple[str, float]:
     """
     vix = v.get("vix")
     t10y2y = v.get("t10y2y")
-    vix = vix if vix is not None else MACRO.default_vix
-    t10y2y = t10y2y if t10y2y is not None else MACRO.rule_default_t10y2y
 
-    if vix > MACRO.rule_contraction_vix_above or t10y2y < MACRO.rule_contraction_t10y2y_below:
+    if (vix is not None and vix > MACRO.rule_contraction_vix_above) or (
+        t10y2y is not None and t10y2y < MACRO.rule_contraction_t10y2y_below
+    ):
         return Regime.CONTRACTION.value, 0.6
-    elif vix < MACRO.rule_expansion_vix_below and t10y2y > MACRO.rule_expansion_t10y2y_above:
+    elif (
+        vix is not None
+        and t10y2y is not None
+        and vix < MACRO.rule_expansion_vix_below
+        and t10y2y > MACRO.rule_expansion_t10y2y_above
+    ):
         return Regime.EXPANSION.value, 0.6
     else:
         return Regime.TRANSITIONAL.value, 0.5
 
 
-def vix_regime(vix: float) -> VixRegime:
+def vix_regime(vix: float | None) -> VixRegime | None:
     """Buckets the VIX on its absolute level, not its percentile.
 
     EXTREME is the governor's kill-switch zone by level, so the bucket must not
@@ -60,6 +65,8 @@ def vix_regime(vix: float) -> VixRegime:
     Returns:
         LOW, MEDIUM, HIGH or EXTREME.
     """
+    if vix is None:
+        return None
     if vix < MACRO.vix_low_max:
         return VixRegime.LOW
     if vix < MACRO.vix_medium_max:
@@ -69,7 +76,7 @@ def vix_regime(vix: float) -> VixRegime:
     return VixRegime.EXTREME
 
 
-def yield_curve_shape(t10y2y: float) -> YieldCurve:
+def yield_curve_shape(t10y2y: float | None) -> YieldCurve | None:
     """Buckets the 10y-2y Treasury spread.
 
     Args:
@@ -78,6 +85,8 @@ def yield_curve_shape(t10y2y: float) -> YieldCurve:
     Returns:
         INVERTED, FLAT or NORMAL.
     """
+    if t10y2y is None:
+        return None
     if t10y2y < MACRO.yield_curve_inverted_below:
         return YieldCurve.INVERTED
     if t10y2y < MACRO.yield_curve_flat_below:
@@ -85,7 +94,7 @@ def yield_curve_shape(t10y2y: float) -> YieldCurve:
     return YieldCurve.NORMAL
 
 
-def sector_rotation(regime: Regime, fed_funds: float, curve: YieldCurve) -> SectorSignal:
+def sector_rotation(regime: Regime, fed_funds: float, curve: YieldCurve | None) -> SectorSignal:
     """Chooses the sector-rotation stance from the regime, policy rate and curve shape.
 
     Args:

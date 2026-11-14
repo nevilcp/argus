@@ -60,7 +60,7 @@ class AnalysisResponse(BaseModel):
     portfolio: list[PositionAllocation]
     cash_reserve_pct: float
     macro_regime: str
-    vix_level: float
+    vix_level: float | None
     governor_report: dict
     timestamp: str
     errors: list[str] = []

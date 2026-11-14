@@ -424,3 +424,16 @@ def test_default_chroma_dir_falls_back_to_the_data_dir(monkeypatch):
     monkeypatch.setattr(cultural_module.settings, "ARGUS_DATA_DIR", "/srv/data")
 
     assert default_chroma_dir() == "/srv/data/chroma_db"
+
+
+def test_trade_document_renders_missing_indicators_as_unavailable():
+    manager = _manager_with_metadatas([])
+    decision = ARGUSDecision(
+        ticker="AAPL",
+        session_timestamp=datetime.now(),
+        macro=macro_context(vix_level=None, vix_regime=None),
+    )
+    manager.store_trade_outcome(decision, 0.05, 3, "target_hit", "unknown")
+    document = manager.collection.upsert.call_args.kwargs["documents"][0]
+    assert "RSI=N/A, MACD hist=N/A" in document
+    assert "VIX regime: unknown" in document

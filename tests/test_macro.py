@@ -120,7 +120,8 @@ def test_vix_defaulted_skips_percentile_computation(monkeypatch: pytest.MonkeyPa
 
     ctx = agent.analyze()
 
-    assert ctx.vix_level == 20.0  # the documented substitute
+    assert ctx.vix_level is None
+    assert ctx.vix_regime is None
     assert ctx.vix_percentile == 50.0  # neutral placeholder, not derived from history
 
 

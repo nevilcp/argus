@@ -104,3 +104,7 @@ def test_status_reports_the_last_observed_vix():
     ks = make_ks("MODERATE")
     check_at_vix(ks, 22.5)
     assert ks.status.current_vix == pytest.approx(22.5)
+
+
+def test_status_reports_no_vix_before_the_first_measurement():
+    assert make_ks("MODERATE").status.current_vix is None

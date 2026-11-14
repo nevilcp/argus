@@ -381,7 +381,7 @@ def _build_response(final_state: dict) -> AnalysisResponse:
         portfolio=allocation.portfolio,
         cash_reserve_pct=allocation.cash_reserve_pct,
         macro_regime=macro_context.macro_regime.value if macro_context else "unknown",
-        vix_level=macro_context.vix_level if macro_context else 0.0,
+        vix_level=macro_context.vix_level if macro_context else None,
         governor_report=governor.get_usage_report(),
         timestamp=now_local().isoformat(),
         errors=final_state.get("errors") or [],

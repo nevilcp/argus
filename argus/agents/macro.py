@@ -232,21 +232,18 @@ class MacroStatisticalAgent:
             regime, confidence = rule_based(current)
             return regime, confidence, None, False
 
-    def _vix_percentile(self, vix: float, *, vix_defaulted: bool) -> float:
+    def _vix_percentile(self, vix: float | None) -> float:
         """Ranks today's VIX against two years of daily closes.
 
         Args:
             vix: The VIX level.
-            vix_defaulted: True when `vix` is the substitute, not a measurement. A
-                percentile against a substituted level would look measured while
-                being derived from a fabricated input, so none is computed.
 
         Returns:
             The percentage of closes below `vix`, or the neutral 50.0 when the level
-            was defaulted or the history could not be fetched.
+            is unavailable or the history could not be fetched.
         """
-        if vix_defaulted:
-            logger.warning("vix was defaulted; skipping percentile computation, using neutral 50.0")
+        if vix is None:
+            logger.warning("VIX unavailable; skipping percentile computation, using neutral 50.0")
             return 50.0
         try:
             closes = self.market_data.ohlcv_daily("^VIX", period="2y")["close"].dropna()
@@ -284,16 +281,14 @@ class MacroStatisticalAgent:
             )
             return None
 
-        vix_defaulted = vix is None
         if vix is None:
             logger.warning(
                 "vix is None from FRED bundle; proceeding with regime classification only."
             )
-            vix = MACRO.default_vix
 
         regime_str, confidence, window_final, model_healthy = self._classify_regime(current)
         regime = Regime(regime_str)
-        vix_percentile = self._vix_percentile(vix, vix_defaulted=vix_defaulted)
+        vix_percentile = self._vix_percentile(vix)
 
         fed_funds = self._resolve_field(
             window_final,
@@ -310,14 +305,9 @@ class MacroStatisticalAgent:
             threshold=0.25,
             label="interest rate",
         )
-        t10y2y = self._resolve_field(
-            window_final,
-            "t10y2y",
-            t10y2y_raw,
-            warn_message=(
-                "analyze: t10y2y is None from FRED bundle; defaulting to 0.0 for yield curve."
-            ),
-        )
+        t10y2y = float(window_final["t10y2y"]) if window_final is not None else t10y2y_raw
+        if t10y2y is None:
+            logger.warning("Yield curve unavailable: no t10y2y measurement")
         curve = yield_curve_shape(t10y2y)
         cpi = self._resolve_field(window_final, "cpi_yoy", current.get("cpi_yoy"))
         inflation_trajectory = self._trend_vs_lag(
