@@ -1,27 +1,4 @@
-"""
-argus/data/cache.py
-
-SQLite-backed caches for OHLCV price candles — a rolling intraday buffer and a
-per-trading-day cache for daily bars — plus a generic in-memory TTL cache for
-agents that only need to dedupe within a process lifetime.
-
-Responsibilities:
-  - Buffer rolling intraday OHLCV candles with a configurable max-rows limit
-  - Cache daily OHLCV bars keyed by (ticker, trading_date), so a ticker
-    refreshed earlier the same UTC day is served from disk rather than refetched
-  - Provide a generic in-memory time-to-live cache, keyed and windowed by the
-    caller, for agent-level result caches that don't need to survive a restart
-
-Not responsible for:
-  - Fetching raw data (see data/fetchers.py)
-  - Semantic vector storage or decision archiving — the LangGraph checkpoint
-    (argus_graph.db, see orchestration/graph.py) and ChromaDB
-    (memory/cultural.py) cover this.
-
-Dependencies:
-  - sqlite3 (stdlib)
-  - pandas
-"""
+"""Bounded TTL caches and SQLite intraday and daily candle stores."""
 
 from __future__ import annotations
 
@@ -42,17 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 class TTLCache[K: Hashable, V]:
-    """Generic in-memory cache whose entries expire after a fixed time window.
-
-    Callers supply their own key type and expiry window at construction — the
-    fundamental and sentiment agents each keep one of these rather than a
-    bespoke cache class (see argus/agents/fundamental.py and
-    argus/agents/sentiment.py).
-
-    An expired entry is dropped on the next `get` or `set` that touches it
-    rather than lingering in the dict. Every caller supplies `max_entries` to
-    bound the store independently of TTL.
-    """
+    """Capacity-bounded in-memory cache with lazy expiry."""
 
     def __init__(
         self,
@@ -61,17 +28,6 @@ class TTLCache[K: Hashable, V]:
         *,
         max_entries: int,
     ) -> None:
-        """Initializes an empty cache.
-
-        Args:
-            ttl: Age at which a stored entry stops being returned.
-            clock: Returns the current time; defaults to wall-clock time.
-                Overridable so expiry can be tested at its boundary instead of
-                waiting for `ttl` to actually elapse.
-            max_entries: Ceiling on the number of live entries. When a `set`
-                for a new key would exceed it, the single oldest entry (by
-                cached-at time) is evicted first. Must be positive.
-        """
         if max_entries < 1:
             raise ValueError("max_entries must be positive")
         self._ttl = ttl
@@ -81,14 +37,7 @@ class TTLCache[K: Hashable, V]:
         self._lock = threading.Lock()
 
     def get(self, key: K) -> V | None:
-        """Returns the cached value for key, or None if absent or expired.
-
-        Args:
-            key: Cache key.
-
-        Returns:
-            The cached value, or None.
-        """
+        """Return the cached value for key, or None if absent or expired."""
         with self._lock:
             entry = self._entries.get(key)
             if entry is None:
@@ -100,20 +49,10 @@ class TTLCache[K: Hashable, V]:
             return value
 
     def set(self, key: K, value: V) -> None:
-        """Stores value under key, timestamped at the current clock time.
-
-        Evicts every expired entry first, then the oldest surviving entry if a
-        new key would exceed capacity.
-
-        Args:
-            key: Cache key.
-            value: Value to store.
-        """
+        """Store value under key, timestamped at the current clock time."""
         with self._lock:
             now = self._clock()
-            expired = [
-                k for k, (_, cached_at) in self._entries.items() if now - cached_at >= self._ttl
-            ]
+            expired = [k for k, (_, cached_at) in self._entries.items() if now - cached_at >= self._ttl]
             for k in expired:
                 del self._entries[k]
 
@@ -173,22 +112,11 @@ _SELECT_ROW_COUNT = """
 SELECT COUNT(*) FROM ohlcv WHERE ticker = ? AND interval = ?
 """
 
-# Most indicators need at least this many periods before they produce a meaningful value
 _MIN_CANDLE_ROWS = 14
 
 
 def _canonical_timestamp(ts: object) -> str:
-    """Canonicalizes a candle timestamp to UTC ISO-8601 for storage.
-
-    Naive input is interpreted as ET — every naive timestamp reaching this
-    buffer comes from a US session.
-
-    Args:
-        ts: datetime, pandas Timestamp, or ISO-8601 string; naive or aware.
-
-    Returns:
-        UTC ISO-8601 string.
-    """
+    """Canonicalize a candle timestamp to UTC ISO-8601 for storage."""
     stamp = pd.Timestamp(ts)
     if stamp.tzinfo is None:
         stamp = stamp.tz_localize(MARKET_TZ.key)
@@ -196,11 +124,7 @@ def _canonical_timestamp(ts: object) -> str:
 
 
 class OHLCVBuffer:
-    """Rolling in-memory candle cache backed by SQLite to support real-time indicators.
-
-    WAL mode is enabled to allow concurrent readers while the buffer is being written
-    by the async fetch loop. Each buffer instance protects its connection with its own lock.
-    """
+    """Locked SQLite intraday candle buffer with WAL readers."""
 
     def __init__(
         self,
@@ -209,16 +133,6 @@ class OHLCVBuffer:
         *,
         interval: str,
     ) -> None:
-        """Opens (or creates) the SQLite-backed candle buffer.
-
-        Args:
-            db_path: SQLite connection path, or ':memory:' for an ephemeral buffer.
-            buffer_size: Max candles retained per ticker; older rows are pruned on insert.
-            interval: Candle resolution this buffer holds (e.g. "1m"). Rows
-                written under a different interval are purged on open —
-                mixed-resolution rows would silently corrupt resampled
-                indicators.
-        """
         self._db_path = db_path
         self._buffer_size = buffer_size
         self._interval = interval
@@ -237,11 +151,7 @@ class OHLCVBuffer:
         )
 
     def _migrate_schema(self) -> None:
-        """Drops and recreates `ohlcv` once, adding the per-row `interval` column.
-
-        `user_version` 0→1 marks the migration as applied so it never re-runs
-        against a buffer already on the new schema.
-        """
+        """Drop and recreates `ohlcv` once, adding the per-row `interval` column."""
         version = self._conn.execute("PRAGMA user_version").fetchone()[0]
         if version < 1:
             self._conn.execute("DROP TABLE IF EXISTS ohlcv")
@@ -250,7 +160,7 @@ class OHLCVBuffer:
         self._conn.commit()
 
     def _purge_stale_interval(self) -> None:
-        """Discards rows written under a different interval than this buffer's configured one."""
+        """Discard rows written under a different interval than this buffer's configured one."""
         cursor = self._conn.execute("DELETE FROM ohlcv WHERE interval != ?", (self._interval,))
         self._conn.commit()
         if cursor.rowcount:
@@ -261,39 +171,16 @@ class OHLCVBuffer:
             )
 
     def insert_candle(self, ticker: str, candle: dict) -> None:
-        """Inserts a single candlestick entry and prunes history past the buffer limit.
-
-        Args:
-            ticker: Equity ticker symbol; case-insensitive, normalized to upper.
-            candle: Dict with keys timestamp, open, high, low, close, volume.
-                timestamp may be naive (interpreted as ET) or tz-aware; stored
-                as canonical UTC ISO-8601.
-        """
+        """Insert a single candlestick entry and prunes history past the buffer limit."""
         self.insert_candles(ticker, [candle])
 
     def insert_candles(self, ticker: str, candles: list[dict]) -> None:
-        """Bulk-inserts candlestick entries in one transaction and prunes once.
-
-        A row-by-row insert with a commit per row measured ~655ms/ticker for a
-        full 2-day fetch; one `executemany` and one commit for the whole batch
-        is 406x faster and the natural shape for `_fetch_one_ticker`'s
-        per-sweep bulk load.
-
-        Args:
-            ticker: Equity ticker symbol; case-insensitive, normalized to upper.
-            candles: Dicts with keys timestamp, open, high, low, close, volume.
-                Each timestamp may be naive (interpreted as ET) or tz-aware;
-                stored as canonical UTC ISO-8601.
-        """
+        """Bulk-insert candlestick entries in one transaction and prunes once."""
         if not candles:
             return
 
         ticker = ticker.upper()
-        # One base "now" for the whole batch, not one per candle: the primary key is
-        # (ticker, timestamp), so several untimestamped candles reading the wall clock
-        # independently can land on the same stored value under a coarse clock and
-        # collide under the upsert below, silently losing all but the last. Offsetting
-        # each by a growing microsecond delta keeps them unique within the batch.
+        # Offset untimestamped candles within one clock sample so coarse clocks cannot collapse batch primary keys.
         now = datetime.now(UTC)
         missing_count = 0
         rows = []
@@ -320,20 +207,10 @@ class OHLCVBuffer:
             self._conn.execute(_PRUNE_OHLCV, (ticker, ticker, self._buffer_size))
             self._conn.commit()
 
-        logger.debug("%s ← %d candle(s)", ticker, len(rows))
+        logger.debug("%s <- %d candle(s)", ticker, len(rows))
 
     def get_candles(self, ticker: str) -> pd.DataFrame | None:
-        """Retrieves buffered candles as a pandas DataFrame, tz-converted to ET.
-
-        Returns None when fewer than `_MIN_CANDLE_ROWS` rows exist.
-
-        Args:
-            ticker: Equity ticker symbol; case-insensitive.
-
-        Returns:
-            DataFrame with float OHLCV columns and a tz-aware (ET) datetime
-            index, sorted ascending, or None.
-        """
+        """Retrieve buffered candles as a pandas DataFrame, tz-converted to ET."""
         ticker = ticker.upper()
         with self._lock:
             rows = self._conn.execute(_SELECT_CANDLES, (ticker, self._interval)).fetchall()
@@ -348,84 +225,48 @@ class OHLCVBuffer:
             return None
 
         df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
-        # utc=True + format="ISO8601" is load-bearing: utc=True alone still raises when naive
-        # and aware strings coexist, and tz_convert must run before any indicator math since
-        # resampling/VWAP bin by wall clock
+        # Parse mixed timestamp offsets as UTC, then convert to Eastern before wall-clock resampling and VWAP.
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, format="ISO8601")
         df.set_index("timestamp", inplace=True)
         df.sort_index(inplace=True)
         df = df.tz_convert(MARKET_TZ.key)
         df = df.astype(float)
-        logger.debug("%s → %d rows", ticker, len(df))
+        logger.debug("%s -> %d rows", ticker, len(df))
         return df
 
     def get_all_tickers(self) -> list[str]:
-        """Returns a list of distinct tickers currently cached in the buffer.
-
-        Returns:
-            List of ticker strings.
-        """
+        """Return a list of distinct tickers currently cached in the buffer."""
         with self._lock:
             rows = self._conn.execute(_SELECT_TICKERS, (self._interval,)).fetchall()
         return [r[0] for r in rows]
 
     def prune_untracked(self, tracked_tickers: set[str]) -> int:
-        """Deletes every row for a ticker outside the given tracked set.
-
-        Evicted tickers must leave persistent storage as well as the in-memory
-        universe, so one-off requests cannot retain candles indefinitely.
-
-        Args:
-            tracked_tickers: Tickers that should be retained; empty is treated
-                as "unknown universe" and skipped rather than wiping the buffer.
-
-        Returns:
-            Row count deleted.
-        """
+        """Delete every row for a ticker outside the given tracked set."""
         if not tracked_tickers:
             return 0
         tracked = {t.upper() for t in tracked_tickers}
         placeholders = ",".join("?" for _ in tracked)
         with self._lock:
-            cursor = self._conn.execute(
-                f"DELETE FROM ohlcv WHERE ticker NOT IN ({placeholders})", tuple(tracked)
-            )
+            cursor = self._conn.execute(f"DELETE FROM ohlcv WHERE ticker NOT IN ({placeholders})", tuple(tracked))
             self._conn.commit()
         if cursor.rowcount:
             logger.info("discarded %d row(s)", cursor.rowcount)
         return cursor.rowcount
 
     def row_counts(self) -> dict[str, int]:
-        """Returns each tracked ticker's row count without materializing its candle frame.
-
-        A `GROUP BY COUNT(*)` rather than one `get_candles()` call per ticker —
-        the latter builds and tz-converts a full DataFrame just to call `len()`
-        on it, and its own `_MIN_CANDLE_ROWS` floor would report 0 for a ticker
-        holding fewer rows than that even though the row count is real.
-
-        Returns:
-            Mapping of ticker → row count, for this buffer's configured interval.
-        """
+        """Count stored candles without loading frames or applying the indicator-readiness floor."""
         with self._lock:
             rows = self._conn.execute(_SELECT_ROW_COUNTS, (self._interval,)).fetchall()
         return dict(rows)
 
     def row_count(self, ticker: str) -> int:
-        """Returns one ticker's row count, without counting every other ticker's rows.
-
-        Args:
-            ticker: Equity ticker symbol.
-
-        Returns:
-            The number of rows held for this buffer's configured interval; 0 for a
-            ticker never inserted.
-        """
+        """Return one ticker's row count, without counting every other ticker's rows."""
         with self._lock:
             row = self._conn.execute(_SELECT_ROW_COUNT, (ticker.upper(), self._interval)).fetchone()
         return int(row[0])
 
     def close(self) -> None:
-        """Closes the underlying database connection."""
+        """Close the underlying database connection."""
         self._conn.close()
         logger.info("OHLCVBuffer closed (db=%s)", self._db_path)
 
@@ -473,33 +314,13 @@ ORDER BY trading_date ASC
 
 
 class DailyBarCache:
-    """Disk-backed cache of daily OHLCV bars keyed by (ticker, trading_date).
+    """Daily candle cache with UTC refresh markers and bounded history."""
 
-    Daily bars only change once per trading day, so a ticker already refreshed
-    today never needs a second network round-trip today no matter how many
-    times a sweep runs. WAL mode allows concurrent readers/writers across the
-    ThreadPoolExecutor workers in fetchers.fetch_multiple_daily.
-    """
-
-    def __init__(
-        self, db_path: str | None = None, *, max_tickers: int = SYSTEM.max_tracked_tickers + 1
-    ) -> None:
-        """Opens (or creates) the SQLite-backed daily bar cache.
-
-        Args:
-            db_path: SQLite connection path. None uses ``daily_bars_cache.db``
-                under ARGUS_DATA_DIR so the cache survives process restarts
-                within the same UTC day; pass ':memory:' for an ephemeral
-                cache in tests.
-            max_tickers: Ticker cap, including one benchmark beyond the tracked
-                universe. Oldest refreshes are evicted first.
-        """
+    def __init__(self, db_path: str | None = None, *, max_tickers: int = SYSTEM.max_tracked_tickers + 1) -> None:
         if max_tickers < 1:
             raise ValueError("max_tickers must be positive")
         self._max_tickers = max_tickers
-        self._db_path = (
-            db_path if db_path is not None else str(settings.data_path("daily_bars_cache.db"))
-        )
+        self._db_path = db_path if db_path is not None else str(settings.data_path("daily_bars_cache.db"))
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -509,15 +330,7 @@ class DailyBarCache:
         logger.info("DailyBarCache initialized (db=%s)", db_path)
 
     def get(self, ticker: str) -> pd.DataFrame | None:
-        """Returns a ticker's cached daily bars if refreshed today (UTC), else None.
-
-        Args:
-            ticker: Equity ticker symbol.
-
-        Returns:
-            Sorted DataFrame with lowercase OHLCV columns and a datetime index,
-            or None if the ticker hasn't been refreshed since UTC midnight.
-        """
+        """Return a ticker's cached daily bars if refreshed today (UTC), else None."""
         today = datetime.now(UTC).date().isoformat()
         with self._lock:
             refreshed = self._conn.execute(_SELECT_DAILY_REFRESH, (ticker,)).fetchone()
@@ -532,23 +345,11 @@ class DailyBarCache:
         df["trading_date"] = pd.to_datetime(df["trading_date"])
         df.set_index("trading_date", inplace=True)
         df.index.name = None
-        logger.debug("%s → %d cached rows", ticker, len(df))
+        logger.debug("%s -> %d cached rows", ticker, len(df))
         return df
 
     def put(self, ticker: str, df: pd.DataFrame) -> None:
-        """Stores a ticker's freshly fetched daily bars and marks it refreshed for today.
-
-        Also prunes any rows older than the fetched window — each
-        `fetch_ohlcv_daily(ticker, period=...)` call re-supplies a full
-        trailing window, but INSERT OR REPLACE never removed the prior
-        window's now-stale rows, so daily_ohlcv grew by one row per ticker
-        per day forever.
-
-        Args:
-            ticker: Equity ticker symbol.
-            df: DataFrame with lowercase OHLCV columns and a datetime index,
-                as returned by fetchers.fetch_ohlcv_daily.
-        """
+        """Store a ticker's freshly fetched daily bars and marks it refreshed for today."""
         today = datetime.now(UTC).date().isoformat()
         rows = [
             (
@@ -569,23 +370,18 @@ class DailyBarCache:
                 earliest = df.index.min().date().isoformat()
                 self._conn.execute(_DELETE_STALE_DAILY_OHLCV, (ticker, earliest))
             self._conn.execute(_UPSERT_DAILY_REFRESH, (ticker, today))
-            retained = (
-                "SELECT ticker FROM daily_ohlcv_refresh "
-                "ORDER BY refreshed_on DESC, rowid DESC LIMIT ?"
-            )
-            self._conn.execute(
-                f"DELETE FROM daily_ohlcv WHERE ticker NOT IN ({retained})", (self._max_tickers,)
-            )
+            retained = "SELECT ticker FROM daily_ohlcv_refresh ORDER BY refreshed_on DESC, rowid DESC LIMIT ?"
+            self._conn.execute(f"DELETE FROM daily_ohlcv WHERE ticker NOT IN ({retained})", (self._max_tickers,))
             self._conn.execute(
                 f"DELETE FROM daily_ohlcv_refresh WHERE ticker NOT IN ({retained})",
                 (self._max_tickers,),
             )
             self._conn.commit()
 
-        logger.debug("%s ← %d rows, refreshed_on=%s", ticker, len(rows), today)
+        logger.debug("%s <- %d rows, refreshed_on=%s", ticker, len(rows), today)
 
     def prune_untracked(self, tracked_tickers: set[str]) -> int:
-        """Removes bars and refresh markers outside the current daily-fetch universe."""
+        """Remove bars and refresh markers outside the current daily-fetch universe."""
         tracked = tuple(t.upper() for t in tracked_tickers)
         placeholders = ",".join("?" for _ in tracked)
         clause = f"WHERE ticker NOT IN ({placeholders})" if tracked else ""
@@ -596,6 +392,6 @@ class DailyBarCache:
         return cursor.rowcount
 
     def close(self) -> None:
-        """Closes the underlying database connection."""
+        """Close the underlying database connection."""
         self._conn.close()
         logger.info("DailyBarCache closed (db=%s)", self._db_path)

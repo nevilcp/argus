@@ -1,10 +1,4 @@
-"""Exercises argus/seams.py's fixture-backed implementations against real agents.
-
-The point of the injection seam is that FundamentalAgent/SentimentAgent
-produce a real, schema-valid signal from fixture data with zero network or
-LLM calls. If these fixtures ever go stale or the seam breaks, these tests
-fail; nothing here is decorative.
-"""
+"""Exercises argus/seams.py's fixture-backed implementations against real agents."""
 
 import json
 import logging
@@ -32,23 +26,13 @@ CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 
 def _single_response_llm(fixture_file: str, ticker: str) -> FixtureLLMClient:
-    """Builds a FixtureLLMClient that replays one recorded response for every call.
-
-    Args:
-        fixture_file: JSON file under fixtures/llm_responses/ keyed by ticker.
-        ticker: Ticker whose recorded response to replay.
-
-    Returns:
-        A FixtureLLMClient returning that ticker's response for any prompt.
-    """
+    """Build a FixtureLLMClient that replays one recorded response for every call."""
     with open(FIXTURES_DIR / "llm_responses" / fixture_file) as f:
         responses = json.load(f)
-    # One ticker per instance, so every call in a single analyze() gets the same response
     return FixtureLLMClient({"only": responses[ticker]}, key_fn=lambda _prompt: "only")
 
 
 def test_fundamental_agent_with_fixtures_produces_valid_signal():
-    """FundamentalAgent produces a schema-valid signal from fixture data alone."""
     market_data = FixtureMarketDataProvider()
     llm_client = _single_response_llm("fundamental.json", "AAPL")
     agent = FundamentalAgent(llm_client=llm_client, market_data=market_data)
@@ -60,13 +44,11 @@ def test_fundamental_agent_with_fixtures_produces_valid_signal():
     assert signal.signal.value == "BEARISH"
     assert signal.conviction == 0.75
     assert signal.moat_score == 8
-    # Fetched (not LLM-produced) fields came through the fixture market data provider
     assert signal.sector == "Technology"
     assert signal.marketCap is not None
 
 
 def test_sentiment_agent_with_fixtures_produces_valid_signal():
-    """SentimentAgent produces a schema-valid signal from fixture data alone."""
     market_data = FixtureMarketDataProvider()
     llm_client = _single_response_llm("sentiment.json", "AAPL")
     agent = SentimentAgent(llm_client=llm_client, market_data=market_data)
@@ -81,7 +63,6 @@ def test_sentiment_agent_with_fixtures_produces_valid_signal():
 
 
 def test_fixture_market_data_provider_ohlcv_daily_matches_fixture():
-    """The fixture provider serves real OHLCV data, not an empty stand-in."""
     market_data = FixtureMarketDataProvider()
     df = market_data.ohlcv_daily("AAPL")
     assert not df.empty
@@ -89,112 +70,73 @@ def test_fixture_market_data_provider_ohlcv_daily_matches_fixture():
 
 
 def test_fixture_market_data_provider_missing_ticker_raises():
-    """A ticker with no fixture data raises KeyError rather than failing silently."""
     market_data = FixtureMarketDataProvider()
     with pytest.raises(KeyError):
         market_data.fundamentals("NOT_A_REAL_TICKER")
 
 
 def _synthetic_response(status_code: int, headers: dict[str, str] | None = None) -> httpx.Response:
-    """Builds an in-memory httpx.Response for the chat-completions endpoint — no network."""
+    """Build an in-memory httpx.Response for the chat-completions endpoint - no network."""
     request = httpx.Request("POST", CHAT_COMPLETIONS_URL)
     return httpx.Response(status_code, headers=headers or {}, request=request)
 
 
 def _synthetic_rate_limit_error(retry_after: str | None) -> groq.RateLimitError:
-    """Builds a groq.RateLimitError with synthetic headers — no real httpx.Client involved.
-
-    Args:
-        retry_after: Value for the Retry-After header, or None to omit it.
-
-    Returns:
-        A RateLimitError carrying an in-memory httpx.Response with those headers.
-    """
+    """Build a groq.RateLimitError with synthetic headers - no real httpx.Client involved."""
     headers = {"retry-after": retry_after} if retry_after is not None else {}
     response = _synthetic_response(429, headers)
     return groq.RateLimitError("rate limited", response=response, body=None)
 
 
 def _synthetic_connection_error() -> groq.APIConnectionError:
-    """Builds the transient, retryable transport failure the adapter must translate."""
+    """Build the transient, retryable transport failure the adapter must translate."""
     return groq.APIConnectionError(request=httpx.Request("POST", CHAT_COMPLETIONS_URL))
 
 
 def _synthetic_auth_error() -> groq.AuthenticationError:
-    """Builds the terminal 401 the adapter must surface without retrying."""
+    """Build the terminal 401 the adapter must surface without retrying."""
     return groq.AuthenticationError("bad key", response=_synthetic_response(401), body=None)
 
 
 def test_groq_retry_delay_honors_retry_after():
-    """A RateLimitError's Retry-After header is honored verbatim."""
     exc = _synthetic_rate_limit_error(retry_after="12.5")
     assert _groq_retry_delay(exc) == 12.5
 
 
 def test_groq_retry_delay_returns_none_without_header():
-    """Without a Retry-After header, the adapter gives no hint — the caller
-    decides its own back-off."""
     exc = _synthetic_rate_limit_error(retry_after=None)
     assert _groq_retry_delay(exc) is None
 
 
 def test_groq_retry_delay_returns_none_for_non_rate_limit_errors():
-    """A retryable error other than RateLimitError carries no provider retry hint."""
     assert _groq_retry_delay(_synthetic_connection_error()) is None
 
 
 def _fake_success_response(prompt_tokens: int = 10, completion_tokens: int = 5):
-    """Minimal stand-in for a ChatGroq.invoke() return value.
-
-    Args:
-        prompt_tokens: Prompt token count reported under
-            response_metadata["token_usage"]["prompt_tokens"].
-        completion_tokens: Completion token count reported under
-            response_metadata["token_usage"]["completion_tokens"].
-
-    Returns:
-        A Mock exposing the ``content``/``response_metadata`` attributes complete() reads.
-    """
+    """Build a minimal successful model response."""
     return mock.Mock(
         content="synthetic response",
-        response_metadata={
-            "token_usage": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens}
-        },
+        response_metadata={"token_usage": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens}},
     )
 
 
 def _groq_client() -> GroqLLMClient:
-    """Builds a GroqLLMClient for a registered model.
-
-    Construction alone never touches the network — only ``._llm.invoke()`` would —
-    so no live Groq key is needed.
-    """
-    return GroqLLMClient(
-        model="openai/gpt-oss-20b", temperature=0.1, max_tokens=50, api_key="test-key"
-    )
+    """Build a GroqLLMClient for a registered model."""
+    return GroqLLMClient(model="openai/gpt-oss-20b", temperature=0.1, max_tokens=50, api_key="test-key")
 
 
 def _client_with_mocked_llm() -> GroqLLMClient:
-    """Builds a GroqLLMClient whose ChatGroq is a Mock.
-
-    Mocking that one call is enough to test complete()'s retry and governance
-    logic offline.
-
-    Returns:
-        A GroqLLMClient ready to have ``._llm.invoke`` given a side_effect.
-    """
+    """Build a GroqLLMClient whose ChatGroq is a Mock."""
     client = _groq_client()
     client._llm = mock.Mock()
     return client
 
 
 def test_groq_llm_client_sets_reasoning_effort_low():
-    """The registered gpt-oss models are reasoning models; low effort caps their token spend."""
     assert _groq_client()._llm.reasoning_effort == "low"
 
 
 def test_groq_llm_client_retryable_error_raises_retryable_transport_error():
-    """A transient APIConnectionError becomes RetryableTransportError after a single invocation."""
     client = _client_with_mocked_llm()
     exc = _synthetic_connection_error()
     client._llm.invoke.side_effect = exc
@@ -207,7 +149,6 @@ def test_groq_llm_client_retryable_error_raises_retryable_transport_error():
 
 
 def test_groq_llm_client_retryable_error_carries_retry_after_hint():
-    """A RateLimitError's Retry-After header rides along on the RetryableTransportError."""
     client = _client_with_mocked_llm()
     client._llm.invoke.side_effect = _synthetic_rate_limit_error(retry_after="12.5")
 
@@ -218,8 +159,6 @@ def test_groq_llm_client_retryable_error_carries_retry_after_hint():
 
 
 def test_groq_llm_client_terminal_error_raises_without_retry():
-    """AuthenticationError propagates on the first attempt — retrying a bad key
-    wastes nothing but time."""
     client = _client_with_mocked_llm()
     client._llm.invoke.side_effect = _synthetic_auth_error()
 
@@ -230,7 +169,6 @@ def test_groq_llm_client_terminal_error_raises_without_retry():
 
 
 def test_groq_llm_client_releases_reservation_on_terminal_error():
-    """A terminal error releases the pre-flight reservation instead of leaking it."""
     client = _client_with_mocked_llm()
     client._llm.invoke.side_effect = _synthetic_auth_error()
 
@@ -245,7 +183,6 @@ def test_groq_llm_client_releases_reservation_on_terminal_error():
 
 
 def test_groq_llm_client_releases_reservation_on_retryable_error():
-    """A retryable error also releases the reservation instead of leaking it."""
     client = _client_with_mocked_llm()
     client._llm.invoke.side_effect = _synthetic_connection_error()
 
@@ -260,7 +197,6 @@ def test_groq_llm_client_releases_reservation_on_retryable_error():
 
 
 def test_groq_llm_client_success_does_not_release_reservation():
-    """A successful call records usage but never releases the reservation it actually spent."""
     client = _client_with_mocked_llm()
     client._llm.invoke.return_value = _fake_success_response()
 
@@ -275,7 +211,6 @@ def test_groq_llm_client_success_does_not_release_reservation():
 
 
 def test_groq_llm_client_warns_when_reply_is_truncated(caplog):
-    """finish_reason=length is logged, not left as an opaque downstream json_parse error."""
     client = _client_with_mocked_llm()
     response = _fake_success_response()
     response.response_metadata["finish_reason"] = "length"
@@ -288,7 +223,6 @@ def test_groq_llm_client_warns_when_reply_is_truncated(caplog):
 
 
 def test_groq_llm_client_does_not_warn_on_normal_stop(caplog):
-    """A reply that stopped on its own produces no truncation warning."""
     client = _client_with_mocked_llm()
     response = _fake_success_response()
     response.response_metadata["finish_reason"] = "stop"
@@ -301,7 +235,6 @@ def test_groq_llm_client_does_not_warn_on_normal_stop(caplog):
 
 
 def test_default_groq_client_uses_the_configured_key(monkeypatch):
-    """The key comes from settings, and the model parameters pass through."""
     monkeypatch.setattr("argus.seams.settings.GROQ_API_KEY", "configured-key")
 
     client = default_groq_client("openai/gpt-oss-20b", 0.1, 50)
@@ -313,7 +246,6 @@ def test_default_groq_client_uses_the_configured_key(monkeypatch):
 
 
 def test_default_groq_client_warns_but_builds_without_a_key(monkeypatch, caplog):
-    """A missing key is logged, not raised, so an agent can still be constructed."""
     monkeypatch.setattr("argus.seams.settings.GROQ_API_KEY", "")
 
     with caplog.at_level(logging.WARNING, logger="argus.seams"):
@@ -324,6 +256,5 @@ def test_default_groq_client_warns_but_builds_without_a_key(monkeypatch, caplog)
 
 
 def test_market_data_providers_report_whether_they_are_live():
-    """Only the network-backed provider is live."""
     assert LiveMarketDataProvider.is_live is True
     assert FixtureMarketDataProvider.is_live is False

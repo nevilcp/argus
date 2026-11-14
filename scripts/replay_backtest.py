@@ -1,16 +1,4 @@
-"""
-scripts/replay_backtest.py
-
-CLI entry point for argus/backtesting/replay.py — replays one or more
-recorded fixture sessions through the real ARGUS graph and prints each
-session's portfolio allocation. See that module's docstring for what
-this is and isn't.
-
-    .venv/bin/python scripts/replay_backtest.py [session_dir ...]
-
-Defaults to tests/fixtures/ — the one session captured so far — when no
-directories are given.
-"""
+"""CLI for ordered fixture replay."""
 
 from __future__ import annotations
 
@@ -23,11 +11,26 @@ from argus.infra.log import configure_logging
 DEFAULT_SESSION_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
 
 
+CLI_DESCRIPTION = """
+scripts/replay_backtest.py
+
+CLI entry point for argus/backtesting/replay.py — replays one or more
+recorded fixture sessions through the real ARGUS graph and prints each
+session's portfolio allocation. See docs/testing.md for the captured-session
+format and replay boundaries.
+
+    .venv/bin/python scripts/replay_backtest.py [session_dir ...]
+
+Defaults to tests/fixtures/ — the one session captured so far — when no
+directories are given.
+"""
+
+
 def main() -> None:
-    """Replays each given session (default: fixtures dir) and prints its allocation."""
+    """Replay each given session (default: fixtures dir) and print its allocation."""
     configure_logging()
 
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=CLI_DESCRIPTION)
     parser.add_argument(
         "session_dirs",
         nargs="*",

@@ -1,17 +1,4 @@
-"""Trade-level performance statistics.
-
-Responsibilities:
-  - Compute win rate, profit factor, average win/loss and holding period over
-    discrete trades, as a flat dict suitable for JSON reporting
-
-Not responsible for:
-  - Return-series metrics (Sharpe, Sortino, drawdown, beta, VaR): nothing in this
-    repo produces a daily equity curve to score
-  - Running a backtest or replaying sessions (see backtesting/replay.py)
-
-Dependencies:
-  - numpy
-"""
+"""Trade-level performance statistics."""
 
 from __future__ import annotations
 
@@ -21,19 +8,7 @@ import numpy as np
 
 
 def trade_level_metrics(trade_log: list[dict]) -> dict:
-    """Computes win/loss, profit-factor and holding-period statistics over discrete trades.
-
-    All float values are rounded to 4 decimal places. NaN or Inf results (a profit
-    factor with no losing trades) are replaced with None to keep the output
-    JSON-serializable.
-
-    Args:
-        trade_log: Trade dicts with key ``return_pct`` and, optionally, ``holding_days``.
-
-    Returns:
-        Dict with win_rate, avg_win_pct, avg_loss_pct, win_loss_ratio, profit_factor,
-        total_trades and avg_holding_days.
-    """
+    """Compute win/loss, profit-factor and holding-period statistics over discrete trades."""
     total_trades = len(trade_log)
     wins = [t for t in trade_log if t.get("return_pct", 0) > 0]
     losses = [t for t in trade_log if t.get("return_pct", 0) <= 0]
@@ -65,7 +40,7 @@ def trade_level_metrics(trade_log: list[dict]) -> dict:
 
 
 def _json_safe(value: object) -> object:
-    """NaN and Inf have no JSON representation; surviving floats round to 4 dp."""
+    """Replace non-finite floats with None and round finite floats to four decimal places."""
     if not isinstance(value, float):
         return value
     if math.isnan(value) or math.isinf(value):

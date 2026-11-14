@@ -22,25 +22,20 @@ _TRADING_YEAR = pd.date_range(start="2023-01-01", periods=253, freq="B")
 
 
 def _prices_from_returns(returns: np.ndarray, dates: pd.DatetimeIndex) -> pd.Series:
-    """Compounds daily returns into a price series starting at 100."""
+    """Compound daily returns into a price series starting at 100."""
     return pd.Series(100 * np.exp(np.cumsum(returns)), index=dates)
 
 
 def _random_prices(dates: pd.DatetimeIndex, mean: float, vol: float) -> pd.Series:
-    """Builds a price series from N(mean, vol) daily returns off the active numpy seed."""
+    """Build a price series from N(mean, vol) daily returns off the active numpy seed."""
     return _prices_from_returns(np.random.normal(mean, vol, len(dates)), dates)
 
 
 @pytest.fixture
 def price_history():
-    """Builds a simulated price history dictionary for tests.
+    """Build a simulated price history dictionary for tests."""
+    np.random.seed(42)
 
-    Returns:
-        Mapping of ticker (plus "SPY" benchmark) to a one-year daily price series.
-    """
-    np.random.seed(42)  # Fixed seed keeps returns reproducible across runs
-
-    # Moderate, normal volatility: 0.1% daily mean return, 1.5% daily vol
     tickers = ["AAPL", "MSFT", "GOOGL", "META", "AMZN", "TSLA", "JPM", "BAC"]
     hist = {t: _random_prices(_TRADING_YEAR, 0.001, 0.015) for t in tickers}
     hist["SPY"] = _random_prices(_TRADING_YEAR, 0.0005, 0.01)
@@ -50,26 +45,23 @@ def price_history():
 
 @pytest.fixture
 def risk_engine():
-    """A fresh RiskStatisticalAgent instance."""
+    """Return a fresh statistical risk agent."""
     return RiskStatisticalAgent(market_data=FixtureMarketDataProvider())
 
 
 def test_vix_blackout(risk_engine: RiskStatisticalAgent, price_history: dict) -> None:
-    """VIX above the 35 blackout threshold vetoes the whole portfolio."""
     positions = [{"ticker": "AAPL", "weight": 0.1} for _ in range(5)]
     result = risk_engine.evaluate(positions, price_history, current_vix=40.0)
 
     assert result.verdict == RiskVerdict.VETO
     assert any("blackout" in r.lower() for r in result.veto_reasons)
-    # A structural-violation short-circuit never computed correlation, so it
-    # must report None ("not measured"), not a fabricated 0.0.
+    # Keep uncomputed correlation as None when structural rejection skips statistical measurement.
     assert result.avg_correlation is None
 
 
 def test_overweight_position(risk_engine: RiskStatisticalAgent, price_history: dict) -> None:
-    """A position above the 0.15 weight limit vetoes the portfolio."""
     positions = [
-        {"ticker": "AAPL", "weight": 0.20},  # exceeds the 0.15 limit
+        {"ticker": "AAPL", "weight": 0.20},
         {"ticker": "MSFT", "weight": 0.10},
         {"ticker": "GOOGL", "weight": 0.10},
         {"ticker": "META", "weight": 0.10},
@@ -82,11 +74,9 @@ def test_overweight_position(risk_engine: RiskStatisticalAgent, price_history: d
 
 
 def test_high_var_reduce(risk_engine: RiskStatisticalAgent) -> None:
-    """Extreme volatility pushes VaR high enough to trigger REDUCE rather than VETO."""
     np.random.seed(42)
     tickers = ["AAPL", "MSFT", "GOOGL", "META", "AMZN"]
 
-    # 15% daily volatility is well above normal to force VaR past the REDUCE threshold
     hist = {t: _random_prices(_TRADING_YEAR, 0.0, 0.15) for t in tickers}
     hist["SPY"] = _random_prices(_TRADING_YEAR, 0.0, 0.01)
 
@@ -99,7 +89,6 @@ def test_high_var_reduce(risk_engine: RiskStatisticalAgent) -> None:
 
 
 def test_approve_healthy_portfolio(risk_engine: RiskStatisticalAgent, price_history: dict) -> None:
-    """A diversified, normally-weighted portfolio with normal vol is approved outright."""
     positions = [
         {"ticker": "AAPL", "weight": 0.1},
         {"ticker": "MSFT", "weight": 0.1},
@@ -118,12 +107,6 @@ def test_approve_healthy_portfolio(risk_engine: RiskStatisticalAgent, price_hist
 
 
 def test_slsqp_covariance_uses_unweighted_returns(price_history: dict) -> None:
-    """The optimizer's w^T*cov*w term is built from raw returns, not pre-weighted ones.
-
-    Regression test: cov used to come from compute_portfolio_returns, whose
-    series are already multiplied by weight, so w^T*cov*w applied the
-    weight a second time — variance came out ~1/weight^2 too small.
-    """
     tickers = ["AAPL", "MSFT", "GOOGL", "META", "AMZN", "TSLA", "JPM", "BAC"]
     weight = 0.125
     positions = [{"ticker": t, "weight": weight} for t in tickers]
@@ -133,35 +116,24 @@ def test_slsqp_covariance_uses_unweighted_returns(price_history: dict) -> None:
     cov = asset_returns.cov() * 252
     fixed_variance = float(np.dot(w, np.dot(cov, w)))
 
-    # Var(sum_i w_i * r_i) is the ground truth this must match
     weighted_returns = compute_portfolio_returns(positions, price_history)
     true_portfolio_variance = float(weighted_returns.sum(axis=1).var() * 252)
     assert fixed_variance == pytest.approx(true_portfolio_variance, rel=0.05)
 
-    # Reproduce the pre-fix computation (cov from already-weighted returns) to
-    # prove this test would have failed against the old code
+    # Compare against double-weighted covariance to detect accidental weighting before risk estimation.
     buggy_cov = weighted_returns.cov() * 252
     buggy_variance = float(np.dot(w, np.dot(buggy_cov, w)))
     assert fixed_variance / buggy_variance == pytest.approx(1.0 / (weight**2), rel=0.05)
 
 
 def test_zero_api_calls(risk_engine: RiskStatisticalAgent, price_history: dict) -> None:
-    """The risk engine evaluates purely statistically, never calling an LLM."""
     positions = [{"ticker": "AAPL", "weight": 0.1} for _ in range(5)]
     result = risk_engine.evaluate(positions, price_history, current_vix=40.0)
 
     assert result.api_calls_used == 0
 
 
-def test_small_universe_is_noted_not_vetoed(
-    risk_engine: RiskStatisticalAgent, price_history: dict
-) -> None:
-    """Regression: a 2-4 ticker universe is informational, not a hard VETO.
-
-    Before the fix, a book below the 5-position diversification floor was
-    structurally VETOed regardless of its actual risk profile, returning
-    all-cash with no reason a human could act on.
-    """
+def test_small_universe_is_noted_not_vetoed(risk_engine: RiskStatisticalAgent, price_history: dict) -> None:
     positions = [{"ticker": t, "weight": 0.1} for t in ["AAPL", "MSFT", "GOOGL"]]
     result = risk_engine.evaluate(positions, price_history, current_vix=20.0)
 
@@ -170,13 +142,6 @@ def test_small_universe_is_noted_not_vetoed(
 
 
 def test_per_ticker_var_normalized_to_full_weight() -> None:
-    """Regression: a volatile ticker at weight=0.15 must REDUCE, not APPROVE.
-
-    Before the fix, var99/cvar were computed from the weight-diluted return series
-    (0.15x), so the same var_limit was ~6.7x looser for a per-ticker call than for
-    the portfolio call — a stock volatile enough to clearly breach the limit at full
-    weight passed the per-ticker gate outright.
-    """
     engine = RiskStatisticalAgent(market_data=FixtureMarketDataProvider())
     np.random.seed(3)
     hist = {
@@ -191,21 +156,13 @@ def test_per_ticker_var_normalized_to_full_weight() -> None:
 
 
 def test_ols_portfolio_beta_uses_lookback_window() -> None:
-    """Regression: beta must use RISK.returns_lookback_days, not the full series.
-
-    Without .tail(lookback), a DailyBarCache holding more than a year of
-    history would silently widen beta's window, diluting a recent, real
-    change in co-movement with older data the risk gates were never
-    calibrated against.
-    """
     total_days = RISK.returns_lookback_days * 2 + 5
     dates = pd.date_range(start="2020-01-01", periods=total_days, freq="B")
 
     np.random.seed(7)
     spy_returns = np.random.normal(0.0005, 0.01, total_days)
 
-    # Pre-lookback segment: unrelated to SPY (beta ~ 0). In-lookback segment: exactly
-    # 2x SPY's return each day (beta == 2). Only .tail(lookback) should see the latter.
+    # Use beta zero before the lookback and beta two within it to expose accidental whole-history fitting.
     split = total_days - RISK.returns_lookback_days - 1
     old_segment = np.random.normal(0.0, 0.02, split)
     recent_segment = spy_returns[split:] * 2.0
@@ -222,13 +179,6 @@ def test_ols_portfolio_beta_uses_lookback_window() -> None:
 
 
 def test_compute_asset_returns_drops_short_history_ticker_without_shrinking_others() -> None:
-    """Regression: one short-history ticker must not truncate the returns matrix.
-
-    Before the fix, pd.DataFrame(returns_dict).dropna() intersected on the
-    short ticker's handful of overlapping dates, shrinking every other
-    ticker's return series down to that same handful of rows and wrecking
-    the covariance SLSQP and the VaR/CVaR gates depend on.
-    """
     short_dates = _TRADING_YEAR[-5:]
 
     hist = {
@@ -247,11 +197,6 @@ def test_compute_asset_returns_drops_short_history_ticker_without_shrinking_othe
 
 
 def test_evaluate_excludes_short_history_ticker_from_covariance(monkeypatch) -> None:
-    """Regression: evaluate() surfaces the excluded ticker as a veto_reason note.
-
-    Picked up by graph.py's error-surfacing filter, rather than silently
-    degrading every other ticker's covariance.
-    """
     monkeypatch.setattr("argus.agents.risk.get_sector", lambda ticker, market_data: "Diversified")
     engine = RiskStatisticalAgent(market_data=FixtureMarketDataProvider())
 
@@ -269,35 +214,18 @@ def test_evaluate_excludes_short_history_ticker_from_covariance(monkeypatch) -> 
 
 
 def test_avg_pairwise_correlation_returns_none_without_overlap() -> None:
-    """No overlapping dates leaves correlation undefined, not a fabricated NaN.
-
-    Regression: pandas' .corr() on a zero-row frame yields NaN, which
-    satisfies neither bound of avg_correlation's [-1, 1] field.
-    """
     disjoint_dates = pd.date_range(start="2010-01-01", periods=len(_TRADING_YEAR), freq="B")
     np.random.seed(1)
     returns_matrix = pd.DataFrame(
         {
-            "AAPL": pd.Series(
-                np.random.normal(0.001, 0.01, len(_TRADING_YEAR)), index=_TRADING_YEAR
-            ),
-            "NEWCO": pd.Series(
-                np.random.normal(0.001, 0.01, len(disjoint_dates)), index=disjoint_dates
-            ),
+            "AAPL": pd.Series(np.random.normal(0.001, 0.01, len(_TRADING_YEAR)), index=_TRADING_YEAR),
+            "NEWCO": pd.Series(np.random.normal(0.001, 0.01, len(disjoint_dates)), index=disjoint_dates),
         }
     )
     assert avg_pairwise_correlation(returns_matrix) is None
 
 
 def test_evaluate_completes_when_a_ticker_has_no_price_history_overlap(monkeypatch) -> None:
-    """Regression: a newly-listed ticker with zero date overlap must degrade, not raise.
-
-    Before the fix, avg_pairwise_correlation's NaN result violated
-    RiskAssessment.avg_correlation's [-1, 1] bound, so evaluate() raised
-    instead of completing with a degraded (None) assessment. VaR/CVaR must
-    likewise report None rather than a fabricated 0.0, since the same
-    zero-row intersection empties the portfolio return series too.
-    """
     monkeypatch.setattr("argus.agents.risk.get_sector", lambda ticker, market_data: "Diversified")
     engine = RiskStatisticalAgent(market_data=FixtureMarketDataProvider())
 
@@ -320,17 +248,12 @@ def test_evaluate_completes_when_a_ticker_has_no_price_history_overlap(monkeypat
 
 
 def test_evaluate_skips_optimizer_on_non_finite_covariance(monkeypatch) -> None:
-    """Regression: a non-finite covariance must not reach SLSQP silently.
-
-    E.g. a zero-price data glitch producing an infinite return that survives
-    dropna().
-    """
     monkeypatch.setattr("argus.agents.risk.get_sector", lambda ticker, market_data: "Diversified")
     engine = RiskStatisticalAgent(market_data=FixtureMarketDataProvider())
 
     np.random.seed(11)
     aapl = _random_prices(_TRADING_YEAR, 0.0005, 0.01)
-    aapl.iloc[100] = 0.0  # a zero print makes the next day's pct_change +inf, not NaN
+    aapl.iloc[100] = 0.0
     hist = {
         "AAPL": aapl,
         "MSFT": _random_prices(_TRADING_YEAR, 0.0005, 0.01),
@@ -346,13 +269,6 @@ def test_evaluate_skips_optimizer_on_non_finite_covariance(monkeypatch) -> None:
 
 
 def test_get_sector_does_not_cache_across_non_live_providers(monkeypatch) -> None:
-    """A non-live provider's sector must never leak into a later, different provider's lookup.
-
-    Regression: argus/backtesting/replay.py constructs a fresh
-    FixtureMarketDataProvider per session in the same process — a
-    provider-agnostic cache would let session 1's sector for a ticker
-    silently answer session 2's lookup for the same ticker.
-    """
     monkeypatch.setattr(
         "argus.agents.risk._SECTOR_CACHE",
         TTLCache(
@@ -397,7 +313,6 @@ class _FlakyLiveMarketData(LiveMarketDataProvider):
 
 
 def test_get_sector_retries_after_a_failed_fetch_instead_of_caching_unknown(monkeypatch) -> None:
-    """A transient fetch failure is not cached, so the next call asks again."""
     monkeypatch.setattr(
         "argus.agents.risk._SECTOR_CACHE",
         TTLCache(ttl=timedelta(seconds=RISK.sector_cache_ttl_seconds), max_entries=10),
@@ -410,7 +325,6 @@ def test_get_sector_retries_after_a_failed_fetch_instead_of_caching_unknown(monk
 
 
 def test_get_sector_caches_a_successful_response_that_lacks_a_sector(monkeypatch) -> None:
-    """A successful lookup with no sector field is a stable answer and may be cached."""
     monkeypatch.setattr(
         "argus.agents.risk._SECTOR_CACHE",
         TTLCache(ttl=timedelta(seconds=RISK.sector_cache_ttl_seconds), max_entries=10),
@@ -429,7 +343,6 @@ def test_get_sector_caches_a_successful_response_that_lacks_a_sector(monkeypatch
 
 
 def test_get_sector_cache_evicts_the_oldest_entry_at_capacity(monkeypatch) -> None:
-    """The live sector cache is bounded: a new ticker at capacity evicts the oldest one."""
     monkeypatch.setattr(
         "argus.agents.risk._SECTOR_CACHE",
         TTLCache(ttl=timedelta(seconds=RISK.sector_cache_ttl_seconds), max_entries=2),
@@ -460,12 +373,7 @@ def test_missing_benchmark_skips_beta_gate_with_a_note(price_history):
         market_data=FakeMarketData(ohlcv_daily=OSError(), ticker_info={"sector": "Technology"})
     )
     history = {"AAPL": price_history["AAPL"]}
-    assert (
-        ols_portfolio_beta(
-            [{"ticker": "AAPL", "weight": 0.1}], history, market_data=engine.market_data
-        )
-        is None
-    )
+    assert ols_portfolio_beta([{"ticker": "AAPL", "weight": 0.1}], history, market_data=engine.market_data) is None
     result = engine.evaluate([{"ticker": "AAPL", "weight": 0.1}], history, 20.0)
     assert result.portfolio_beta is None
     assert any("beta not measurable" in note for note in result.veto_reasons)

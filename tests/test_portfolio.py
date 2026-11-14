@@ -23,34 +23,22 @@ from tests.helpers.builders import risk_assessment
 
 
 def test_half_kelly_weight_bullish():
-    """A half-Kelly weight above the position cap clips to that cap."""
-    # b=2, q=0.4: full kelly 0.4, half kelly 0.2, clipped to the 0.15 cap
     res = half_kelly_weight(0.6, 0.08, 0.04, 0.15)
     assert res == 0.15
 
 
 def test_half_kelly_weight_bearish():
-    """A negative half-Kelly weight floors at 0.0 rather than going short."""
-    # b=2, q=0.7: full kelly is -0.05, so half kelly is negative
     res = half_kelly_weight(0.3, 0.08, 0.04, 0.15)
     assert res == 0.0
 
 
 def test_half_kelly_weight_moderate():
-    """A half-Kelly weight within the cap passes through unclipped."""
-    # b=2, q=0.5: full kelly 0.25 halves to 0.125, under the 0.15 cap
     res = half_kelly_weight(0.5, 0.08, 0.04, 0.15)
     assert pytest.approx(res) == 0.125
 
 
 class MockSignal:
-    """Minimal stand-in for a per-agent Signal result.
-
-    Attributes:
-        signal: Signal direction.
-        conviction: Confidence score for the signal.
-        agents_present: Specialists that contributed, for an aggregated signal.
-    """
+    """Minimal stand-in for a per-agent Signal result."""
 
     def __init__(self, signal, conviction, agents_present=None):
         self.signal = signal
@@ -59,10 +47,6 @@ class MockSignal:
 
 
 def test_build_signal_table():
-    """Vetoed positions are excluded from the table.
-
-    Others render with their approved weight.
-    """
     macro = MacroContext(
         fed_funds=5.25,
         cpi_yoy=3.2,
@@ -88,9 +72,7 @@ def test_build_signal_table():
             fundamental=MockSignal(Signal.BULLISH, 0.8),
             technical=MockSignal(Signal.NEUTRAL, 0.5),
             sentiment=MockSignal(Signal.BULLISH, 0.7),
-            aggregated=MockSignal(
-                Signal.BULLISH, 0.85, agents_present=["fundamental", "technical", "sentiment"]
-            ),
+            aggregated=MockSignal(Signal.BULLISH, 0.85, agents_present=["fundamental", "technical", "sentiment"]),
             risk=risk_assessment(
                 RiskVerdict.APPROVE,
                 0.15,
@@ -132,28 +114,23 @@ def test_build_signal_table():
     assert "AAPL:" in table
     assert "MSFT:" in table
     assert "TSLA:" not in table
-    # .value, not str(Enum) — str(Enum) would otherwise leak the class name into the prompt
     assert "MACRO: EXPANSION | VIX 12.50 (LOW) | GROWTH_FAVORED" in table
     assert "FUND=BULLISH(0.80)" in table
     assert "TECH=NEUTRAL(0.50)" in table
     assert "FUND=BEARISH(0.90)" in table
-    assert "TECH=N/A" in table  # MSFT missing tech signal
-    assert "Cap=5.0%" in table  # MSFT reduced weight
-    assert "Evidence=3/3" in table  # AAPL has all three specialists present
-    assert "Evidence=0/3" in table  # MSFT has no aggregated signal
+    assert "TECH=N/A" in table
+    assert "Cap=5.0%" in table
+    assert "Evidence=3/3" in table
+    assert "Evidence=0/3" in table
 
 
 def test_full_universe_prompt_reservation_fits_the_tpm_floor():
-    """The governor reserves prompt + max_tokens up front; if that alone exceeds the
-    tokens-per-minute floor it can never admit the call and raises RateLimitExceeded."""
     snapshots = {
         ticker: TickerSnapshot(
             fundamental=MockSignal(Signal.BULLISH, 0.8),
             technical=MockSignal(Signal.NEUTRAL, 0.5),
             sentiment=MockSignal(Signal.BULLISH, 0.7),
-            aggregated=MockSignal(
-                Signal.BULLISH, 0.85, agents_present=["fundamental", "technical", "sentiment"]
-            ),
+            aggregated=MockSignal(Signal.BULLISH, 0.85, agents_present=["fundamental", "technical", "sentiment"]),
             risk=risk_assessment(
                 RiskVerdict.APPROVE,
                 0.05,
@@ -185,5 +162,4 @@ def test_full_universe_prompt_reservation_fits_the_tpm_floor():
 
 
 def test_the_prompt_quotes_the_same_advisor_note_limit_the_schema_enforces():
-    """The prompt and PositionAllocation share one advisor-note limit."""
     assert f"Maximum {PORTFOLIO.advisor_note_char_limit} characters" in SYSTEM_PROMPT

@@ -1,10 +1,4 @@
-"""Tests for argus/data/cache.py.
-
-Covers DailyBarCache, the per-(ticker, trading_date) disk cache that lets
-fetch_multiple_daily skip the network on same-day re-runs; OHLCVBuffer, the
-rolling intraday candle buffer; and TTLCache, the generic in-memory cache
-shared by the fundamental and sentiment agents.
-"""
+"""Tests for argus/data/cache.py."""
 
 import logging
 import sqlite3
@@ -17,26 +11,22 @@ from argus.data.cache import DailyBarCache, OHLCVBuffer, TTLCache
 from tests.helpers.candles import daily_bars, dst_straddling_candles
 
 
-def _buffer(
-    buffer_size: int = 20, *, db_path: str = ":memory:", interval: str = "1m"
-) -> OHLCVBuffer:
-    """Builds an OHLCVBuffer, in memory unless `db_path` names a file."""
+def _buffer(buffer_size: int = 20, *, db_path: str = ":memory:", interval: str = "1m") -> OHLCVBuffer:
+    """Build an OHLCVBuffer, in memory unless `db_path` names a file."""
     return OHLCVBuffer(db_path=db_path, buffer_size=buffer_size, interval=interval)
 
 
 @pytest.fixture
 def cache():
-    """A fresh in-memory DailyBarCache."""
+    """Yield a fresh in-memory daily bar cache."""
     return DailyBarCache(db_path=":memory:")
 
 
 def test_get_returns_none_for_uncached_ticker(cache):
-    """A ticker never stored has no cached bars."""
     assert cache.get("AAPL") is None
 
 
 def test_put_then_get_round_trips(cache):
-    """A stored ticker's bars come back sorted with the right values, refreshed today."""
     df = daily_bars(["2026-08-10", "2026-08-11", "2026-08-12"])
     cache.put("AAPL", df)
 
@@ -48,20 +38,16 @@ def test_put_then_get_round_trips(cache):
 
 
 def test_get_returns_none_when_refreshed_before_today(cache):
-    """A ticker refreshed on a prior UTC day is treated as stale, not served."""
     cache.put("AAPL", daily_bars(["2026-08-11"]))
 
     yesterday = (datetime.now(UTC).date() - timedelta(days=1)).isoformat()
-    cache._conn.execute(
-        "UPDATE daily_ohlcv_refresh SET refreshed_on = ? WHERE ticker = ?", (yesterday, "AAPL")
-    )
+    cache._conn.execute("UPDATE daily_ohlcv_refresh SET refreshed_on = ? WHERE ticker = ?", (yesterday, "AAPL"))
     cache._conn.commit()
 
     assert cache.get("AAPL") is None
 
 
 def test_put_overwrites_prior_rows_for_same_ticker(cache):
-    """A second put() for the same ticker replaces (not appends to) its cached bars."""
     cache.put("AAPL", daily_bars(["2026-08-11"]))
     cache.put("AAPL", daily_bars(["2026-08-11", "2026-08-12"]))
 
@@ -70,14 +56,6 @@ def test_put_overwrites_prior_rows_for_same_ticker(cache):
 
 
 def test_put_prunes_rows_older_than_the_freshly_fetched_window(cache):
-    """A later put() with a newer window discards the prior window's rows.
-
-    fetch_multiple_daily re-fetches a full trailing window (e.g. period="1y")
-    on every cache miss and re-supplies it to put(); without pruning here,
-    each day's now-stale leading edge stayed in daily_ohlcv forever, growing
-    it by one row per ticker per day and silently widening every consumer
-    (e.g. ols_portfolio_beta) past its intended lookback window.
-    """
     cache.put("AAPL", daily_bars(["2020-01-01", "2020-01-02"]))
     cache.put("AAPL", daily_bars(["2026-08-11", "2026-08-12"]))
 
@@ -89,17 +67,14 @@ def test_put_prunes_rows_older_than_the_freshly_fetched_window(cache):
 
 
 def test_get_is_isolated_per_ticker(cache):
-    """Caching one ticker doesn't make an unrelated ticker appear cached."""
     cache.put("AAPL", daily_bars(["2026-08-12"]))
     assert cache.get("MSFT") is None
 
 
 def test_dst_straddling_insert_returns_a_monotonic_et_frame():
-    """A buffer fed DST fall-back candles returns them sorted, ET-indexed, not a raise."""
     buffer = _buffer()
 
-    # Padding bars ahead of the transition so the buffer clears get_candles' 14-row floor —
-    # n_per_side beyond 6 would overlap pre/post UTC instants in the shared DST helper itself
+    # Pad before the DST transition; extending both repeated hours would overlap UTC instants.
     padding = pd.date_range("2025-11-02 04:00:00", periods=4, freq="1min", tz="UTC")
     for i, ts in enumerate(padding):
         buffer.insert_candle(
@@ -120,7 +95,6 @@ def test_dst_straddling_insert_returns_a_monotonic_et_frame():
 
 
 def test_naive_et_and_aware_utc_inputs_for_one_instant_store_identically():
-    """The same instant, given as naive ET, aware ET, and aware UTC, canonicalizes to one row."""
     buffer = _buffer()
     aware_et = pd.Timestamp("2024-01-02T09:30:00", tz="America/New_York")
 
@@ -133,7 +107,6 @@ def test_naive_et_and_aware_utc_inputs_for_one_instant_store_identically():
 
 
 def test_ticker_case_collapses_to_one_key_space():
-    """A lowercase and uppercase ticker write into the same row space."""
     buffer = _buffer()
     buffer.insert_candle("aapl", {"timestamp": "2024-01-02T09:30:00", "close": 1.0})
     buffer.insert_candle("AAPL", {"timestamp": "2024-01-02T09:31:00", "close": 2.0})
@@ -142,7 +115,6 @@ def test_ticker_case_collapses_to_one_key_space():
 
 
 def test_schema_migration_from_v0_drops_and_recreates(tmp_path):
-    """A legacy buffer file (no interval column) migrates without raising."""
     db_path = str(tmp_path / "legacy.db")
     conn = sqlite3.connect(db_path)
     conn.execute(
@@ -165,7 +137,6 @@ def test_schema_migration_from_v0_drops_and_recreates(tmp_path):
 
 
 def test_interval_change_purges_stale_rows(tmp_path):
-    """Re-opening a buffer file under a different interval discards the old interval's rows."""
     db_path = str(tmp_path / "buffer.db")
     old = _buffer(db_path=db_path)
     old.insert_candle("AAPL", {"timestamp": "2024-01-02T09:30:00", "close": 1.0})
@@ -177,12 +148,7 @@ def test_interval_change_purges_stale_rows(tmp_path):
 
 
 class _CommitCountingConnection:
-    """Wraps a real sqlite3.Connection, counting only its commit() calls.
-
-    sqlite3.Connection is an immutable C type — neither its class nor its
-    instances accept a patched `commit` attribute — so counting calls to it
-    requires wrapping the connection rather than monkeypatching it directly.
-    """
+    """Wraps a real sqlite3.Connection, counting only its commit() calls."""
 
     def __init__(self, real: sqlite3.Connection) -> None:
         self._real = real
@@ -197,7 +163,6 @@ class _CommitCountingConnection:
 
 
 def test_insert_candles_bulk_uses_a_single_commit():
-    """Bulk-inserting N candles commits once, not once per row."""
     buffer = _buffer(50)
     proxy = _CommitCountingConnection(buffer._conn)
     buffer._conn = proxy
@@ -212,23 +177,14 @@ def test_insert_candles_bulk_uses_a_single_commit():
 
 
 def test_insert_candles_is_a_noop_for_an_empty_list():
-    """Bulk-inserting an empty batch touches nothing."""
     buffer = _buffer()
     buffer.insert_candles("AAPL", [])
     assert buffer.get_all_tickers() == []
 
 
 def test_insert_candles_without_a_timestamp_do_not_collide_with_each_other():
-    """Several timestamp-less candles in one batch each get a distinct stored row.
-
-    The primary key is (ticker, timestamp); stamping every missing timestamp with
-    the same `datetime.now()` call would collide under the upsert and silently
-    keep only the last one.
-    """
     buffer = _buffer(50)
-    candles = [
-        {"open": i, "high": i, "low": i, "close": float(i), "volume": 100.0} for i in range(15)
-    ]
+    candles = [{"open": i, "high": i, "low": i, "close": float(i), "volume": 100.0} for i in range(15)]
 
     buffer.insert_candles("AAPL", candles)
 
@@ -238,12 +194,9 @@ def test_insert_candles_without_a_timestamp_do_not_collide_with_each_other():
 
 
 def test_insert_candle_delegates_to_insert_candles(monkeypatch):
-    """The single-candle path is a thin wrapper over the bulk path."""
     buffer = _buffer()
     received = []
-    monkeypatch.setattr(
-        buffer, "insert_candles", lambda ticker, candles: received.append((ticker, candles))
-    )
+    monkeypatch.setattr(buffer, "insert_candles", lambda ticker, candles: received.append((ticker, candles)))
 
     buffer.insert_candle("AAPL", {"timestamp": "2024-01-02T09:30:00", "close": 1.0})
 
@@ -251,8 +204,6 @@ def test_insert_candle_delegates_to_insert_candles(monkeypatch):
 
 
 def test_row_counts_returns_per_ticker_counts_without_the_get_candles_floor():
-    """row_counts() reports real per-ticker counts, including below get_candles' own
-    14-row floor."""
     buffer = _buffer(50)
     for i in range(5):
         buffer.insert_candle("AAPL", {"timestamp": f"2024-01-02T09:{i:02d}:00", "close": float(i)})
@@ -263,7 +214,6 @@ def test_row_counts_returns_per_ticker_counts_without_the_get_candles_floor():
 
 
 def test_row_count_counts_one_ticker_and_is_zero_for_an_unknown_one():
-    """row_count() reports one ticker's real count, below get_candles' floor, case-insensitively."""
     buffer = _buffer(50)
     for i in range(5):
         buffer.insert_candle("AAPL", {"timestamp": f"2024-01-02T09:{i:02d}:00", "close": float(i)})
@@ -276,7 +226,6 @@ def test_row_count_counts_one_ticker_and_is_zero_for_an_unknown_one():
 
 
 def test_prune_untracked_deletes_rows_outside_the_given_set():
-    """prune_untracked removes every row for a ticker not in the tracked set."""
     buffer = _buffer(50)
     buffer.insert_candle("AAPL", {"timestamp": "2024-01-02T09:30:00", "close": 1.0})
     buffer.insert_candle("ORPHAN", {"timestamp": "2024-01-02T09:30:00", "close": 1.0})
@@ -288,7 +237,6 @@ def test_prune_untracked_deletes_rows_outside_the_given_set():
 
 
 def test_prune_untracked_is_case_insensitive():
-    """A lowercase tracked-set entry still matches the upper-cased stored ticker."""
     buffer = _buffer(50)
     buffer.insert_candle("AAPL", {"timestamp": "2024-01-02T09:30:00", "close": 1.0})
 
@@ -299,7 +247,6 @@ def test_prune_untracked_is_case_insensitive():
 
 
 def test_prune_untracked_skips_an_empty_tracked_set():
-    """An empty tracked set is treated as 'unknown universe' rather than wiping the buffer."""
     buffer = _buffer(50)
     buffer.insert_candle("AAPL", {"timestamp": "2024-01-02T09:30:00", "close": 1.0})
 
@@ -310,7 +257,6 @@ def test_prune_untracked_skips_an_empty_tracked_set():
 
 
 def test_interval_change_logs_the_discarded_count(tmp_path, caplog):
-    """The interval-change purge logs how many stale rows it discarded, at WARNING."""
     db_path = str(tmp_path / "buffer.db")
     old = _buffer(db_path=db_path)
     for i in range(3):
@@ -334,13 +280,12 @@ class _FakeClock:
 
 
 def _clocked_ttl_cache() -> tuple[TTLCache[str, str], _FakeClock]:
-    """Builds a one-day TTLCache alongside the settable clock driving its expiry."""
+    """Build a one-day TTLCache alongside the settable clock driving its expiry."""
     clock = _FakeClock(datetime(2026, 1, 1, 12, 0, 0))
     return TTLCache(ttl=timedelta(days=1), clock=clock, max_entries=100), clock
 
 
 def test_ttl_cache_returns_a_value_stored_within_the_window():
-    """A value stored and read back before the TTL elapses is returned."""
     cache, clock = _clocked_ttl_cache()
 
     cache.set("AAPL", "bullish")
@@ -350,7 +295,6 @@ def test_ttl_cache_returns_a_value_stored_within_the_window():
 
 
 def test_ttl_cache_does_not_return_a_value_once_the_window_has_passed():
-    """The same value is no longer returned once the clock passes the TTL."""
     cache, clock = _clocked_ttl_cache()
 
     cache.set("AAPL", "bullish")
@@ -360,19 +304,12 @@ def test_ttl_cache_does_not_return_a_value_once_the_window_has_passed():
 
 
 def test_ttl_cache_returns_none_for_a_key_that_was_never_stored():
-    """A key with no prior `set` call returns nothing rather than raising."""
     cache: TTLCache[str, str] = TTLCache(ttl=timedelta(days=1), max_entries=100)
 
     assert cache.get("AAPL") is None
 
 
 def test_ttl_cache_keys_differing_only_in_one_component_do_not_share_a_value():
-    """Two tuple keys differing only in one component don't share a value.
-
-    Mirrors FundamentalCache's (ticker, session_seed) key: two backtest
-    sessions replaying the same ticker must not share a cached value, and a
-    live call (session_seed=None) must not be conflated with either.
-    """
     cache: TTLCache[tuple[str, int | None], str] = TTLCache(ttl=timedelta(days=7), max_entries=100)
 
     cache.set(("AAPL", 20240101), "session 1")
@@ -384,7 +321,6 @@ def test_ttl_cache_keys_differing_only_in_one_component_do_not_share_a_value():
 
 
 def test_ttl_cache_set_refreshes_the_stored_timestamp():
-    """Storing a key again resets its expiry clock rather than keeping the original timestamp."""
     cache, clock = _clocked_ttl_cache()
 
     cache.set("AAPL", "bullish")
@@ -396,7 +332,6 @@ def test_ttl_cache_set_refreshes_the_stored_timestamp():
 
 
 def test_ttl_cache_get_drops_an_expired_entry_rather_than_leaving_it_in_place():
-    """An expired entry is removed from the underlying store on read, not just skipped."""
     cache, clock = _clocked_ttl_cache()
 
     cache.set("AAPL", "bullish")
@@ -407,7 +342,6 @@ def test_ttl_cache_get_drops_an_expired_entry_rather_than_leaving_it_in_place():
 
 
 def test_ttl_cache_set_sweeps_expired_entries_before_storing():
-    """Storing a new key evicts every already-expired entry, not just the key being set."""
     cache, clock = _clocked_ttl_cache()
 
     cache.set("AAPL", "bullish")
@@ -419,7 +353,6 @@ def test_ttl_cache_set_sweeps_expired_entries_before_storing():
 
 
 def test_ttl_cache_max_entries_evicts_the_oldest_entry_at_capacity():
-    """A new key at capacity evicts the single oldest surviving entry, not the whole store."""
     clock = _FakeClock(datetime(2026, 1, 1, 12, 0, 0))
     cache: TTLCache[str, str] = TTLCache(ttl=timedelta(days=1), clock=clock, max_entries=2)
 
@@ -435,7 +368,6 @@ def test_ttl_cache_max_entries_evicts_the_oldest_entry_at_capacity():
 
 
 def test_ttl_cache_max_entries_does_not_evict_when_refreshing_an_existing_key():
-    """Re-setting a key already in the store never triggers capacity eviction for it."""
     clock = _FakeClock(datetime(2026, 1, 1, 12, 0, 0))
     cache: TTLCache[str, str] = TTLCache(ttl=timedelta(days=1), clock=clock, max_entries=2)
 

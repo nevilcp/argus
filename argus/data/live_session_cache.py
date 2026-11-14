@@ -1,42 +1,4 @@
-"""
-argus/data/live_session_cache.py
-
-The live session cache: the named seam between the MFT pipeline that
-produces per-ticker session states and the API gateway that allocates
-against them. Owns publication, eviction, admission, and age reporting for
-the freshness rule an /analyze request must clear before a cached session
-state can be used.
-
-Responsibilities:
-  - Publish a sweep's compressed session states, evicting entries for
-    tickers outside the caller's tracked universe
-  - Admit a requested set of tickers against an explicit clock, sorting
-    rejections into absent / stalled / stale so a caller can report each
-    distinctly
-  - Report per-ticker publication and bar age for everything held, for a
-    status endpoint that needs numbers rather than a pass/fail verdict
-  - Own the two freshness thresholds (session_state_ttl_seconds,
-    max_bar_age_seconds) beside the rule that applies them
-
-Not responsible for:
-  - Market hours — a property of the market, not of this cache's own data;
-    stays a route concern (see api/main.py)
-  - Fetching, buffering, or compressing candles (see argus/data/pipeline.py)
-  - Re-validating session-state readiness at publish time — enforced once,
-    by the pipeline's compress_all (see
-    argus.schemas.signals.missing_session_state_keys)
-
-Publication and admission both measure age against one timezone-aware
-MARKET_TZ clock, via `datetime.timestamp()` rather than plain
-subtraction — two aware datetimes sharing the same ZoneInfo instance (as
-every clock read here does) compare their naive wall-clock fields instead of
-real elapsed time, which is wrong by exactly the DST offset across a
-transition.
-
-Dependencies:
-  - argus.params (SYSTEM.mft_fetch_interval_seconds, the sweep cadence both thresholds
-    below are built from, and SYSTEM.freshness_margin_seconds)
-"""
+"""Live technical feature publication, eviction, and freshness admission."""
 
 from __future__ import annotations
 
@@ -49,49 +11,17 @@ from argus.params import SYSTEM
 
 
 def session_state_ttl_seconds() -> int:
-    """Derives how old a cache entry's publication time may be before admit() treats it as stalled.
-
-    Returns:
-        Budget in seconds: two fetch sweeps — tolerating one missed sweep
-        before an entry counts as stalled — plus a fixed jitter margin.
-    """
+    """Derive how old a cache entry's publication time may be before admit() treats it as stalled."""
     return 2 * SYSTEM.mft_fetch_interval_seconds + SYSTEM.freshness_margin_seconds
 
 
 def max_bar_age_seconds(interval_minutes: int) -> int:
-    """Derives how old a session state's own bar timestamp may be before admit() treats it as stale.
-
-    Distinct from session_state_ttl_seconds: that budget catches an entry
-    that stopped being refreshed, this one catches a fresh publish that
-    republishes an old bar (e.g. a restart replaying the persistent buffer).
-
-    Args:
-        interval_minutes: Native candle resolution in minutes.
-
-    Returns:
-        Budget in seconds: one fetch sweep plus two candle intervals plus a
-        fixed jitter margin.
-    """
-    return (
-        SYSTEM.mft_fetch_interval_seconds
-        + 2 * interval_minutes * 60
-        + SYSTEM.freshness_margin_seconds
-    )
+    """Derive how old a session state's own bar timestamp may be before admit() treats it as stale."""
+    return SYSTEM.mft_fetch_interval_seconds + 2 * interval_minutes * 60 + SYSTEM.freshness_margin_seconds
 
 
 def _bar_age_seconds(state: dict, now_et: datetime) -> float | None:
-    """Computes a session state's bar age in seconds, failing closed on a bad timestamp.
-
-    A missing, malformed, or naive ``timestamp`` must not raise out of
-    admit() or ages() — it's treated as staleness instead.
-
-    Args:
-        state: A compressed technical feature dict.
-        now_et: Current time, ET-aware, to measure age against.
-
-    Returns:
-        Age in seconds, or None if ``timestamp`` can't be parsed against `now_et`.
-    """
+    """Return elapsed bar age, treating missing, invalid, or naive timestamps as stale."""
     try:
         return (now_et - datetime.fromisoformat(state["timestamp"])).total_seconds()
     except KeyError, TypeError, ValueError:
@@ -100,13 +30,7 @@ def _bar_age_seconds(state: dict, now_et: datetime) -> float | None:
 
 @dataclass
 class AdmissionResult:
-    """Outcome of one LiveSessionCache.admit() call.
-
-    Rejections are sorted into three lists rather than a single verdict:
-    each means something operationally different (warming up vs. pipeline
-    stalled vs. stale candles after a restart), and a caller building a
-    response for each needs the grouping, not just a reason string.
-    """
+    """Outcome of one LiveSessionCache.admit() call."""
 
     admitted: dict[str, dict] = field(default_factory=dict)
     absent: list[str] = field(default_factory=list)
@@ -115,23 +39,9 @@ class AdmissionResult:
 
 
 class LiveSessionCache:
-    """Publication, eviction, admission, and age reporting for MFT session states.
+    """Publication, eviction, admission, and age reporting for MFT session states."""
 
-    Constructed once at startup and held in one module global by its
-    caller. Holds no pipeline reference of its own — publish() takes the
-    tracked universe as a plain argument, so eviction can be tested without
-    a stand-in pipeline object.
-    """
-
-    def __init__(
-        self, interval_minutes: int, *, max_entries: int = SYSTEM.max_tracked_tickers
-    ) -> None:
-        """Creates an empty cache sized for the given candle resolution.
-
-        Args:
-            interval_minutes: Native candle resolution the tracked pipeline
-                fetches at, used to size the max-bar-age threshold.
-        """
+    def __init__(self, interval_minutes: int, *, max_entries: int = SYSTEM.max_tracked_tickers) -> None:
         if max_entries < 1:
             raise ValueError("max_entries must be positive")
         self._max_entries = max_entries
@@ -148,20 +58,7 @@ class LiveSessionCache:
         tracked_universe: Iterable[str],
         now: datetime | None = None,
     ) -> None:
-        """Stores one sweep's compressed session states and evicts untracked tickers.
-
-        Args:
-            session_states: Mapping of ticker -> compressed technical feature
-                dict, e.g. from MFTDataPipeline.compress_all().
-            tracked_universe: The caller's full current tracked-ticker set.
-                Every held ticker outside this set is dropped, not just ones
-                absent from `session_states` — a repeated call with a
-                shrinking universe is what actually evicts a dropped ticker.
-            now: Publication timestamp to stamp every entry with. Defaults
-                to the current ET-aware time — the same clock admit()/ages()
-                measure against; tests pass an explicit value to control
-                write age without reaching into private state.
-        """
+        """Store one sweep's compressed session states and evicts untracked tickers."""
         published_at = now if now is not None else now_market()
         tracked = set(tracked_universe)
         self._states = {t: entry for t, entry in self._states.items() if t in tracked}
@@ -174,18 +71,7 @@ class LiveSessionCache:
             del self._states[oldest]
 
     def admit(self, tickers: Iterable[str], now: datetime) -> AdmissionResult:
-        """Determines which of the requested tickers may be allocated against right now.
-
-        Args:
-            tickers: Tickers to check.
-            now: Current time, ET-aware — the one clock both publication age
-                (against session_state_ttl_seconds) and bar age (against
-                max_bar_age_seconds) are measured against.
-
-        Returns:
-            An AdmissionResult with every ticker sorted into exactly one of
-            `admitted`, `absent`, `stalled`, or `stale`.
-        """
+        """Determine which of the requested tickers may be allocated against right now."""
         result = AdmissionResult()
         ttl = session_state_ttl_seconds()
         max_bar_age = max_bar_age_seconds(self._interval_minutes)
@@ -197,9 +83,7 @@ class LiveSessionCache:
                 continue
 
             state, published_at = entry
-            # now and published_at share the same ZoneInfo instance, so plain
-            # subtraction would compare wall-clock fields and drift by an hour
-            # across a DST transition; timestamp() avoids that
+            # Use epoch seconds because same-ZoneInfo subtraction measures wall time across DST changes.
             if (now.timestamp() - published_at.timestamp()) > ttl:
                 result.stalled.append(ticker)
                 continue
@@ -214,28 +98,9 @@ class LiveSessionCache:
         return result
 
     def ages(self, now: datetime) -> tuple[dict[str, float], dict[str, float | None]]:
-        """Reports per-ticker publication age and bar age for everything held.
-
-        A different question from admit(): this answers "how old is X" for
-        every cached ticker regardless of whether it would pass admission,
-        for a status endpoint watching freshness degrade before it starts
-        rejecting requests.
-
-        Args:
-            now: Current time, ET-aware — the same clock `publish` stamps
-                entries with.
-
-        Returns:
-            Tuple of (cache_age_seconds, bar_age_seconds), each a mapping of
-            ticker -> seconds; bar_age_seconds values are None where the
-            entry's timestamp can't be parsed.
-        """
-        # timestamp(), not subtraction — see admit()
+        """Report per-ticker publication age and bar age for everything held."""
         cache_age_seconds = {
-            ticker: now.timestamp() - published_at.timestamp()
-            for ticker, (_, published_at) in self._states.items()
+            ticker: now.timestamp() - published_at.timestamp() for ticker, (_, published_at) in self._states.items()
         }
-        bar_age_seconds = {
-            ticker: _bar_age_seconds(state, now) for ticker, (state, _) in self._states.items()
-        }
+        bar_age_seconds = {ticker: _bar_age_seconds(state, now) for ticker, (state, _) in self._states.items()}
         return cache_age_seconds, bar_age_seconds

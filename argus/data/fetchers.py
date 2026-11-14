@@ -1,28 +1,4 @@
-"""
-argus/data/fetchers.py
-
-Centralized data access layer for fetching pricing, fundamentals, and macro series.
-
-Responsibilities:
-  - Provide retried access to Yahoo Finance OHLCV and fundamentals
-  - Fetch and cache macroeconomic FRED series with a 6-hour TTL
-  - Cache daily OHLCV bars per (ticker, trading day) so a sweep only pays for
-    the first fetch of each trading day
-  - Aggregate news headlines from free-tier APIs, returning None — never a
-    fabricated empty result — when a source can't be reached
-
-Not responsible for:
-  - Retry classification and back-off (see data/retry.py)
-  - NewsAPI's 100 request/day budget (see data/newsapi_budget.py)
-  - Data compression or indicator calculation (see data/indicators.py)
-  - Rolling intraday SQLite buffering (see data/cache.py's OHLCVBuffer)
-  - Rate-limit governance for Groq LLM calls (see argus/governor.py)
-
-Dependencies:
-  - yfinance
-  - fredapi (optional; requires FRED_API_KEY)
-  - newsapi-python (optional; requires NEWSAPI_KEY)
-"""
+"""Retried market, fundamentals, news, and economic data access."""
 
 from __future__ import annotations
 
@@ -57,23 +33,7 @@ _OHLCV_COLUMNS = ["open", "high", "low", "close", "volume"]
 
 
 def _normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
-    """Standardizes DataFrame schemas to lower-case OHLCV columns.
-
-    yfinance ≥ 0.2.40 returns MultiIndex columns; this function flattens them
-    before column name normalization to ensure downstream consumers always
-    receive a simple single-level column schema.
-
-    Args:
-        df: Raw DataFrame from yfinance.download().
-
-    Returns:
-        Filtered, sorted DataFrame with lowercase OHLCV columns and datetime index.
-
-    Raises:
-        DataFetchError: If no close column is present after normalization. Every
-            consumer reads ``close``, and guessing another column in its place
-            would hand back a number that is not a price.
-    """
+    """Standardize DataFrame schemas to lower-case OHLCV columns."""
     if isinstance(df.columns, pd.MultiIndex):
         df = df.droplevel(1, axis=1)
 
@@ -89,22 +49,7 @@ def _normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _download_ohlcv(ticker: str, *, period: str, interval: str) -> pd.DataFrame:
-    """Downloads one ticker's candles from Yahoo Finance as a normalized, sorted frame.
-
-    The one place the daily and intraday fetchers call ``yf.download``. Not
-    retried itself; the public fetchers wrap it.
-
-    Args:
-        ticker: Equity ticker symbol.
-        period: yfinance period string (e.g. '2y', '5d').
-        interval: yfinance interval string (e.g. '1d', '5m').
-
-    Returns:
-        Sorted DataFrame with lowercase OHLCV columns and a datetime index.
-
-    Raises:
-        DataFetchError: If yfinance returns nothing, or no usable OHLCV columns.
-    """
+    """Download one ticker's candles from Yahoo Finance as a normalized, sorted frame."""
     raw = yf.download(
         ticker,
         period=period,
@@ -115,68 +60,34 @@ def _download_ohlcv(ticker: str, *, period: str, interval: str) -> pd.DataFrame:
     )
     if raw.empty:
         raise DataFetchError(
-            f"yfinance returned empty DataFrame for ticker={ticker!r} "
-            f"interval={interval!r} period={period!r}"
+            f"yfinance returned empty DataFrame for ticker={ticker!r} interval={interval!r} period={period!r}"
         )
     df = _normalize_ohlcv(raw)
     df.sort_index(inplace=True)
-    logger.info("%s [%s] → %d rows", ticker, interval, len(df))
+    logger.info("%s [%s] -> %d rows", ticker, interval, len(df))
     return df
 
 
 @with_retry
 def fetch_ohlcv_daily(ticker: str, period: str = "2y") -> pd.DataFrame:
-    """Fetches historical daily OHLCV candlestick data from Yahoo Finance.
-
-    Args:
-        ticker: Equity ticker symbol (e.g. 'AAPL').
-        period: yfinance period string (e.g. '2y', '1y').
-
-    Returns:
-        Sorted DataFrame with lowercase OHLCV columns and a datetime index.
-
-    Raises:
-        DataFetchError: If the returned DataFrame is empty after all retries.
-    """
+    """Fetch historical daily OHLCV candlestick data from Yahoo Finance."""
     return _download_ohlcv(ticker, period=period, interval="1d")
 
 
 @with_retry
 def fetch_ohlcv_intraday(ticker: str, interval: str = "5m", period: str = "5d") -> pd.DataFrame:
-    """Fetches intraday OHLCV candlestick intervals from Yahoo Finance.
-
-    Args:
-        ticker: Equity ticker symbol.
-        interval: yfinance interval string (e.g. '5m', '15m', '1h').
-        period: yfinance period string (e.g. '5d', '2d').
-
-    Returns:
-        Sorted DataFrame with lowercase OHLCV columns.
-
-    Raises:
-        DataFetchError: If the returned DataFrame is empty.
-    """
+    """Fetch intraday OHLCV candlestick intervals from Yahoo Finance."""
     return _download_ohlcv(ticker, period=period, interval=interval)
 
 
 _MULTI_DAILY_MAX_WORKERS = 5
 
-# Daily bars change once per trading day; caching them turns every run after
-# the first of the day into 0 requests for this node instead of one per ticker.
-# Constructed lazily (not at import time) so it lands under whatever
-# settings.ARGUS_DATA_DIR is current when first used, not whatever it was at
-# import time — docker-compose mounts only data/ and chroma_db/, so the old
-# cwd-relative default silently landed on the ephemeral container layer and
-# was destroyed on every restart.
+# Create the daily cache lazily under the current ARGUS_DATA_DIR so deployment overrides survive restarts.
 _DAILY_BAR_CACHE: DailyBarCache | None = None
 
 
 def _daily_bar_cache() -> DailyBarCache:
-    """Returns the module-level DailyBarCache, constructing it under ARGUS_DATA_DIR on first use.
-
-    Returns:
-        The shared DailyBarCache instance.
-    """
+    """Return the module-level DailyBarCache, constructing it under ARGUS_DATA_DIR on first use."""
     global _DAILY_BAR_CACHE
     if _DAILY_BAR_CACHE is None:
         db_file = settings.data_path("daily_bars_cache.db")
@@ -186,19 +97,7 @@ def _daily_bar_cache() -> DailyBarCache:
 
 
 def fetch_multiple_daily(tickers: list[str], period: str = "1y") -> dict[str, pd.DataFrame]:
-    """Fetches daily candlestick histories in parallel across a list of tickers.
-
-    Tickers already refreshed today (UTC) are served from the on-disk
-    DailyBarCache instead of hitting the network — daily bars only change once
-    per trading day, so a same-day re-run costs 0 requests per cached ticker.
-
-    Args:
-        tickers: List of equity ticker symbols.
-        period: yfinance period string applied to all tickers.
-
-    Returns:
-        Mapping of ticker → DataFrame. Failed tickers are omitted with a warning.
-    """
+    """Fetch daily candlestick histories in parallel across a list of tickers."""
     cache = _daily_bar_cache()
     cache.prune_untracked(set(tickers))
     results: dict[str, pd.DataFrame] = {}
@@ -213,9 +112,7 @@ def fetch_multiple_daily(tickers: list[str], period: str = "1y") -> dict[str, pd
 
     if to_fetch:
         with ThreadPoolExecutor(max_workers=_MULTI_DAILY_MAX_WORKERS) as pool:
-            future_to_ticker = {
-                pool.submit(fetch_ohlcv_daily, ticker, period): ticker for ticker in to_fetch
-            }
+            future_to_ticker = {pool.submit(fetch_ohlcv_daily, ticker, period): ticker for ticker in to_fetch}
             for future in as_completed(future_to_ticker):
                 ticker = future_to_ticker[future]
                 try:
@@ -224,7 +121,7 @@ def fetch_multiple_daily(tickers: list[str], period: str = "1y") -> dict[str, pd
                     cache.put(ticker, df)
                 except Exception as exc:
                     logger.warning(
-                        "failed for %s — %s: %s",
+                        "failed for %s - %s: %s",
                         ticker,
                         type(exc).__name__,
                         exc,
@@ -240,27 +137,7 @@ def fetch_multiple_daily(tickers: list[str], period: str = "1y") -> dict[str, pd
 
 
 def fetch_fundamentals(ticker: str) -> dict:
-    """Retrieves fundamental balance sheet and income statements from Yahoo Finance.
-
-    Not decorated with ``with_retry`` itself: ``fetch_ticker_info`` already
-    retries the one network call, and a second layer would multiply the
-    attempts.
-
-    Note: ``returnOnAssets`` is used as a ROIC proxy because yfinance does not
-    expose an invested-capital figure. This understates ROIC for capital-light
-    companies but provides a consistent cross-ticker signal.
-
-    Args:
-        ticker: Equity ticker symbol.
-
-    Returns:
-        Dict of fundamental metrics with keys: pe_ttm, revenue_growth_yoy,
-        operating_margin, net_margin, fcf_yield, debt_to_equity, current_ratio,
-        roe, roic, sector, industry, marketCap, p_fcf, as_of_date.
-
-    Raises:
-        DataFetchError: If the info lookup fails after all retries.
-    """
+    """Retrieve fundamental balance sheet and income statements from Yahoo Finance."""
     info = fetch_ticker_info(ticker)
 
     fcf = info.get("freeCashflow")
@@ -289,7 +166,7 @@ def fetch_fundamentals(ticker: str) -> dict:
         "as_of_date": date.today().isoformat(),  # noqa: DTZ011
     }
     logger.info(
-        "%s → %d keys populated",
+        "%s -> %d keys populated",
         ticker,
         sum(1 for v in result.values() if v is not None),
     )
@@ -298,61 +175,24 @@ def fetch_fundamentals(ticker: str) -> dict:
 
 @with_retry
 def fetch_ticker_info(ticker: str) -> dict:
-    """Fetches yfinance's raw ``.info`` dict for a ticker.
-
-    Shared retried entry point for callers that only need a slice of `.info`
-    (e.g. `sector`), so all callers share retry and backoff handling.
-
-    Args:
-        ticker: Equity ticker symbol.
-
-    Returns:
-        Raw info dict as returned by yfinance.Ticker(ticker).info.
-    """
+    """Fetch yfinance's raw `.info` dict for a ticker."""
     logger.debug("ticker=%s", ticker)
     return yf.Ticker(ticker).info
 
 
 @with_retry
 def fetch_ticker_calendar(ticker: str) -> Any:
-    """Fetches yfinance's raw ``.calendar`` object for a ticker.
-
-    Earnings-date lookups share the same retry and backoff policy as other fetches.
-
-    Args:
-        ticker: Equity ticker symbol.
-
-    Returns:
-        Raw calendar object from yfinance.Ticker(ticker).calendar. Shape
-        (DataFrame or dict) varies across yfinance versions; callers must
-        handle both.
-    """
+    """Fetch yfinance's raw `.calendar` object for a ticker."""
     logger.debug("ticker=%s", ticker)
     return yf.Ticker(ticker).calendar
 
 
-_FRED_CACHE: TTLCache[str, pd.Series] = TTLCache(
-    ttl=timedelta(hours=6), max_entries=SYSTEM.fred_cache_max_entries
-)
+_FRED_CACHE: TTLCache[str, pd.Series] = TTLCache(ttl=timedelta(hours=6), max_entries=SYSTEM.fred_cache_max_entries)
 
 
 @with_retry
 def fetch_fred_series(series_id: str, start: str = MACRO.fred_default_start) -> pd.Series:
-    """Fetches a macroeconomic timeline from the Federal Reserve Economic Database (FRED).
-
-    Responses are cached in-process for 6 hours to avoid redundant FRED API calls
-    across multiple macro analysis cycles within a single trading session.
-
-    Args:
-        series_id: FRED series identifier (e.g. 'FEDFUNDS', 'T10Y2Y').
-        start: ISO date string for the beginning of the requested history.
-
-    Returns:
-        Sorted, NaN-dropped pd.Series with a DatetimeIndex.
-
-    Raises:
-        DataFetchError: If FRED_API_KEY is not configured or the series is empty.
-    """
+    """Fetch a macroeconomic timeline from the Federal Reserve Economic Database (FRED)."""
     if not settings.FRED_API_KEY:
         raise DataFetchError("FRED_API_KEY is not set — configure it in .env to use macro data.")
 
@@ -363,7 +203,7 @@ def fetch_fred_series(series_id: str, start: str = MACRO.fred_default_start) -> 
         return cached
 
     logger.debug("fetching %s from FRED", series_id)
-    from fredapi import Fred  # Lazy import; only loaded when FRED is actually used
+    from fredapi import Fred
 
     fred = Fred(api_key=settings.FRED_API_KEY)
     raw: pd.Series = fred.get_series(series_id, observation_start=start)
@@ -375,7 +215,7 @@ def fetch_fred_series(series_id: str, start: str = MACRO.fred_default_start) -> 
 
     _FRED_CACHE.set(cache_key, raw)
 
-    logger.info("%s → %d observations", series_id, len(raw))
+    logger.info("%s -> %d observations", series_id, len(raw))
     return raw
 
 
@@ -393,34 +233,19 @@ def _latest_fred_value(
     series_id: str,
     transform: Callable[[pd.Series], pd.Series] | None = None,
 ) -> float | None:
-    """Reads the most recent observation of a FRED series, degrading to None on failure.
-
-    Args:
-        key: Bundle field name the value lands under, used only for logging.
-        series_id: FRED series identifier.
-        transform: Applied to the raw series before the last observation is taken,
-            for fields that are a derivative of the published index rather than it.
-
-    Returns:
-        The last non-NaN observation as a float, or None if the fetch failed.
-    """
+    """Read the most recent observation of a FRED series, degrading to None on failure."""
     try:
         series = fetch_fred_series(series_id)
         if transform is not None:
             series = transform(series)
         return float(series.dropna().iloc[-1])
     except Exception as exc:
-        logger.warning("%s (%s) failed — %s", key, series_id, exc)
+        logger.warning("%s (%s) failed - %s", key, series_id, exc)
         return None
 
 
 def fetch_macro_bundle() -> dict:
-    """Gathers a consolidated set of macroeconomic indicators and interest rates.
-
-    Returns:
-        Dict with keys: fed_funds, unemployment, t10y2y, t10yie, consumer_sentiment,
-        cpi_yoy, vix. Any key that fails to fetch is set to None.
-    """
+    """Gather a consolidated set of macroeconomic indicators and interest rates."""
     bundle: dict[str, float | None] = {
         key: _latest_fred_value(key, series_id) for key, series_id in _MACRO_BUNDLE_SERIES.items()
     }
@@ -429,7 +254,7 @@ def fetch_macro_bundle() -> dict:
     try:
         bundle["vix"] = fetch_vix()
     except Exception as exc:
-        logger.warning("vix fetch failed — %s", exc)
+        logger.warning("vix fetch failed - %s", exc)
         bundle["vix"] = None
 
     logger.info(
@@ -440,8 +265,7 @@ def fetch_macro_bundle() -> dict:
     return bundle
 
 
-# NewsAPI's maximum page size; larger than the default 20, so each of the
-# scarce daily requests returns as many articles as the tier allows.
+# Request the maximum article page so each scarce daily reservation returns as much evidence as possible.
 _NEWSAPI_PAGE_SIZE = 100
 
 _NEWSAPI_BUDGET = NewsApiBudget()
@@ -449,27 +273,11 @@ _NEWSAPI_BUDGET = NewsApiBudget()
 
 @with_retry
 def _fetch_news_page(client: Any, query: str, from_date: str) -> list[dict]:
-    """Fetches and normalizes one page of NewsAPI articles.
-
-    Args:
-        client: An initialized NewsApiClient.
-        query: NewsAPI query string (e.g. "AAPL OR Apple Inc").
-        from_date: ISO date string for the start of the search window.
-
-    Returns:
-        List of dicts with keys: title, description, published_at, source.
-
-    Raises:
-        DataFetchError: If no budget slot is available. The reservation is made
-            here rather than in the caller because every retry of this function is
-            another real NewsAPI request.
-    """
+    """Fetch and normalizes one page of NewsAPI articles."""
     if not _NEWSAPI_BUDGET.try_reserve():
-        # Exhaustion and a disk error both come back as False; try_reserve already
-        # logged the specific cause for a disk error, so this stays cause-agnostic.
+        # A rejected reservation may mean exhaustion or disk failure; try_reserve logs persistence failures itself.
         raise DataFetchError(
-            f"no NewsAPI budget slot available (daily cap of {NEWSAPI_DAILY_LIMIT} reached, "
-            "or the reservation failed)"
+            f"no NewsAPI budget slot available (daily cap of {NEWSAPI_DAILY_LIMIT} reached, or the reservation failed)"
         )
 
     response = client.get_everything(
@@ -497,56 +305,29 @@ def fetch_news(
     company_name: str,
     days_back: int = 7,
 ) -> list[dict] | None:
-    """Retrieves recent news articles matching a ticker from NewsAPI.
-
-    NewsAPI's free Developer tier delays article availability by roughly 24
-    hours and caps history at one month, so results are never same-day and a
-    backtest window further back than that returns nothing.
-
-    Args:
-        ticker: Equity ticker symbol used in the search query.
-        company_name: Human-readable company name appended to the query.
-        days_back: Number of days of news history to retrieve (default 7).
-
-    Returns:
-        List of dicts with keys: title, description, published_at, source.
-        None if NEWSAPI_KEY is not configured, the 100 request/day budget is
-        exhausted, or the request failed after retries — distinguishable from
-        an empty list, which means the request succeeded but found nothing.
-    """
+    """Retrieve recent news articles matching a ticker from NewsAPI."""
     if not settings.NEWSAPI_KEY:
         logger.debug("NEWSAPI_KEY not set")
         return None
 
     try:
-        from newsapi import NewsApiClient  # Lazy import; only loaded when NewsAPI is used
+        from newsapi import NewsApiClient
 
         client = NewsApiClient(api_key=settings.NEWSAPI_KEY)
         from_date = (datetime.now(UTC) - timedelta(days=days_back)).strftime("%Y-%m-%d")
         query = f"{ticker} OR {company_name}"
 
         result = _fetch_news_page(client, query, from_date)
-        logger.info("%s → %d articles", ticker, len(result))
+        logger.info("%s -> %d articles", ticker, len(result))
         return result
 
     except DataFetchError as exc:
-        logger.warning("%s failed — %s", ticker, exc)
+        logger.warning("%s failed - %s", ticker, exc)
         return None
 
 
 def fetch_vix() -> float:
-    """Fetches the current CBOE Volatility Index (VIX) level.
-
-    Reads the same ``^VIX`` daily history the macro agent does, through the
-    same retried download, so a missing ``Close`` column is an error here
-    rather than a silent fallback to whichever column comes first.
-
-    Returns:
-        Most recent VIX close as a float.
-
-    Raises:
-        DataFetchError: If yfinance returns no ``^VIX`` history or no close column.
-    """
+    """Fetch the current CBOE Volatility Index (VIX) level."""
     vix = float(fetch_ohlcv_daily("^VIX", period="5d")["close"].iloc[-1])
     logger.info("current VIX = %.2f", vix)
     return vix

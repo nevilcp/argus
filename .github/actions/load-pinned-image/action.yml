@@ -24,8 +24,7 @@ runs:
         path: deploy
 
     - name: Read pinned image tag
-      # See image.yml's "Pin scheduled jobs to this build" step: falls back
-      # to :latest only if the argus-deploy branch has never been published.
+      # Fall back to :latest only before the deployment branch has published an immutable image tag.
       id: read
       shell: bash
       run: |

@@ -1,20 +1,4 @@
-"""Route-level tests for /analyze's freshness gate.
-
-The four freshness clauses themselves — absent/stalled/stale/malformed/naive/
-one-full-interval-old — now live at the LiveSessionCache seam (see
-tests/test_live_session_cache.py) and are verified there with an explicit
-clock, no HTTP client required.
-
-What's genuinely a route concern and stays here: market hours outranking
-every age check, each admission group mapping to its own response text, and
-ticker registration happening only after the earlier gates pass — none of
-that is LiveSessionCache's to know about.
-
-These exercise the route function directly via FastAPI's TestClient rather
-than going through the app's lifespan, so no MFT pipeline, collector, or
-reconcile loop needs to start. `runtime.pipeline` and `runtime.live_cache` are
-set directly on api.lifespan.runtime instead.
-"""
+"""Route-level tests for /analyze's freshness gate."""
 
 from __future__ import annotations
 
@@ -34,7 +18,6 @@ pytestmark = pytest.mark.usefixtures("api_state")
 
 
 def test_analyze_market_closed_outranks_bar_age(client, monkeypatch):
-    """A hopelessly stale bar still surfaces as market-closed, not stale, outside session hours."""
     api_pipeline(monkeypatch, market_hours=False)
     now = now_market() - timedelta(days=9)
     runtime.live_cache.publish({"AAPL": {"timestamp": now.isoformat()}}, ["AAPL"], now=now)
@@ -56,8 +39,6 @@ def test_analyze_market_closed_outranks_bar_age(client, monkeypatch):
 def test_analyze_maps_each_admission_group_to_its_own_response_text(
     client, monkeypatch, admission_field, expected_substring
 ):
-    """Each of LiveSessionCache.admit()'s three rejection groups produces distinct
-    response wording."""
     api_pipeline(monkeypatch, market_hours=True)
     result = AdmissionResult(**{admission_field: ["AAPL"]})
     monkeypatch.setattr(runtime.live_cache, "admit", mock.Mock(return_value=result))
@@ -69,7 +50,6 @@ def test_analyze_maps_each_admission_group_to_its_own_response_text(
 
 
 def test_analyze_market_closed_skips_ticker_registration(client, monkeypatch):
-    """A rejected-by-market-hours request must not mutate pipeline state."""
     fake_pipeline = api_pipeline(monkeypatch, market_hours=False)
 
     response = client.post("/analyze", json=_PAYLOAD)

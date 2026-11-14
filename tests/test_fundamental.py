@@ -14,12 +14,9 @@ from argus.infra.diagnostics import Diagnostics
 from argus.seams import FixtureLLMClient
 from tests.helpers.market_data import FakeMarketData
 
-# The smallest fundamentals payload FundamentalSignal will validate against
 _MINIMAL_FUNDAMENTALS = {"sector": "Technology", "industry": "Consumer Electronics"}
 
-_VALID_LLM_RESPONSE = json.dumps(
-    {"signal": "NEUTRAL", "conviction": 0.5, "moat_score": 5, "reasoning": "r"}
-)
+_VALID_LLM_RESPONSE = json.dumps({"signal": "NEUTRAL", "conviction": 0.5, "moat_score": 5, "reasoning": "r"})
 
 
 class _UnlimitedCapacityLLMClient:
@@ -42,7 +39,6 @@ class _RecordingLLMClient(_UnlimitedCapacityLLMClient):
 
 
 def test_anonymize_ticker():
-    """Anonymized IDs are deterministic per (ticker, seed) and vary if either input changes."""
     id1 = anonymize_ticker("AAPL", 20240101)
     id2 = anonymize_ticker("AAPL", 20240101)
     assert id1 == id2
@@ -56,7 +52,6 @@ def test_anonymize_ticker():
 
 
 def test_build_compact_prompt():
-    """The compact prompt embeds fundamentals and substitutes the anon ID when provided."""
     pit_data = {
         "as_of_date": "2024-01-01",
         "fundamentals": {
@@ -83,22 +78,16 @@ def test_build_compact_prompt():
 
 
 def test_use_backtest_seed_treats_zero_as_a_valid_seed():
-    """session_seed=0 is a legal Optional[int] and must not be treated as falsy."""
     assert _use_backtest_seed(True, 0) is True
     assert _use_backtest_seed(True, None) is False
     assert _use_backtest_seed(False, 20240101) is False
 
 
 def test_session_seed_to_date_parses_yyyymmdd_stamp():
-    """session_seed is an integer date stamp, e.g. 20240115 -> 2024-01-15."""
     assert _session_seed_to_date(20240115) == datetime(2024, 1, 15).date()
 
 
 def test_analyze_overwrites_llm_echoed_ratios_with_measured_data():
-    """Every measured ratio in the persisted signal comes from the fetched payload.
-
-    None of it comes from the LLM's echo of those same values.
-    """
     measured = {
         "pe_ttm": 31.5,
         "revenue_growth_yoy": 0.02,
@@ -116,7 +105,6 @@ def test_analyze_overwrites_llm_echoed_ratios_with_measured_data():
     }
     market_data = FakeMarketData(fundamentals=measured)
 
-    # A wrong numeric echo: e.g. as if the model misread 31.5x/2% growth as 12x/45% growth.
     llm_response = json.dumps(
         {
             "signal": "BULLISH",
@@ -142,10 +130,6 @@ def test_analyze_overwrites_llm_echoed_ratios_with_measured_data():
 
 
 def test_analyze_anonymizes_and_derives_as_of_date_from_session_seed():
-    """A seeded backtest call anonymizes the ticker and stamps data_as_of_date from session_seed.
-
-    Not from today's date.
-    """
     market_data = FakeMarketData(fundamentals=_MINIMAL_FUNDAMENTALS)
     llm = _RecordingLLMClient(_VALID_LLM_RESPONSE)
     agent = FundamentalAgent(llm_client=llm, market_data=market_data)
@@ -158,7 +142,6 @@ def test_analyze_anonymizes_and_derives_as_of_date_from_session_seed():
 
 
 def test_analyze_retries_with_the_prior_validation_error_in_the_prompt():
-    """A malformed first response's error is carried into the retry prompt, not silently re-sent."""
     market_data = FakeMarketData(fundamentals=_MINIMAL_FUNDAMENTALS)
     prompts: list[str] = []
 
@@ -178,7 +161,6 @@ def test_analyze_retries_with_the_prior_validation_error_in_the_prompt():
 
 
 def test_analyze_degrades_the_ticker_on_governor_exhaustion_without_retrying():
-    """A RateLimitExceeded from the LLM client fails that ticker immediately, once, into errors."""
     market_data = FakeMarketData(fundamentals=_MINIMAL_FUNDAMENTALS)
 
     class _RateLimitedLLMClient(_UnlimitedCapacityLLMClient):
@@ -202,13 +184,7 @@ def test_analyze_degrades_the_ticker_on_governor_exhaustion_without_retrying():
 
 
 def test_analyze_degrades_the_ticker_when_measured_data_fails_signal_validation():
-    """A schema violation in the merged-in measured data must not crash the batch.
-
-    The violation is in the measured data, not the LLM's verdict.
-    """
-    market_data = FakeMarketData(
-        fundamentals={**_MINIMAL_FUNDAMENTALS, "debt_to_equity": -1.5}  # requires ge=0.0
-    )
+    market_data = FakeMarketData(fundamentals={**_MINIMAL_FUNDAMENTALS, "debt_to_equity": -1.5})
     llm = _RecordingLLMClient(_VALID_LLM_RESPONSE)
     agent = FundamentalAgent(llm_client=llm, market_data=market_data)
 
@@ -221,11 +197,6 @@ def test_analyze_degrades_the_ticker_when_measured_data_fails_signal_validation(
 
 
 def test_analyze_does_not_skip_every_ticker_at_a_low_configured_rpm(monkeypatch):
-    """A low ARGUS_GROQ_RPM must not make the pre-flight capacity reserve exceed the budget.
-
-    A client reporting that full budget as remaining capacity should still
-    admit the call.
-    """
     monkeypatch.setattr(fundamental_module.settings, "ARGUS_GROQ_RPM", 10)
 
     market_data = FakeMarketData(fundamentals=_MINIMAL_FUNDAMENTALS)
@@ -240,12 +211,6 @@ def test_analyze_does_not_skip_every_ticker_at_a_low_configured_rpm(monkeypatch)
 
 
 def test_analyze_skips_the_ticker_and_makes_no_calls_when_capacity_is_low():
-    """A low-capacity client skips the ticker before any market-data fetch or LLM call.
-
-    The capacity check must stay ahead of the fetch so a skipped ticker still
-    costs no network call — asserted here by a market-data stub that raises
-    if it is ever invoked.
-    """
 
     class _ExplodingMarketData:
         def fundamentals(self, ticker: str) -> dict:

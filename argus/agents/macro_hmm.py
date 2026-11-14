@@ -1,28 +1,4 @@
-"""
-argus/agents/macro_hmm.py
-
-The Gaussian HMM that maps macro features to hidden economic regimes.
-
-Responsibilities:
-  - Fit RegimeClassifier on a long feature history with random restarts,
-    rejecting degenerate or under-occupied fits
-  - Label the hidden states (CONTRACTION by NBER recession enrichment,
-    EXPANSION and TRANSITIONAL by feature means)
-  - Classify a current observation or a feature window, falling back to
-    macro_context.rule_based when unfitted
-  - Run the training validation gate (validation_failures)
-  - Persist the fitted model and refuse to load an artifact trained under a
-    different feature set, library version or HMM hyperparameters
-
-Not responsible for:
-  - Feature construction (see data/macro_features.py)
-  - Fetching data or caching a MacroContext (see agents/macro.py)
-  - The rule-based thresholds (see agents/macro_context.py)
-
-Dependencies:
-  - hmmlearn
-  - sklearn
-"""
+"""Gaussian HMM training, validation, persistence, and regime inference."""
 
 from __future__ import annotations
 
@@ -92,18 +68,7 @@ DISCRIMINATION_SCENARIOS: dict[str, dict[str, float]] = {
 
 
 def _new_hmm(n_components: int, random_state: int | None = None) -> GaussianHMM:
-    """Builds an untrained GaussianHMM with the project's fixed hyperparameters.
-
-    The one place the covariance structure and EM iteration cap are chosen, so a
-    fit, a diagnostic fit and the compatibility check cannot disagree.
-
-    Args:
-        n_components: Number of latent states.
-        random_state: Seed for the EM initialization; None leaves it unseeded.
-
-    Returns:
-        The unfitted model.
-    """
+    """Build an untrained GaussianHMM with the project's fixed hyperparameters."""
     return GaussianHMM(
         n_components=n_components,
         covariance_type=MACRO.hmm_covariance_type,
@@ -113,15 +78,7 @@ def _new_hmm(n_components: int, random_state: int | None = None) -> GaussianHMM:
 
 
 def _dwell_times_months(hidden_states: np.ndarray, n_components: int) -> dict[int, float]:
-    """Computes each state's mean run length (in observations) from a Viterbi path.
-
-    Args:
-        hidden_states: Decoded state sequence, ordered oldest to newest.
-        n_components: Number of HMM states.
-
-    Returns:
-        Dict mapping state index to mean dwell time; 0.0 for a state with no runs.
-    """
+    """Compute each state's mean run length (in observations) from a Viterbi path."""
     runs: dict[int, list[int]] = {s: [] for s in range(n_components)}
     run_state = int(hidden_states[0])
     run_len = 1
@@ -138,18 +95,7 @@ def _dwell_times_months(hidden_states: np.ndarray, n_components: int) -> dict[in
 
 
 def _min_pairwise_mahalanobis(hmm: GaussianHMM, occupancy: np.ndarray) -> float:
-    """Computes the minimum pairwise Mahalanobis distance between state means.
-
-    Uses the occupancy-weighted pooled covariance across states, so a state's
-    own (possibly ill-conditioned) covariance doesn't dominate the metric.
-
-    Args:
-        hmm: A fitted GaussianHMM with full covariances.
-        occupancy: Fraction of decoded observations assigned to each state.
-
-    Returns:
-        The smallest pairwise distance, or 0.0 for a single-state model.
-    """
+    """Compute the minimum pairwise Mahalanobis distance between state means."""
     n = hmm.n_components
     if n < 2:
         return 0.0
@@ -168,24 +114,12 @@ def _min_pairwise_mahalanobis(hmm: GaussianHMM, occupancy: np.ndarray) -> float:
 
 
 def _major_minor(version: str) -> str:
-    """Truncates a dotted version string to its major.minor prefix."""
+    """Truncate a dotted version string to its major.minor prefix."""
     return ".".join(version.split(".")[:2])
 
 
 def _check_artifact_compatibility(metadata: dict, hmm: GaussianHMM) -> None:
-    """Verifies a persisted artifact was trained against the installed code and libraries.
-
-    Args:
-        metadata: The "metadata" mapping written by RegimeClassifier.save().
-        hmm: The artifact's fitted model.
-
-    Raises:
-        ValueError: If the artifact's feature columns, hmmlearn version,
-            scikit-learn version, or the model's covariance structure or EM
-            iteration cap disagree with what is currently installed or
-            configured. A mismatch forces a retrain instead of silently serving
-            a model fit under different settings.
-    """
+    """Verify a persisted artifact was trained against the installed code and libraries."""
     if metadata.get("feature_columns") != FEATURE_COLUMNS:
         raise ValueError(
             f"feature column mismatch: artifact trained on "
@@ -195,14 +129,12 @@ def _check_artifact_compatibility(metadata: dict, hmm: GaussianHMM) -> None:
     artifact_hmmlearn = metadata.get("hmmlearn_version", "")
     if _major_minor(artifact_hmmlearn) != _major_minor(hmmlearn.__version__):
         raise ValueError(
-            f"hmmlearn version mismatch: artifact={artifact_hmmlearn!r}, "
-            f"installed={hmmlearn.__version__!r}"
+            f"hmmlearn version mismatch: artifact={artifact_hmmlearn!r}, installed={hmmlearn.__version__!r}"
         )
     artifact_sklearn = metadata.get("sklearn_version", "")
     if _major_minor(artifact_sklearn) != _major_minor(sklearn.__version__):
         raise ValueError(
-            f"scikit-learn version mismatch: artifact={artifact_sklearn!r}, "
-            f"installed={sklearn.__version__!r}"
+            f"scikit-learn version mismatch: artifact={artifact_sklearn!r}, installed={sklearn.__version__!r}"
         )
     if (hmm.covariance_type, hmm.n_iter) != (MACRO.hmm_covariance_type, MACRO.hmm_n_iter):
         raise ValueError(
@@ -213,56 +145,21 @@ def _check_artifact_compatibility(metadata: dict, hmm: GaussianHMM) -> None:
 
 
 class RegimeClassifier:
-    """Gaussian Hidden Markov Model mapping macro features to hidden economic states.
-
-    Trained on a long FRED history (1990+), then applied to current macro observations
-    to infer the latent regime. CONTRACTION is labeled by NBER (USREC) recession
-    enrichment; EXPANSION and TRANSITIONAL are labeled heuristically from per-state
-    feature means. See fit() and _map_states().
-    """
+    """Gaussian Hidden Markov Model mapping macro features to hidden economic states."""
 
     def __init__(self, n_components: int = 3) -> None:
-        """Builds the underlying Gaussian HMM, untrained.
-
-        Args:
-            n_components: Number of latent regime states.
-        """
         self.hmm = _new_hmm(n_components)
         self.scaler = StandardScaler()
         self.is_fitted = False
         self.state_to_regime: dict[int, str] = {}
         self.n_train_observations = 0
-        # Diagnostic-only per-state means from the last fit; not persisted, refreshed
-        # by _map_states.
+        # Diagnostic state means are refreshed by _map_states and excluded from persisted artifacts.
         self.state_means: dict[int, dict[str, float]] = {}
-        # Populated by fit(): validation evidence, persisted by save(), checked by
-        # validation_failures().
+        # Persist fit validation evidence so the publication gate can inspect the winning model.
         self.validation_metrics: dict = {}
 
     def fit(self, macro_history: pd.DataFrame, recession_series: pd.Series | None = None) -> bool:
-        """Fits the scaling transformer and HMM classifier on historic feature timelines.
-
-        Tries MACRO.hmm_n_init random restarts (seeds 0..n_init-1), rejecting any
-        restart whose states are not well separated or that leaves a state
-        under-occupied, and keeps the highest-likelihood survivor. A single fixed
-        seed is not enough: on this data, 3 of 5 seeds collapse two states onto
-        the same distribution, and the shipped artifact's seed (42) was one of them.
-
-        Args:
-            macro_history: DataFrame containing at least FEATURE_COLUMNS. NaN rows
-                are dropped before fitting.
-            recession_series: Optional NBER USREC series (1.0 during a recession
-                month, else 0.0), indexed to overlap macro_history. Used by
-                _map_states to label the CONTRACTION state by recession
-                enrichment; if None, no state is labeled CONTRACTION.
-
-        Returns:
-            True once the classifier is fitted; False, leaving it unchanged, when
-            no row survives dropping NaNs.
-
-        Raises:
-            ValueError: If every restart is rejected as degenerate or under-occupied.
-        """
+        """Fit the scaling transformer and HMM classifier on historic feature timelines."""
         df = macro_history.dropna().copy()
         if df.empty:
             logger.warning("Empty DataFrame after dropping NaNs.")
@@ -313,8 +210,7 @@ class RegimeClassifier:
             )
 
         self.hmm = best_hmm
-        # Apply now: validation_failures() calls predict() pre-save, and raw EM
-        # startprob_ would dominate.
+        # Set the stationary prior before validation calls predict on the unsaved model.
         self.hmm.startprob_ = self._stationary_startprob(self.hmm.transmat_)
         self.scaler = scaler
         hidden_states = best_hmm.predict(scaled_features)
@@ -334,29 +230,13 @@ class RegimeClassifier:
 
     @staticmethod
     def _stationary_startprob(transmat: np.ndarray) -> np.ndarray:
-        """Computes a Markov chain's stationary distribution from its transition matrix.
-
-        Args:
-            transmat: The HMM's n x n transition matrix.
-
-        Returns:
-            A probability vector over states (the left eigenvector for eigenvalue 1).
-        """
+        """Compute a Markov chain's stationary distribution from its transition matrix."""
         eigenvalues, eigenvectors = scipy.linalg.eig(transmat.T)
         stationary = eigenvectors[:, np.argmin(np.abs(eigenvalues - 1.0))].real
         return stationary / stationary.sum()
 
     def _log_bic_diagnostic(self, scaled_features: np.ndarray) -> None:
-        """Logs BIC for k in {2..5} states as a diagnostic; does not affect the fitted model.
-
-        n_components stays fixed at 3 (see the class docstring) — BIC decreases
-        monotonically through k=5 on this data, but k>3 forces an arbitrary
-        many-to-3 mapping onto the Regime enum for no validated gain. Logged so
-        that choice stays visible instead of assumed.
-
-        Args:
-            scaled_features: Scaler-transformed training features.
-        """
+        """Log BIC for two through five states without changing the fitted three-state model."""
         n_obs, n_features = scaled_features.shape
         for k in range(2, 6):
             try:
@@ -365,32 +245,14 @@ class RegimeClassifier:
                     warnings.filterwarnings("ignore", category=ConvergenceWarning)
                     candidate.fit(scaled_features)
                 log_likelihood = candidate.score(scaled_features)
-                n_params = (
-                    (k - 1) + k * (k - 1) + k * n_features + k * n_features * (n_features + 1) // 2
-                )
+                n_params = (k - 1) + k * (k - 1) + k * n_features + k * n_features * (n_features + 1) // 2
                 bic = -2 * log_likelihood + n_params * np.log(n_obs)
                 logger.info("BIC diagnostic k=%d -> %.1f", k, bic)
             except Exception as exc:
                 logger.debug("BIC diagnostic failed for k=%d: %s", k, exc)
 
     def _map_states(self, df: pd.DataFrame, recession_series: pd.Series | None = None) -> None:
-        """Maps hidden states to human-readable regimes.
-
-        CONTRACTION = the state with the highest NBER (USREC) recession
-            frequency, provided it clears MACRO.contraction_enrichment_min
-            against the sample's base rate; otherwise no state is labeled
-            CONTRACTION. This replaces a VIX-percentile heuristic that always
-            assigned CONTRACTION to *some* state whether or not a
-            contractionary state actually existed — which is how the ZIRP era
-            got the label.
-        EXPANSION = of the remaining states, the one with the lowest average
-            d_unemp_12m (falling unemployment).
-        TRANSITIONAL = all other states.
-
-        Args:
-            df: The same DataFrame used for fitting, used to label state sequences.
-            recession_series: Optional NBER USREC series; see fit()'s docstring.
-        """
+        """Map hidden states to human-readable regimes."""
         self.state_to_regime = {}
 
         features = df[FEATURE_COLUMNS].values
@@ -422,21 +284,8 @@ class RegimeClassifier:
 
         logger.debug("HMM State Mapping: %s", self.state_to_regime)
 
-    def _label_contraction_state(
-        self, df_with_state: pd.DataFrame, recession_series: pd.Series | None
-    ) -> int | None:
-        """Picks the CONTRACTION state by NBER recession-frequency enrichment.
-
-        Args:
-            df_with_state: Training frame with a "state" column, from _map_states.
-            recession_series: NBER USREC series (1.0/0.0), or None if unavailable.
-
-        Returns:
-            The state index to label CONTRACTION, or None if no candidate clears
-            MACRO.contraction_enrichment_min. Either way, records enrichment and
-            recall into validation_metrics for validation_failures() and the
-            persisted artifact metadata.
-        """
+    def _label_contraction_state(self, df_with_state: pd.DataFrame, recession_series: pd.Series | None) -> int | None:
+        """Pick the CONTRACTION state by NBER recession-frequency enrichment."""
         if recession_series is None:
             self.validation_metrics["contraction_enrichment"] = None
             self.validation_metrics["contraction_recall"] = None
@@ -445,9 +294,7 @@ class RegimeClassifier:
         aligned = recession_series.reindex(df_with_state.index).fillna(0.0)
         base_rate = float(aligned.mean())
         freq_by_state = aligned.groupby(df_with_state["state"]).mean()
-        self.validation_metrics["recession_frequency_by_state"] = {
-            int(s): float(f) for s, f in freq_by_state.items()
-        }
+        self.validation_metrics["recession_frequency_by_state"] = {int(s): float(f) for s, f in freq_by_state.items()}
 
         if base_rate <= 0 or freq_by_state.empty:
             self.validation_metrics["contraction_enrichment"] = None
@@ -464,25 +311,13 @@ class RegimeClassifier:
 
         recession_mask = aligned > 0
         recall = (
-            float((df_with_state.loc[recession_mask, "state"] == candidate).mean())
-            if recession_mask.any()
-            else 0.0
+            float((df_with_state.loc[recession_mask, "state"] == candidate).mean()) if recession_mask.any() else 0.0
         )
         self.validation_metrics["contraction_recall"] = recall
         return candidate
 
     def validation_failures(self) -> list[str]:
-        """Checks the fitted model against the training-gate thresholds in MACRO.
-
-        Meant for scripts/train_macro_hmm.py to hard-fail a training run before
-        persisting a broken artifact. fit() already rejects degenerate/
-        under-occupied restarts internally; this re-checks the winning fit plus
-        the checks fit() doesn't perform on its own (dwell time, CONTRACTION
-        enrichment, and a discrimination smoke test).
-
-        Returns:
-            Human-readable failure descriptions; empty if every check passes.
-        """
+        """Check the fitted model against the training-gate thresholds in MACRO."""
         if not self.is_fitted:
             return ["classifier is not fitted"]
 
@@ -491,23 +326,16 @@ class RegimeClassifier:
 
         separation = m.get("min_state_separation", 0.0)
         if separation < MACRO.hmm_min_state_separation:
-            failures.append(
-                f"min state separation {separation:.3f} below floor "
-                f"{MACRO.hmm_min_state_separation}"
-            )
+            failures.append(f"min state separation {separation:.3f} below floor {MACRO.hmm_min_state_separation}")
 
         occupancy = m.get("state_occupancy", {})
         low_occupancy = {s: o for s, o in occupancy.items() if o < MACRO.hmm_min_state_occupancy}
         if low_occupancy:
-            failures.append(
-                f"states below occupancy floor {MACRO.hmm_min_state_occupancy}: {low_occupancy}"
-            )
+            failures.append(f"states below occupancy floor {MACRO.hmm_min_state_occupancy}: {low_occupancy}")
 
         dwell = m.get("dwell_times_months", {})
         bad_dwell = {
-            s: d
-            for s, d in dwell.items()
-            if not (MACRO.dwell_time_min_months <= d <= MACRO.dwell_time_max_months)
+            s: d for s, d in dwell.items() if not (MACRO.dwell_time_min_months <= d <= MACRO.dwell_time_max_months)
         }
         if bad_dwell:
             failures.append(
@@ -517,44 +345,16 @@ class RegimeClassifier:
 
         enrichment = m.get("contraction_enrichment")
         if enrichment is None or enrichment < MACRO.contraction_enrichment_min:
-            failures.append(
-                f"CONTRACTION enrichment {enrichment} below floor "
-                f"{MACRO.contraction_enrichment_min}"
-            )
+            failures.append(f"CONTRACTION enrichment {enrichment} below floor {MACRO.contraction_enrichment_min}")
 
-        labels = {
-            self.predict(pd.DataFrame([scenario]))[0]
-            for scenario in DISCRIMINATION_SCENARIOS.values()
-        }
+        labels = {self.predict(pd.DataFrame([scenario]))[0] for scenario in DISCRIMINATION_SCENARIOS.values()}
         if len(labels) < 2:
             failures.append(f"discrimination scenarios collapsed to a single label: {labels}")
 
         return failures
 
     def predict(self, current: dict | pd.DataFrame) -> tuple[str, float]:
-        """Classifies the current economic regime and returns posterior probability confidence.
-
-        An unfitted classifier takes the static rule-based path for a dict (see
-        ``macro_context.rule_based``) and refuses a DataFrame, whose rows carry the model
-        features and none of the raw levels that path reads.
-        Accepts either a single observation (dict) or a multi-day feature window
-        (DataFrame). A window lets the HMM's transition matrix inform the
-        classification via the forward-backward algorithm instead of decoding an
-        isolated point, which is what the posterior confidence is meant to reflect.
-
-        Args:
-            current: Either a dict with keys matching FEATURE_COLUMNS, or a DataFrame
-                with those same columns, one row per period, ordered oldest to newest.
-
-        Returns:
-            Tuple of (regime_string, confidence), where confidence is the max posterior
-            probability at the window's final timestep (or the single observation).
-
-        Raises:
-            ValueError: If the classifier is unfitted and given a DataFrame; if a fitted
-                classifier's dict lacks a FEATURE_COLUMNS entry or holds None for one;
-                or if the feature array contains a NaN or infinite value.
-        """
+        """Classify the final feature row using window posteriors, or raw-level rules when unfitted."""
         if not self.is_fitted:
             if isinstance(current, pd.DataFrame):
                 raise ValueError(
@@ -566,13 +366,10 @@ class RegimeClassifier:
         if isinstance(current, pd.DataFrame):
             arr = current[FEATURE_COLUMNS].values
         else:
-            # A missing feature is an error, not a neutral value: imputing one would
-            # score the observation as though it had been measured.
+            # Reject missing features instead of scoring an invented neutral observation.
             missing = [col for col in FEATURE_COLUMNS if current.get(col) is None]
             if missing:
-                raise ValueError(
-                    f"RegimeClassifier.predict: missing or None feature(s): {', '.join(missing)}"
-                )
+                raise ValueError(f"RegimeClassifier.predict: missing or None feature(s): {', '.join(missing)}")
             arr = np.array([[current[col] for col in FEATURE_COLUMNS]])
 
         if not np.isfinite(arr).all():
@@ -588,13 +385,7 @@ class RegimeClassifier:
         return regime, confidence
 
     def save(self, path: str | Path, start_date: str | None = None) -> None:
-        """Persists the fitted hmm, scaler, and state_to_regime mapping to a joblib file.
-
-        Args:
-            path: Destination file path; parent directories are created if missing.
-            start_date: ISO date string the training history began at, recorded in
-                metadata for provenance only (fit() itself is agnostic to it).
-        """
+        """Persist the fitted hmm, scaler, and state_to_regime mapping to a joblib file."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -621,17 +412,7 @@ class RegimeClassifier:
 
     @classmethod
     def load(cls, path: str | Path) -> RegimeClassifier:
-        """Loads a persisted classifier artifact, never raising to the caller.
-
-        Args:
-            path: Path to a joblib artifact written by save().
-
-        Returns:
-            A fitted RegimeClassifier on success. On any failure (missing file,
-            corrupt pickle, or a hmmlearn/scikit-learn/feature-column mismatch
-            against the currently installed versions) logs at ERROR and returns
-            an unfitted classifier, so predict() takes the rule-based path.
-        """
+        """Load a persisted classifier artifact, never raising to the caller."""
         path = Path(path)
         try:
             payload = joblib.load(path)
@@ -647,8 +428,7 @@ class RegimeClassifier:
             classifier.validation_metrics = metadata.get("validation_metrics", {})
 
             if classifier.is_fitted:
-                # fit() already applies this; re-derived here so old artifacts reach
-                # CONTRACTION from cold start.
+                # Reapply the stationary prior so older artifacts can reach every regime at cold start.
                 classifier.hmm.startprob_ = cls._stationary_startprob(classifier.hmm.transmat_)
 
             logger.info(

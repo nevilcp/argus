@@ -1,8 +1,4 @@
-"""Tests for orchestration/decision_log.py.
-
-Covers the decisions.jsonl log (append, load, compaction under its lock) and
-reading decisions back out of the LangGraph checkpoint database.
-"""
+"""Tests for orchestration/decision_log.py."""
 
 from __future__ import annotations
 
@@ -35,15 +31,10 @@ from tests.helpers.builders import (
 from tests.helpers.decision_store import write_decisions_log
 from tests.helpers.paths import FIXTURES_DIR
 
-# ---------------------------------------------------------------------------
-# load_decisions_from_checkpoints
-# ---------------------------------------------------------------------------
-
 
 def test_load_decisions_from_checkpoints_on_a_missing_db_returns_empty_and_creates_nothing(
     tmp_path,
 ):
-    """A missing checkpoint database reads as empty without sqlite creating the file."""
     db_path = tmp_path / "does_not_exist.db"
 
     assert load_decisions_from_checkpoints(str(db_path)) == []
@@ -51,7 +42,6 @@ def test_load_decisions_from_checkpoints_on_a_missing_db_returns_empty_and_creat
 
 
 def test_load_decisions_from_checkpoints_round_trips_a_real_graph_run(tmp_path):
-    """Checkpoints round-trip real ARGUSDecision objects, not degraded dicts."""
     universe = ["AAPL", "MSFT", "NVDA", "GOOGL", "JPM", "XOM"]
 
     def per_ticker_llm(fixture_file: str) -> FixtureLLMClient:
@@ -117,27 +107,17 @@ def test_load_decisions_from_checkpoints_round_trips_a_real_graph_run(tmp_path):
     assert {d.ticker for d in decisions} <= set(universe)
 
 
-# ---------------------------------------------------------------------------
-# compact_decisions_jsonl
-# ---------------------------------------------------------------------------
-
-
 def _compact(
     path: Path | str,
     cutoff: datetime,
     unresolved_cutoff: datetime = datetime(1900, 1, 1),
     resolved_ids: frozenset[str] = frozenset(),
 ) -> CompactionResult:
-    """compact_decisions_jsonl with a default unresolved_cutoff far enough in the past
-    to be a no-op.
-
-    Lets tests that don't exercise unresolved-retention behavior omit it.
-    """
+    """Compact resolved records while keeping unresolved retirement out of the test window."""
     return compact_decisions_jsonl(str(path), cutoff, unresolved_cutoff, resolved_ids)
 
 
 def test_compact_decisions_jsonl_drops_sessions_before_cutoff(tmp_path):
-    """Decisions older than cutoff are dropped; everything at or after it is kept."""
     path = write_decisions_log(
         tmp_path / "decisions.jsonl",
         ARGUSDecision(ticker="OLD", session_timestamp=datetime(2026, 1, 1)),
@@ -154,7 +134,6 @@ def test_compact_decisions_jsonl_drops_sessions_before_cutoff(tmp_path):
 
 
 def test_compact_decisions_jsonl_preserves_malformed_lines_and_counts_them(tmp_path):
-    """A line that fails to parse is written back verbatim rather than silently deleted."""
     path = write_decisions_log(
         tmp_path / "decisions.jsonl",
         ARGUSDecision(ticker="OLD", session_timestamp=datetime(2026, 1, 1)),
@@ -173,7 +152,6 @@ def test_compact_decisions_jsonl_preserves_malformed_lines_and_counts_them(tmp_p
 
 
 def test_append_issued_during_compaction_is_not_lost(tmp_path, monkeypatch):
-    """An append that arrives mid-compaction lands after it instead of being overwritten."""
     from argus.orchestration import decision_log
 
     path = write_decisions_log(
@@ -186,7 +164,6 @@ def test_append_issued_during_compaction_is_not_lost(tmp_path, monkeypatch):
     real_needs = decision_log.needs_reconciliation
 
     def _held(decision):
-        # Called per decision after the log was read and before it is rewritten
         mid_compaction.set()
         assert release.wait(timeout=10)
         return real_needs(decision)
@@ -202,7 +179,7 @@ def test_append_issued_during_compaction_is_not_lost(tmp_path, monkeypatch):
         args=([ARGUSDecision(ticker="LATE", session_timestamp=datetime(2026, 1, 21))], str(path)),
     )
     appender.start()
-    appender.join(timeout=0.5)  # blocked on the lock when the fix is in; done at once without it
+    appender.join(timeout=0.5)  # A racing append must wait for the lock until compaction finishes replacing the log.
     release.set()
     compactor.join(timeout=10)
     appender.join(timeout=10)
@@ -211,14 +188,12 @@ def test_append_issued_during_compaction_is_not_lost(tmp_path, monkeypatch):
 
 
 def test_compact_decisions_jsonl_missing_file_is_a_noop():
-    """A path that doesn't exist yet returns 0 and writes nothing."""
     result = _compact("/nonexistent/decisions.jsonl", cutoff=datetime(2026, 1, 1))
     assert result.retained == 0
     assert result.retired_unresolved == 0
 
 
 def test_compact_decisions_jsonl_nothing_to_drop_leaves_the_file_untouched(tmp_path):
-    """When every decision is at or after cutoff, the file is not rewritten."""
     path = write_decisions_log(
         tmp_path / "decisions.jsonl",
         ARGUSDecision(ticker="NEW", session_timestamp=datetime(2026, 1, 20)),
@@ -234,13 +209,6 @@ def test_compact_decisions_jsonl_nothing_to_drop_leaves_the_file_untouched(tmp_p
 def test_compact_decisions_jsonl_never_drops_an_unresolved_position_decision_at_routine_cutoff(
     tmp_path,
 ):
-    """A decision that took a position but has no stored outcome survives routine compaction.
-
-    Reproduces the observed bug: a reconcile pass that finds nothing to
-    reconcile (e.g. a missed schedule tick, or a price fetch failure) must
-    not cost the decision its one chance at being scored, however old it is
-    relative to the ordinary retention cutoff.
-    """
     old = ARGUSDecision(
         ticker="UNRESOLVED",
         session_timestamp=datetime(2020, 1, 1),
@@ -264,8 +232,6 @@ def test_compact_decisions_jsonl_never_drops_an_unresolved_position_decision_at_
 def test_compact_decisions_jsonl_retires_an_unresolved_decision_past_the_wider_cutoff(
     tmp_path,
 ):
-    """An unresolved decision is dropped, and counted separately, once it ages past
-    unresolved_cutoff."""
     old = ARGUSDecision(
         ticker="STALE",
         session_timestamp=datetime(2020, 1, 1),
@@ -287,7 +253,6 @@ def test_compact_decisions_jsonl_retires_an_unresolved_decision_past_the_wider_c
 
 
 def test_compact_decisions_jsonl_drops_a_resolved_decision_at_the_routine_cutoff(tmp_path):
-    """A decision with a stored outcome is pruned at the ordinary cutoff, not held past it."""
     old = ARGUSDecision(
         ticker="RESOLVED",
         session_timestamp=datetime(2020, 1, 1),
@@ -309,12 +274,6 @@ def test_compact_decisions_jsonl_drops_a_resolved_decision_at_the_routine_cutoff
 
 
 def test_compact_decisions_jsonl_a_no_position_decision_is_resolved_by_definition(tmp_path):
-    """A decision with no position is dropped at the routine cutoff even with no stored outcome.
-
-    It never needed reconciliation, so it can never appear in resolved_ids —
-    the routine cutoff must still apply to it, or a HOLD-only history would
-    never shrink.
-    """
     old = ARGUSDecision(
         ticker="HOLD",
         session_timestamp=datetime(2020, 1, 1),
@@ -334,7 +293,6 @@ def test_compact_decisions_jsonl_a_no_position_decision_is_resolved_by_definitio
 
 
 def test_append_decisions_jsonl_stamps_running_image_tag(tmp_path, monkeypatch):
-    """Issue #95: every logged decision carries the tag of the image that produced it."""
     monkeypatch.setattr(settings, "ARGUS_IMAGE_TAG", "sha-abc123def456")
     log_path = tmp_path / "decisions.jsonl"
     decision = argus_decision("AAPL", datetime(2024, 1, 2))
@@ -344,4 +302,4 @@ def test_append_decisions_jsonl_stamps_running_image_tag(tmp_path, monkeypatch):
 
     logged = [ARGUSDecision.model_validate_json(line) for line in log_path.read_text().splitlines()]
     assert logged[0].image_tag == "sha-abc123def456"
-    assert decision.image_tag is None  # the caller's own object is left untouched
+    assert decision.image_tag is None

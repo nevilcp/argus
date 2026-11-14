@@ -1,28 +1,4 @@
-"""
-argus/seams.py
-
-The adapters behind the two ports in argus/ports.py: network market-data
-fetches (argus/data/fetchers.py) and Groq LLM calls. Each port has a live
-implementation and a fixture implementation:
-  - `LiveMarketDataProvider` (delegates to argus/data/fetchers.py) /
-    `FixtureMarketDataProvider` (serves pre-captured JSON from
-    tests/fixtures/market_data/), implementing `MarketDataProvider`.
-  - `GroqLLMClient` (wraps ChatGroq construction + invocation, and is the
-    sole choke point for governor rate-limiting and header-driven limit
-    observation; classifies which failures are worth retrying and raises
-    RetryableTransportError for those, but the retry loop itself lives in
-    argus/structured_output.py's decode() — see its own docstring; also
-    answers `remaining_capacity()` by delegating to the governor, so a
-    caller can back off before spending a call it would only lose) /
-    `FixtureLLMClient` (serves pre-captured response text from
-    tests/fixtures/llm_responses/, never touches the governor or the
-    network, and answers `remaining_capacity()` from a value fixed at
-    construction), implementing `LLMClient`.
-
-Agents accept these via constructor injection with a real default, so
-production wiring (graph.py's `build_graph()`) is unchanged unless a
-caller explicitly passes a fixture-backed instance.
-"""
+"""Live and fixture implementations of market-data and model transport ports."""
 
 from __future__ import annotations
 
@@ -49,75 +25,48 @@ logger = logging.getLogger(__name__)
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
 
 
-# ---------------------------------------------------------------------------
-# Market data
-# ---------------------------------------------------------------------------
-
-
 class LiveMarketDataProvider:
     """Thin delegating wrapper around argus/data/fetchers.py. No behavior change."""
 
     is_live = True
 
     def ohlcv_daily(self, ticker: str, period: str = "2y") -> pd.DataFrame:
-        """Delegates to fetchers.fetch_ohlcv_daily."""
         return fetchers.fetch_ohlcv_daily(ticker, period=period)
 
     def ohlcv_intraday(self, ticker: str, interval: str = "5m", period: str = "5d") -> pd.DataFrame:
-        """Delegates to fetchers.fetch_ohlcv_intraday."""
         return fetchers.fetch_ohlcv_intraday(ticker, interval=interval, period=period)
 
     def multiple_daily(self, tickers: list[str], period: str = "1y") -> dict[str, pd.DataFrame]:
-        """Delegates to fetchers.fetch_multiple_daily."""
         return fetchers.fetch_multiple_daily(tickers, period=period)
 
     def fundamentals(self, ticker: str) -> dict:
-        """Delegates to fetchers.fetch_fundamentals."""
         return fetchers.fetch_fundamentals(ticker)
 
     def fred_series(self, series_id: str, start: str = MACRO.fred_default_start) -> pd.Series:
-        """Delegates to fetchers.fetch_fred_series."""
         return fetchers.fetch_fred_series(series_id, start=start)
 
     def macro_bundle(self) -> dict:
-        """Delegates to fetchers.fetch_macro_bundle."""
         return fetchers.fetch_macro_bundle()
 
     def news(self, ticker: str, company_name: str, days_back: int = 7) -> list[dict] | None:
-        """Delegates to fetchers.fetch_news."""
         return fetchers.fetch_news(ticker, company_name, days_back=days_back)
 
     def vix(self) -> float:
-        """Delegates to fetchers.fetch_vix."""
         return fetchers.fetch_vix()
 
     def ticker_info(self, ticker: str) -> dict:
-        """Delegates to fetchers.fetch_ticker_info."""
         return fetchers.fetch_ticker_info(ticker)
 
     def ticker_calendar(self, ticker: str) -> Any:
-        """Delegates to fetchers.fetch_ticker_calendar."""
         return fetchers.fetch_ticker_calendar(ticker)
 
 
 class FixtureMarketDataProvider:
-    """Serves pre-captured data from tests/fixtures/market_data/ instead of the network.
-
-    Fixtures are plain JSON keyed by ticker, hand-captured under
-    tests/fixtures/market_data/. A ticker missing from a fixture file raises
-    KeyError rather than silently returning empty/zero data — a test
-    exercising a ticker with no fixture should fail loudly, not pass on
-    fabricated data.
-    """
+    """Captured market data provider that raises for missing ticker fixtures."""
 
     is_live = False
 
     def __init__(self, fixtures_dir: Path = FIXTURES_DIR / "market_data") -> None:
-        """Initializes the provider against a fixtures directory.
-
-        Args:
-            fixtures_dir: Directory containing the per-domain JSON fixture files.
-        """
         self._dir = fixtures_dir
         self._cache: dict[str, Any] = {}
 
@@ -129,7 +78,7 @@ class FixtureMarketDataProvider:
         return self._cache[name]
 
     def ohlcv_daily(self, ticker: str, period: str = "2y") -> pd.DataFrame:
-        """Returns cached OHLCV history from the price_history fixture."""
+        """Return cached OHLCV history from the price_history fixture."""
         record = self._load("price_history")[ticker]
         return pd.DataFrame(
             {"close": record["prices"]},
@@ -137,60 +86,44 @@ class FixtureMarketDataProvider:
         )
 
     def ohlcv_intraday(self, ticker: str, interval: str = "5m", period: str = "5d") -> pd.DataFrame:
-        """Raises: no intraday candles are captured under tests/fixtures/market_data/.
-
-        Raises:
-            NotImplementedError: Always. Intraday candles feed only the live
-                MFT pipeline, which no fixture-backed run exercises, so there
-                is nothing to serve and nothing to fabricate.
-        """
+        """Reject intraday reads because the captured fixtures contain no intraday candles."""
         raise NotImplementedError("FixtureMarketDataProvider has no intraday candles")
 
     def multiple_daily(self, tickers: list[str], period: str = "1y") -> dict[str, pd.DataFrame]:
-        """Returns cached OHLCV history for each ticker present in the price_history fixture."""
-        return {
-            t: self.ohlcv_daily(t, period=period)
-            for t in tickers
-            if t in self._load("price_history")
-        }
+        """Return cached OHLCV history for each ticker present in the price_history fixture."""
+        return {t: self.ohlcv_daily(t, period=period) for t in tickers if t in self._load("price_history")}
 
     def fundamentals(self, ticker: str) -> dict:
-        """Returns the cached fundamentals payload from the fundamentals fixture."""
+        """Return the cached fundamentals payload from the fundamentals fixture."""
         return dict(self._load("fundamentals")[ticker])
 
     def fred_series(self, series_id: str, start: str = MACRO.fred_default_start) -> pd.Series:
-        """Returns a cached FRED series from the fred_series fixture."""
+        """Return a cached FRED series from the fred_series fixture."""
         record = self._load("fred_series")[series_id]
         return pd.Series(record["values"], index=pd.to_datetime(record["dates"]))
 
     def macro_bundle(self) -> dict:
-        """Returns the cached macro indicator bundle from the macro_bundle fixture."""
+        """Return the cached macro indicator bundle from the macro_bundle fixture."""
         return dict(self._load("macro_bundle"))
 
     def news(self, ticker: str, company_name: str, days_back: int = 7) -> list[dict]:
-        """Returns cached news articles from the news fixture, or an empty list if none."""
+        """Return cached news articles from the news fixture, or an empty list if none."""
         return list(self._load("news").get(ticker, []))
 
     def vix(self) -> float:
-        """Returns the cached VIX level from the macro_bundle fixture."""
+        """Return the cached VIX level from the macro_bundle fixture."""
         return float(self._load("macro_bundle")["vix"])
 
     def ticker_info(self, ticker: str) -> dict:
-        """Returns the cached yfinance .info dict from the ticker_info fixture."""
+        """Return the cached yfinance .info dict from the ticker_info fixture."""
         return dict(self._load("ticker_info")[ticker])
 
     def ticker_calendar(self, ticker: str) -> Any:
-        """Returns the cached yfinance .calendar dict from the ticker_calendar fixture."""
+        """Return the cached yfinance .calendar dict from the ticker_calendar fixture."""
         return dict(self._load("ticker_calendar")[ticker])
 
 
-# ---------------------------------------------------------------------------
-# LLM client
-# ---------------------------------------------------------------------------
-
-
-# Retryable: transient conditions where a second attempt might succeed. Everything
-# else (bad key, bad request, missing resource) is terminal and propagates as-is.
+# Classify transient provider errors here; terminal failures propagate without retries.
 _RETRYABLE_GROQ_ERRORS = (
     groq.RateLimitError,
     groq.APIConnectionError,
@@ -200,70 +133,27 @@ _RETRYABLE_GROQ_ERRORS = (
 
 
 def _groq_retry_delay(exc: Exception) -> float | None:
-    """Reads the provider's own retry hint off a retryable Groq error, if it gave one.
-
-    Only a RateLimitError carries an explicit hint (its Retry-After header,
-    honored verbatim since Groq is telling us exactly how long its own limit
-    takes to clear). Every other retryable error has no such hint, so the
-    caller decides its own back-off. Header extraction itself is shared with
-    argus/data/retry.py's retry loop rather than reimplemented here.
-
-    Args:
-        exc: The exception the failed attempt raised.
-
-    Returns:
-        Seconds to wait before retrying per the provider's hint, or None.
-    """
+    """Read the provider's own retry hint off a retryable Groq error, if it gave one."""
     if isinstance(exc, groq.RateLimitError):
         return retry_after_seconds(exc)
     return None
 
 
 def _response_text(content: Any) -> str:
-    """Flattens an invoked model's ``content`` into plain response text.
-
-    Groq returns a plain string for the models ARGUS registers, but LangChain's
-    content type also admits a list of content blocks, of which only the ones
-    tagged ``"text"`` carry response text.
-
-    Args:
-        content: The ``content`` attribute of a LangChain response message.
-
-    Returns:
-        The response as a single string.
-    """
+    """Flatten an invoked model's `content` into plain response text."""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
         return "".join(
-            item.get("text", "")
-            for item in content
-            if isinstance(item, dict) and item.get("type") == "text"
+            item.get("text", "") for item in content if isinstance(item, dict) and item.get("type") == "text"
         )
     return str(content)
 
 
 class GroqLLMClient:
-    """Wraps a ChatGroq model+params combination. One instance per (model, temperature, max_tokens).
-
-    The sole choke point for governance: token estimation, the governor's pre-flight
-    wait, and rate-limit-header observation all live here rather than duplicated
-    across the three agents that construct this client, so none of them can bypass
-    it by accident. It also classifies which Groq failures are worth retrying and
-    supplies the provider's own retry hint, but performs no retry loop itself — see
-    RetryableTransportError and argus/structured_output.py's decode(), which owns
-    the retry loop this client's failures feed into.
-    """
+    """Governed single-call Groq transport with provider-specific failure classification."""
 
     def __init__(self, model: str, temperature: float, max_tokens: int, api_key: str) -> None:
-        """Constructs the underlying ChatGroq client for this model+params combination.
-
-        Args:
-            model: Groq model identifier.
-            temperature: Sampling temperature.
-            max_tokens: Maximum completion length in tokens.
-            api_key: Groq API key.
-        """
         self._model = model
         self._max_tokens = max_tokens
         http_client = httpx.Client(event_hooks={"response": [self._on_response]})
@@ -273,68 +163,33 @@ class GroqLLMClient:
             max_tokens=max_tokens,
             groq_api_key=api_key,
             http_client=http_client,
-            # The groq SDK's own retry (default 2) would silently double-retry
-            # underneath this client's retry loop and hide 429s from the governor.
+            # Disable SDK retries so the shared decoder owns the attempt budget and the governor observes every call.
             max_retries=0,
-            # Both registered gpt-oss models are reasoning models; "low" keeps
-            # reasoning-token spend down since reasoning is billed against the
-            # same completion budget as max_tokens (see fundamental.py/sentiment.py's
-            # max_tokens comments). reasoning_format is deliberately left unset —
-            # Groq does not support it on gpt-oss, and the reasoning text already
-            # comes back in a separate `reasoning` field rather than inlined into
-            # content, so the existing fence-strip parsers are unaffected either way.
+            # Keep reasoning effort low because reasoning tokens share the completion budget.
             reasoning_effort="low",
         )
 
     def _on_response(self, response: httpx.Response) -> None:
-        """Feeds a Groq response's rate-limit headers to the governor.
-
-        Reads headers only — never the body (``response.read()``), which would
-        break streaming responses by forcing them to buffer.
-
-        Args:
-            response: The raw httpx.Response for a Groq API call.
-        """
+        """Feed a Groq response's rate-limit headers to the governor."""
         governor.observe_headers(self._model, response.headers)
 
     def remaining_capacity(self) -> int:
-        """Returns the governor's remaining rolling-window request capacity for this model."""
+        """Return the governor's remaining rolling-window request capacity for this model."""
         return governor.get_remaining_capacity(self._model)
 
     def complete(self, system_prompt: str, user_prompt: str) -> str:
-        """Invokes the Groq model once and returns its response as plain text.
-
-        Waits for governor capacity, then makes a single invocation — a
-        caller with its own attempt budget (argus/structured_output.py's
-        decode()) is responsible for retrying. A retryable failure (per
-        _RETRYABLE_GROQ_ERRORS) is wrapped in RetryableTransportError,
-        carrying the provider's retry hint if it gave one; a terminal
-        failure (bad key, bad request) propagates as-is. Either way the
-        governor's pre-flight reservation is released first, since no
-        tokens were ever actually spent (see
-        RateLimitGovernor.release_reservation).
-
-        Returns:
-            The response text, flattened from a content-block list if needed.
-
-        Raises:
-            RetryableTransportError: If the call fails with a transient error.
-            The underlying groq/langchain exception: For a terminal error.
-        """
+        """Invoke the Groq model once and return its response as plain text."""
         estimated_tokens = estimate_tokens(system_prompt, user_prompt, self._max_tokens)
         governor.wait_if_needed(self._model, estimated_tokens)
 
         invoked = False
         try:
-            response = self._llm.invoke(
-                [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
-            )
+            response = self._llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)])
             invoked = True
         except _RETRYABLE_GROQ_ERRORS as e:
             raise RetryableTransportError(e, retry_after=_groq_retry_delay(e)) from e
         finally:
-            # Any failure — retryable, terminal or unexpected —
-            # spent no tokens, so give the reservation back.
+            # Release the pre-flight reservation on failure before classifying it for the caller.
             if not invoked:
                 governor.release_reservation(self._model, estimated_tokens)
 
@@ -346,7 +201,6 @@ class GroqLLMClient:
             token_usage.get("completion_tokens", 0),
         )
 
-        # A cut-off reply otherwise surfaces downstream as an opaque json_parse error.
         if response.response_metadata.get("finish_reason") == "length":
             logger.warning(
                 "[%s] reply truncated at max_tokens=%d (finish_reason=length); "
@@ -359,35 +213,15 @@ class GroqLLMClient:
 
 
 def default_groq_client(model: str, temperature: float, max_tokens: int) -> GroqLLMClient:
-    """Builds the Groq-backed client an LLM agent falls back to when none is injected.
-
-    Args:
-        model: Groq model identifier.
-        temperature: Sampling temperature.
-        max_tokens: Maximum completion length in tokens.
-
-    Returns:
-        A GroqLLMClient keyed with ``settings.GROQ_API_KEY``. A missing key is
-        logged, not raised, so an agent can still be constructed; the first
-        call fails instead.
-    """
+    """Build the Groq-backed client an LLM agent falls back to when none is injected."""
     api_key = settings.GROQ_API_KEY
     if not api_key:
-        logger.warning("GROQ_API_KEY is not set — LLM calls will fail at invocation time.")
-    return GroqLLMClient(
-        model=model, temperature=temperature, max_tokens=max_tokens, api_key=api_key
-    )
+        logger.warning("GROQ_API_KEY is not set - LLM calls will fail at invocation time.")
+    return GroqLLMClient(model=model, temperature=temperature, max_tokens=max_tokens, api_key=api_key)
 
 
 class FixtureLLMClient:
-    """Returns pre-captured response text instead of calling Groq.
-
-    `responses` maps an opaque key (agent's choosing — e.g. ticker) to the
-    exact raw response text recorded from the model, hand-captured
-    under tests/fixtures/llm_responses/. `complete` is keyed by
-    `key_fn(user_prompt)` so a fixture-backed agent test doesn't need to
-    guess call order.
-    """
+    """Captured model responses selected by prompt content without network access or governor use."""
 
     _UNLIMITED_CAPACITY = 1_000_000
 
@@ -397,46 +231,24 @@ class FixtureLLMClient:
         key_fn: Any | None = None,
         capacity: int = _UNLIMITED_CAPACITY,
     ) -> None:
-        """Stores the response map and the key function used to look up responses.
-
-        Args:
-            responses: Mapping of key → pre-captured raw response text.
-            key_fn: Function deriving a lookup key from the user prompt. Defaults
-                to using the user prompt itself as the key.
-            capacity: Fixed value `remaining_capacity()` reports. Defaults to
-                effectively unlimited, so a fixture-backed test only sees
-                back-pressure when it deliberately asks for a low value.
-        """
         self._responses = responses
         self._key_fn = key_fn or (lambda user_prompt: user_prompt)
         self._capacity = capacity
 
     def complete(self, system_prompt: str, user_prompt: str) -> str:
-        """Returns the pre-captured response text keyed by ``key_fn(user_prompt)``.
-
-        Raises:
-            KeyError: If no response was recorded for the derived key.
-        """
+        """Return the pre-captured response text keyed by `key_fn(user_prompt)`."""
         key = self._key_fn(user_prompt)
         if key not in self._responses:
             raise KeyError(f"FixtureLLMClient has no recorded response for key {key!r}")
         return self._responses[key]
 
     def remaining_capacity(self) -> int:
-        """Returns the fixed capacity value supplied at construction."""
+        """Return the fixed capacity value supplied at construction."""
         return self._capacity
 
     @classmethod
     def from_fixture_file(cls, path: Path, key_fn: Any | None = None) -> FixtureLLMClient:
-        """Builds a FixtureLLMClient from a JSON file of key → response text.
-
-        Args:
-            path: Path to the JSON fixture file.
-            key_fn: Function deriving a lookup key from the user prompt.
-
-        Returns:
-            A FixtureLLMClient backed by the loaded responses.
-        """
+        """Build a FixtureLLMClient from a JSON file of key -> response text."""
         with open(path) as f:
             responses = json.load(f)
         return cls(responses, key_fn=key_fn)

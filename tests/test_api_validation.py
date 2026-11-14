@@ -1,12 +1,4 @@
-"""Tests for AnalysisRequest's ticker validation and /analyze's error redaction.
-
-Covers ticker validation, normalization, and dedupe on AnalysisRequest, and
-/analyze's redaction of internal exception details behind a correlation ref.
-
-These exercise the route function directly via FastAPI's TestClient rather
-than going through the app's lifespan, so no MFT pipeline, collector, or
-reconcile loop needs to start.
-"""
+"""Tests for AnalysisRequest's ticker validation and /analyze's error redaction."""
 
 from __future__ import annotations
 
@@ -23,12 +15,12 @@ pytestmark = pytest.mark.usefixtures("api_state")
 
 
 def _payload(*tickers: str) -> dict:
-    """An /analyze request body that varies only in the tickers it asks for."""
+    """Build an analysis request for the specified tickers."""
     return {"tickers": list(tickers), "total_wealth": 100_000, "invest_pct": 0.5}
 
 
 def _seed_cache(ticker: str, *, bar_age_seconds: float, write_age_seconds: float = 0.0):
-    """Populates `_live_cache` with a state whose bar and write times are both controlled."""
+    """Populate `_live_cache` with a state whose bar and write times are both controlled."""
     now = now_market()
     bar_ts = now - timedelta(seconds=bar_age_seconds)
     write_ts = now - timedelta(seconds=write_age_seconds)
@@ -50,18 +42,11 @@ def _seed_cache(ticker: str, *, bar_age_seconds: float, write_age_seconds: float
     ],
 )
 def test_analyze_rejects_malformed_ticker_with_422(client, ticker):
-    """A hostile or malformed ticker is rejected by pydantic before any handler runs."""
     response = client.post("/analyze", json=_payload(ticker))
     assert response.status_code == 422
 
 
 def test_analyze_accepts_share_class_tickers(client, monkeypatch):
-    """Dotted/hyphenated share-class tickers validate and reach the pipeline.
-
-    Market is open here (rather than closed) because register_tickers now only
-    runs once the market-hours gate clears — a rejected request must not
-    mutate pipeline state.
-    """
     fake_pipeline = api_pipeline(monkeypatch, market_hours=True)
     response = client.post("/analyze", json=_payload("BRK.B", "BRK-B"))
     assert response.status_code == 503
@@ -69,7 +54,6 @@ def test_analyze_accepts_share_class_tickers(client, monkeypatch):
 
 
 def test_analyze_upcases_and_dedupes_tickers(client, monkeypatch):
-    """Lowercase, whitespace-padded, and repeated tickers collapse to one upper-cased entry each."""
     fake_pipeline = api_pipeline(monkeypatch, market_hours=True)
     response = client.post("/analyze", json=_payload(" aapl ", "AAPL", "msft"))
     assert response.status_code == 503
@@ -77,7 +61,6 @@ def test_analyze_upcases_and_dedupes_tickers(client, monkeypatch):
 
 
 def test_analyze_reports_a_missing_allocation_as_503_not_500(client, monkeypatch):
-    """A degraded (no-allocation) graph run is an upstream LLM outage, not a server bug."""
     api_pipeline(monkeypatch, market_hours=True)
     _seed_cache("AAPL", bar_age_seconds=5, write_age_seconds=5)
     fake_graph = mock.Mock()
@@ -91,7 +74,6 @@ def test_analyze_reports_a_missing_allocation_as_503_not_500(client, monkeypatch
 
 
 def test_analyze_redacts_internal_exception_details(client, monkeypatch):
-    """A raw graph exception never reaches the client; only a correlation ref does."""
     api_pipeline(monkeypatch, market_hours=True)
     _seed_cache("AAPL", bar_age_seconds=5, write_age_seconds=5)
     fake_graph = mock.Mock()

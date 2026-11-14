@@ -1,26 +1,4 @@
-"""
-argus/orchestration/checkpoint.py
-
-Everything that touches the LangGraph checkpoint database (argus_graph.db), so
-the graph, the collector and reconciliation share one serializer, one way to
-open the file, and one place that reaches into LangGraph's table layout.
-
-Responsibilities:
-  - build_checkpoint_serde: the msgpack allowlist for ARGUSState's nested models
-  - CheckpointedGraph: compiles the DAG with a fresh connection on every invoke()
-  - new_run_config: the run config (a fresh unique thread_id) every entry point invokes with
-  - open_saver: a SqliteSaver over an existing database, closed on exit
-  - newest_checkpoint_per_thread: each thread's most recent checkpoint
-  - prune_checkpoints / retention_cutoff: bound the database
-
-Not responsible for:
-  - Reading decisions out of checkpoints (see orchestration/decision_log.py)
-  - Building the DAG itself (see orchestration/graph.py)
-
-Dependencies:
-  - langgraph (SqliteSaver, JsonPlusSerializer)
-  - argus.orchestration.state (ARGUSState)
-"""
+"""Graph checkpoint serialization, isolated connections, and retention."""
 
 import logging
 import sqlite3
@@ -42,8 +20,7 @@ from argus.params import RECONCILIATION
 
 logger = logging.getLogger(__name__)
 
-# Every schemas.signals model nested in ARGUSState must be listed here or the
-# checkpointer's msgpack deserializer degrades it to a plain dict
+# Allowlist every nested signal model so checkpoint deserialization preserves validated model types.
 _CHECKPOINT_MODEL_CLASSES = (
     "MacroContext",
     "TechnicalSignal",
@@ -58,24 +35,14 @@ _CHECKPOINT_MODEL_CLASSES = (
 
 
 def build_checkpoint_serde() -> JsonPlusSerializer:
-    """Returns the JsonPlusSerializer used to read/write ARGUSState checkpoints."""
+    """Return the JsonPlusSerializer used to read/write ARGUSState checkpoints."""
     return JsonPlusSerializer(
-        allowed_msgpack_modules=[
-            ("argus.schemas.signals", cls) for cls in _CHECKPOINT_MODEL_CLASSES
-        ]
+        allowed_msgpack_modules=[("argus.schemas.signals", cls) for cls in _CHECKPOINT_MODEL_CLASSES]
     )
 
 
 def _open_checkpointer(checkpoint_db_path: str) -> SqliteSaver | None:
-    """Opens a fresh SqliteSaver connection, or None if the path can't be opened.
-
-    Args:
-        checkpoint_db_path: SQLite file to checkpoint to.
-
-    Returns:
-        A new SqliteSaver, or None on any I/O failure (a checkpointer-less
-        compile still runs the graph, just without resumability).
-    """
+    """Open a fresh SqliteSaver connection, or None if the path can't be opened."""
     conn: sqlite3.Connection | None = None
     try:
         if checkpoint_db_path != ":memory:":
@@ -94,31 +61,14 @@ def _open_checkpointer(checkpoint_db_path: str) -> SqliteSaver | None:
 
 
 class CheckpointedGraph:
-    """Compiles the DAG fresh, with its own SQLite connection, on every invoke().
-
-    StateGraph.compile() does no I/O beyond opening the checkpoint connection;
-    the expensive part — constructing the six agents (LLM clients, the macro
-    HMM classifier load from disk) — happens once in build_graph() and is
-    captured in the node closures this wraps. Concurrent callers (parallel
-    /analyze requests, the unattended collector loop) therefore each get their
-    own sqlite3.Connection instead of contending on one shared checkpointer.
-    """
+    """Graph wrapper with a fresh SQLite connection and compilation per invocation."""
 
     def __init__(self, builder: StateGraph, checkpoint_db_path: str):
-        """Stores the built (but not compiled) graph and its checkpoint path."""
         self._builder = builder
         self._checkpoint_db_path = checkpoint_db_path
 
     def invoke(self, state: ARGUSState, config: RunnableConfig | None = None) -> dict:
-        """Compiles with a fresh checkpointer and invokes the graph once.
-
-        Args:
-            state: Initial ARGUSState for this session.
-            config: LangGraph run config, e.g. ``{"configurable": {"thread_id": ...}}``.
-
-        Returns:
-            The final ARGUSState dict produced by the run.
-        """
+        """Compile with a fresh checkpointer and invoke the graph once."""
         checkpointer = _open_checkpointer(self._checkpoint_db_path)
         compiled = self._builder.compile(checkpointer=checkpointer)
         try:
@@ -129,26 +79,14 @@ class CheckpointedGraph:
 
 
 def new_run_config(prefix: str) -> RunnableConfig:
-    """Builds the run config for one graph invocation, under a fresh unique thread_id.
-
-    A timestamp alone is only second-resolution, so two runs starting within
-    the same second would share a thread_id; the uuid suffix makes it unique
-    regardless of process restarts.
-
-    Args:
-        prefix: Names the entry point (e.g. "analyze", "collector", "replay"),
-            so a checkpoint row can be traced back to what started it.
-
-    Returns:
-        ``{"configurable": {"thread_id": ...}}`` for ``graph.invoke``.
-    """
+    """Build the run config for one graph invocation, under a fresh unique thread_id."""
     thread_id = f"{prefix}-{now_local():%Y%m%d%H%M%S}-{uuid.uuid4().hex[:8]}"
     return {"configurable": {"thread_id": thread_id}}
 
 
 @contextmanager
 def open_saver(db_path: str) -> Iterator[SqliteSaver]:
-    """Opens a SqliteSaver over the checkpoint database, closing its connection on exit."""
+    """Open a SqliteSaver over the checkpoint database, closing its connection on exit."""
     conn = sqlite3.connect(db_path, check_same_thread=False)
     try:
         yield SqliteSaver(conn, serde=build_checkpoint_serde())
@@ -157,11 +95,7 @@ def open_saver(db_path: str) -> Iterator[SqliteSaver]:
 
 
 def newest_checkpoint_per_thread(saver: SqliteSaver) -> Iterator[tuple[str, Checkpoint]]:
-    """Yields each thread's newest checkpoint exactly once, as (thread_id, checkpoint).
-
-    SqliteSaver.list() yields checkpoints newest-first, so a thread's first tuple
-    is its most recent — and so most complete — one.
-    """
+    """Yield each thread's newest checkpoint exactly once, as (thread_id, checkpoint)."""
     seen_threads: set[str] = set()
     for tup in saver.list(None):
         thread_id = tup.config["configurable"]["thread_id"]
@@ -172,47 +106,12 @@ def newest_checkpoint_per_thread(saver: SqliteSaver) -> Iterator[tuple[str, Chec
 
 
 def retention_cutoff(horizon_days: int = RECONCILIATION.horizon_days) -> datetime:
-    """The cutoff before which a reconciled decision, checkpoint or snapshot may be pruned.
-
-    One definition for every store that is bounded on the reconciliation window:
-    collector.py's per-cycle pruning calls it with the default horizon, and
-    reconcile.py's run_reconciliation_pass with the horizon it was given, so
-    the prune paths can't silently drift onto different windows.
-
-    Args:
-        horizon_days: Calendar days after a decision's session_timestamp at
-            which its outcome is scored.
-
-    Returns:
-        The naive local-time cutoff, ``horizon_days`` plus the retention margin ago.
-    """
+    """Return the common cutoff for retained decisions, checkpoints, and snapshots."""
     return now_local() - timedelta(days=horizon_days + RECONCILIATION.retention_margin_days)
 
 
 def prune_checkpoints(db_path: str, cutoff: datetime) -> int:
-    """Deletes every checkpoint thread whose most recent checkpoint predates cutoff, then VACUUMs.
-
-    Each build_graph() invocation checkpoints under a fresh, never-reused
-    thread_id (see build_graph()'s callers) and nothing resumes a thread by
-    id, so a thread's checkpoints exist only as load_decisions_from_checkpoints'
-    read path — a fallback now that decisions.jsonl is the durable
-    record both /analyze and the collector write to. Retention, not removal:
-    the checkpoint DB stays available as that fallback for anything within the
-    reconciliation window, with older threads pruned to bound the store.
-
-    The DELETEs name LangGraph's ``checkpoints`` and ``writes`` tables
-    directly: SqliteSaver has no public API for removing a thread, so this
-    is the one place that depends on that layout.
-
-    Args:
-        db_path: Path to the SQLite file build_graph() checkpoints to.
-        cutoff: Threads whose newest checkpoint timestamp is before this are
-            deleted. Should be tz-naive, matching the naive timestamps
-            LangGraph checkpoint metadata is compared against here.
-
-    Returns:
-        Count of threads deleted. 0 if the database doesn't exist yet.
-    """
+    """Delete every checkpoint thread whose most recent checkpoint predates cutoff, then VACUUMs."""
     if not Path(db_path).exists():
         return 0
 

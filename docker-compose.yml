@@ -8,11 +8,7 @@ services:
     env_file:
       - .env
     environment:
-      # Secrets (GROQ_API_KEY, FRED_API_KEY, NEWSAPI_KEY) come through via
-      # env_file above; ARGUS_COLLECTOR_ENABLED/ARGUS_RECONCILE_ENABLED need
-      # compose-level default-value substitution, which env_file alone can't
-      # provide. ARGUS_CHROMA_DIR/ARGUS_RUNS_DIR point at their own named
-      # volumes below rather than nesting under ARGUS_DATA_DIR.
+      # Use env_file for secrets and Compose defaults for loops; mount each store in its own volume.
       - ARGUS_COLLECTOR_ENABLED=${ARGUS_COLLECTOR_ENABLED:-true}
       - ARGUS_RECONCILE_ENABLED=${ARGUS_RECONCILE_ENABLED:-true}
       - ARGUS_CHROMA_DIR=/app/chroma_db
@@ -27,9 +23,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      # FinBERT and the embedding model are baked into the image; the macro
-      # agent now just loads a committed artifact (see argus/agents/macro.py),
-      # so this headroom is really for MFT pipeline warmup on first boot
+      # Allow startup time for baked model loading and the first indicator-ready candle sweep.
       start_period: 90s
 
 volumes:

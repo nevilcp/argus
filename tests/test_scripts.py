@@ -1,11 +1,4 @@
-"""Smoke tests for the CLI entry points under scripts/.
-
-Each script gets a `--help` check (argument parsing wires up and exits 0), and
-`collect_session`, `reconcile_outcomes`, `run_evaluation` and `train_macro_hmm`
-also get one `main()` run against fixture-backed or injected dependencies. The
-`main()` runs go through the real shared code paths; only the network edges
-(the MFT pipeline sweep, market data) are replaced.
-"""
+"""Smoke tests for the CLI entry points under scripts/."""
 
 from __future__ import annotations
 
@@ -59,7 +52,7 @@ def test_collect_session_rejects_an_unknown_risk_tolerance(monkeypatch, capsys):
 def _run_collect_session(
     monkeypatch, tmp_path: Path, *, session_states: dict, final_state: dict, extra_args=()
 ) -> mock.Mock:
-    """Runs collect_session.main() over a fake pipeline and graph; returns the graph."""
+    """Run collect_session.main() over a fake pipeline and graph; returns the graph."""
     pipeline = mock.Mock()
     pipeline.run_once = mock.AsyncMock(return_value=session_states)
     graph = mock.Mock()
@@ -88,7 +81,7 @@ def test_collect_session_main_with_no_session_data_is_a_clean_noop(monkeypatch, 
 
 
 def test_collect_session_main_exits_1_when_the_cycle_is_degraded(monkeypatch, tmp_path, capsys):
-    decision = argus_decision("AAPL", datetime(2024, 1, 2))  # no allocation
+    decision = argus_decision("AAPL", datetime(2024, 1, 2))
 
     with pytest.raises(SystemExit) as exc_info:
         _run_collect_session(
@@ -115,21 +108,18 @@ def test_reconcile_outcomes_main_reports_an_empty_log(monkeypatch, tmp_path, cap
 
 
 def test_run_evaluation_main_prints_the_report_for_the_fixture_session(monkeypatch, capsys):
-    # The fixture session was captured on 2026-05-22, so these prices cover its forward window.
     prices = pd.DataFrame(
         {"close": [100.0 + i for i in range(30)]},
         index=pd.date_range("2026-05-20", periods=30, freq="D"),
     )
     market_data = FakeMarketData(ohlcv_daily=lambda ticker, period="2y": prices)
     monkeypatch.setattr("sys.argv", ["run_evaluation", "--fixtures-dir", str(FIXTURES_DIR)])
-    # The closed-loop replay reads the real cultural memory unless told otherwise.
     monkeypatch.setattr("argus.orchestration.graph.get_cultural_memory", neutral_cultural_memory)
 
     run_evaluation.main(market_data=market_data)
 
     out = capsys.readouterr().out
     assert "=== Pre-registered evaluation" in out
-    # The fixture session allocates to one ticker, too few for a rank IC.
     assert "--- Open-loop (n=1)" in out
     assert "--- Closed-loop (n=1)" in out
     assert "open-loop replay is deterministic: True" in out
@@ -150,8 +140,7 @@ def test_train_macro_hmm_main_exits_1_when_the_fit_fails(monkeypatch, tmp_path, 
 def test_train_macro_hmm_main_saves_a_validated_classifier(monkeypatch, tmp_path, capsys):
     output = tmp_path / "hmm.joblib"
     monkeypatch.setattr("sys.argv", ["train_macro_hmm", "--output", str(output)])
-    # The fit itself is covered in test_macro.py; here the committed artifact
-    # stands in for a freshly fit model so main()'s report-validate-save path runs.
+    # Use the committed classifier to isolate CLI validation and save behavior from stochastic fitting.
     monkeypatch.setattr(MacroStatisticalAgent, "fit_on_history", lambda self, start_date: True)
 
     train_macro_hmm.main(market_data=FakeMarketData())

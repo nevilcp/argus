@@ -20,17 +20,8 @@ from tests.helpers.market_data import FakeMarketData
 _DEFAULT_VIX_CLOSES = [20.0, 20.0, 20.0, 20.0, 10.0]
 
 
-def _market_data(
-    vix: float | None = 15.0, historical_closes: list[float] | None = None, **overrides
-) -> FakeMarketData:
-    """A provider for macro.analyze(), with a configurable VIX level and history.
-
-    Args:
-        vix: VIX level reported by macro_bundle().
-        historical_closes: Trailing VIX closes ohlcv_daily() reports, which drive
-            the VIX percentile calculation.
-        **overrides: Per-method responses replacing the defaults below.
-    """
+def _market_data(vix: float | None = 15.0, historical_closes: list[float] | None = None, **overrides) -> FakeMarketData:
+    """Build a macro provider with configurable VIX level and history."""
     closes = historical_closes if historical_closes is not None else _DEFAULT_VIX_CLOSES
     responses = {
         "macro_bundle": {
@@ -47,92 +38,59 @@ def _market_data(
 
 
 def test_rule_based_fallback() -> None:
-    """An unfitted classifier falls back to the VIX/yield-curve heuristic."""
     classifier = RegimeClassifier()
     assert not classifier.is_fitted
 
-    # High VIX plus an inverted curve is the contraction heuristic's trigger condition
     regime, conf = classifier.predict({"vix": 35.0, "t10y2y": -0.6})
     assert regime == Regime.CONTRACTION.value
     assert conf == 0.6
 
 
 def test_agent_multipliers_expansion(monkeypatch: pytest.MonkeyPatch) -> None:
-    """EXPANSION regime with low VIX percentile sets fundamental and sentiment multipliers."""
     agent = MacroStatisticalAgent(market_data=_market_data())
 
-    monkeypatch.setattr(
-        agent.classifier, "predict", lambda current_values: (Regime.EXPANSION.value, 0.9)
-    )
+    monkeypatch.setattr(agent.classifier, "predict", lambda current_values: (Regime.EXPANSION.value, 0.9))
 
     ctx = agent.analyze()
 
     assert ctx.macro_regime == Regime.EXPANSION
-    # VIX percentile < 40 and EXPANSION together map to a 1.3 fundamental multiplier
     assert ctx.agent_multipliers["fundamental"] == 1.3
-    # VIX percentile < 50 maps to a 0.9 sentiment multiplier
     assert ctx.agent_multipliers["sentiment"] == 0.9
 
 
 def test_vix_regime_buckets_from_level_not_percentile(monkeypatch: pytest.MonkeyPatch) -> None:
-    """vix_regime is bucketed from the absolute VIX level, not its trailing percentile.
-
-    Regression test: a low VIX level sitting at a high trailing percentile
-    must still bucket LOW, and a high VIX level at a low trailing percentile must
-    still bucket HIGH.
-    """
-    # VIX 11, at its 85th trailing percentile (17 of 20 historical closes are lower)
     low_vix_agent = MacroStatisticalAgent(market_data=_market_data(11.0, [10.0] * 17 + [50.0] * 3))
-    monkeypatch.setattr(
-        low_vix_agent.classifier, "predict", lambda current_values: (Regime.EXPANSION.value, 0.9)
-    )
+    monkeypatch.setattr(low_vix_agent.classifier, "predict", lambda current_values: (Regime.EXPANSION.value, 0.9))
     low_vix_ctx = low_vix_agent.analyze()
     assert low_vix_ctx.vix_percentile == pytest.approx(85.0)
     assert low_vix_ctx.vix_regime == VixRegime.LOW
 
-    # VIX 28, at its 25th trailing percentile (5 of 20 historical closes are lower).
-    # VixRegime buckets HIGH as 25 <= VIX < 35, so 28 lands HIGH despite the low percentile.
+    # Absolute VIX 28 is HIGH even when its historical percentile is low.
     high_vix_agent = MacroStatisticalAgent(market_data=_market_data(28.0, [10.0] * 5 + [60.0] * 15))
-    monkeypatch.setattr(
-        high_vix_agent.classifier, "predict", lambda current_values: (Regime.EXPANSION.value, 0.9)
-    )
+    monkeypatch.setattr(high_vix_agent.classifier, "predict", lambda current_values: (Regime.EXPANSION.value, 0.9))
     high_vix_ctx = high_vix_agent.analyze()
     assert high_vix_ctx.vix_percentile == pytest.approx(25.0)
     assert high_vix_ctx.vix_regime == VixRegime.HIGH
 
 
 def test_vix_defaulted_skips_percentile_computation(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A defaulted VIX must not produce a derived percentile presented as measured.
-
-    Regression: the substituted VIX default used to be compared against real
-    trailing history to compute a plausible-looking percentile, promoting a
-    fabricated level into what looked like a measured statistic and feeding it
-    into the agent multipliers.
-    """
-    # Historical closes chosen so a computed percentile would clearly differ
-    # from the neutral 50.0 placeholder if the fabricated VIX were used.
-    agent = MacroStatisticalAgent(
-        market_data=_market_data(vix=None, historical_closes=[10.0] * 17 + [50.0] * 3)
-    )
-    monkeypatch.setattr(
-        agent.classifier, "predict", lambda current_values: (Regime.EXPANSION.value, 0.9)
-    )
+    # Use history that separates a fabricated VIX percentile from the neutral fallback.
+    agent = MacroStatisticalAgent(market_data=_market_data(vix=None, historical_closes=[10.0] * 17 + [50.0] * 3))
+    monkeypatch.setattr(agent.classifier, "predict", lambda current_values: (Regime.EXPANSION.value, 0.9))
 
     ctx = agent.analyze()
 
     assert ctx.vix_level is None
     assert ctx.vix_regime is None
-    assert ctx.vix_percentile == 50.0  # neutral placeholder, not derived from history
+    assert ctx.vix_percentile == 50.0
 
 
 def test_cache(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A populated cache is returned as-is, without touching any fetchers."""
     agent = MacroStatisticalAgent()
 
     dummy_ctx = type("MockCtx", (), {"macro_regime": Regime.EXPANSION})()
     agent._cache = (dummy_ctx, datetime.now())  # type: ignore
 
-    # Fetchers are unmocked, so a cache miss here would raise rather than return stale data
     res1 = agent.analyze()
     res2 = agent.analyze()
 
@@ -140,8 +98,7 @@ def test_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     assert res1.macro_regime == Regime.EXPANSION
 
 
-# Synthetic per-regime cluster means, well separated so a small Gaussian HMM
-# fits three cleanly distinguishable states without needing real FRED/VIX data.
+# Separate synthetic regime clusters so training exercises labeling without live providers.
 _EXPANSION_POINT = {
     "d_fed_funds_6m": -0.5,
     "d_unemp_12m": -0.5,
@@ -169,19 +126,7 @@ _N_PER_BLOCK = 60
 
 
 def _synthetic_history(seed: int = 3) -> pd.DataFrame:
-    """Builds synthetic, well-separated 3-regime feature history, unfitted.
-
-    Blocks (not shuffled) so a fitted HMM also learns a sensible transition
-    structure, rather than i.i.d. noise around three means.
-
-    Args:
-        seed: RNG seed for the per-point Gaussian noise.
-
-    Returns:
-        DataFrame with FEATURE_COLUMNS, four blocks of _N_PER_BLOCK rows each
-        (expansion, contraction, transitional, expansion), daily-indexed from
-        2015-01-01.
-    """
+    """Build synthetic, well-separated 3-regime feature history, unfitted."""
     rng = np.random.default_rng(seed)
 
     def block(point: dict) -> pd.DataFrame:
@@ -206,32 +151,17 @@ def _synthetic_history(seed: int = 3) -> pd.DataFrame:
 
 
 def _fit_synthetic_classifier(seed: int = 3) -> RegimeClassifier:
-    """Fits a RegimeClassifier on synthetic, well-separated 3-regime data.
-
-    fit() itself tries multiple random restarts (see RegimeClassifier.fit), so
-    no particular constructor seed needs to be hand-picked for this data to
-    separate cleanly.
-
-    Args:
-        seed: RNG seed for the per-point Gaussian noise.
-
-    Returns:
-        A fitted RegimeClassifier whose state_to_regime covers all three regimes.
-    """
+    """Fit a RegimeClassifier on synthetic, well-separated 3-regime data."""
     history = _synthetic_history(seed)
 
-    # Recession flag over the contraction block only, so _map_states' NBER-enrichment
-    # labelling (see RegimeClassifier._label_contraction_state) has something to key
-    # CONTRACTION on, the same way it would from a real USREC series.
+    # Provide recession labels for the contraction cluster so the enrichment gate has external evidence.
     recession_series = pd.Series(0.0, index=history.index)
     recession_series.iloc[_N_PER_BLOCK : 2 * _N_PER_BLOCK] = 1.0
 
     classifier = RegimeClassifier(n_components=3)
     classifier.fit(history, recession_series=recession_series)
 
-    # save()/load() round-trip so the returned classifier carries load()'s stationary-
-    # startprob_ fix (see RegimeClassifier.load) instead of a test-only hand patch —
-    # hand-patching here would mask a regression in that fix from the rest of the suite.
+    # Round-trip the artifact so stationary-prior restoration is exercised without a test-only patch.
     with tempfile.TemporaryDirectory() as tmp_dir:
         artifact_path = Path(tmp_dir) / "synthetic.joblib"
         classifier.save(artifact_path)
@@ -247,7 +177,6 @@ def _fit_synthetic_classifier(seed: int = 3) -> RegimeClassifier:
 
 
 def test_save_load_round_trip(tmp_path: Path) -> None:
-    """A saved artifact, once loaded, preserves state_to_regime and reproduces predictions."""
     classifier = _fit_synthetic_classifier()
     artifact_path = tmp_path / "macro_hmm.joblib"
     classifier.save(artifact_path, start_date="2015-01-01")
@@ -266,26 +195,15 @@ def test_save_load_round_trip(tmp_path: Path) -> None:
 
 
 def test_committed_artifact_loads_and_discriminates_regimes() -> None:
-    """The shipped artifact loads under the pinned libraries and discriminates regimes.
-
-    This is the guard that would have caught a library version mismatch
-    silently degrading production to the rule-based fallback.
-    """
     classifier = RegimeClassifier.load(settings.ARGUS_HMM_MODEL_PATH)
 
     assert classifier.is_fitted
 
-    labels = {
-        classifier.predict(pd.DataFrame([scenario]))[0]
-        for scenario in DISCRIMINATION_SCENARIOS.values()
-    }
+    labels = {classifier.predict(pd.DataFrame([scenario]))[0] for scenario in DISCRIMINATION_SCENARIOS.values()}
     assert len(labels) >= 2, f"discrimination scenarios collapsed to a single label: {labels}"
 
 
-def test_load_missing_file_returns_unfitted_and_logs_error(
-    caplog: pytest.LogCaptureFixture, tmp_path: Path
-) -> None:
-    """A missing artifact path logs an ERROR and returns an unfitted classifier."""
+def test_load_missing_file_returns_unfitted_and_logs_error(caplog: pytest.LogCaptureFixture, tmp_path: Path) -> None:
     missing_path = tmp_path / "does_not_exist.joblib"
 
     with caplog.at_level(logging.ERROR, logger="argus.agents.macro_hmm"):
@@ -294,16 +212,12 @@ def test_load_missing_file_returns_unfitted_and_logs_error(
     assert not classifier.is_fitted
     assert any("failed to load artifact" in r.message for r in caplog.records)
 
-    # predict() takes the documented rule-based path
     regime, confidence = classifier.predict({"vix": 35.0, "t10y2y": -0.6})
     assert regime == Regime.CONTRACTION.value
     assert confidence == 0.6
 
 
-def test_load_corrupt_file_returns_unfitted_and_logs_error(
-    caplog: pytest.LogCaptureFixture, tmp_path: Path
-) -> None:
-    """A corrupt pickle logs an ERROR and returns an unfitted classifier rather than raising."""
+def test_load_corrupt_file_returns_unfitted_and_logs_error(caplog: pytest.LogCaptureFixture, tmp_path: Path) -> None:
     corrupt_path = tmp_path / "corrupt.joblib"
     corrupt_path.write_bytes(b"this is not a valid joblib pickle")
 
@@ -317,8 +231,6 @@ def test_load_corrupt_file_returns_unfitted_and_logs_error(
 def test_load_version_mismatch_returns_unfitted_and_logs_error(
     caplog: pytest.LogCaptureFixture, tmp_path: Path
 ) -> None:
-    """A hmmlearn/scikit-learn version mismatch in the artifact's metadata is treated
-    as a failure."""
     classifier = _fit_synthetic_classifier()
     artifact_path = tmp_path / "macro_hmm.joblib"
     classifier.save(artifact_path)
@@ -335,7 +247,6 @@ def test_load_version_mismatch_returns_unfitted_and_logs_error(
 
 
 def test_windowed_predict_classifies_a_stable_window_consistently() -> None:
-    """A window of near-identical expansion-like observations classifies as EXPANSION."""
     classifier = _fit_synthetic_classifier()
 
     window = pd.DataFrame([_EXPANSION_POINT] * 10)
@@ -346,38 +257,22 @@ def test_windowed_predict_classifies_a_stable_window_consistently() -> None:
 
 
 def test_windowed_predict_resists_a_single_point_spike() -> None:
-    """A noisy single observation flips the regime alone, but not inside a stable window.
-
-    This is the property windowed inference exists to provide: informed by nine
-    surrounding stable observations, the transition matrix resists flipping the
-    session's regime call on one noisy print the way single-row decoding does.
-    """
     classifier = _fit_synthetic_classifier()
 
-    # Halfway between the expansion and contraction cluster means — an ambiguous
-    # single print, not a full jump to another cluster's center.
+    # Place one ambiguous point between clusters to test contextual inference rather than a regime jump.
     noisy_point = {
-        col: _EXPANSION_POINT[col] + 0.5 * (_CONTRACTION_POINT[col] - _EXPANSION_POINT[col])
-        for col in FEATURE_COLUMNS
+        col: _EXPANSION_POINT[col] + 0.5 * (_CONTRACTION_POINT[col] - _EXPANSION_POINT[col]) for col in FEATURE_COLUMNS
     }
 
-    # Decoded alone (no surrounding context), the ambiguous point does not read as EXPANSION
     spike_alone_regime, _ = classifier.predict(noisy_point)
     assert spike_alone_regime != Regime.EXPANSION.value
 
-    # The same point as the final row of an otherwise-stable expansion window
     window = pd.DataFrame([_EXPANSION_POINT] * 9 + [noisy_point])
     windowed_regime, _ = classifier.predict(window)
     assert windowed_regime == Regime.EXPANSION.value
 
 
 def test_window_length_invariance() -> None:
-    """The same constant window classifies identically at every length.
-
-    Direct regression test for the parity bug that made the shipped artifact's
-    regime a function of window-length parity rather than the macro data:
-    tail(89) and tail(90) on the same real window returned different regimes.
-    """
     classifier = _fit_synthetic_classifier()
 
     regimes = {classifier.predict(pd.DataFrame([_EXPANSION_POINT] * n))[0] for n in range(5, 15)}
@@ -386,12 +281,6 @@ def test_window_length_invariance() -> None:
 
 
 def test_discrimination_crash_and_boom_windows_produce_different_labels() -> None:
-    """A crash-like window and a boom-like window must not collapse to the same label.
-
-    Regression test for the labelling bug where _map_states always assigned
-    CONTRACTION to *some* state regardless of whether a genuinely contractionary
-    state existed, which is what let a boom period read as CONTRACTION.
-    """
     classifier = _fit_synthetic_classifier()
 
     boom_regime, _ = classifier.predict(pd.DataFrame([_EXPANSION_POINT] * 10))
@@ -402,17 +291,6 @@ def test_discrimination_crash_and_boom_windows_produce_different_labels() -> Non
 
 
 def test_contraction_reachable_from_a_single_observation() -> None:
-    """CONTRACTION must be decodable from one observation with no window context.
-
-    Regression test for the pre-fix bug: fitting one long training sequence
-    leaves startprob_ a near one-hot pointing at whichever state the sequence
-    happened to start in, making some states — including CONTRACTION, since
-    training always starts on the expansion block — provably unreachable from a
-    cold start. RegimeClassifier.load replaces startprob_ with the transition
-    matrix's stationary distribution to fix this; _fit_synthetic_classifier
-    routes through save()/load() rather than hand-patching startprob_, so this
-    test exercises the real fix.
-    """
     classifier = _fit_synthetic_classifier()
 
     regime, _ = classifier.predict(dict(_CONTRACTION_POINT))
@@ -420,16 +298,6 @@ def test_contraction_reachable_from_a_single_observation() -> None:
 
 
 def test_fit_raises_when_all_restarts_are_degenerate(monkeypatch: pytest.MonkeyPatch) -> None:
-    """fit() raises rather than silently accepting a degenerate model.
-
-    Regression test for the shipped-artifact bug: two of its three states were
-    the same distribution (|Δμ|max = 0.00097). Reproducing that exact EM
-    collapse needs the same non-stationary daily forward-filled data that
-    caused it; here GaussianHMM.fit is patched to always converge every state
-    to identical means regardless of seed, so the test exercises fit()'s own
-    degeneracy-rejection logic deterministically instead of hoping a
-    synthetic dataset happens to degenerate under EM.
-    """
 
     def _collapse_to_one_state(self, X, lengths=None):
         n_components = self.n_components
@@ -449,13 +317,11 @@ def test_fit_raises_when_all_restarts_are_degenerate(monkeypatch: pytest.MonkeyP
 
 
 def test_validation_failures_flags_unfitted_classifier() -> None:
-    """An unfitted classifier fails validation with a specific, non-empty reason."""
     classifier = RegimeClassifier()
     assert classifier.validation_failures() == ["classifier is not fitted"]
 
 
 def test_validation_failures_flags_missing_contraction_enrichment() -> None:
-    """Without a recession_series, fit() can't clear the CONTRACTION-enrichment gate."""
     classifier = RegimeClassifier(n_components=3)
     classifier.fit(_synthetic_history())
 
@@ -464,24 +330,13 @@ def test_validation_failures_flags_missing_contraction_enrichment() -> None:
 
 
 def test_discrimination_scenarios_cover_all_feature_columns() -> None:
-    """Every canned scenario supplies all FEATURE_COLUMNS.
-
-    predict() raises on a missing feature column, so a scenario missing a key
-    would make validation_failures() fail loudly rather than be silently weakened.
-    """
     for name, scenario in DISCRIMINATION_SCENARIOS.items():
         assert set(scenario.keys()) == set(FEATURE_COLUMNS), name
     assert len(DISCRIMINATION_SCENARIOS) >= 2
 
 
 def _window_assembly_failure_market_data() -> FakeMarketData:
-    """A provider whose FRED calls always fail, forcing window assembly to fail.
-
-    macro_bundle() carries the keys the real fetcher returns (raw levels: VIX 35
-    and an inverted curve, none of the five model features), so a fallback that
-    feeds the bundle straight to a fitted model would be handed columns it does
-    not have.
-    """
+    """Fail FRED reads to exercise unavailable feature windows."""
     return _market_data(
         macro_bundle={
             "vix": 35.0,
@@ -497,7 +352,6 @@ def _window_assembly_failure_market_data() -> FakeMarketData:
 def test_analyze_falls_back_to_rule_based_when_window_assembly_fails(
     caplog: pytest.LogCaptureFixture, tmp_path: Path
 ) -> None:
-    """A window-assembly failure degrades to the rule-based regime and flags the model unhealthy."""
     agent = MacroStatisticalAgent(
         market_data=_window_assembly_failure_market_data(),
         model_path=tmp_path / "no_artifact_here.joblib",
@@ -517,11 +371,7 @@ def test_analyze_falls_back_to_rule_based_when_window_assembly_fails(
     assert ctx.model_healthy is False
 
 
-def test_unfitted_agent_uses_raw_vix_for_rule_based_regime(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """An unfitted agent classifies from the bundle's raw VIX, not a percentile-only window row."""
-    # A window that assembles fine but, like the real one, carries vix_pctile and no raw vix
+def test_unfitted_agent_uses_raw_vix_for_rule_based_regime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     window = pd.DataFrame([_EXPANSION_POINT] * 6)
     monkeypatch.setattr("argus.agents.macro.build_macro_feature_frame", lambda *a, **k: window)
     agent = MacroStatisticalAgent(
@@ -538,7 +388,6 @@ def test_unfitted_agent_uses_raw_vix_for_rule_based_regime(
 
 
 def test_fitted_predict_rejects_dict_with_missing_feature() -> None:
-    """A fitted model refuses a dict lacking a feature column instead of imputing it."""
     classifier = _fit_synthetic_classifier()
     partial = {k: v for k, v in _EXPANSION_POINT.items() if k != "vix_pctile"}
 
@@ -550,21 +399,12 @@ def test_fitted_predict_rejects_dict_with_missing_feature() -> None:
 
 
 def test_unfitted_predict_rejects_dataframe() -> None:
-    """An unfitted classifier's rule-based path needs raw levels a feature window lacks."""
     with pytest.raises(ValueError, match="not fitted"):
         RegimeClassifier().predict(pd.DataFrame([_EXPANSION_POINT]))
 
 
-# ---------------------------------------------------------------------------
-# fit_on_history, artifact hyperparameters, and the pure derivations
-# ---------------------------------------------------------------------------
-
-
 def test_fit_on_history_returns_false_when_fetching_fails() -> None:
-    """A failed fetch is reported through the return value and leaves the classifier alone."""
-    agent = MacroStatisticalAgent(
-        market_data=_market_data(fred_series=RuntimeError("FRED unavailable"))
-    )
+    agent = MacroStatisticalAgent(market_data=_market_data(fred_series=RuntimeError("FRED unavailable")))
 
     observations_before = agent.classifier.n_train_observations
 
@@ -573,12 +413,9 @@ def test_fit_on_history_returns_false_when_fetching_fails() -> None:
 
 
 def test_a_successful_refit_drops_the_cached_context(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The cached MacroContext was classified by the previous model, so a refit invalidates it."""
     agent = MacroStatisticalAgent(market_data=_market_data())
     agent._cache = (object(), datetime.now())  # type: ignore[assignment]
-    monkeypatch.setattr(
-        "argus.agents.macro.build_macro_feature_frame", lambda *a, **k: pd.DataFrame()
-    )
+    monkeypatch.setattr("argus.agents.macro.build_macro_feature_frame", lambda *a, **k: pd.DataFrame())
     monkeypatch.setattr(agent.classifier, "fit", lambda *a, **k: True)
 
     assert agent.fit_on_history() is True
@@ -588,7 +425,6 @@ def test_a_successful_refit_drops_the_cached_context(monkeypatch: pytest.MonkeyP
 def test_load_refuses_an_artifact_fit_with_different_hyperparameters(
     caplog: pytest.LogCaptureFixture, tmp_path: Path
 ) -> None:
-    """A model fit with another EM iteration cap is not served; the loader degrades instead."""
     classifier = _fit_synthetic_classifier()
     classifier.hmm.n_iter = 50
     artifact_path = tmp_path / "other_iterations.joblib"
@@ -602,7 +438,6 @@ def test_load_refuses_an_artifact_fit_with_different_hyperparameters(
 
 
 def test_the_shipped_artifact_matches_the_configured_hyperparameters() -> None:
-    """The committed artifact was fit with the covariance structure and iteration cap in MACRO."""
     classifier = RegimeClassifier.load(settings.ARGUS_HMM_MODEL_PATH)
 
     assert classifier.is_fitted

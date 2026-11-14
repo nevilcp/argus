@@ -25,7 +25,6 @@ from argus.schemas.signals import Regime, SectorSignal, Trend, VixRegime, YieldC
     ],
 )
 def test_vix_regime_buckets_change_exactly_at_the_thresholds(vix, expected):
-    """Each bucket is closed below and open above its threshold."""
     assert vix_regime(vix) == expected
 
 
@@ -38,24 +37,20 @@ def test_vix_regime_buckets_change_exactly_at_the_thresholds(vix, expected):
     ],
 )
 def test_yield_curve_shape_changes_exactly_at_the_thresholds(spread, expected):
-    """The spread is bucketed with the same open/closed edges as the VIX."""
     assert yield_curve_shape(spread) == expected
 
 
 def test_sector_rotation_prefers_growth_only_in_a_low_rate_expansion():
-    """A high policy rate takes an expansion off GROWTH_FAVORED."""
     assert sector_rotation(Regime.EXPANSION, 2.0, YieldCurve.NORMAL) == SectorSignal.GROWTH_FAVORED
     assert sector_rotation(Regime.EXPANSION, 5.0, YieldCurve.NORMAL) == SectorSignal.VALUE_FAVORED
 
 
 def test_sector_rotation_goes_defensive_on_contraction_or_an_inverted_curve():
-    """Either condition alone is enough."""
     assert sector_rotation(Regime.CONTRACTION, 2.0, YieldCurve.NORMAL) == SectorSignal.DEFENSIVE
     assert sector_rotation(Regime.EXPANSION, 5.0, YieldCurve.INVERTED) == SectorSignal.DEFENSIVE
 
 
 def test_agent_multipliers_amplify_technical_and_sentiment_at_high_vix_percentile():
-    """A high VIX percentile raises the technical and sentiment weights, not the fundamental."""
     calm = agent_multipliers(Regime.EXPANSION, 30.0)
     stressed = agent_multipliers(Regime.CONTRACTION, 80.0)
 
@@ -64,7 +59,6 @@ def test_agent_multipliers_amplify_technical_and_sentiment_at_high_vix_percentil
 
 
 def test_trend_from_lag_compares_against_the_lagged_observation():
-    """The comparison is against the value `lag` periods before the last, beyond the threshold."""
     series = pd.Series([1.0, 2.0, 3.0, 4.0])
 
     assert trend_from_lag(series, 4.0, lag=2, threshold=0.5) == Trend.RISING
@@ -73,12 +67,10 @@ def test_trend_from_lag_compares_against_the_lagged_observation():
 
 
 def test_trend_from_lag_is_stable_when_the_series_is_too_short():
-    """With no observation `lag` periods back there is nothing to compare against."""
     assert trend_from_lag(pd.Series([1.0, 2.0]), 9.0, lag=2, threshold=0.1) == Trend.STABLE
 
 
 def test_cpi_yoy_is_the_twelve_month_percent_change():
-    """A series that grows 2% a month over a year reads as about 26.8% year over year."""
     cpi = pd.Series([100.0 * 1.02**i for i in range(14)])
 
     result = cpi_yoy(cpi)

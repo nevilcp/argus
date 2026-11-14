@@ -1,34 +1,4 @@
-"""
-argus/orchestration/graph.py
-
-LangGraph execution orchestrator for the ARGUS multi-agent decision network.
-
-Coordinates asynchronous fetch pipelines, parallel specialized analyst agents,
-centralized risk assessment, dynamic signal aggregation, and long-term cultural
-memory ingestion into a stateful execution graph.
-
-Responsibilities:
-  - Construct the agents and bundle them into a GraphDeps
-  - Build and compile the LangGraph StateGraph DAG via build_graph()
-
-Not responsible for:
-  - The node functions themselves (see orchestration/nodes.py)
-  - Agent implementation logic (see individual agent modules)
-  - Schema validation (see schemas/signals.py)
-  - API serving (see api/main.py)
-
-Dependencies:
-  - langgraph
-  - argus.agents.* (all six specialist agents)
-  - argus.orchestration.checkpoint (the SQLite checkpointer, argus_graph.db)
-
-Agent wiring is a build_graph() parameter, not a module-level singleton:
-every agent that touches the network or an LLM accepts a
-MarketDataProvider/LLMClient, defaulting to the real implementation, so a
-test can build a fixture-backed graph without patching this module's
-internals. Callers — api/lifespan.py, scripts/collect_session.py — call
-build_graph() themselves rather than importing a shared instance.
-"""
+"""Dependency wiring and parallel execution of the decision graph."""
 
 from collections.abc import Callable
 from functools import partial
@@ -71,35 +41,7 @@ def build_graph(
     checkpoint_db_path: str | None = None,
     cultural_memory_provider: Callable[[], CulturalMemoryManager] | None = None,
 ):
-    """Constructs and compiles the ARGUS decision graph.
-
-    Args:
-        market_data: Shared data source injected into every agent that fetches
-            market/macro data (macro, fundamental, sentiment, risk). Defaults
-            to a live LiveMarketDataProvider for each agent independently.
-        fundamental_llm: LLMClient for FundamentalAgent. Defaults to a real
-            Groq client.
-        sentiment_llm: LLMClient for SentimentAgent. Defaults to a real Groq
-            client.
-        portfolio_llm: LLMClient for PortfolioManagerAgent. Defaults to a real
-            Groq client.
-        checkpoint_db_path: SQLite file each invocation checkpoints ARGUSState
-            to. Exposed (rather than hardcoded) so tests — and
-            argus/orchestration/reconcile.py's own tests — can point it
-            at a temp file instead of the real store production callers use.
-            None (default) resolves to ``<ARGUS_DATA_DIR>/argus_graph.db`` at
-            call time, so tests/conftest.py's per-test ARGUS_DATA_DIR override
-            also isolates a call site that omits this argument.
-        cultural_memory_provider: Returns the cultural memory store each time
-            a node needs it. Defaults to the process-wide
-            ``get_cultural_memory``; a test or replay passes its own, so no
-            patching of this module is needed.
-
-    Returns:
-        A CheckpointedGraph, ready for .invoke(). Recompiles with a fresh
-        checkpointer connection on every call rather than baking one
-        connection into a single compiled graph — see checkpoint.CheckpointedGraph.
-    """
+    """Construct and compile the ARGUS decision graph."""
     if checkpoint_db_path is None:
         checkpoint_db_path = str(settings.data_path("argus_graph.db"))
 
@@ -132,11 +74,7 @@ def build_graph(
 
     builder.set_entry_point("fetch_price_history")
 
-    # macro_analysis runs in parallel with the three specialists, not ahead of
-    # them: none of them consumes macro_context (see state.py's docstring), so
-    # gating them behind it needlessly serializes fundamental's ~20 sequential
-    # Groq round-trips behind the HMM window and drops a whole session's output
-    # whenever only the FRED bundle is unavailable.
+    # Run macro beside independent specialists so a slow or failed macro fetch cannot gate their analysis.
     builder.add_edge("fetch_price_history", "macro_analysis")
     builder.add_edge("fetch_price_history", "technical_analysis")
     builder.add_edge("fetch_price_history", "fundamental_analysis")
@@ -147,10 +85,7 @@ def build_graph(
         "signal_aggregation",
     )
 
-    # retrieve_cultural_memory runs after signal_aggregation (not beside it) so it
-    # can summarize this session's own aggregated_signals into its similarity
-    # query; wisdom/warnings are consumed only by portfolio_allocation, so this
-    # is safe to run in parallel with risk_evaluation.
+    # Query memory after aggregation supplies its technical posture; only allocation needs the result.
     builder.add_edge("signal_aggregation", "retrieve_cultural_memory")
     builder.add_edge("signal_aggregation", "risk_evaluation")
     builder.add_edge(["retrieve_cultural_memory", "risk_evaluation"], "portfolio_allocation")

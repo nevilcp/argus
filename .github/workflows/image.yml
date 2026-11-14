@@ -14,11 +14,7 @@ on:
       - "scripts/**"
       - ".github/workflows/image.yml"
   schedule:
-    # Weekly rebuild so pip-installed dependency security patches land even
-    # without a code push. Dockerfile.api now pins python:3.14-slim by
-    # digest for build reproducibility, so this alone no longer refreshes
-    # the base image itself — bumping that digest needs a manual PR, which
-    # lands here via the push trigger above once merged.
+    # Refresh unpinned dependencies weekly; the base image digest still needs an explicit update.
     - cron: "0 6 * * 1"
   workflow_dispatch:
 
@@ -29,8 +25,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    # Observed: ~6-10.5 min on a cold buildx cache. 30 min covers a full
-    # cache miss without leaving room for a truly hung build.
+    # Allow a cold build cache while bounding hung image builds.
     timeout-minutes: 30
     steps:
       - name: Checkout repository
@@ -65,14 +60,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Pin scheduled jobs to this build
-        # collector.yml/reconcile.yml read this back to decide which
-        # immutable tag to pull (see their "Read pinned image tag" step)
-        # instead of chasing :latest — GITHUB_TOKEN can't write repository
-        # variables (needs a PAT), so this reuses the same orphan-branch,
-        # force-pushed-single-commit idiom the publish-argus-state action
-        # already uses for argus-data, on its own argus-deploy branch. Rolling back
-        # is a one-line edit to image-tag.txt on that branch, pushed by hand
-        # — no rebuild required.
+        # Pin scheduled jobs on argus-deploy; rollback edits image-tag.txt without rebuilding the image.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

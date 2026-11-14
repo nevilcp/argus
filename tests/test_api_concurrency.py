@@ -1,19 +1,4 @@
-"""
-tests/test_api_concurrency.py
-
-Tests for /analyze's concurrency and process-safety guarantees:
-  - a semaphore of 1 around the graph invocation, 429 + Retry-After
-    when a run is already in progress, released even when the graph raises
-  - the kill switch is re-checked after the graph returns, not just
-    before it
-  - the graph-not-yet-initialized guard (`runtime.graph is None` -> 503)
-  - `lifespan._mft_session_callback` evicts live-cache entries for tickers no
-    longer tracked
-
-These exercise the route function and callback directly via FastAPI's
-TestClient / a bare coroutine call rather than going through the app's
-lifespan, so no MFT pipeline, collector, or reconcile loop needs to start.
-"""
+"""API concurrency, deadline, safety recheck, and cache eviction regressions."""
 
 from __future__ import annotations
 
@@ -42,16 +27,12 @@ _PAYLOAD = {"tickers": ["AAPL"], "total_wealth": 100_000, "invest_pct": 0.5}
 
 @pytest.fixture(autouse=True)
 def _reset_analyze_semaphore(monkeypatch):
-    """Resets the analyze semaphore for each test."""
+    """Reset the analyze semaphore for each test."""
     monkeypatch.setattr(runtime, "analyze_lock", asyncio.Semaphore(1))
 
 
 def _ready(monkeypatch):
-    """Clears every freshness gate ahead of /analyze so a request reaches the graph.
-
-    Installs an in-market-hours pipeline and publishes an AAPL state whose bar
-    and write times are both recent enough to clear the staleness gates.
-    """
+    """Clear every freshness gate ahead of /analyze so a request reaches the graph."""
     api_pipeline(monkeypatch)
 
     recent = now_market() - timedelta(seconds=5)
@@ -59,14 +40,7 @@ def _ready(monkeypatch):
 
 
 def _install_graph(monkeypatch, **invoke_behavior):
-    """Installs a fake graph as `runtime.graph` and configures invoke().
-
-    Args:
-        invoke_behavior: Mock keyword arguments for `invoke` (`side_effect`, `return_value`).
-
-    Returns:
-        The installed fake graph.
-    """
+    """Install a fake graph as `runtime.graph` and configure invoke()."""
     fake_graph = mock.Mock()
     fake_graph.invoke.configure_mock(**invoke_behavior)
     monkeypatch.setattr(runtime, "graph", fake_graph)
@@ -74,10 +48,8 @@ def _install_graph(monkeypatch, **invoke_behavior):
 
 
 def _graph_result(decisions: list) -> dict:
-    """A successful graph return value carrying `decisions` and a minimal allocation."""
-    allocation = mock.Mock(
-        session_id="sess-1", portfolio=[], cash_reserve_pct=0.5, expected_sharpe=1.0
-    )
+    """Build a successful graph result with decisions and a minimal allocation."""
+    allocation = mock.Mock(session_id="sess-1", portfolio=[], cash_reserve_pct=0.5, expected_sharpe=1.0)
     return {
         "decisions": decisions,
         "errors": [],
@@ -86,13 +58,7 @@ def _graph_result(decisions: list) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Semaphore
-# ---------------------------------------------------------------------------
-
-
 def test_analyze_rejects_a_concurrent_run_with_429(client, monkeypatch):
-    """A held semaphore is reported as 429 with Retry-After, not run against the graph."""
     _ready(monkeypatch)
     fake_graph = _install_graph(
         monkeypatch,
@@ -111,11 +77,6 @@ def test_analyze_rejects_a_concurrent_run_with_429(client, monkeypatch):
 
 
 def test_analyze_releases_the_semaphore_when_the_graph_raises(client, monkeypatch):
-    """The semaphore slot is released even when the graph raises, not just on success.
-
-    Otherwise a failed run would wedge every subsequent /analyze call behind
-    a permanently held semaphore.
-    """
     _ready(monkeypatch)
     _install_graph(monkeypatch, side_effect=RuntimeError("boom"))
 
@@ -125,17 +86,7 @@ def test_analyze_releases_the_semaphore_when_the_graph_raises(client, monkeypatc
     assert not runtime.analyze_lock.locked()
 
 
-# ---------------------------------------------------------------------------
-# Request deadline
-# ---------------------------------------------------------------------------
-
-
 def test_analyze_returns_504_when_the_graph_exceeds_its_deadline(client, monkeypatch):
-    """A run past ARGUS_ANALYZE_DEADLINE_SECONDS is cut off with a 504.
-
-    Bounded here rather than left open past whatever timeout the caller's
-    own proxy already gave up at.
-    """
     _ready(monkeypatch)
     monkeypatch.setattr(api_main.settings, "ARGUS_ANALYZE_DEADLINE_SECONDS", 0.05)
     _install_graph(monkeypatch, side_effect=lambda *a, **kw: time.sleep(0.5))
@@ -146,13 +97,7 @@ def test_analyze_returns_504_when_the_graph_exceeds_its_deadline(client, monkeyp
     assert not runtime.analyze_lock.locked()
 
 
-# ---------------------------------------------------------------------------
-# Graph-not-initialized guard
-# ---------------------------------------------------------------------------
-
-
 def test_analyze_rejects_when_graph_not_yet_initialized(client, monkeypatch):
-    """A None _graph before lifespan startup finishes is a 503, not an AttributeError."""
     _ready(monkeypatch)
     monkeypatch.setattr(runtime, "graph", None)
 
@@ -162,13 +107,7 @@ def test_analyze_rejects_when_graph_not_yet_initialized(client, monkeypatch):
     assert "graph" in response.json()["detail"].lower()
 
 
-# ---------------------------------------------------------------------------
-# Kill switch re-checked after the graph returns
-# ---------------------------------------------------------------------------
-
-
 def test_analyze_rejects_when_kill_switch_trips_during_the_graph_run(client, monkeypatch):
-    """A halt landing mid-run is caught after invoke() returns, not missed."""
     _ready(monkeypatch)
     ks = KillSwitch("MODERATE")
     kill_switch_module._kill_switch = ks
@@ -185,13 +124,7 @@ def test_analyze_rejects_when_kill_switch_trips_during_the_graph_run(client, mon
     assert "halted" in response.json()["detail"].lower()
 
 
-# ---------------------------------------------------------------------------
-# Live cache eviction
-# ---------------------------------------------------------------------------
-
-
 async def test_mft_session_callback_evicts_untracked_tickers(monkeypatch):
-    """A ticker dropped from the tracked universe is also dropped from the live cache."""
     fake_pipeline = mock.Mock()
     fake_pipeline.tickers = ["AAPL"]
     monkeypatch.setattr(runtime, "pipeline", fake_pipeline)
@@ -204,18 +137,7 @@ async def test_mft_session_callback_evicts_untracked_tickers(monkeypatch):
     assert "AAPL" not in result.absent
 
 
-# ---------------------------------------------------------------------------
-# /analyze decisions reach decisions.jsonl
-# ---------------------------------------------------------------------------
-
-
 def test_analyze_appends_decisions_to_decisions_jsonl(client, monkeypatch):
-    """A successful /analyze run appends its decisions to decisions.jsonl.
-
-    Without this, decisions.jsonl — the only source reconcile_decisions
-    reads — never sees a decision made through /analyze, and an API-only
-    deployment reconciles nothing.
-    """
     _ready(monkeypatch)
     decision = ARGUSDecision(ticker="AAPL", session_timestamp=datetime.now())
     _install_graph(monkeypatch, return_value=_graph_result([decision]))
@@ -230,7 +152,6 @@ def test_analyze_appends_decisions_to_decisions_jsonl(client, monkeypatch):
 
 
 def test_analyze_writes_nothing_when_the_graph_produces_no_decisions(client, monkeypatch):
-    """An empty decisions list leaves decisions.jsonl unwritten, not an empty file."""
     _ready(monkeypatch)
     _install_graph(monkeypatch, return_value=_graph_result([]))
 
@@ -242,7 +163,6 @@ def test_analyze_writes_nothing_when_the_graph_produces_no_decisions(client, mon
 
 
 def test_analyze_returns_each_position_as_its_allocation_model(client, monkeypatch):
-    """The response's portfolio carries every PositionAllocation field, as JSON."""
     _ready(monkeypatch)
     position = position_allocation("AAPL", 0.1, advisor_note="Hold.")
     result = _graph_result([])

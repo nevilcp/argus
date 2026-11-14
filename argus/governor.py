@@ -1,37 +1,4 @@
-"""
-argus/governor.py
-
-Centralized API rate-limit governance module across all LLM and data providers.
-
-Responsibilities:
-  - Enforce per-model tokens-per-minute and requests-per-minute quotas over a
-    rolling 60s window
-  - Provide cooperative back-pressure via timed waits before each API call
-  - Learn a model's real limits from Groq's own rate-limit response headers,
-    falling back to a conservative bootstrap floor until the first header
-    arrives
-  - Release a pre-flight reservation that a failed call never actually spent
-  - Expose usage telemetry for health checks and governor reports
-
-Not responsible for:
-  - Retry logic (handled per-agent with exponential back-off)
-  - Authentication or credential management (see config.py)
-  - Kill-switch circuit breakers (see risk/kill_switch.py)
-
-Groq reports the account's real limits on every response, and those limits
-depend on the API key's tier — a fact this module cannot know in advance.
-BOOTSTRAP_LIMITS below is seeded from settings.ARGUS_GROQ_RPM/TPM, a
-conservative free-tier default, used only until a response header corrects it
-for the tier actually in use. It is a floor, not a claim about any particular
-account's tier.
-
-This is one governor per process, not per account: it only sees calls made
-by its own process. api/guards.py enforces --workers 1 so the API never runs
-two ignorant copies of it (see Dockerfile.api's CMD), but
-scripts/reconcile_outcomes.py's Actions collector is a second, independent
-process making calls against the same Groq key — a second governor this
-module has no visibility into and cannot coordinate with.
-"""
+"""Thread-safe Groq request and token quota admission and observation."""
 
 from __future__ import annotations
 
@@ -59,10 +26,7 @@ class UnregisteredModel(ValueError):
     """Raised when a model with no known rate-limit profile is passed to the governor."""
 
 
-# The two gpt-oss IDs the system actually calls (see argus/seams.py, GroqLLMClient
-# construction sites in fundamental.py/sentiment.py/portfolio.py, sourced from
-# argus/config.py's ARGUS_*_MODEL settings). Membership only — the numbers live
-# in BOOTSTRAP_LIMITS below since headers are the real source.
+# Register supported model names here; quota values come from bootstrap settings and observed headers.
 REGISTERED_MODELS: frozenset[str] = frozenset(
     {
         "openai/gpt-oss-120b",
@@ -70,11 +34,7 @@ REGISTERED_MODELS: frozenset[str] = frozenset(
     }
 )
 
-# Conservative free-tier bootstrap floor, applied uniformly to every registered
-# model until observe_headers() corrects it per-model for the account's actual
-# tier. Groq publishes no daily figure for either axis at this floor, so neither
-# a requests-per-day nor a tokens-per-day number is invented here; both stay
-# unenforced until a response header reports one.
+# Use conservative bootstrap RPM and TPM; enforce daily request quotas only after headers report them.
 BOOTSTRAP_LIMITS: dict[str, dict[str, int]] = {
     model: {
         "tokens_per_minute": settings.ARGUS_GROQ_TPM,
@@ -83,11 +43,7 @@ BOOTSTRAP_LIMITS: dict[str, dict[str, int]] = {
     for model in REGISTERED_MODELS
 }
 
-# Groq's rate-limit response headers, split by axis so one axis can be observed
-# without the other — a response is never required to carry both.
-# x-ratelimit-*-requests is a DAILY figure; x-ratelimit-*-tokens is a PER-MINUTE
-# figure. Groq publishes no header for RPM or TPD at all, so those two stay
-# BOOTSTRAP_LIMITS-enforced even once headers arrive for the other two.
+# Observe request and token headers independently; requests are daily and tokens are per minute.
 _REQUEST_AXIS_HEADERS = (
     "x-ratelimit-limit-requests",
     "x-ratelimit-remaining-requests",
@@ -99,43 +55,19 @@ _TOKEN_AXIS_HEADERS = (
     "x-ratelimit-reset-tokens",
 )
 
-# Go-style duration components, as Groq's reset headers encode them
-# ("2m59.56s", "7.66s", "88ms"). "ms" must be tried before "m" or "88ms" would
-# parse as "88m" with a dangling "s".
+# Match ms before m so a reset such as 88ms cannot be parsed as 88 minutes.
 _DURATION_COMPONENT_RE = re.compile(r"(\d+(?:\.\d+)?)(h|ms|m|s)")
 _DURATION_UNIT_SECONDS = {"h": 3600.0, "m": 60.0, "s": 1.0, "ms": 0.001}
 
 
 def _require_registered(model: str) -> None:
-    """Rejects a model the governor holds no rate-limit profile for.
-
-    Args:
-        model: Provider model identifier string.
-
-    Raises:
-        UnregisteredModel: If ``model`` is not in REGISTERED_MODELS.
-    """
+    """Reject a model the governor holds no rate-limit profile for."""
     if model not in REGISTERED_MODELS:
         raise UnregisteredModel(f"{model!r} has no registered rate-limit profile")
 
 
 def _parse_reset_duration(value: str) -> float:
-    """Parses a Go-style duration string into seconds.
-
-    Groq's x-ratelimit-reset-* headers use Go's time.Duration.String() format,
-    not plain integers, but a bare number (no unit suffix) is accepted as
-    seconds rather than rejected outright.
-
-    Args:
-        value: Duration string such as "2m59.56s", "7.66s", "88ms", or "60".
-
-    Returns:
-        Total duration in seconds.
-
-    Raises:
-        ValueError: If ``value`` contains no recognizable duration component
-            and isn't a bare number either.
-    """
+    """Parse a Go-style duration string into seconds."""
     total = 0.0
     matched = False
     for amount, unit in _DURATION_COMPONENT_RE.findall(value):
@@ -156,20 +88,7 @@ def _observe_axis(
     axis_headers: tuple[str, str, str],
     now: float,
 ) -> tuple[int, int, float | None] | None:
-    """Reads one rate-limit axis's (limit, remaining, reset) triple out of a Groq response.
-
-    Args:
-        model: Provider model identifier string, for log context.
-        headers: Response headers from a Groq API call.
-        axis: Axis name as it appears in log messages.
-        axis_headers: This axis's (limit, remaining, reset) header names.
-        now: The time.monotonic() reading the reset deadline is measured from.
-
-    Returns:
-        ``(limit, remaining, reset_at)``, or None when the axis is absent or its
-        limit/remaining pair is malformed. An unparseable reset alone yields a
-        None ``reset_at`` rather than discarding the whole axis.
-    """
+    """Read one rate-limit axis's (limit, remaining, reset) triple out of a Groq response."""
     limit_header, remaining_header, reset_header = axis_headers
     if not all(header in headers for header in axis_headers):
         return None
@@ -190,65 +109,14 @@ def _observe_axis(
 
 
 def estimate_tokens(system_prompt: str, user_prompt: str, max_tokens: int) -> int:
-    """Estimates a chat completion's total token consumption before making the call.
-
-    Word count * GOVERNOR.word_to_token_ratio plus a fixed chat-template overhead
-    approximates prompt-side tokenization; max_tokens stands in for the
-    completion side since actual completion length is unknown pre-flight.
-    Every GroqLLMClient reserves both prompt and completion tokens with this estimator.
-
-    Args:
-        system_prompt: The system message text.
-        user_prompt: The user message text.
-        max_tokens: The completion's configured max_tokens ceiling.
-
-    Returns:
-        Estimated total token count to reserve against the governor's budget.
-    """
+    """Estimate a chat completion's total token consumption before making the call."""
     word_count = len(system_prompt.split()) + len(user_prompt.split())
-    return (
-        int(word_count * GOVERNOR.word_to_token_ratio)
-        + GOVERNOR.chat_template_overhead_tokens
-        + max_tokens
-    )
+    return int(word_count * GOVERNOR.word_to_token_ratio) + GOVERNOR.chat_template_overhead_tokens + max_tokens
 
 
 @dataclass
 class ModelUsage:
-    """Per-model rolling usage counters, plus Groq's own header-reported limits once observed.
-
-    The header-reported fields are informational only until ``observe_headers``
-    sets ``limits_observed``; before that, ``wait_if_needed`` enforces off the
-    bootstrap counters alone.
-
-    Attributes:
-        requests_today: Daily bootstrap request counter, reset on UTC date
-            rollover.
-        tokens_today: Daily bootstrap token counter, reset on UTC date
-            rollover.
-        current_date: UTC date (YYYY-MM-DD) the two counters above were last
-            reset for.
-        requests_window: Monotonic timestamp of every admitted request within
-            the trailing ``GOVERNOR.window_seconds``, pruned lazily on each access —
-            the rolling replacement for a fixed-minute bucket.
-        tokens_window: (monotonic timestamp, tokens) pair for every admitted
-            call within the trailing ``GOVERNOR.window_seconds``, pruned the same way
-            as ``requests_window``.
-        limit_requests: Provider-reported daily request limit, or None before
-            the first header arrives.
-        limit_tokens: Provider-reported per-minute token limit, or None
-            before the first header arrives.
-        remaining_requests: Provider-reported daily requests remaining, or
-            None before the first header arrives.
-        remaining_tokens: Provider-reported per-minute tokens remaining, or
-            None before the first header arrives.
-        reset_requests_at: time.monotonic() deadline at which
-            remaining_requests resets, immune to wall-clock adjustment.
-        reset_tokens_at: time.monotonic() deadline at which remaining_tokens
-            resets, immune to wall-clock adjustment.
-        limits_observed: Whether ``observe_headers`` has ever populated the
-            provider-reported fields above.
-    """
+    """Rolling per-model usage and independently observed provider quotas."""
 
     requests_today: int = 0
     tokens_today: int = 0
@@ -267,13 +135,12 @@ class ModelUsage:
 
 
 class ModelUsageReport(TypedDict):
-    """One model's entry in ``RateLimitGovernor.get_usage_report``."""
+    """One model's entry in `RateLimitGovernor.get_usage_report`."""
 
     requests_today: int
     tokens_today: int
     requests_per_minute_limit: int
-    # Header-observed once known, else the bootstrap floor. None only when the
-    # provider reported headers without a token limit.
+    # Prefer observed token limits; fall back to bootstrap limits before observation.
     tokens_per_minute_limit: int | None
     limits_observed: bool
     remaining_requests_today: int | None
@@ -281,45 +148,26 @@ class ModelUsageReport(TypedDict):
 
 
 def _observed(usage: ModelUsage, remaining: int | None) -> int | None:
-    """Returns a provider-reported remaining figure, or None before any headers arrived."""
+    """Return a provider-reported remaining figure, or None before any headers arrived."""
     return remaining if usage.limits_observed else None
 
 
 class RateLimitGovernor:
-    """Thread-safe governor enforcing Groq's real quotas, bootstrapped from a published floor.
-
-    Designed for cooperative multi-threaded use: GroqLLMClient calls ``wait_if_needed``
-    before each API invocation, causing a blocking sleep if adding the request would
-    violate quotas, then ``observe_headers``/``record_usage`` after each response to
-    keep the tracked state true to what the provider actually reports, or
-    ``release_reservation`` if the call never got a response at all.
-    """
+    """Thread-safe Groq quota admission with bounded waits and provider header observation."""
 
     def __init__(self) -> None:
-        """Initializes empty per-model usage tracking."""
         self._usage: dict[str, ModelUsage] = {}
         self._lock = threading.Lock()
         logger.info("RateLimitGovernor initialized with %d model profiles", len(REGISTERED_MODELS))
 
     def _get_usage(self, model: str) -> ModelUsage:
-        """Retrieves or initializes the ModelUsage tracker for a given model.
-
-        Args:
-            model: Provider model identifier string.
-
-        Returns:
-            Live ModelUsage instance for the model.
-        """
+        """Retrieve or initializes the ModelUsage tracker for a given model."""
         if model not in self._usage:
             self._usage[model] = ModelUsage()
         return self._usage[model]
 
     def _reset_if_new_day(self, usage: ModelUsage) -> None:
-        """Resets daily counters when the tracker's date diverges from the current UTC date.
-
-        Args:
-            usage: Mutable ModelUsage instance to check and reset.
-        """
+        """Reset daily counters when the tracker's date diverges from the current UTC date."""
         today = datetime.now(UTC).strftime("%Y-%m-%d")
         if usage.current_date != today:
             usage.requests_today = 0
@@ -328,11 +176,7 @@ class RateLimitGovernor:
             logger.debug("daily counters reset for new UTC day")
 
     def _prune_window(self, usage: ModelUsage) -> None:
-        """Drops entries older than ``GOVERNOR.window_seconds`` from both rolling windows.
-
-        Args:
-            usage: Mutable ModelUsage instance to prune in place.
-        """
+        """Drop entries older than `GOVERNOR.window_seconds` from both rolling windows."""
         cutoff = time.monotonic() - GOVERNOR.window_seconds
         while usage.requests_window and usage.requests_window[0] < cutoff:
             usage.requests_window.popleft()
@@ -340,15 +184,7 @@ class RateLimitGovernor:
             usage.tokens_window.popleft()
 
     def _refresh_observed_windows(self, usage: ModelUsage) -> None:
-        """Assumes a header-observed window has rolled over once its deadline passes.
-
-        No further response has arrived to confirm the reset, so this is an optimistic
-        assumption bounded by the provider's own reported deadline — the same trust
-        model the bootstrap counters' daily rollover already relies on.
-
-        Args:
-            usage: Mutable ModelUsage instance to check and reset.
-        """
+        """Assume a header-observed window has rolled over once its deadline passes."""
         now = time.monotonic()
         if usage.reset_tokens_at is not None and now >= usage.reset_tokens_at:
             usage.remaining_tokens = usage.limit_tokens
@@ -358,31 +194,7 @@ class RateLimitGovernor:
             usage.reset_requests_at = None
 
     def wait_if_needed(self, model: str, estimated_tokens: int = 500) -> None:
-        """Blocks the calling thread until rate limits allow the next request.
-
-        Checks three independent axes: requests-per-minute (always bootstrap-enforced;
-        Groq never reports an RPM header), tokens-per-minute (header-enforced once
-        observed, bootstrap-enforced before that), and requests-per-day (header-enforced
-        once observed, unenforced before that — matching Tier A's refusal to invent a
-        daily figure nothing publishes). If a per-minute limit would be exceeded,
-        releases the lock, sleeps out the remainder of the rolling window's oldest
-        entry, then re-checks. Total wait is capped at ``GOVERNOR.max_wait_attempts`` sleeps;
-        a call still over budget after that raises rather than blocking indefinitely.
-        If the provider-reported daily budget is genuinely exhausted, raises
-        immediately rather than sleeping — its reset window is on the order of a day,
-        too long for a request thread to block on.
-
-        Args:
-            model: Provider model identifier string.
-            estimated_tokens: Estimated token consumption of the upcoming request.
-
-        Raises:
-            UnregisteredModel: If ``model`` has no known rate-limit profile.
-            RateLimitExceeded: If the daily request budget is exhausted, or the
-                request still doesn't fit after ``GOVERNOR.max_wait_attempts`` sleeps —
-                typically because estimated_tokens alone exceeds the tokens-per-minute
-                budget.
-        """
+        """Block the calling thread until rate limits allow the next request."""
         _require_registered(model)
 
         for attempt in range(GOVERNOR.max_wait_attempts):
@@ -411,20 +223,8 @@ class RateLimitGovernor:
             "model's tokens-per-minute budget"
         )
 
-    def _admit_or_wait_seconds(
-        self, model: str, usage: ModelUsage, estimated_tokens: int
-    ) -> float | None:
-        """Admits the request if all three axes allow it, else says how long to wait.
-
-        Must be called with ``self._lock`` held and the usage already refreshed.
-
-        Returns:
-            None when the request was admitted and recorded, otherwise the seconds
-            until the rolling window's oldest entry expires.
-
-        Raises:
-            RateLimitExceeded: If the provider-reported daily request budget is exhausted.
-        """
+    def _admit_or_wait_seconds(self, model: str, usage: ModelUsage, estimated_tokens: int) -> float | None:
+        """Admit or calculate the next wait while the usage lock is held."""
         bootstrap = BOOTSTRAP_LIMITS[model]
         remaining_tokens = _observed(usage, usage.remaining_tokens)
         remaining_requests = _observed(usage, usage.remaining_requests)
@@ -437,11 +237,7 @@ class RateLimitGovernor:
         else:
             tpm_ok = tokens_this_window + estimated_tokens <= bootstrap["tokens_per_minute"]
 
-        # No bootstrap figure exists for the daily axis (see BOOTSTRAP_LIMITS'
-        # comment) — inventing one would fabricate a daily cap nothing
-        # publishes. This is permissive only until the first response's
-        # headers arrive; rpm_ok/tpm_ok above still gate every call in that
-        # window, bounding it to roughly the process's first request.
+        # Do not invent a daily quota before the first observed header; RPM and TPM still bound admission.
         rpd_ok = remaining_requests is None or remaining_requests > 0
 
         if rpm_ok and tpm_ok and rpd_ok:
@@ -455,7 +251,7 @@ class RateLimitGovernor:
             if remaining_requests is not None:
                 usage.remaining_requests = max(0, remaining_requests - 1)
             logger.debug(
-                "%s — today: %d req, %d tok | this window: %d req, %d tok",
+                "%s - today: %d req, %d tok | this window: %d req, %d tok",
                 model,
                 usage.requests_today,
                 usage.tokens_today,
@@ -475,23 +271,7 @@ class RateLimitGovernor:
         return max(1.0, GOVERNOR.window_seconds - (time.monotonic() - oldest))
 
     def observe_headers(self, model: str, headers: Mapping[str, str]) -> None:
-        """Overwrites this model's provider-reported limits from a Groq response.
-
-        Called after every Groq response, success and 429 alike (see
-        GroqLLMClient._on_response in argus/seams.py). Provider numbers always win
-        over local bookkeeping. The token and request axes are observed
-        independently — a response carrying only one axis's headers still updates
-        that axis rather than being discarded because the other axis is absent.
-        A response missing rate-limit headers entirely is silently skipped rather
-        than raising, since observing nothing is not an error.
-
-        Args:
-            model: Provider model identifier string.
-            headers: Response headers from a Groq API call (case-insensitive mapping).
-
-        Raises:
-            UnregisteredModel: If ``model`` has no known rate-limit profile.
-        """
+        """Overwrite this model's provider-reported limits from a Groq response."""
         _require_registered(model)
 
         now = time.monotonic()
@@ -506,12 +286,10 @@ class RateLimitGovernor:
             if token_values is not None:
                 usage.limit_tokens, usage.remaining_tokens, usage.reset_tokens_at = token_values
             if request_values is not None:
-                usage.limit_requests, usage.remaining_requests, usage.reset_requests_at = (
-                    request_values
-                )
+                usage.limit_requests, usage.remaining_requests, usage.reset_requests_at = request_values
             usage.limits_observed = True
             logger.debug(
-                "%s — observed limits: req=%s/%s tok=%s/%s",
+                "%s - observed limits: req=%s/%s tok=%s/%s",
                 model,
                 usage.remaining_requests,
                 usage.limit_requests,
@@ -519,29 +297,8 @@ class RateLimitGovernor:
                 usage.limit_tokens,
             )
 
-    def record_usage(
-        self, model: str, estimated_tokens: int, prompt_tokens: int, completion_tokens: int
-    ) -> None:
-        """Reconciles a completed call's actual token usage against its pre-flight estimate.
-
-        Applies the delta (actual - estimated) to the local bootstrap counters only —
-        never to the header-derived remaining_tokens, which observe_headers already
-        refreshed with the provider's own post-call figure for this same response by
-        the time this runs (GroqLLMClient calls observe_headers from its response hook
-        before complete() returns). Groq also excludes cached tokens from rate-limit
-        accounting, so this call's token_usage and the header-derived remaining can
-        legitimately disagree — headers are authoritative for enforcement; this method
-        only keeps the informational today/window counters honest.
-
-        Args:
-            model: Provider model identifier string.
-            estimated_tokens: The estimate originally passed to ``wait_if_needed``.
-            prompt_tokens: Actual prompt tokens from response.response_metadata["token_usage"].
-            completion_tokens: Actual completion tokens from the same source.
-
-        Raises:
-            UnregisteredModel: If ``model`` has no known rate-limit profile.
-        """
+    def record_usage(self, model: str, estimated_tokens: int, prompt_tokens: int, completion_tokens: int) -> None:
+        """Reconcile actual usage against local estimates without debiting observed headers again."""
         _require_registered(model)
 
         delta = (prompt_tokens + completion_tokens) - estimated_tokens
@@ -553,23 +310,7 @@ class RateLimitGovernor:
             self._apply_window_delta(usage, delta)
 
     def release_reservation(self, model: str, estimated_tokens: int) -> None:
-        """Returns a pre-flight reservation that a failed call never actually spent.
-
-        wait_if_needed debits a model's budget the moment it admits a call, before
-        that call has actually reached the network. A terminal error or an
-        exhausted retry loop (see GroqLLMClient.complete) means no tokens were
-        ever spent and no request landed — without this, that reservation would
-        sit in the local counters and the header-derived remaining figures for
-        the rest of their windows, permanently shrinking real capacity for a
-        call that never happened.
-
-        Args:
-            model: Provider model identifier string.
-            estimated_tokens: The estimate originally passed to ``wait_if_needed``.
-
-        Raises:
-            UnregisteredModel: If ``model`` has no known rate-limit profile.
-        """
+        """Return a pre-flight reservation that a failed call never actually spent."""
         _require_registered(model)
 
         with self._lock:
@@ -585,22 +326,12 @@ class RateLimitGovernor:
 
             if usage.limits_observed:
                 if usage.remaining_tokens is not None and usage.limit_tokens is not None:
-                    usage.remaining_tokens = min(
-                        usage.limit_tokens, usage.remaining_tokens + estimated_tokens
-                    )
+                    usage.remaining_tokens = min(usage.limit_tokens, usage.remaining_tokens + estimated_tokens)
                 if usage.remaining_requests is not None and usage.limit_requests is not None:
-                    usage.remaining_requests = min(
-                        usage.limit_requests, usage.remaining_requests + 1
-                    )
+                    usage.remaining_requests = min(usage.limit_requests, usage.remaining_requests + 1)
 
     def _apply_window_delta(self, usage: ModelUsage, delta: int) -> None:
-        """Appends a clamped correction entry to the token window, flooring the sum at 0.
-
-        Args:
-            usage: Mutable ModelUsage instance whose tokens_window is corrected.
-            delta: Signed token adjustment (actual - estimated for record_usage,
-                or -estimated_tokens for a full release).
-        """
+        """Append a clamped correction entry to the token window, flooring the sum at 0."""
         if delta == 0:
             return
         current_sum = sum(tok for _, tok in usage.tokens_window)
@@ -609,34 +340,15 @@ class RateLimitGovernor:
             usage.tokens_window.append((time.monotonic(), applied))
 
     def get_remaining_capacity(self, model: str) -> int:
-        """Returns the remaining rolling-window request capacity for a given model.
-
-        Args:
-            model: Provider model identifier string.
-
-        Returns:
-            Remaining requests allowed in the trailing window.
-
-        Raises:
-            UnregisteredModel: If ``model`` has no known rate-limit profile.
-        """
+        """Return the remaining rolling-window request capacity for a given model."""
         _require_registered(model)
         with self._lock:
             usage = self._get_usage(model)
             self._prune_window(usage)
-            return max(
-                0, BOOTSTRAP_LIMITS[model]["requests_per_minute"] - len(usage.requests_window)
-            )
+            return max(0, BOOTSTRAP_LIMITS[model]["requests_per_minute"] - len(usage.requests_window))
 
     def get_usage_report(self) -> dict[str, ModelUsageReport]:
-        """Compiles a per-model usage snapshot for health check endpoints.
-
-        Returns:
-            Dict mapping model name → today's cumulative usage, the per-minute limit
-            in force (header-observed tokens-per-minute once known, else the bootstrap
-            floor), whether that limit is provider-observed or still a bootstrap guess,
-            and the provider's own remaining counts where observed.
-        """
+        """Compile a per-model usage snapshot for health check endpoints."""
         report: dict[str, ModelUsageReport] = {}
         with self._lock:
             for model in REGISTERED_MODELS:
@@ -650,9 +362,7 @@ class RateLimitGovernor:
                     tokens_today=usage.tokens_today,
                     requests_per_minute_limit=bootstrap["requests_per_minute"],
                     tokens_per_minute_limit=(
-                        usage.limit_tokens
-                        if usage.limits_observed
-                        else bootstrap["tokens_per_minute"]
+                        usage.limit_tokens if usage.limits_observed else bootstrap["tokens_per_minute"]
                     ),
                     limits_observed=usage.limits_observed,
                     remaining_requests_today=usage.remaining_requests,
@@ -661,5 +371,4 @@ class RateLimitGovernor:
         return report
 
 
-# Module-level singleton shared by all agents within a process
 governor = RateLimitGovernor()

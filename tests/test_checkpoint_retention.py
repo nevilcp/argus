@@ -13,16 +13,8 @@ from tests.helpers.builders import (
 )
 from tests.helpers.decision_store import put_checkpoint
 
-# ---------------------------------------------------------------------------
-# prune_checkpoints
-# ---------------------------------------------------------------------------
-
 
 def test_prune_checkpoints_deletes_only_threads_older_than_cutoff(tmp_path):
-    """A thread whose newest checkpoint predates cutoff is deleted.
-
-    A newer thread survives.
-    """
     db_path = str(tmp_path / "argus_graph.db")
     put_checkpoint(db_path, "stale-thread", datetime(2026, 1, 1))
     put_checkpoint(db_path, "fresh-thread", datetime(2026, 1, 20))
@@ -31,20 +23,16 @@ def test_prune_checkpoints_deletes_only_threads_older_than_cutoff(tmp_path):
 
     assert deleted == 1
     conn = sqlite3.connect(db_path, check_same_thread=False)
-    checkpoint_threads = {
-        row[0] for row in conn.execute("SELECT DISTINCT thread_id FROM checkpoints").fetchall()
-    }
+    checkpoint_threads = {row[0] for row in conn.execute("SELECT DISTINCT thread_id FROM checkpoints").fetchall()}
     conn.close()
     assert checkpoint_threads == {"fresh-thread"}
 
 
 def test_prune_checkpoints_missing_db_is_a_noop():
-    """A checkpoint database that doesn't exist yet returns 0 rather than raising."""
     assert prune_checkpoints("/nonexistent/argus_graph.db", cutoff=datetime(2026, 1, 1)) == 0
 
 
 def test_prune_checkpoints_nothing_stale_deletes_nothing(tmp_path):
-    """Every thread newer than cutoff survives untouched."""
     db_path = str(tmp_path / "argus_graph.db")
     put_checkpoint(db_path, "fresh-thread", datetime.now())
 
@@ -54,14 +42,6 @@ def test_prune_checkpoints_nothing_stale_deletes_nothing(tmp_path):
 
 
 def test_prune_checkpoints_normalizes_a_non_utc_offset_before_comparing(tmp_path):
-    """A checkpoint timestamped with a non-UTC offset is compared against cutoff in UTC.
-
-    Regression: discarding the offset instead of converting to UTC first shifts the
-    value by the offset's magnitude. This thread's ts is 2026-01-01T20:00:00-05:00
-    (2026-01-02T01:00:00 UTC), one hour *after* the UTC cutoff — it must survive.
-    Naively stripping the offset instead would compare 2026-01-01T20:00:00 (naive)
-    against the same cutoff and wrongly prune it as four hours stale.
-    """
     db_path = str(tmp_path / "argus_graph.db")
     non_utc_ts = datetime(2026, 1, 1, 20, 0, 0, tzinfo=timezone(timedelta(hours=-5)))
     put_checkpoint(db_path, "offset-thread", non_utc_ts)
@@ -74,14 +54,6 @@ def test_prune_checkpoints_normalizes_a_non_utc_offset_before_comparing(tmp_path
 def test_checkpoint_pruning_stabilizes_the_published_file_size_across_successive_cycles(
     tmp_path,
 ):
-    """Repeated collector cycles, each adding one thread and pruning to the retention
-    window, leave the file published to argus-data at a constant size once the window
-    fills — not one that keeps growing with the number of cycles run (issue #99).
-
-    Each thread carries a real decisions payload (rather than an empty checkpoint) so a
-    growing thread count actually moves the file size, the way a real collector cycle's
-    checkpoint does.
-    """
     db_path = str(tmp_path / "argus_graph.db")
     retention_days = RECONCILIATION.horizon_days + RECONCILIATION.retention_margin_days
     sim_now = datetime(2026, 1, 1)
@@ -95,18 +67,15 @@ def test_checkpoint_pruning_stabilizes_the_published_file_size_across_successive
         sizes.append(Path(db_path).stat().st_size)
         sim_now += timedelta(days=1)
 
-    # While the retention window is still filling, every cycle's new thread grows the file.
     assert sizes[retention_days] > sizes[0]
 
-    # Once the window is full, each cycle's new thread displaces exactly one aged-out
-    # thread, so the file stops growing instead of continuing to track cycle count.
+    # After retention fills, each new checkpoint thread replaces one expired thread instead of growing the store.
     plateau = sizes[retention_days + 2 :]
     assert plateau, "test needs more cycles than the retention window to reach a plateau"
     assert all(size == plateau[0] for size in plateau)
 
 
 def test_retention_cutoff_defaults_to_the_declared_horizon_plus_the_margin():
-    """With no argument the window is RECONCILIATION's horizon plus its retention margin."""
     window = timedelta(days=RECONCILIATION.horizon_days + RECONCILIATION.retention_margin_days)
 
     before = datetime.now()
@@ -117,7 +86,6 @@ def test_retention_cutoff_defaults_to_the_declared_horizon_plus_the_margin():
 
 
 def test_retention_cutoff_widens_with_a_longer_horizon():
-    """A caller-supplied horizon moves the cutoff back by exactly the difference."""
     default = retention_cutoff()
     longer = retention_cutoff(RECONCILIATION.horizon_days + 10)
 

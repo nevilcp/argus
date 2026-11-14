@@ -464,7 +464,7 @@ With the default `.env`, this alone gives the same unattended behavior — hourl
 ├── scripts/              # collect_session, reconcile_outcomes, replay_backtest,
 │                         # run_evaluation and train_macro_hmm
 ├── .github/              # CI/deployment workflows and shared image/state actions
-├── docs/                 # System guide, macro walkthrough and limitations
+├── docs/                 # Architecture, implementation notes, limitations, and source conventions
 ├── data/                 # Generated runtime state (gitignored)
 ├── tests/                # Flat test modules
 │   ├── helpers/          # Shared builders, providers, candle helpers and paths
@@ -491,6 +491,9 @@ expected graph or replay output. Tests stay flat and share builders and provider
 doubles under `tests/helpers/`.
 
 ## Contributing
+
+The [documentation index](docs/README.md) links architecture, implementation
+contracts, operations, testing, and [commenting conventions](docs/commenting-style.md).
 
 ARGUS is not an open-contribution project. It is maintained solely by its author as a private research and portfolio project. External pull requests and issues are closed, and — per the [License](#license--acknowledgements) below — forking, redistributing, or building on this code is not permitted without written permission. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for development conventions and verification requirements.
 

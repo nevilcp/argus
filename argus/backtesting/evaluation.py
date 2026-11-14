@@ -1,33 +1,4 @@
-"""
-argus/backtesting/evaluation.py
-
-Pre-registered evaluation of the outcome loop: what is measured, why, and
-the success threshold fixed before any of this module's output was observed.
-
-Responsibilities:
-  - Pair each decision's signed conviction with its realized forward return
-  - Rank information coefficient (Spearman) and hit-rate-with-dead-band,
-    both with percentile bootstrap confidence intervals
-  - pre_registered_verdict: the fixed success rule applied to open- vs closed-loop
-  - System-behavior metrics (schema validity, constraint enforcement,
-    API calls/decision, replay determinism), reported separately and never
-    blended into the predictive metrics above
-  - Trade-level win/loss statistics over the same paired outcomes (see
-    backtesting/metrics.py), reported separately from the metrics above
-
-Not responsible for:
-  - Running the replay itself (see backtesting/replay.py)
-  - Choosing the horizon and dead-band: the caller passes them in
-    (scripts/run_evaluation.py defaults them from RECONCILIATION). The
-    bootstrap settings are fixed ahead of time in argus/params.py (EVALUATION)
-
-Dependencies:
-  - numpy, pandas, scipy (statistics)
-  - argus.backtesting.metrics (trade_level_metrics, reused rather than duplicated)
-  - argus.outcomes (compute_realized_return, reused rather than duplicated —
-    this is the same function that feeds cultural.store_trade_outcome in
-    production)
-"""
+"""Pre-registered outcome evaluation and separate system behavior metrics."""
 
 from __future__ import annotations
 
@@ -50,10 +21,7 @@ from argus.schemas.signals import ARGUSDecision, RiskVerdict, Signal
 
 
 def signed_conviction(decision: ARGUSDecision) -> float | None:
-    """Conviction signed by direction, or None if the decision has no aggregated signal.
-
-    +conviction for BULLISH, -conviction for BEARISH, 0.0 for NEUTRAL.
-    """
+    """Return positive bullish, negative bearish, or zero neutral conviction; return None if absent."""
     if decision.aggregated is None:
         return None
     if decision.aggregated.signal == Signal.BULLISH:
@@ -65,16 +33,7 @@ def signed_conviction(decision: ARGUSDecision) -> float | None:
 
 @dataclass(frozen=True)
 class PairedOutcome:
-    """One decision's signed conviction paired with its realized forward return.
-
-    Attributes:
-        ticker: Equity ticker symbol.
-        signed_conviction: Conviction magnitude signed by direction (see
-            signed_conviction).
-        forward_return: Realized forward return over the evaluation horizon,
-            as a fraction (0.05 is +5%).
-        holding_days: Actual number of calendar days held before exit.
-    """
+    """One decision's signed conviction paired with its realized forward return."""
 
     ticker: str
     signed_conviction: float
@@ -85,39 +44,17 @@ class PairedOutcome:
 def collect_paired_outcomes(
     decisions: list[ARGUSDecision], market_data: MarketDataProvider, horizon_days: int
 ) -> list[PairedOutcome]:
-    """Pairs signed conviction with realized forward return for every reconcilable decision.
-
-    Reuses outcomes.compute_realized_return — the same function that
-    feeds cultural.store_trade_outcome in production — so this evaluation
-    measures exactly the decisions that would actually be reconciled, not a
-    parallel notion of "outcome". Decisions with no aggregated signal, no
-    allocation, or whose horizon hasn't cleared against market_data are
-    skipped (see compute_realized_return's docstring for why: deferred
-    rather than fabricated).
-
-    Args:
-        decisions: Completed ARGUSDecision objects, e.g. from a replayed
-            session's final_state["decisions"].
-        market_data: Source of each ticker's daily close price series.
-        horizon_days: Calendar days after session_timestamp defining the
-            target exit date.
-
-    Returns:
-        One PairedOutcome per reconcilable decision.
-    """
+    """Pair signed conviction with realized forward return for every reconcilable decision."""
     pairs: list[PairedOutcome] = []
     prices_by_ticker: dict[str, pd.Series] = {}
     for decision in decisions:
         conv = signed_conviction(decision)
         if conv is None or not needs_reconciliation(decision):
             continue
-        # One fetch per ticker, however many decisions share it. A failed fetch
-        # raises rather than skipping, so a partial evaluation is never silent
+        # Fetch each ticker once and propagate failures so partial evaluation cannot pass silently.
         if decision.ticker not in prices_by_ticker:
             prices_by_ticker[decision.ticker] = market_data.ohlcv_daily(decision.ticker)["close"]
-        outcome = compute_realized_return(
-            decision, market_data, horizon_days, prices=prices_by_ticker[decision.ticker]
-        )
+        outcome = compute_realized_return(decision, market_data, horizon_days, prices=prices_by_ticker[decision.ticker])
         if outcome is None:
             continue
         actual_return_pct, holding_days, _exit_reason = outcome
@@ -135,12 +72,7 @@ def collect_paired_outcomes(
 def rank_information_coefficient(
     pairs: Sequence[PairedOutcome],
 ) -> tuple[float | None, float | None]:
-    """Spearman rank correlation between signed conviction and forward return.
-
-    Returns:
-        (rho, p_value), or (None, None) if fewer than 2 pairs, or if either
-        series is constant (Spearman is undefined in both cases).
-    """
+    """Compute Spearman correlation between signed conviction and measured forward return."""
     if len(pairs) < 2:
         return None, None
     convictions = [p.signed_conviction for p in pairs]
@@ -151,25 +83,8 @@ def rank_information_coefficient(
     return float(rho), float(p_value)
 
 
-def hit_rate_with_deadband(
-    pairs: Sequence[PairedOutcome], deadband: float
-) -> tuple[float | None, int]:
-    """Fraction of directional calls outside the dead band that called the return's sign.
-
-    Decisions whose forward return falls within +/-deadband are excluded —
-    mirroring cultural.store_trade_outcome's own dead band
-    (RECONCILIATION.min_abs_return_for_storage), not a second invented
-    threshold. NEUTRAL decisions (signed conviction 0.0) make no directional
-    call and are excluded too, rather than being scored as bearish.
-
-    Args:
-        pairs: Paired outcomes to score.
-        deadband: Absolute forward-return threshold below which a decision
-            is excluded from scoring.
-
-    Returns:
-        (hit_rate, n_scored). hit_rate is None if n_scored == 0.
-    """
+def hit_rate_with_deadband(pairs: Sequence[PairedOutcome], deadband: float) -> tuple[float | None, int]:
+    """Measure directional hit rate excluding neutral calls and return inside the dead band."""
     scored = [p for p in pairs if p.signed_conviction != 0 and abs(p.forward_return) > deadband]
     if not scored:
         return None, 0
@@ -184,27 +99,7 @@ def bootstrap_ci(
     alpha: float = EVALUATION.ci_alpha,
     seed: int = EVALUATION.bootstrap_seed,
 ) -> tuple[float | None, float | None]:
-    """Percentile bootstrap CI for a statistic over paired (conviction, return) outcomes.
-
-    Paired resampling (each resample draws whole PairedOutcome tuples, with
-    replacement) rather than a closed-form CI — at the sample sizes this
-    evaluation actually has, asymptotic-normality assumptions behind
-    closed-form Spearman CIs don't hold.
-
-    Args:
-        pairs: Paired outcomes to resample from.
-        statistic_fn: Function computing the statistic (e.g. rank IC's rho)
-            from a resampled list of pairs; may return None for a
-            resample too small to define the statistic, in which case that
-            resample is dropped.
-        n_resamples: Bootstrap resample count.
-        alpha: Two-sided significance level (0.05 -> 95% CI).
-        seed: RNG seed, fixed for reproducibility.
-
-    Returns:
-        (lower, upper) percentile bounds, or (None, None) if fewer than 2
-        pairs, or if every resample's statistic was undefined.
-    """
+    """Estimate a percentile confidence interval by resampling whole paired outcomes."""
     if len(pairs) < 2:
         return None, None
 
@@ -227,22 +122,7 @@ def bootstrap_ci(
 
 @dataclass(frozen=True)
 class EvaluationResult:
-    """One session/condition's evaluation: rank IC and hit-rate, each with a bootstrap CI.
-
-    Attributes:
-        n: Number of paired outcomes the evaluation ran over.
-        rank_ic: Spearman rank correlation between signed conviction and
-            forward return, or None if undefined (see
-            rank_information_coefficient).
-        rank_ic_p_value: Two-sided p-value for rank_ic, or None alongside it.
-        rank_ic_ci: (lower, upper) bootstrap percentile CI for rank_ic.
-        hit_rate: Fraction of dead-band-scored decisions with the correct
-            sign, or None if none were scored (see hit_rate_with_deadband).
-        hit_rate_n: Number of decisions scored for hit_rate.
-        hit_rate_ci: (lower, upper) bootstrap percentile CI for hit_rate.
-        pairs: The underlying paired outcomes the metrics above were computed
-            from.
-    """
+    """One session/condition's evaluation: rank IC and hit-rate, each with a bootstrap CI."""
 
     n: int
     rank_ic: float | None
@@ -260,19 +140,7 @@ def evaluate_decisions(
     horizon_days: int,
     deadband: float,
 ) -> EvaluationResult:
-    """Runs the full pre-registered evaluation over a set of completed decisions.
-
-    Args:
-        decisions: Completed ARGUSDecision objects.
-        market_data: Source of each ticker's daily close price series.
-        horizon_days: Calendar days after session_timestamp defining the
-            target exit date (pre-registered at 5).
-        deadband: Absolute forward-return threshold for hit-rate exclusion
-            (pre-registered as RECONCILIATION.min_abs_return_for_storage).
-
-    Returns:
-        EvaluationResult with rank IC, hit-rate, and bootstrap CIs for both.
-    """
+    """Run the full pre-registered evaluation over a set of completed decisions."""
     pairs = collect_paired_outcomes(decisions, market_data, horizon_days)
     rho, p_value = rank_information_coefficient(pairs)
     rho_ci = bootstrap_ci(pairs, lambda sample: rank_information_coefficient(sample)[0])
@@ -292,20 +160,7 @@ def evaluate_decisions(
 
 
 def pre_registered_verdict(open_loop: EvaluationResult, closed_loop: EvaluationResult) -> bool:
-    """Applies the pre-registered success rule to the two replay conditions.
-
-    The bar, fixed before any output was observed: the closed-loop rank IC must
-    exceed the open-loop rank IC, and the closed-loop rank IC's bootstrap
-    confidence interval must exclude zero.
-
-    Args:
-        open_loop: Evaluation of the replay with reliability fixed at its prior.
-        closed_loop: Evaluation of the replay reading real outcome history.
-
-    Returns:
-        True if closed-loop cleared the bar; False if it did not, or if either
-        rank IC is undefined.
-    """
+    """Apply the pre-registered success rule to the two replay conditions."""
     if open_loop.rank_ic is None or closed_loop.rank_ic is None:
         return False
     ci_lower = closed_loop.rank_ic_ci[0]
@@ -313,52 +168,15 @@ def pre_registered_verdict(open_loop: EvaluationResult, closed_loop: EvaluationR
 
 
 def trade_level_win_loss_stats(pairs: Sequence[PairedOutcome]) -> dict:
-    """Win/loss/profit-factor statistics over a set of paired outcomes.
-
-    Keys backtesting.metrics.trade_level_metrics on each pair's
-    forward_return/holding_days. No return-series metrics (Sharpe, drawdown, ...)
-    are reported: this replay only has discrete per-decision horizon returns, not
-    the daily equity curve they assume.
-
-    Args:
-        pairs: Paired outcomes, e.g. from EvaluationResult.pairs.
-
-    Returns:
-        Empty dict if pairs is empty; otherwise the trade-level statistics.
-    """
+    """Compute trade-level win, loss, and profit-factor statistics without a daily equity curve."""
     if not pairs:
         return {}
-    return trade_level_metrics(
-        [{"return_pct": p.forward_return, "holding_days": p.holding_days} for p in pairs]
-    )
+    return trade_level_metrics([{"return_pct": p.forward_return, "holding_days": p.holding_days} for p in pairs])
 
 
 @dataclass(frozen=True)
 class SystemBehaviorReport:
-    """System-behavior metrics for one replayed session.
-
-    Reported separately from, and never blended into, EvaluationResult's
-    predictive metrics.
-
-    Attributes:
-        tickers_total: Number of tickers in the replayed session's universe.
-        decisions_built: Number of tickers that produced a completed
-            ARGUSDecision.
-        schema_validity: decisions_built / tickers_total, or 0.0 if
-            tickers_total is 0.
-        errors: Error messages accumulated in the session's final state.
-        reduce_verdicts: Number of decisions whose risk verdict was REDUCE.
-        constraint_violations: Always 0 — RiskAssessment's model_validator
-            makes a violating instance unconstructable (see
-            system_behavior_report).
-        total_api_calls: Sum of total_api_calls across all decisions.
-        api_calls_per_decision: total_api_calls / decisions_built, or None
-            if no decisions were built.
-        retries_instrumented: Whether retry counts are tracked; always False
-            since retries aren't currently instrumented.
-        tokens_instrumented: Whether token counts are tracked; always False
-            since tokens aren't currently instrumented.
-    """
+    """System-behavior metrics for one replayed session."""
 
     tickers_total: int
     decisions_built: int
@@ -373,22 +191,7 @@ class SystemBehaviorReport:
 
 
 def system_behavior_report(session_result: SessionResult) -> SystemBehaviorReport:
-    """Builds a SystemBehaviorReport from one replayed session's final state.
-
-    Constraint violations are reported as 0 by construction:
-    RiskAssessment.approved_weight <= proposed_weight is a Pydantic
-    model_validator, so a violating instance cannot exist in
-    final_state["decisions"] in the first place.
-    Retries and tokens/decision are not currently instrumented anywhere in
-    the codebase at decision granularity — reported as a disclosed gap
-    rather than fabricated.
-
-    Args:
-        session_result: Output of backtesting.replay.replay_session.
-
-    Returns:
-        SystemBehaviorReport for that session.
-    """
+    """Build a SystemBehaviorReport from one replayed session's final state."""
     decisions: list[ARGUSDecision] = session_result.final_state.get("decisions") or []
     errors: list[str] = session_result.final_state.get("errors") or []
     tickers_total = len(session_result.universe)
@@ -400,9 +203,7 @@ def system_behavior_report(session_result: SessionResult) -> SystemBehaviorRepor
         decisions_built=decisions_built,
         schema_validity=decisions_built / tickers_total if tickers_total else 0.0,
         errors=list(errors),
-        reduce_verdicts=sum(
-            1 for d in decisions if d.risk is not None and d.risk.verdict == RiskVerdict.REDUCE
-        ),
+        reduce_verdicts=sum(1 for d in decisions if d.risk is not None and d.risk.verdict == RiskVerdict.REDUCE),
         constraint_violations=0,
         total_api_calls=total_api_calls,
         api_calls_per_decision=total_api_calls / decisions_built if decisions_built else None,
@@ -410,23 +211,10 @@ def system_behavior_report(session_result: SessionResult) -> SystemBehaviorRepor
 
 
 def check_replay_determinism(session_dir: Path) -> bool:
-    """Replays the same fixture session twice, open-loop, and diffs the results.
-
-    Checks for bit-for-bit agreement on each decision's
-    signal/conviction/total_api_calls. closed_loop=True is intentionally not
-    checked here — it reads live chroma_db state, which reconciliation can
-    mutate between runs, so determinism isn't a property closed-loop replay
-    is expected to have.
-
-    Args:
-        session_dir: Directory shaped like tests/fixtures/.
-
-    Returns:
-        True if both replays produced identical decisions for every ticker.
-    """
+    """Replay the same fixture session twice, open-loop, and diffs the results."""
 
     def fingerprint(result: SessionResult) -> list[tuple]:
-        """Sorted (ticker, signal, conviction, total_api_calls) tuples for comparison."""
+        """Return sorted ticker, signal, conviction, and API-call tuples for comparison."""
         decisions: list[ARGUSDecision] = result.final_state.get("decisions") or []
         return sorted(
             (

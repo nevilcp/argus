@@ -1,8 +1,4 @@
-"""Tests for orchestration/reconcile.py.
-
-Covers realized-return computation, reconciling decisions into stored
-outcomes, and the end-to-end reconciliation pass.
-"""
+"""Tests for orchestration/reconcile.py."""
 
 from __future__ import annotations
 
@@ -40,13 +36,8 @@ from tests.helpers.builders import (
 from tests.helpers.decision_store import put_checkpoint, write_decisions_log
 from tests.helpers.market_data import FakeMarketData, ten_day_series
 
-# ---------------------------------------------------------------------------
-# compute_realized_return
-# ---------------------------------------------------------------------------
-
 
 def test_compute_realized_return_pairs_entry_and_horizon_close():
-    """Realized return pairs the entry-day close with the close N horizon days later."""
     start = datetime(2026, 1, 1)
     technical = technical_signal(Signal.BULLISH, 0.8, current_price=100.0)
     decision = ARGUSDecision(
@@ -67,7 +58,6 @@ def test_compute_realized_return_pairs_entry_and_horizon_close():
 
 
 def test_compute_realized_return_none_without_allocation():
-    """A decision with no position allocation has no realized return to compute."""
     decision = ARGUSDecision(
         ticker="TEST",
         session_timestamp=datetime(2026, 1, 1),
@@ -78,7 +68,6 @@ def test_compute_realized_return_none_without_allocation():
 
 
 def test_compute_realized_return_none_without_technical_signal():
-    """A decision with no technical signal has no entry price to compute a return from."""
     decision = ARGUSDecision(
         ticker="TEST",
         session_timestamp=datetime(2026, 1, 1),
@@ -89,13 +78,6 @@ def test_compute_realized_return_none_without_technical_signal():
 
 
 def test_compute_realized_return_none_with_zero_weight_allocation():
-    """A decision allocated 0% has no position to reconcile.
-
-    Same as a decision with no allocation at all. Regression test: filtering
-    0%-weight positions belongs at the reconciliation boundary,
-    not at graph.py's decision-building step (which would break the audit
-    trail of "we evaluated this ticker and chose not to hold").
-    """
     decision = ARGUSDecision(
         ticker="TEST",
         session_timestamp=datetime(2026, 1, 1),
@@ -115,7 +97,6 @@ def test_compute_realized_return_none_with_zero_weight_allocation():
 
 
 def test_compute_realized_return_none_when_horizon_not_yet_reached():
-    """No return is computed until price data reaches the requested horizon."""
     start = datetime(2026, 1, 1)
     decision = ARGUSDecision(
         ticker="TEST",
@@ -123,17 +104,11 @@ def test_compute_realized_return_none_when_horizon_not_yet_reached():
         technical=technical_signal(Signal.BULLISH, 0.8),
         allocation=position_allocation(),
     )
-    market_data = ten_day_series(start)  # only 10 days, short of the 30-day horizon requested below
+    market_data = ten_day_series(start)
     assert compute_realized_return(decision, market_data, horizon_days=30) is None
 
 
-# ---------------------------------------------------------------------------
-# reconcile_decision / reconcile_decisions
-# ---------------------------------------------------------------------------
-
-
 def test_reconcile_decision_stores_outcome_with_ablated_primary_driver():
-    """Reconciling a decision stores its outcome tagged with the credited driver."""
     start = datetime(2026, 1, 1)
     decision = aggregated_decision(
         technical_signal(Signal.BULLISH, 0.9, current_price=100.0),
@@ -157,7 +132,6 @@ def test_reconcile_decision_stores_outcome_with_ablated_primary_driver():
 
 
 def test_reconcile_decision_returns_false_and_stores_nothing_with_no_position():
-    """A decision with no position produces no stored outcome."""
     decision = ARGUSDecision(
         ticker="TEST",
         session_timestamp=datetime(2026, 1, 1),
@@ -171,7 +145,6 @@ def test_reconcile_decision_returns_false_and_stores_nothing_with_no_position():
 
 
 def test_reconcile_decisions_counts_only_the_ones_actually_reconciled():
-    """The batch count reflects only decisions that actually had an outcome to store."""
     start = datetime(2026, 1, 1)
     reconcilable = ARGUSDecision(
         ticker="TEST",
@@ -183,22 +156,18 @@ def test_reconcile_decisions_counts_only_the_ones_actually_reconciled():
         ticker="TEST",
         session_timestamp=start,
         technical=technical_signal(Signal.BULLISH, 0.8),
-        # no allocation -> nothing to reconcile
     )
     market_data = ten_day_series(start, start_price=100.0)
     cultural = mock.create_autospec(CulturalMemoryManager, instance=True)
     cultural.already_reconciled.return_value = set()
 
-    count = reconcile_decisions(
-        [reconcilable, not_reconcilable], market_data, cultural, horizon_days=5
-    )
+    count = reconcile_decisions([reconcilable, not_reconcilable], market_data, cultural, horizon_days=5)
 
     assert count == 1
     assert cultural.store_trade_outcome.call_count == 1
 
 
 def test_reconcile_decisions_skips_decisions_already_reconciled():
-    """A decision cultural already has a stored outcome for is not touched again."""
     start = datetime(2026, 1, 1)
     decision = ARGUSDecision(
         ticker="TEST",
@@ -217,7 +186,6 @@ def test_reconcile_decisions_skips_decisions_already_reconciled():
 
 
 def test_reconcile_decisions_fetches_each_ticker_price_history_once():
-    """Two decisions on the same ticker share a single ohlcv_daily fetch."""
     start = datetime(2026, 1, 1)
     first = ARGUSDecision(
         ticker="TEST",
@@ -242,14 +210,8 @@ def test_reconcile_decisions_fetches_each_ticker_price_history_once():
     market_data.ohlcv_daily.assert_called_once_with("TEST")
 
 
-# ---------------------------------------------------------------------------
-# run_reconciliation_pass: the end-to-end pass that reads decisions, reconciles
-# them, and bounds every store it touches.
-# ---------------------------------------------------------------------------
-
-
 def _autospec_cultural(expired: int = 0) -> mock.MagicMock:
-    """An autospec CulturalMemoryManager stubbed for reconcile_decisions and expiry."""
+    """Stub outcome reconciliation and expiry without constructing memory models."""
     cultural = mock.create_autospec(CulturalMemoryManager, instance=True)
     cultural.already_reconciled.return_value = set()
     cultural.expire_pending_snapshots.return_value = expired
@@ -257,39 +219,27 @@ def _autospec_cultural(expired: int = 0) -> mock.MagicMock:
 
 
 class _FakeCultural:
-    """A stateful CulturalMemoryManager double that actually tracks stored outcomes.
-
-    Unlike _autospec_cultural's fixed return_value, already_reconciled here
-    reflects real state across calls within one test — needed to exercise
-    resolved_ids across two run_reconciliation_pass calls.
-    """
+    """A stateful CulturalMemoryManager double that actually tracks stored outcomes."""
 
     def __init__(self) -> None:
-        """Starts with no stored outcomes."""
         self._stored_ids: set[str] = set()
 
     def already_reconciled(self, decision_ids: list[str]) -> set[str]:
-        """Returns the subset of decision_ids this fake has a stored outcome for."""
+        """Return the subset of decision_ids this fake has a stored outcome for."""
         return {d for d in decision_ids if d in self._stored_ids}
 
     def store_trade_outcome(self, decision: ARGUSDecision, **_kwargs: object) -> None:
-        """Records decision.decision_id as resolved."""
+        """Record decision.decision_id as resolved."""
         self._stored_ids.add(decision.decision_id)
 
     def expire_pending_snapshots(self, _cutoff: datetime) -> int:
-        """No PENDING snapshots to expire in this fake."""
+        """Return zero pending expirations from this fake."""
         return 0
 
 
 def test_run_reconciliation_pass_over_matured_decisions_produces_outcome_and_equity(tmp_path):
-    """A full pass over matured decisions stores the outcome and updates paper equity.
-
-    The decision's realized return is compounded onto paper equity.
-    """
     start = datetime(2026, 1, 1)
-    decisions_log = write_decisions_log(
-        tmp_path / "decisions.jsonl", matured_decision("TEST", start)
-    )
+    decisions_log = write_decisions_log(tmp_path / "decisions.jsonl", matured_decision("TEST", start))
 
     book_path = tmp_path / "paper_equity.json"
     paper_book.save(PaperBook(equity=100_000.0, high_water_mark=100_000.0), str(book_path))
@@ -322,19 +272,8 @@ def test_run_reconciliation_pass_over_matured_decisions_produces_outcome_and_equ
 
 
 def test_run_reconciliation_pass_survives_across_runs_when_resolution_is_unavailable(tmp_path):
-    """A decision whose horizon has passed but whose outcome couldn't be computed is not pruned.
-
-    Reproduces the observed "Reconciled 0/N" failure mode: the decision's
-    session_timestamp is already well past the ordinary retention cutoff, but
-    its price series never reaches the target exit date (as if the reconcile
-    pass keeps finding nothing to work with, run after run). It must survive
-    compaction rather than being destroyed before it ever gets a chance to
-    resolve.
-    """
     horizon_days = RECONCILIATION.horizon_days
-    old_start = datetime.now() - timedelta(
-        days=horizon_days + RECONCILIATION.retention_margin_days + 5
-    )
+    old_start = datetime.now() - timedelta(days=horizon_days + RECONCILIATION.retention_margin_days + 5)
     decision = ARGUSDecision(
         ticker="UNRESOLVED",
         session_timestamp=old_start,
@@ -346,7 +285,6 @@ def test_run_reconciliation_pass_survives_across_runs_when_resolution_is_unavail
     book_path = tmp_path / "paper_equity.json"
     paper_book.save(PaperBook(equity=100_000.0, high_water_mark=100_000.0), str(book_path))
 
-    # Only one day of price history: the horizon's target exit date is never reached.
     market_data = FakeMarketData.from_closes({"UNRESOLVED": pd.Series([100.0], index=[old_start])})
     cultural = _autospec_cultural()
 
@@ -369,20 +307,8 @@ def test_run_reconciliation_pass_survives_across_runs_when_resolution_is_unavail
 def test_run_reconciliation_pass_never_double_applies_a_run_whose_other_ticker_resolved_first(
     tmp_path,
 ):
-    """Protecting an unresolved decision past cutoff must not let its run be applied twice.
-
-    One run has two decisions: FAST matures and gets reconciled and compacted
-    out of decisions.jsonl on the first pass, while SLOW stays unresolved and
-    is protected past the same cutoff. The run is partially applied (FAST
-    only) on the first pass. When SLOW finally matures on a second pass, its
-    now-solo recomputation of the same run_timestamp must not compound onto
-    equity again — runs_applied must still remember this run, even though its
-    session_timestamp is already older than the routine retention cutoff.
-    """
     horizon_days = RECONCILIATION.horizon_days
-    old_start = datetime.now() - timedelta(
-        days=horizon_days + RECONCILIATION.retention_margin_days + 1
-    )
+    old_start = datetime.now() - timedelta(days=horizon_days + RECONCILIATION.retention_margin_days + 1)
     fast = ARGUSDecision(
         ticker="FAST",
         session_timestamp=old_start,
@@ -421,7 +347,6 @@ def test_run_reconciliation_pass_never_double_applies_a_run_whose_other_ticker_r
     assert equity_after_first_pass != pytest.approx(100_000.0)
     assert {d.ticker for d in load_decisions_from_jsonl(str(decisions_log))} == {"SLOW"}
 
-    # SLOW's price history finally extends far enough to mature.
     closes["SLOW"] = pd.Series(
         [100.0 + i for i in range(20)],
         index=pd.date_range(start=old_start, periods=20, freq="D"),
@@ -442,7 +367,6 @@ def test_run_reconciliation_pass_never_double_applies_a_run_whose_other_ticker_r
 
 
 def test_run_reconciliation_pass_reading_from_checkpoints_bounds_checkpoints(tmp_path):
-    """With only a checkpoint path, decisions are read from it and it alone is bounded."""
     start = datetime(2026, 1, 1)
     db_path = str(tmp_path / "argus_graph.db")
     put_checkpoint(db_path, "session-thread", start, [matured_decision("TEST", start)])
@@ -466,14 +390,8 @@ def test_run_reconciliation_pass_reading_from_checkpoints_bounds_checkpoints(tmp
 
 
 def test_run_reconciliation_pass_given_both_paths_bounds_both(tmp_path):
-    """With both paths given, the decisions log wins as the read source.
-
-    Both stores — the decisions log and the checkpoint database — are bounded.
-    """
     start = datetime(2026, 1, 1)
-    decisions_log = write_decisions_log(
-        tmp_path / "decisions.jsonl", matured_decision("TEST", start)
-    )
+    decisions_log = write_decisions_log(tmp_path / "decisions.jsonl", matured_decision("TEST", start))
 
     db_path = str(tmp_path / "argus_graph.db")
     put_checkpoint(db_path, "stale-thread", datetime(2020, 1, 1))
@@ -490,7 +408,6 @@ def test_run_reconciliation_pass_given_both_paths_bounds_both(tmp_path):
         horizon_days=5,
     )
 
-    # The checkpoint's only thread carries no decisions -> the log (with one) is the read source
     assert report.decisions_loaded == 1
     assert report.decisions_compacted is not None
     assert report.checkpoints_pruned is not None
@@ -499,14 +416,8 @@ def test_run_reconciliation_pass_given_both_paths_bounds_both(tmp_path):
 
 
 def test_run_reconciliation_pass_one_store_failing_leaves_the_others_bounded_and_names_it(tmp_path):
-    """A corrupt checkpoint database fails only that store.
-
-    decisions.jsonl compaction still runs.
-    """
     start = datetime(2026, 1, 1)
-    decisions_log = write_decisions_log(
-        tmp_path / "decisions.jsonl", matured_decision("TEST", start)
-    )
+    decisions_log = write_decisions_log(tmp_path / "decisions.jsonl", matured_decision("TEST", start))
 
     db_path = tmp_path / "argus_graph.db"
     db_path.write_bytes(b"not a sqlite database")
@@ -534,16 +445,12 @@ def test_run_reconciliation_pass_one_store_failing_leaves_the_others_bounded_and
 def test_run_reconciliation_pass_truncated_paper_equity_file_neither_resets_nor_double_applies(
     tmp_path,
 ):
-    """A truncated paper_equity.json fails the paper-book step instead of silently starting
-    fresh — which would both reset equity and re-apply a run already reflected in it."""
     start = datetime(2026, 1, 1)
-    decisions_log = write_decisions_log(
-        tmp_path / "decisions.jsonl", matured_decision("TEST", start)
-    )
+    decisions_log = write_decisions_log(tmp_path / "decisions.jsonl", matured_decision("TEST", start))
 
     book_path = tmp_path / "paper_equity.json"
     good_book = PaperBook(equity=12_345.0, high_water_mark=15_000.0)
-    good_book.apply_run(start, -0.05)  # this run is already reflected in equity and runs_applied
+    good_book.apply_run(start, -0.05)
     paper_book.save(good_book, str(book_path))
     full = book_path.read_bytes()
     truncated = full[: len(full) // 2]
@@ -561,24 +468,15 @@ def test_run_reconciliation_pass_truncated_paper_equity_file_neither_resets_nor_
     )
 
     assert report.paper_book_updated is False
-    assert report.equity == 0.0  # unset default — neither reset to fresh, nor double-applied
+    assert report.equity == 0.0
     assert len(report.errors) == 1
     assert "paper-book update failed" in report.errors[0]
-    # The persisted file is untouched: still truncated, not silently overwritten by a fresh book.
     assert book_path.read_bytes() == truncated
 
 
-def test_run_reconciliation_pass_paper_book_not_partially_applied_when_its_step_fails(
-    tmp_path, monkeypatch
-):
-    """A paper-book save failure leaves the persisted book exactly as it was.
-
-    The failure is named in the report's errors.
-    """
+def test_run_reconciliation_pass_paper_book_not_partially_applied_when_its_step_fails(tmp_path, monkeypatch):
     start = datetime(2026, 1, 1)
-    decisions_log = write_decisions_log(
-        tmp_path / "decisions.jsonl", matured_decision("TEST", start)
-    )
+    decisions_log = write_decisions_log(tmp_path / "decisions.jsonl", matured_decision("TEST", start))
 
     book_path = tmp_path / "paper_equity.json"
     paper_book.save(PaperBook(equity=12_345.0, high_water_mark=12_345.0), str(book_path))
@@ -605,21 +503,12 @@ def test_run_reconciliation_pass_paper_book_not_partially_applied_when_its_step_
     assert len(report.errors) == 1
     assert "paper-book update failed" in report.errors[0]
     assert book_path.read_bytes() == original_bytes
-    # Independent of the failed paper-book step, the other stores still ran
     assert report.decisions_compacted is not None
     assert report.pending_snapshots_expired == 0
 
 
-# ---------------------------------------------------------------------------
-# ReconciliationReport.summary_lines
-# ---------------------------------------------------------------------------
-
-
 def test_summary_lines_for_a_pass_that_only_reconciled_and_expired():
-    """Steps that did not run, or failed, contribute no line; the two always-present ones do."""
-    report = ReconciliationReport(
-        decisions_loaded=4, outcomes_stored=3, pending_snapshots_expired=2
-    )
+    report = ReconciliationReport(decisions_loaded=4, outcomes_stored=3, pending_snapshots_expired=2)
 
     assert report.summary_lines() == [
         "Reconciled 3/4 decision(s)",
@@ -628,7 +517,6 @@ def test_summary_lines_for_a_pass_that_only_reconciled_and_expired():
 
 
 def test_summary_lines_reports_every_step_that_ran():
-    """Each optional step adds its own line, in pass order."""
     report = ReconciliationReport(
         decisions_loaded=4,
         outcomes_stored=3,

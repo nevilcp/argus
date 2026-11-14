@@ -1,4 +1,18 @@
-"""
+"""CLI for decision settlement and persistent store retention."""
+
+from __future__ import annotations
+
+import argparse
+
+from argus.config import settings
+from argus.infra.log import configure_logging
+from argus.memory.cultural import get_cultural_memory
+from argus.orchestration.reconcile import run_reconciliation_pass
+from argus.params import RECONCILIATION
+from argus.ports import MarketDataProvider
+from argus.seams import LiveMarketDataProvider
+
+CLI_DESCRIPTION = """
 scripts/reconcile_outcomes.py
 
 CLI entry point for run_reconciliation_pass
@@ -23,28 +37,12 @@ Not responsible for:
     reconciliation loop also calls)
 """
 
-from __future__ import annotations
-
-import argparse
-
-from argus.config import settings
-from argus.infra.log import configure_logging
-from argus.memory.cultural import get_cultural_memory
-from argus.orchestration.reconcile import run_reconciliation_pass
-from argus.params import RECONCILIATION
-from argus.ports import MarketDataProvider
-from argus.seams import LiveMarketDataProvider
-
 
 def main(*, market_data: MarketDataProvider | None = None) -> None:
-    """Parses CLI args, runs one reconciliation pass, and prints its report.
-
-    Args:
-        market_data: Price source; defaults to live fetches. Tests inject a fixture-backed one.
-    """
+    """Parse CLI args, run one reconciliation pass, and print its report."""
     configure_logging()
 
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=CLI_DESCRIPTION)
     parser.add_argument(
         "--db",
         default=str(settings.data_path("argus_graph.db")),
@@ -73,9 +71,7 @@ def main(*, market_data: MarketDataProvider | None = None) -> None:
     )
 
     source = args.decisions_log or args.db
-    print(
-        f"Loaded {report.decisions_loaded} decision(s) from {source} (horizon={args.horizon_days}d)"
-    )
+    print(f"Loaded {report.decisions_loaded} decision(s) from {source} (horizon={args.horizon_days}d)")
     for line in report.summary_lines():
         print(line)
     for error in report.errors:

@@ -1,22 +1,4 @@
-"""
-argus/data/retry.py
-
-Jittered-backoff retries for the network fetchers, and the error type they raise.
-
-Responsibilities:
-  - Classify which failures a second attempt could plausibly fix
-  - Retry those with full-jitter backoff, honoring a provider's Retry-After
-  - Reset yfinance's session when Yahoo rejects its crumb, since retrying with
-    the same crumb would just repeat the failure
-  - Wrap everything else in DataFetchError so callers handle one exception type
-
-Not responsible for:
-  - What is fetched (see data/fetchers.py)
-  - Retrying LLM calls (see argus/structured_output.py)
-
-Dependencies:
-  - yfinance, requests; newsapi-python is optional
-"""
+"""Classified data-fetch failures and bounded retries with jitter."""
 
 from __future__ import annotations
 
@@ -39,50 +21,21 @@ class DataFetchError(Exception):
 
 
 class YahooCrumbHandshakeError(DataFetchError):
-    """Yahoo Finance rejected every attempt with an invalid/expired crumb.
-
-    yfinance mints an anonymous session cookie + crumb per process and caches
-    it for reuse; this is not a credential problem (there is no API key to be
-    wrong), it is Yahoo's anti-bot layer invalidating that handshake — which
-    then poisons every subsequent call in the process until a fresh crumb is
-    minted.
-    """
+    """Yahoo rejection of the cached anonymous cookie and crumb handshake."""
 
 
 _RETRY_ATTEMPTS = 3
-# Full-jitter backoff base; doubles the ceiling each attempt (base, 2*base, 4*base)
 _RETRY_BASE_DELAY = 1.5
 
 
 def _status_code_of(exc: Exception) -> int | None:
-    """Extracts an HTTP status code from an exception's attached response, if any.
-
-    Args:
-        exc: An exception potentially carrying a ``requests``/``httpx``-style
-            ``.response`` attribute.
-
-    Returns:
-        The response's status code, or None if the exception carries none.
-    """
+    """Extract an HTTP status code from an exception's attached response, if any."""
     response = getattr(exc, "response", None)
     return getattr(response, "status_code", None)
 
 
 def is_retryable(exc: Exception) -> bool:
-    """Classifies whether a second attempt at the same call could plausibly succeed.
-
-    An invalid API key or a missing resource fails identically on every retry, so
-    retrying it only burns time; a rate limit or a transient 5xx often clears within
-    seconds. Unrecognized exceptions default to retryable, so anything not
-    explicitly known to be terminal gets the full retry budget.
-
-    Args:
-        exc: The exception a fetch attempt raised.
-
-    Returns:
-        True if retrying is worthwhile; False for 401/403/404 and their
-        provider-specific equivalents.
-    """
+    """Classify whether a second attempt at the same call could plausibly succeed."""
     import yfinance.exceptions as yf_exceptions
 
     if isinstance(exc, yf_exceptions.YFRateLimitError):
@@ -110,35 +63,12 @@ def is_retryable(exc: Exception) -> bool:
 
 
 def _is_crumb_handshake_failure(exc: Exception) -> bool:
-    """Distinguishes Yahoo's "Invalid Crumb" 401 from a genuine credential 401.
-
-    FRED and NewsAPI 401s mean a bad/missing API key and retrying is pointless
-    (see is_retryable). A yfinance 401 is different: yfinance has no key at
-    all, so a 401 there means Yahoo rejected the anonymous crumb it minted —
-    a session handshake a fresh mint can often fix, not a permanent failure.
-
-    Args:
-        exc: The exception a fetch attempt raised.
-
-    Returns:
-        True if this looks like Yahoo's crumb rejection specifically.
-    """
+    """Distinguish Yahoo's "Invalid Crumb" 401 from a genuine credential 401."""
     return _status_code_of(exc) == 401 and "crumb" in str(exc).lower()
 
 
 def _reset_yfinance_session() -> None:
-    """Forces yfinance's singleton client to mint a fresh cookie and crumb next call.
-
-    yfinance caches the crumb it mints for the life of the process; once Yahoo
-    invalidates it, every subsequent call reuses the same broken crumb and
-    fails identically. Clearing only the in-memory _cookie/_crumb isn't
-    enough: yfinance also persists the cookie to an on-disk cache keyed
-    'curlCffi' (see its data.py's _load_cookie_curlCffi), and reloads it
-    before ever attempting a new network handshake — so a stale, Yahoo-
-    rejected cookie would otherwise survive the reset and get reused
-    immediately. Clearing both is what lets a retry attempt an actual new
-    handshake instead of repeating the failed one.
-    """
+    """Force yfinance's singleton client to mint a fresh cookie and crumb next call."""
     data_client = yf.data.YfData()
     data_client._cookie = None
     data_client._crumb = None
@@ -146,15 +76,7 @@ def _reset_yfinance_session() -> None:
 
 
 def retry_after_seconds(exc: Exception) -> float | None:
-    """Reads a Retry-After response header off an exception, if one is attached.
-
-    Args:
-        exc: The exception a fetch attempt raised.
-
-    Returns:
-        Seconds to wait before retrying, taken verbatim from the provider's own
-        Retry-After header, or None if no such header is present.
-    """
+    """Read a Retry-After response header off an exception, if one is attached."""
     response = getattr(exc, "response", None)
     headers = getattr(response, "headers", None)
     if not headers:
@@ -169,27 +91,11 @@ def retry_after_seconds(exc: Exception) -> float | None:
 
 
 def with_retry[F: Callable[..., Any]](fn: F) -> F:
-    """Decorator implementing jittered back-off retries on retryable failures only.
-
-    Wraps transient exceptions in DataFetchError after exhausting all attempts.
-    Re-raises DataFetchError immediately without re-wrapping to avoid stacking.
-    A terminal (non-retryable) failure raises DataFetchError on the first
-    attempt rather than burning the full retry budget on a call that would
-    fail identically every time. A Yahoo crumb/cookie handshake failure (see
-    _is_crumb_handshake_failure) is retried with the yfinance session reset
-    first, since retrying without a reset would just repeat the same failure;
-    exhausting the budget there raises YahooCrumbHandshakeError instead.
-
-    Args:
-        fn: The function to wrap.
-
-    Returns:
-        Wrapped function with retry semantics.
-    """
+    """Retry transient fetch failures with jitter and reset rejected Yahoo sessions between attempts."""
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        """Calls fn, retrying retryable failures and re-raising as DataFetchError once exhausted."""
+        """Call fn, retrying retryable failures and re-raising as DataFetchError once exhausted."""
         last_exc: Exception = RuntimeError("unreachable")
         for attempt in range(1, _RETRY_ATTEMPTS + 1):
             try:
@@ -223,14 +129,10 @@ def with_retry[F: Callable[..., Any]](fn: F) -> F:
                         type(exc).__name__,
                         exc,
                     )
-                    raise DataFetchError(
-                        f"{fn.__name__} failed with a non-retryable error: {exc}"
-                    ) from exc
+                    raise DataFetchError(f"{fn.__name__} failed with a non-retryable error: {exc}") from exc
 
                 retry_after = retry_after_seconds(exc)
-                delay = full_jitter_delay(
-                    attempt - 1, _RETRY_BASE_DELAY, math.inf, retry_after=retry_after
-                )
+                delay = full_jitter_delay(attempt - 1, _RETRY_BASE_DELAY, math.inf, retry_after=retry_after)
                 logger.warning(
                     "%s attempt %d/%d failed (%s: %s); retrying in %.1fs",
                     fn.__name__,
@@ -242,8 +144,6 @@ def with_retry[F: Callable[..., Any]](fn: F) -> F:
                 )
                 if attempt < _RETRY_ATTEMPTS:
                     time.sleep(delay)
-        raise DataFetchError(
-            f"{fn.__name__} failed after {_RETRY_ATTEMPTS} attempts: {last_exc}"
-        ) from last_exc
+        raise DataFetchError(f"{fn.__name__} failed after {_RETRY_ATTEMPTS} attempts: {last_exc}") from last_exc
 
     return wrapper  # type: ignore[return-value]

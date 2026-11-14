@@ -1,10 +1,4 @@
-"""Tests argus/structured_output.py's decode() function.
-
-Covers fence-stripping, the retry/repair loop, typed-error reporting, and
-decode_or_degrade()'s mapping of each failure to a diagnostics note. These
-tests exercise the decoder directly against a mocked LLMClient rather than
-through any agent.
-"""
+"""Tests argus/structured_output.py's decode() function."""
 
 import json
 from unittest import mock
@@ -26,7 +20,7 @@ from argus.structured_output import (
 from tests.helpers.paths import FIXTURES_DIR
 
 VALID_JSON = '{"signal": "NEUTRAL", "conviction": 0.3}'
-SCHEMA_INVALID_JSON = '{"signal": "NEUTRAL"}'  # missing required "conviction"
+SCHEMA_INVALID_JSON = '{"signal": "NEUTRAL"}'
 
 
 class _Verdict(BaseModel):
@@ -37,59 +31,37 @@ class _Verdict(BaseModel):
 
 
 def _mock_llm(*responses: str | BaseException) -> mock.Mock:
-    """Builds a Mock LLMClient whose complete() yields each response in order.
-
-    Args:
-        responses: Raw response text to return, or an exception to raise, on
-            successive calls.
-
-    Returns:
-        A Mock exposing complete(system_prompt, user_prompt) -> str.
-    """
+    """Build a Mock LLMClient whose complete() yields each response in order."""
     client = mock.Mock()
     client.complete.side_effect = list(responses)
     return client
 
 
 def _transport_error(retry_after: float | None = None) -> RetryableTransportError:
-    """Builds the retryable transport failure the seam raises on a transient outage."""
+    """Build the retryable transport failure the seam raises on a transient outage."""
     return RetryableTransportError(RuntimeError("connection reset"), retry_after=retry_after)
 
 
-# ---------------------------------------------------------------------------
-# Fence-stripping
-# ---------------------------------------------------------------------------
-
-
 def test_strip_markdown_fence_unfenced_passthrough():
-    """Text with no fence markers is returned unchanged (aside from whitespace)."""
     assert _strip_markdown_fence('{"signal": "BULLISH"}') == '{"signal": "BULLISH"}'
 
 
 def test_strip_markdown_fence_closed_fence():
-    """A closed, untagged fence has its markers removed."""
     raw = '```\n{"signal": "BULLISH"}\n```'
     assert _strip_markdown_fence(raw) == '{"signal": "BULLISH"}'
 
 
 def test_strip_markdown_fence_json_tagged_fence():
-    """A closed, ```json-tagged fence has both the markers and the language tag removed."""
     raw = '```json\n{"signal": "BULLISH"}\n```'
     assert _strip_markdown_fence(raw) == '{"signal": "BULLISH"}'
 
 
 def test_strip_markdown_fence_unterminated_fence():
-    """A single opening ```json marker with no closing fence still strips cleanly."""
     raw = '```json\n{"signal": "BULLISH"}'
     assert _strip_markdown_fence(raw) == '{"signal": "BULLISH"}'
 
 
 def test_strip_markdown_fence_preserves_embedded_backticks_in_string_values():
-    """A JSON string value quoting its own fenced snippet must survive intact.
-
-    A global split on every ``` occurrence would truncate the payload at the
-    first embedded fence rather than only stripping the outer one.
-    """
     raw = (
         "```json\n"
         '{"signal": "BULLISH", "conviction": 0.8, '
@@ -98,19 +70,12 @@ def test_strip_markdown_fence_preserves_embedded_backticks_in_string_values():
     )
     stripped = _strip_markdown_fence(raw)
     assert stripped == (
-        '{"signal": "BULLISH", "conviction": 0.8, '
-        '"reasoning": "See ```python\\nprint(1)\\n``` for reference"}'
+        '{"signal": "BULLISH", "conviction": 0.8, "reasoning": "See ```python\\nprint(1)\\n``` for reference"}'
     )
     assert json.loads(stripped)["reasoning"] == "See ```python\nprint(1)\n``` for reference"
 
 
-# ---------------------------------------------------------------------------
-# decode(): success paths
-# ---------------------------------------------------------------------------
-
-
 def test_decode_returns_validated_instance_on_first_attempt():
-    """A well-formed, schema-valid response decodes on the first attempt."""
     llm = _mock_llm('{"signal": "BULLISH", "conviction": 0.8}')
 
     result = decode(llm, "system", "user", _Verdict, repair=False)
@@ -120,7 +85,6 @@ def test_decode_returns_validated_instance_on_first_attempt():
 
 
 def test_decode_strips_fence_before_validating():
-    """A fenced response is stripped before JSON parsing, not rejected as invalid."""
     llm = _mock_llm('```json\n{"signal": "BEARISH", "conviction": 0.5}\n```')
 
     result = decode(llm, "system", "user", _Verdict, repair=False)
@@ -129,7 +93,6 @@ def test_decode_strips_fence_before_validating():
 
 
 def test_decode_retries_invalid_json_then_succeeds():
-    """Invalid JSON on the first attempt is retried and a later valid response succeeds."""
     llm = _mock_llm("not json at all", VALID_JSON)
 
     with mock.patch("argus.structured_output.time.sleep"):
@@ -140,7 +103,6 @@ def test_decode_retries_invalid_json_then_succeeds():
 
 
 def test_decode_retries_schema_violation_then_succeeds():
-    """Valid JSON that fails schema validation is retried and a later valid response succeeds."""
     llm = _mock_llm(SCHEMA_INVALID_JSON, VALID_JSON)
 
     with mock.patch("argus.structured_output.time.sleep"):
@@ -150,13 +112,7 @@ def test_decode_retries_schema_violation_then_succeeds():
     assert llm.complete.call_count == 2
 
 
-# ---------------------------------------------------------------------------
-# decode(): retryable transport failures
-# ---------------------------------------------------------------------------
-
-
 def test_decode_retries_retryable_transport_error_then_succeeds():
-    """A transport error is retried and eventual success is returned."""
     llm = _mock_llm(_transport_error(), VALID_JSON)
 
     with mock.patch("argus.structured_output.time.sleep"):
@@ -167,7 +123,6 @@ def test_decode_retries_retryable_transport_error_then_succeeds():
 
 
 def test_decode_exhausts_attempts_on_retryable_transport_error_raises_transport_stage():
-    """Transport failure costs attempt cap, then raises stage=transport."""
     llm = _mock_llm(*(_transport_error() for _ in range(STRUCTURED_OUTPUT.max_attempts)))
 
     with (
@@ -182,7 +137,6 @@ def test_decode_exhausts_attempts_on_retryable_transport_error_raises_transport_
 
 
 def test_decode_honors_transport_retry_after_hint():
-    """A RetryableTransportError's retry_after hint is used as the sleep delay verbatim."""
     llm = _mock_llm(_transport_error(retry_after=7.5), VALID_JSON)
 
     with mock.patch("argus.structured_output.time.sleep") as mock_sleep:
@@ -192,12 +146,6 @@ def test_decode_honors_transport_retry_after_hint():
 
 
 def test_decode_transport_retry_without_hint_uses_jittered_backoff():
-    """Without a retry_after hint, a transport retry uses full-jitter back-off, not a fixed delay.
-
-    The adapter's deleted internal loop used full jitter specifically to
-    desynchronize retries across the parallel agents during a shared
-    provider outage; decode() must preserve that for the unhinted case.
-    """
     llm = _mock_llm(_transport_error(), VALID_JSON)
 
     with mock.patch("argus.structured_output.time.sleep") as mock_sleep:
@@ -208,11 +156,10 @@ def test_decode_transport_retry_without_hint_uses_jittered_backoff():
 
 
 def test_decode_transport_retry_preserves_repair_context_from_earlier_content_failure():
-    """A transport hiccup between two content failures does not discard the pending repair text."""
     llm = _mock_llm(
-        SCHEMA_INVALID_JSON,  # schema_validation failure
-        _transport_error(),  # transport hiccup between the two content failures
-        SCHEMA_INVALID_JSON,  # still invalid -> exhausts attempts
+        SCHEMA_INVALID_JSON,
+        _transport_error(),
+        SCHEMA_INVALID_JSON,
     )
 
     with mock.patch("argus.structured_output.time.sleep"), pytest.raises(StructuredOutputError):
@@ -225,7 +172,6 @@ def test_decode_transport_retry_preserves_repair_context_from_earlier_content_fa
 
 
 def test_decode_transport_retry_does_not_append_repair_text():
-    """Transport retry resends original prompt, repair is for content failures."""
     llm = _mock_llm(_transport_error(), VALID_JSON)
 
     with mock.patch("argus.structured_output.time.sleep"):
@@ -235,13 +181,7 @@ def test_decode_transport_retry_does_not_append_repair_text():
     assert second_call_user_prompt == "original user prompt"
 
 
-# ---------------------------------------------------------------------------
-# decode(): exhausted-attempts failure paths
-# ---------------------------------------------------------------------------
-
-
 def test_decode_exhausts_attempts_on_invalid_json_raises_json_parse_stage():
-    """Persistently invalid JSON is retried up to the attempt cap, then raises stage=json_parse."""
     llm = _mock_llm(*(["not json"] * STRUCTURED_OUTPUT.max_attempts))
 
     with (
@@ -256,7 +196,6 @@ def test_decode_exhausts_attempts_on_invalid_json_raises_json_parse_stage():
 
 
 def test_decode_exhausts_attempts_on_schema_violation_raises_schema_validation_stage():
-    """Schema-invalid JSON is retried up to cap, then raises stage=schema_validation."""
     llm = _mock_llm(*([SCHEMA_INVALID_JSON] * STRUCTURED_OUTPUT.max_attempts))
 
     with (
@@ -269,13 +208,7 @@ def test_decode_exhausts_attempts_on_schema_violation_raises_schema_validation_s
     assert exc_info.value.attempts == STRUCTURED_OUTPUT.max_attempts
 
 
-# ---------------------------------------------------------------------------
-# decode(): repair flag
-# ---------------------------------------------------------------------------
-
-
 def test_decode_repair_enabled_appends_prior_failure_to_next_prompt():
-    """With repair=True, the retry's prompt carries the previous attempt's error."""
     llm = _mock_llm("not json", VALID_JSON)
 
     with mock.patch("argus.structured_output.time.sleep"):
@@ -287,7 +220,6 @@ def test_decode_repair_enabled_appends_prior_failure_to_next_prompt():
 
 
 def test_decode_repair_disabled_resends_prompt_unchanged():
-    """With repair=False, every attempt sends the exact same, unmodified prompt."""
     llm = _mock_llm("not json", VALID_JSON)
 
     with mock.patch("argus.structured_output.time.sleep"):
@@ -299,13 +231,7 @@ def test_decode_repair_disabled_resends_prompt_unchanged():
     assert second_call_user_prompt == "original user prompt"
 
 
-# ---------------------------------------------------------------------------
-# decode(): governor exceptions propagate unretried
-# ---------------------------------------------------------------------------
-
-
 def test_decode_propagates_rate_limit_exceeded_without_retry():
-    """A RateLimitExceeded from the transport propagates immediately, with no retry attempt."""
     llm = _mock_llm(RateLimitExceeded("daily budget exhausted"))
 
     with pytest.raises(RateLimitExceeded):
@@ -315,7 +241,6 @@ def test_decode_propagates_rate_limit_exceeded_without_retry():
 
 
 def test_decode_propagates_unregistered_model_without_retry():
-    """An UnregisteredModel from the transport propagates immediately, with no retry attempt."""
     llm = _mock_llm(UnregisteredModel("no rate-limit profile"))
 
     with pytest.raises(UnregisteredModel):
@@ -324,13 +249,7 @@ def test_decode_propagates_unregistered_model_without_retry():
     assert llm.complete.call_count == 1
 
 
-# ---------------------------------------------------------------------------
-# decode_or_degrade(): every failure becomes a note and None
-# ---------------------------------------------------------------------------
-
-
 def test_decode_or_degrade_returns_the_decoded_object_and_records_nothing():
-    """A clean decode returns the model and leaves the diagnostics empty."""
     diagnostics = Diagnostics()
 
     result = decode_or_degrade(
@@ -348,7 +267,6 @@ def test_decode_or_degrade_returns_the_decoded_object_and_records_nothing():
 
 
 def test_decode_or_degrade_notes_an_exhausted_decode():
-    """A StructuredOutputError becomes a "<label>: <error>" note at the requested level."""
     diagnostics = Diagnostics()
 
     with mock.patch("argus.structured_output.time.sleep"):
@@ -368,13 +286,10 @@ def test_decode_or_degrade_notes_an_exhausted_decode():
 
 
 def test_decode_or_degrade_notes_a_governor_rejection():
-    """RateLimitExceeded is noted as "rate limited" and not retried."""
     diagnostics = Diagnostics()
     llm = _mock_llm(RateLimitExceeded("budget gone"))
 
-    result = decode_or_degrade(
-        llm, "system", "user", _Verdict, repair=False, diagnostics=diagnostics, label="x[T]"
-    )
+    result = decode_or_degrade(llm, "system", "user", _Verdict, repair=False, diagnostics=diagnostics, label="x[T]")
 
     assert result is None
     assert llm.complete.call_count == 1
@@ -382,7 +297,6 @@ def test_decode_or_degrade_notes_a_governor_rejection():
 
 
 def test_decode_or_degrade_reraises_the_governor_when_asked():
-    """With reraise_governor, a governor rejection propagates and nothing is recorded."""
     diagnostics = Diagnostics()
 
     with pytest.raises(UnregisteredModel):
@@ -401,7 +315,6 @@ def test_decode_or_degrade_reraises_the_governor_when_asked():
 
 
 def test_decode_or_degrade_notes_an_unclassified_error_with_the_given_wording():
-    """Any other exception becomes a note using api_error_text."""
     diagnostics = Diagnostics()
 
     result = decode_or_degrade(
@@ -419,13 +332,7 @@ def test_decode_or_degrade_notes_an_unclassified_error_with_the_given_wording():
     assert diagnostics.messages == ["x: Custom API error: boom"]
 
 
-# ---------------------------------------------------------------------------
-# decode() against real, fixture-captured responses
-# ---------------------------------------------------------------------------
-
-
 def test_decode_against_fundamental_fixture_response():
-    """decode() validates a real, pre-captured LLM response, not just synthetic JSON."""
 
     class _FundamentalVerdict(BaseModel):
         signal: str
@@ -434,9 +341,7 @@ def test_decode_against_fundamental_fixture_response():
         reasoning: str
 
     fixtures_dir = FIXTURES_DIR / "llm_responses"
-    llm = FixtureLLMClient.from_fixture_file(
-        fixtures_dir / "fundamental.json", key_fn=lambda _prompt: "AAPL"
-    )
+    llm = FixtureLLMClient.from_fixture_file(fixtures_dir / "fundamental.json", key_fn=lambda _prompt: "AAPL")
 
     result = decode(llm, "system", "AAPL", _FundamentalVerdict, repair=False)
 

@@ -1,18 +1,4 @@
-"""Multi-tier media sentiment analysis agent for the ARGUS platform.
-
-Fetches and aggregates raw financial news data, classifies headlines locally
-using a HuggingFace FinBERT pipeline, and synthesizes the resulting metrics
-into a unified SentimentSignal via LLM.
-
-Not responsible for:
-  - Technical indicator computation (see agents/technical.py).
-  - Fundamental ratio analysis (see agents/fundamental.py).
-  - Portfolio allocation decisions (see agents/portfolio.py).
-
-Depends on transformers>=4.0 (ProsusAI/finbert), langchain_groq, and yfinance
-(for catalyst event detection, via the MarketDataProvider seam); GROQ_API_KEY
-must be set (see .env.example).
-"""
+"""Multi-tier media sentiment analysis agent for the ARGUS platform."""
 
 from __future__ import annotations
 
@@ -60,8 +46,7 @@ _TICKER_COMPANY_NAMES: dict[str, str] = {
     "CVX": "Chevron",
 }
 
-# HuggingFace model id of the FinBERT classifier; /health reports it as the
-# deployed sentiment model.
+# Expose the deployed FinBERT identifier in health reports.
 FINBERT_MODEL = "ProsusAI/finbert"
 
 # Module-level singleton prevents repeated model initialization (~30s first load).
@@ -69,14 +54,7 @@ _FINBERT_PIPELINE = None
 
 
 def get_finbert():
-    """Returns the singleton FinBERT text-classification pipeline.
-
-    Initializes the pipeline on first call; later calls reuse it.
-
-    Returns:
-        A HuggingFace transformers Pipeline configured for CPU sentiment
-        classification.
-    """
+    """Return the singleton FinBERT text-classification pipeline."""
     global _FINBERT_PIPELINE
     if _FINBERT_PIPELINE is None:
         from transformers import pipeline
@@ -86,7 +64,6 @@ def get_finbert():
             task="text-classification",
             model=FINBERT_MODEL,
             tokenizer=FINBERT_MODEL,
-            # CPU forces broad compatibility; GPU acceleration requires explicit opt-in.
             device=-1,
             max_length=512,
             truncation=True,
@@ -96,21 +73,7 @@ def get_finbert():
 
 
 def score_headlines_with_finbert(articles: list[dict]) -> list[dict]:
-    """Classifies headlines with FinBERT and returns signed numeric scores.
-
-    Processes up to 25 articles, in the order given, to bound CPU blocking time
-    on large fetches. Positive labels map to +score, negative to -score, neutral
-    to 0.0.
-
-    Args:
-        articles: List of article dicts with ``title`` and ``published_at`` keys
-            (as returned by ``MarketDataProvider.news``), in relevance order —
-            the caller decides ordering before truncation.
-
-    Returns:
-        List of dicts with keys ``headline``, ``published_at``, ``label``,
-        ``raw_score``, ``numeric``. Returns an empty list if articles is empty.
-    """
+    """Classify headlines with FinBERT and return signed numeric scores."""
     if not articles:
         return []
 
@@ -143,25 +106,8 @@ def score_headlines_with_finbert(articles: list[dict]) -> list[dict]:
     return results
 
 
-def aggregate_finbert_scores(
-    scored: list[dict], decay_rate: float = SENTIMENT.news_decay_rate
-) -> dict:
-    """Aggregates FinBERT headline scores using exponential recency decay.
-
-    Exponential decay prioritizes recent context over stale news; articles
-    earlier in the list are weighted less than later ones. Callers must sort
-    ``scored`` chronologically (oldest first) before calling this — the
-    decay is positional, not date-aware. Confidence is capped at 10 articles
-    to normalize behavior on small datasets.
-
-    Args:
-        scored: List of scored dicts from ``score_headlines_with_finbert``,
-            sorted oldest to newest.
-        decay_rate: Decay factor applied per position from oldest to newest.
-
-    Returns:
-        Dict with keys ``net``, ``pct_pos``, ``pct_neg``, ``confidence``.
-    """
+def aggregate_finbert_scores(scored: list[dict], decay_rate: float = SENTIMENT.news_decay_rate) -> dict:
+    """Aggregate oldest-first FinBERT scores with positional decay and capped confidence."""
     if not scored:
         return {"net": 0.0, "pct_pos": 0.0, "pct_neg": 0.0, "confidence": 0.0}
 
@@ -183,21 +129,7 @@ def aggregate_finbert_scores(
 
 
 def _check_earnings_calendar(ticker: str, market_data: MarketDataProvider) -> bool | None:
-    """Returns True if an earnings date falls within SENTIMENT.catalyst_window_days of now.
-
-    Uses yfinance's calendar API via the MarketDataProvider seam (retried,
-    rate-limit-classified) rather than calling yfinance directly. The response
-    shape (DataFrame or dict) varies across yfinance versions; both are parsed
-    for cross-version compatibility.
-
-    Args:
-        ticker: Equity ticker symbol.
-        market_data: Provider for the ticker-calendar lookup.
-
-    Returns:
-        True if an upcoming earnings event is within the catalyst window, False otherwise
-        or None when the calendar cannot be fetched.
-    """
+    """Return True if an earnings date falls within SENTIMENT.catalyst_window_days of now."""
     try:
         cal = market_data.ticker_calendar(ticker)
         if not isinstance(cal, (dict, pd.DataFrame)):
@@ -219,16 +151,12 @@ def _check_earnings_calendar(ticker: str, market_data: MarketDataProvider) -> bo
     return False
 
 
-# Maps metric keys to human-readable descriptions used in the LLM synthesis prompt.
 _SENTIMENT_METRIC_LABELS: dict[str, str] = {
     "net_finbert_score": "[-1.0 to +1.0]  weighted average FinBERT score across headlines "
     "(+1.0 = fully positive, -1.0 = fully negative, 0.0 = neutral)",
-    "pct_positive": "[0.0 to 1.0]    fraction of headlines labeled positive "
-    "(e.g. 0.60 = 60% positive)",
-    "pct_negative": "[0.0 to 1.0]    fraction of headlines labeled negative "
-    "(e.g. 0.25 = 25% negative)",
-    "finbert_confidence": "[0.0 to 1.0]    confidence proxy based on article volume "
-    "(caps at 1.0 when ≥10 articles)",
+    "pct_positive": "[0.0 to 1.0]    fraction of headlines labeled positive (e.g. 0.60 = 60% positive)",
+    "pct_negative": "[0.0 to 1.0]    fraction of headlines labeled negative (e.g. 0.25 = 25% negative)",
+    "finbert_confidence": "[0.0 to 1.0]    confidence proxy based on article volume (caps at 1.0 when ≥10 articles)",
     "news_volume_7d": "[integer]        total news articles fetched in the last 7 days",
     "news_scored_count": "[integer]        of those, how many were actually scored by FinBERT "
     "(<=25) — the denominator behind pct_positive/pct_negative",
@@ -239,20 +167,11 @@ _SENTIMENT_METRIC_LABELS: dict[str, str] = {
 }
 
 
-# Rendered from SentimentVerdict's PromptText; shared so prompt/schema can't drift apart.
 _VERDICT_SCHEMA_JSON = schema_block(SentimentVerdict)
 
 
 def _build_synthesis_prompt(ticker: str, metrics: dict) -> str:
-    """Constructs the human-turn message for LLM sentiment synthesis.
-
-    Args:
-        ticker: Equity ticker symbol.
-        metrics: Dict of pre-computed sentiment metrics.
-
-    Returns:
-        Stripped prompt string ready for LLM invocation.
-    """
+    """Construct the human-turn message for LLM sentiment synthesis."""
     lines = []
     for k, v in metrics.items():
         hint = _SENTIMENT_METRIC_LABELS.get(k, "")
@@ -317,29 +236,13 @@ SYSTEM_PROMPT = (
 
 
 class SentimentAgent:
-    """LLM-backed sentiment agent combining FinBERT scores with LLM synthesis.
-
-    Uses a daily cache to prevent redundant inference for the same ticker within a
-    trading session. Obtains its verdict via the shared structured-output decoder
-    with repair disabled — see analyze()'s docstring for why.
-
-    Attributes:
-        llm_client: LLM backend used for verdict synthesis.
-        market_data: Provider used for news and earnings-calendar lookups.
-        cache: Per-ticker TTL cache of computed signals.
-    """
+    """LLM-backed sentiment agent combining FinBERT scores with LLM synthesis."""
 
     def __init__(
         self,
         llm_client: LLMClient | None = None,
         market_data: MarketDataProvider | None = None,
     ) -> None:
-        """Constructs Groq/live defaults for any provider not injected.
-
-        Args:
-            llm_client: LLM backend; defaults to a Groq-backed client.
-            market_data: Provider for price lookups; defaults to live fetches.
-        """
         self.llm_client = llm_client or default_groq_client(
             settings.ARGUS_SENTIMENT_MODEL,
             STRUCTURED_OUTPUT.llm_temperature,
@@ -356,25 +259,7 @@ class SentimentAgent:
         company_name: str | None = None,
         diagnostics: Diagnostics | None = None,
     ) -> SentimentSignal | None:
-        """Generates a ticker's SentimentSignal via FinBERT and LLM synthesis.
-
-        Decodes a SentimentVerdict from the LLM via argus.structured_output.decode
-        with repair disabled: a failed decode degrades this ticker rather than
-        re-prompting with the failure appended, since repair would roughly double
-        token spend for a ticker whose measured completion peak already sits close
-        to its budget, against a governor that is the binding constraint on the
-        whole system when provider credentials or data are unavailable.
-
-        Args:
-            ticker: Equity ticker symbol.
-            company_name: Optional display name used in news queries (defaults to ticker).
-            diagnostics: Receives a reason on every path that returns None, so
-                callers can surface the failure instead of only logging it.
-                Defaults to a throwaway collector.
-
-        Returns:
-            A validated SentimentSignal, or None if decoding ultimately fails.
-        """
+        """Generate a ticker's SentimentSignal via FinBERT and LLM synthesis."""
         cached = self.cache.get(ticker)
         if cached:
             return cached
@@ -397,9 +282,7 @@ class SentimentAgent:
         signal = SentimentSignal(
             ticker=ticker,
             # A failed fetch's 0.0 looks like a real neutral; persist None instead of a fabricated score.
-            finbert_net_score=(
-                metrics["net_finbert_score"] if metrics["news_data_available"] else None
-            ),
+            finbert_net_score=(metrics["net_finbert_score"] if metrics["news_data_available"] else None),
             pct_positive=metrics["pct_positive"],
             pct_negative=metrics["pct_negative"],
             news_volume_7d=metrics["news_volume_7d"],
@@ -418,19 +301,7 @@ class SentimentAgent:
         return signal
 
     def _news_metrics(self, ticker: str, company_name: str | None) -> dict:
-        """Fetches this ticker's news and reduces it to LLM-facing metrics.
-
-        A failed fetch is reported as ``news_data_available: False`` with placeholder
-        counts rather than as a genuine absence of news.
-
-        Args:
-            ticker: Equity ticker symbol.
-            company_name: Display name used in the news query (defaults to the ticker).
-
-        Returns:
-            Dict of the FinBERT aggregates, article counts, fetch-availability flag,
-            and the upcoming-catalyst flag.
-        """
+        """Fetch this ticker's news and reduces it to LLM-facing metrics."""
         try:
             news = self.market_data.news(ticker, company_name or ticker, days_back=7)
         except Exception as e:
@@ -438,7 +309,6 @@ class SentimentAgent:
             news = None
 
         news_list = news or []
-        # Keep fetched order for the [:25] cut, then sort scored subset so decay favors newest articles.
         articles = [a for a in news_list if a.get("title")]
         scored = score_headlines_with_finbert(articles)
         scored.sort(key=lambda s: s["published_at"] or "")
@@ -458,28 +328,7 @@ class SentimentAgent:
         }
 
     def batch_analyze(self, tickers: list[str]) -> tuple[dict[str, SentimentSignal], list[str]]:
-        """Generates SentimentSignals sequentially for a list of tickers.
-
-        Against a live market-data provider, paces each ticker's scraper calls
-        (NewsAPI + the yfinance earnings-calendar lookup) rather than
-        bursting all of them in the first few seconds. In graph.py's fan-out,
-        this node runs concurrently with fundamental_analysis's ~20 sequential
-        Groq round-trips — the slower node either way — so spreading sentiment's
-        requests across that same slack costs no wall-clock time while sharply
-        cutting 429 risk on the scrapers. Fixture-backed providers skip pacing:
-        there's no live burst to smooth, and it would only slow down tests.
-
-        Looks up each ticker's company name (see ``_TICKER_COMPANY_NAMES``) so the
-        news query isn't just the ticker duplicated against itself.
-
-        Args:
-            tickers: List of equity ticker symbols.
-
-        Returns:
-            Tuple of (signals, errors). ``signals`` maps ticker → SentimentSignal
-            for each successfully analyzed ticker. ``errors`` names each ticker
-            omitted and why.
-        """
+        """Generate SentimentSignals sequentially for a list of tickers."""
         pace = self.market_data.is_live
         results = {}
         diagnostics = Diagnostics()
